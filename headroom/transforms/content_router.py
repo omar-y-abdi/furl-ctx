@@ -1341,6 +1341,9 @@ class ContentRouter(Transform):
                                         f"{decision_reason}_fallback_log_after_no_savings"
                                     )
 
+            # Re-narrow for mypy: all reassignments above produce str, but
+            # mypy 1.14.x widens after nested try/except/else reassignments.
+            assert compressed is not None
             if logger.isEnabledFor(logging.DEBUG):
                 _log_router_debug(
                     "content_router_strategy_result",
