@@ -117,6 +117,43 @@ headroom mcp uninstall
 headroom mcp serve --debug
 ```
 
+## MCP host configuration
+
+For MCP hosts that let you configure a local stdio server, point them at `headroom mcp serve`. If you also run the proxy, pass the proxy URL explicitly so retrieval and stats come from the intended proxy instance.
+
+```json
+{
+  "mcpServers": {
+    "headroom": {
+      "type": "stdio",
+      "command": "headroom",
+      "args": ["mcp", "serve", "--proxy-url", "http://127.0.0.1:8787"]
+    }
+  }
+}
+```
+
+For multiple proxy instances, register one stdio MCP server per proxy URL:
+
+```json
+{
+  "mcpServers": {
+    "headroom": {
+      "type": "stdio",
+      "command": "headroom",
+      "args": ["mcp", "serve", "--proxy-url", "http://127.0.0.1:8787"]
+    },
+    "headroom-azure": {
+      "type": "stdio",
+      "command": "headroom",
+      "args": ["mcp", "serve", "--proxy-url", "http://127.0.0.1:8788"]
+    }
+  }
+}
+```
+
+Do not assume that a running proxy exposes an HTTP MCP endpoint at `/mcp`. If `http://127.0.0.1:<port>/mcp` returns `404`, use the stdio configuration above.
+
 ## Cross-tool compatibility
 
 | Tool | MCP Support | Setup |
