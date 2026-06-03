@@ -95,7 +95,7 @@ headroom proxy --port 8787              # drop-in proxy, zero code changes
 # or: from headroom import compress      # inline library
 
 # 3 — See the savings
-headroom stats
+headroom perf
 ```
 
 Granular extras: `[proxy]`, `[mcp]`, `[ml]`, `[agno]`, `[langchain]`, `[evals]`. Requires **Python 3.10+**.
