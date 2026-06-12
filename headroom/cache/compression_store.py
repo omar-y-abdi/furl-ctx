@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 from ..relevance.bm25 import BM25Scorer
 
 if TYPE_CHECKING:
-    from ..memory.tracker import ComponentStats
+    from ..component_tracker import ComponentStats
     from .backends import CompressionStoreBackend
 
 logger = logging.getLogger(__name__)
@@ -848,7 +848,7 @@ class CompressionStore:
         Returns:
             ComponentStats with current memory usage.
         """
-        from ..memory.tracker import ComponentStats
+        from ..component_tracker import ComponentStats
 
         with self._lock:
             # Get backend stats which include bytes_used

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..memory.tracker import ComponentStats
+    from ..component_tracker import ComponentStats
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ class BatchContextStore:
         """
         import sys
 
-        from ..memory.tracker import ComponentStats
+        from ..component_tracker import ComponentStats
 
         # Take atomic snapshot to prevent RuntimeError during iteration
         # dict.copy() is atomic in CPython due to GIL
