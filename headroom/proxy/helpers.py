@@ -1113,7 +1113,10 @@ def _context_tool_summary_payload(
 def _read_rtk_lifetime_stats() -> dict[str, Any] | None:
     """Read rtk's current project-level lifetime stats."""
 
-    from headroom.rtk import get_rtk_path
+    try:
+        from headroom.rtk import get_rtk_path
+    except ImportError:
+        return None
 
     rtk_path = get_rtk_path()
     if not rtk_path:
@@ -1199,7 +1202,10 @@ def _read_rtk_lifetime_stats() -> dict[str, Any] | None:
 def _read_lean_ctx_lifetime_stats() -> dict[str, Any] | None:
     """Read lean-ctx's current project-level lifetime stats."""
 
-    from headroom.lean_ctx import get_lean_ctx_path
+    try:
+        from headroom.lean_ctx import get_lean_ctx_path
+    except ImportError:
+        return None
 
     lean_ctx_path = get_lean_ctx_path()
     if not lean_ctx_path:
