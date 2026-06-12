@@ -337,21 +337,30 @@ fn value_signature(v: &Value) -> String {
 /// stable-hash family across the whole array (a singleton family is
 /// maximally novel), with ascending index as a deterministic tie-break.
 fn rank_by_novelty(candidates: &[usize], items: &[Value], exclude: &BTreeSet<String>) -> Vec<usize> {
-    // Family sizes over the whole array (rarity signal).
+    // Family sizes over the whole array (rarity signal). Hashes are
+    // remembered per index so the sort below never re-serializes — the
+    // comparator runs O(n log n) times and an MD5-over-JSON per
+    // comparison would dominate the fill cost.
     let mut family_size: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (i, item) in items.iter().enumerate() {
-        let h = item_content_hash(item, i, exclude);
-        *family_size.entry(h).or_insert(0) += 1;
+    let hashes: Vec<String> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| item_content_hash(item, i, exclude))
+        .collect();
+    for h in &hashes {
+        *family_size.entry(h.clone()).or_insert(0) += 1;
     }
 
     let mut ranked: Vec<usize> = candidates.to_vec();
     ranked.sort_by(|&a, &b| {
-        let fa = family_size
-            .get(&item_content_hash(&items[a], a, exclude))
+        let fa = hashes
+            .get(a)
+            .and_then(|h| family_size.get(h))
             .copied()
             .unwrap_or(1);
-        let fb = family_size
-            .get(&item_content_hash(&items[b], b, exclude))
+        let fb = hashes
+            .get(b)
+            .and_then(|h| family_size.get(h))
             .copied()
             .unwrap_or(1);
         // Smaller family first (more novel); ties broken by lower index
