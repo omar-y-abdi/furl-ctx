@@ -53,6 +53,7 @@ pub struct SmartCrusherBuilder {
     observers: Vec<Box<dyn Observer>>,
     compaction: Option<CompactionStage>,
     ccr_store: Option<Arc<dyn CcrStore>>,
+    tokenizer: Option<Box<dyn crate::tokenizer::Tokenizer>>,
 }
 
 impl SmartCrusherBuilder {
@@ -67,6 +68,7 @@ impl SmartCrusherBuilder {
             observers: Vec::new(),
             compaction: None,
             ccr_store: None,
+            tokenizer: None,
         }
     }
 
@@ -166,6 +168,17 @@ impl SmartCrusherBuilder {
         self.with_ccr_store(Arc::new(InMemoryCcrStore::new()))
     }
 
+    /// Set the tokenizer used by the `MinTokens` routing policy to size
+    /// the lossless-vs-lossy renderings. When not set, `build` installs
+    /// a `gpt-4o` tiktoken counter (see [`DEFAULT_ROUTING_TOKENIZER_MODEL`]).
+    /// The CHOICE only depends on the relative ranking of the two
+    /// renders, so any consistent tokenizer is correct; tiktoken is the
+    /// honest, deterministic default.
+    pub fn with_tokenizer(mut self, tokenizer: Box<dyn crate::tokenizer::Tokenizer>) -> Self {
+        self.tokenizer = Some(tokenizer);
+        self
+    }
+
     /// Construct the `SmartCrusher`. If `with_scorer` was not called,
     /// falls back to `HybridScorer::default()` so a builder with no
     /// other customization still produces a working crusher.
@@ -185,6 +198,13 @@ impl SmartCrusherBuilder {
             (Some(stage), Some(store)) => Some(stage.with_ccr_store(Arc::clone(store))),
             (stage, _) => stage,
         };
+        // Default the routing tokenizer to a gpt-4o tiktoken counter when
+        // the caller did not supply one. Only the relative ranking of the
+        // two candidate renders matters to the routing choice, so the
+        // absolute model is immaterial; tiktoken is the honest metric.
+        let tokenizer = self
+            .tokenizer
+            .unwrap_or_else(|| crate::tokenizer::get_tokenizer(DEFAULT_ROUTING_TOKENIZER_MODEL));
         SmartCrusher::from_parts(
             self.config,
             anchor_selector,
@@ -194,9 +214,21 @@ impl SmartCrusherBuilder {
             self.observers,
             compaction,
             self.ccr_store,
+            tokenizer,
         )
     }
 }
+
+/// Default model name handed to `get_tokenizer` for the `MinTokens`
+/// routing decision when no tokenizer is supplied to the builder.
+/// `gpt-4o` routes to the real tiktoken BPE (byte-identical to Python
+/// `tiktoken`) and matches the engine's benchmark model, so routing
+/// decisions made here line up with the token numbers the benchmark
+/// reports. The choice only compares two renders relative to each
+/// other, so this default never changes WHICH render is correct — it
+/// just makes the metric the honest tokenizer rather than misleading
+/// byte length.
+pub const DEFAULT_ROUTING_TOKENIZER_MODEL: &str = "gpt-4o";
 
 #[cfg(test)]
 mod tests {

@@ -173,17 +173,18 @@ def test_non_json_input_does_not_record(fresh_toin):
 
 
 def test_ccr_inject_marker_false_suppresses_markers_in_output(fresh_toin):
-    """`inject_retrieval_marker=False` is honored end-to-end now. The
-    Rust crusher's `enable_ccr_marker` flips off and the lossy path
-    skips the `<<ccr:HASH>>` marker TEXT in the prompt. Per DESIGN.md
-    1A the CCR store write itself is now UNCONDITIONAL — the dropped
-    payload is still persisted + recoverable by hash; only the
-    prompt-visible pointer is suppressed. This test pins the
-    prompt-visible behavior: no marker text, no sentinel key."""
+    """`inject_retrieval_marker=False` suppresses the prompt-visible
+    marker on the NO-DROP (lossless) path. Scope note: under the
+    production default (route-by-min-tokens) this uniform array routes
+    lossy and a dropped row ALWAYS surfaces its `<<ccr:HASH>>` recovery
+    pointer (Defect 1 — the pointer is the retrieval key, not a UX flag;
+    that path is pinned by tests/test_ccr_recovery_invariant.py). The
+    suppression knob only applies where there is no forced drop, so we
+    pin LosslessFirst here to isolate it."""
     from headroom.config import CCRConfig
 
     crusher = SmartCrusher(
-        SmartCrusherConfig(),
+        SmartCrusherConfig(routing_policy="lossless-first"),
         ccr_config=CCRConfig(enabled=True, inject_retrieval_marker=False),
     )
     payload = _bigger_array(60)
@@ -225,11 +226,15 @@ def test_ccr_enabled_false_suppresses_markers_in_output(fresh_toin):
     the output. Both flags collapse to the Rust-side
     `enable_ccr_marker=False` gate. Per DESIGN.md 1A the underlying CCR
     store write is unconditional (so a dropped needle is never silently
-    lost); this test pins only the prompt-visible suppression."""
+    lost); this test pins only the prompt-visible suppression on the
+    NO-DROP (lossless) path. (On the lossy/drop path the recovery pointer
+    is unconditional — Defect 1 — and is pinned by
+    tests/test_ccr_recovery_invariant.py; we pin LosslessFirst here to
+    isolate the suppression knob.)"""
     from headroom.config import CCRConfig
 
     crusher = SmartCrusher(
-        SmartCrusherConfig(),
+        SmartCrusherConfig(routing_policy="lossless-first"),
         # Note: inject_retrieval_marker stays True — we want to prove
         # `enabled=False` alone is enough to suppress.
         ccr_config=CCRConfig(enabled=False, inject_retrieval_marker=True),
@@ -247,15 +252,18 @@ def test_ccr_enabled_false_suppresses_markers_in_output(fresh_toin):
 def test_ccr_marker_off_still_persists_and_is_retrievable(fresh_toin):
     """DESIGN.md sub-step 1A — kill silent loss.
 
-    With `inject_retrieval_marker=False` the prompt sees no `<<ccr:>>`
-    pointer, but a forced row drop must STILL persist the original to
-    the CCR store and be recoverable by hash. This is the exact failure
-    1A eliminates: a dropped needle is never silently, unrecoverably
-    lost — only the in-prompt pointer is suppressed.
+    A forced row drop must persist the original to the CCR store and be
+    recoverable by hash, even with `inject_retrieval_marker=False`. This
+    is the exact failure 1A eliminates: a dropped needle is never
+    silently, unrecoverably lost.
 
-    We drive the structured `crush_array_json` path (which always
-    surfaces `ccr_hash` when rows drop) and assert:
-      1. the marker text is absent from the kept rendering,
+    Per Defect 1 the `<<ccr:HASH>>` recovery pointer is the retrieval
+    KEY, not a UX nicety — so it is surfaced UNCONDITIONALLY on every
+    drop (the `inject_retrieval_marker` flag governs only the heavier
+    retrieval-tool advertisement, owned by the proxy layer). We drive the
+    structured `crush_array_json` path (which always surfaces `ccr_hash`
+    when rows drop) and assert:
+      1. the recovery pointer is present in `dropped_summary` (the key),
       2. a `ccr_hash` is still returned,
       3. `ccr_get(hash)` round-trips the canonical original array.
     """
@@ -274,12 +282,16 @@ def test_ccr_marker_off_still_persists_and_is_retrievable(fresh_toin):
     if not result.get("ccr_hash"):
         pytest.skip(f"payload didn't trigger a row drop (strategy={strategy!r})")
 
-    # Marker text suppressed in the rendered kept rows / summary.
+    # The recovery pointer IS surfaced on a drop — it is the retrieval
+    # key (Defect 1), not gated by the marker flag.
     dropped_summary = str(result.get("dropped_summary") or "")
-    assert "<<ccr:" not in dropped_summary, f"marker text should be gated off, got: {dropped_summary!r}"
+    assert "<<ccr:" in dropped_summary, (
+        f"a dropped row must surface its recovery pointer (Defect 1), got: {dropped_summary!r}"
+    )
 
-    # ...but the hash is returned and the original is recoverable.
+    # ...and the hash is returned and the original is recoverable.
     ccr_hash = str(result["ccr_hash"])
+    assert ccr_hash in dropped_summary, "the pointer must name the returned hash"
     recovered = crusher.ccr_get(ccr_hash)
     assert recovered is not None, "dropped payload must be retrievable from the CCR store (1A)"
 

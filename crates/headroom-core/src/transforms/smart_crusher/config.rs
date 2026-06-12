@@ -4,6 +4,69 @@
 //! defaults must match Python exactly — they're consulted everywhere
 //! during compression and any drift breaks parity fixtures.
 
+/// Policy for choosing between the lossless and lossy-recoverable
+/// renderings of a compressible array when BOTH are available and both
+/// are 100% recoverable.
+///
+/// Background: a compressible array can render two ways that lose no
+/// information —
+/// - **lossless**: all rows present, encoded as a CSV-schema table
+///   (constant-fold / ditto / ISO-delta / dict / decimal-fold); the
+///   reconstruction-aware decoder rebuilds every row from the output.
+/// - **lossy-recoverable**: a visible sample of rows + a surfaced
+///   `<<ccr:HASH>>` sentinel; the dropped originals live in the CCR
+///   store keyed by that hash (the recovery invariant), so every dropped
+///   row is retrievable from the output alone.
+///
+/// Both views are fully recoverable, so the choice between them costs no
+/// information — it is purely a SIZE decision. Bytes mislead here (the
+/// hex-vs-base64 case proves a smaller-byte render can tokenize larger),
+/// so the size metric that matters is TOKENS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingPolicy {
+    /// **Default.** When both a lossless render and a lossy-recoverable
+    /// render exist for an array, ship the one with FEWER tokens (real
+    /// tokenizer, not bytes). Ties prefer lossless (more rows visible).
+    /// This is the max-compression policy: it never ships more tokens
+    /// than necessary and never loses information.
+    MinTokens,
+    /// Legacy policy: prefer the lossless render whenever it clears the
+    /// byte-savings gate (`lossless_min_savings_ratio`), even if the
+    /// lossy-recoverable render would be fewer tokens. Used by the
+    /// lossless round-trip suite (which asserts the lossless rendering
+    /// directly) and by callers who want all rows inline regardless of
+    /// token cost.
+    LosslessFirst,
+}
+
+impl RoutingPolicy {
+    /// Parse the policy from its kebab-case string form (the wire form
+    /// the PyO3 bridge and Python config use). Returns `None` for
+    /// unknown values so the caller can surface a clear error rather
+    /// than silently defaulting.
+    ///
+    /// Deliberately an inherent `Option`-returning method (not the
+    /// `FromStr` trait): the `None` arm carries the "unknown policy"
+    /// signal the PyO3 boundary turns into a `ValueError`, and there is
+    /// no `Err` payload to thread.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "min-tokens" => Some(RoutingPolicy::MinTokens),
+            "lossless-first" => Some(RoutingPolicy::LosslessFirst),
+            _ => None,
+        }
+    }
+
+    /// Kebab-case string form. Inverse of [`RoutingPolicy::from_str`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoutingPolicy::MinTokens => "min-tokens",
+            RoutingPolicy::LosslessFirst => "lossless-first",
+        }
+    }
+}
+
 /// Configuration for SmartCrusher.
 ///
 /// SCHEMA-PRESERVING: Output contains only items from the original array.
@@ -81,6 +144,16 @@ pub struct SmartCrusherConfig {
     /// Default `true`. Stage-3c.2 opaque-string CCR substitutions (in
     /// `walker::process_value`) likewise always emit their pointer.
     pub enable_ccr_marker: bool,
+    /// How `crush_array` chooses between a lossless render and a
+    /// lossy-recoverable render when BOTH are available (see
+    /// [`RoutingPolicy`]). Default [`RoutingPolicy::MinTokens`] — the
+    /// max-compression policy: ship whichever render is fewer TOKENS
+    /// (both are 100% recoverable, so no information is lost). Set to
+    /// [`RoutingPolicy::LosslessFirst`] to keep the legacy byte-ratio
+    /// gate (used by the lossless round-trip suite, which asserts the
+    /// lossless rendering directly). No Python-parity counterpart — this
+    /// governs Rust-side dispatch only.
+    pub routing_policy: RoutingPolicy,
 }
 
 impl Default for SmartCrusherConfig {
@@ -107,6 +180,7 @@ impl Default for SmartCrusherConfig {
             relevance_threshold: 0.3,
             lossless_min_savings_ratio: 0.30,
             enable_ccr_marker: true,
+            routing_policy: RoutingPolicy::MinTokens,
         }
     }
 }
@@ -139,5 +213,22 @@ mod tests {
         assert_eq!(c.relevance_threshold, 0.3);
         assert_eq!(c.lossless_min_savings_ratio, 0.30);
         assert!(c.enable_ccr_marker);
+        // Route-by-min-tokens is the default max-compression policy.
+        assert_eq!(c.routing_policy, RoutingPolicy::MinTokens);
+    }
+
+    #[test]
+    fn routing_policy_string_round_trips() {
+        assert_eq!(
+            RoutingPolicy::from_str("min-tokens"),
+            Some(RoutingPolicy::MinTokens)
+        );
+        assert_eq!(
+            RoutingPolicy::from_str("lossless-first"),
+            Some(RoutingPolicy::LosslessFirst)
+        );
+        assert_eq!(RoutingPolicy::from_str("bogus"), None);
+        assert_eq!(RoutingPolicy::MinTokens.as_str(), "min-tokens");
+        assert_eq!(RoutingPolicy::LosslessFirst.as_str(), "lossless-first");
     }
 }

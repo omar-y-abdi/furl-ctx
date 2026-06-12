@@ -191,6 +191,17 @@ class SmartCrusherConfig:
     # default; mainly lowered in tests and KV experiments — KV repeats
     # field names per row, so it clears the gate less often than CSV.
     lossless_min_savings_ratio: float = 0.30
+    # How the crusher chooses between a lossless render (all rows,
+    # encoded) and a lossy-recoverable render (dropped + ``<<ccr:HASH>>``
+    # sentinel) when BOTH are available — both are 100% recoverable, so
+    # the choice loses no information.
+    #
+    # * ``"min-tokens"`` (default, max compression): ship whichever render
+    #   is fewer TOKENS (a real tokenizer, not bytes — bytes mislead).
+    # * ``"lossless-first"``: keep the legacy behavior; lossless wins
+    #   whenever it clears ``lossless_min_savings_ratio``. Used by the
+    #   lossless round-trip suite, which asserts the lossless rendering.
+    routing_policy: str = "min-tokens"
 
 
 # ─── Rust-backed SmartCrusher ─────────────────────────────────────────────
@@ -334,6 +345,7 @@ class SmartCrusher(Transform):
             enable_ccr_marker=(
                 self._ccr_config.enabled and self._ccr_config.inject_retrieval_marker
             ),
+            routing_policy=cfg.routing_policy,
         )
         # Default: lossless-first compaction (PR4). Lossless wins for
         # cleanly tabular input where it saves ≥ 30% bytes; otherwise

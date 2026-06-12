@@ -21,13 +21,22 @@ from __future__ import annotations
 
 import json
 
-from headroom.transforms.content_router import ContentRouter
+from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
 
 from tests.test_ccr_recovery_invariant import _decode_csv_schema, _repr
 
+# These tests assert the LOSSLESS CSV-schema rendering directly (every
+# row encoded in the output, `isinstance(parsed, str)`). The production
+# default is route-by-min-tokens, which would ship the fewer-token render
+# — for several of these shapes that is the lossy/dropped render, flipping
+# the assertions. Force LosslessFirst so this suite exercises the lossless
+# encoder/decoder in isolation, as intended. (The recovery invariant under
+# the default policy is covered by tests/test_ccr_recovery_invariant.py.)
+_LOSSLESS_FIRST = ContentRouterConfig(smart_crusher_routing_policy="lossless-first")
+
 
 def _compress_to_text(items: list) -> str:
-    result = ContentRouter().compress(json.dumps(items, ensure_ascii=False))
+    result = ContentRouter(_LOSSLESS_FIRST).compress(json.dumps(items, ensure_ascii=False))
     rendered = result.compressed
     try:
         parsed = json.loads(rendered)

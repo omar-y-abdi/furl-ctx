@@ -395,13 +395,22 @@ class TestCCREdgeCases:
         assert isinstance(results, list)
 
     def test_ccr_disabled_no_caching(self):
-        """When CCR disabled, no caching occurs."""
+        """When CCR is disabled AND no row is dropped, no caching occurs.
+
+        Scope note: the CCR store write is unconditional on a DROP (DESIGN
+        1A — a dropped row is always recoverable, regardless of the CCR
+        flag; that path is pinned by tests/test_ccr_recovery_invariant.py).
+        This test pins the no-drop case, so it routes LosslessFirst: the
+        monotone `{id, score}` array renders losslessly (every row inline,
+        nothing dropped) → nothing to cache."""
         reset_compression_store()
 
         items = [{"id": i, "score": 100 - i} for i in range(100)]
         content = json.dumps(items)
 
-        config = SmartCrusherConfig(max_items_after_crush=15)
+        config = SmartCrusherConfig(
+            max_items_after_crush=15, routing_policy="lossless-first"
+        )
         ccr_config = CCRConfig(enabled=False)  # Disabled
 
         smart_crush_tool_output(content, config, ccr_config)

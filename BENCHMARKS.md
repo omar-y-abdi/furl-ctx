@@ -1,5 +1,75 @@
 # BENCHMARKS — Headroom Engine honest benchmarks
 
+## Phase-7: route-by-min-tokens — ship the fewer-token recoverable render (before → after)
+
+- Baseline: Phase-6 final (`7e446de7`). Policy default flipped
+  `LosslessFirst → MinTokens`.
+- Frontier change: every prior phase, when a compressible array could
+  render BOTH ways — **lossless** (all rows, CSV-schema-encoded,
+  reconstructible by the decoder) and **lossy-recoverable** (a visible
+  sample + a surfaced `<<ccr:HASH>>` sentinel, dropped rows in the CCR
+  store) — shipped lossless whenever it cleared a BYTE-savings gate. But
+  **both renders are 100% recoverable** (lossless shows everything; the
+  CCR recovery invariant guarantees the lossy path), so choosing between
+  them loses no information — it is a pure SIZE decision. And the size
+  metric that matters is **tokens, not bytes** (a fewer-byte render can
+  tokenize larger — hex vs base64). The lossless-first contract was
+  shipping the byte-smaller render even when the lossy-recoverable render
+  was far fewer TOKENS (`logs@90`: lossless **5274 tok** vs
+  lossy **598 tok**, BOTH 100% recoverable).
+- New policy `RoutingPolicy { MinTokens (default), LosslessFirst }`
+  (`config.rs`). Under `MinTokens`, when both renders exist `crush_array`
+  counts the TOKENS of each (real tiktoken via `crate::tokenizer`, model
+  `gpt-4o` — the benchmark model) and ships the fewer; ties prefer
+  lossless (more rows visible). Under `LosslessFirst` the legacy
+  byte-ratio gate is kept (used by the lossless round-trip suite, which
+  asserts the lossless rendering directly). The decision is in
+  `crusher.rs::crush_array` (lossless candidate + lossy candidate built,
+  then `render_token_count` compares the two final model-visible
+  strings). The lossless encoder/decoder and the canonical CCR hash are
+  UNCHANGED — only the CHOICE between two existing renders changed.
+
+| dataset | tok before (P6, lossless-first) | tok after (P7, min-tokens) | Δ | path before → after | drop | retention | needle-recall |
+|---|---:|---:|---:|---|---:|---:|---:|
+| code@7 | 41025 | 41025 | 0 | lossless → lossless | 0% | 100% | — |
+| logs@90 | 5274 | **598** | **−4676** | lossless → **LOSSY** | 91.1% | 100% | 100% (out\|CCR) |
+| search@90 | 1803 | **300** | **−1503** | lossless → **LOSSY** | 85.6% | 100% | 100% (out\|CCR) |
+| repeated_logs@90 | 240 | **105** | **−135** | lossless → **LOSSY** | 100% | 100% | — |
+| disk@9 | 347 | 347 | 0 | lossless → lossless | 0% | 100% | — |
+| multiturn@135 | 5674 | **4339** | **−1335** | lossless → **LOSSY** | 49.6% | 100% | — |
+
+**Recovery proof (logs@90, the headline flip).** The output ships the
+lossy survivor table whose final line is the sentinel
+`<<ccr:d421d36becdd 82_rows_offloaded>>`. Parsing that hash from the
+OUTPUT ALONE and calling `ccr_get(hash)` returns the 82 dropped
+originals; combined with the 8 visible survivor rows, **all 90 distinct
+input rows are recoverable** (0 lost). The chosen-lossy render loses no
+information — it just costs 598 tokens instead of 5274.
+
+**Honest read (Phase-7).**
+- **No dataset grew.** Every dataset is ≤ its Phase-6 token count; the
+  five compressible ones strictly improved. `code@7` (entropy floor) and
+  `disk@9` (small array, only the lossless render is valid) are unchanged
+  — `MinTokens` correctly leaves them lossless.
+- **`repeated_logs` went 240 → 105, not "stayed 240".** Route-by-min-tokens
+  found that dropping the highly-redundant ping rows to the CCR store
+  (100% recoverable) is fewer tokens than encoding all 90 rows in a
+  lossless table. That is a strict, lossless-information win the
+  byte-ratio gate could not see.
+- **Needle-recall stays 100% (output OR CCR) AND visible-recall stays
+  100%** across `search` and `logs` × {30, 90, 300} × {start, middle,
+  end}. The lossy renders the policy now prefers carry every dropped
+  needle to the CCR store under a surfaced pointer — nothing the model
+  could be asked for is unreachable.
+- **What this is NOT.** It is not a new encoder, not a new drop strategy,
+  not a hash change. It is purely picking the smaller of two renders that
+  the engine already produced and already guaranteed recoverable. The
+  lossless round-trip suite (`test_lossless_column_encodings`) is pinned
+  to `LosslessFirst` so it keeps asserting the lossless rendering in
+  isolation; the recovery invariant suite
+  (`test_ccr_recovery_invariant`, 21 tests) is policy-agnostic and stays
+  green because the chosen lossy render is always recoverable.
+
 ## Phase-6: cross-message dedup — conversation-level redundancy (before → after)
 
 - Baseline commit: `986bbc37` (Phase-5 final). Final commit: `357dbad8`

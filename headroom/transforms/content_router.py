@@ -505,6 +505,11 @@ class ContentRouterConfig:
     ccr_inject_marker: bool = True  # Add retrieval markers to compressed content
     smart_crusher_max_items_after_crush: int | None = None
     smart_crusher_with_compaction: bool = True
+    # Routing policy for the lossless-vs-lossy-recoverable choice (both
+    # recoverable, so no information is lost). ``"min-tokens"`` (default)
+    # ships whichever render is fewer tokens; ``"lossless-first"`` keeps
+    # the legacy lossless-wins-on-byte-ratio behavior.
+    smart_crusher_routing_policy: str = "min-tokens"
 
     # Tag protection: preserve custom/workflow XML tags from text compression.
     # When False (default), entire <custom-tag>content</custom-tag> blocks are
@@ -1636,6 +1641,7 @@ class ContentRouter(Transform):
                     crusher_config.max_items_after_crush = (
                         self.config.smart_crusher_max_items_after_crush
                     )
+                crusher_config.routing_policy = self.config.smart_crusher_routing_policy
                 self._smart_crusher = SmartCrusher(
                     config=crusher_config,
                     ccr_config=ccr_config,

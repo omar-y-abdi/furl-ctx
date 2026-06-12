@@ -45,7 +45,7 @@ use super::compaction::{
     classify_cell, emit_opaque_ccr_marker, try_parse_json_container, CellClass, ClassifyConfig,
     Compaction, CompactionStage,
 };
-use super::config::SmartCrusherConfig;
+use super::config::{RoutingPolicy, SmartCrusherConfig};
 use super::crushers::{compute_k_split, crush_number_array, crush_object, crush_string_array};
 use super::planning::SmartCrusherPlanner;
 use super::traits::{Constraint, CrushEvent, Observer};
@@ -120,6 +120,22 @@ struct DroppedPersist {
     marker: String,
 }
 
+/// Result of the lossy-recoverable render attempt in
+/// [`SmartCrusher::crush_array_lossy`].
+///
+/// The routing layer needs to tell two cases apart:
+/// - **Crushed** — a real DROP render exists (rows offloaded to CCR + a
+///   surfaced `<<ccr:HASH>>` pointer). This is the candidate the
+///   `MinTokens` policy sizes against the lossless render.
+/// - **Skip** — the analyzer refused to crush the array (e.g. all-unique
+///   entities with no signal). There is NO drop alternative; the carried
+///   `CrushArrayResult` is the `skip:<reason>` passthrough, shipped only
+///   when there's also no lossless render.
+enum LossyOutcome {
+    Crushed(CrushArrayResult),
+    Skip(CrushArrayResult),
+}
+
 /// Top-level SmartCrusher.
 ///
 /// Three pluggable extensions (Stage 3c.2 PR1):
@@ -153,6 +169,15 @@ pub struct SmartCrusher {
     /// (e.g. the proxy server holds it for retrieval lookups while
     /// SmartCrusher writes through it).
     pub ccr_store: Option<Arc<dyn CcrStore>>,
+    /// Tokenizer used by the `MinTokens` routing policy to size the two
+    /// candidate renderings (lossless vs lossy-recoverable) of a
+    /// compressible array. Bytes mislead — a fewer-byte render can
+    /// tokenize larger (hex vs base64) — so the routing choice is made
+    /// on real token counts. Defaults to a `gpt-4o` tiktoken counter
+    /// (the engine's benchmark model); the absolute model is immaterial
+    /// to the CHOICE since only the relative ranking of the two renders
+    /// matters, and tiktoken is the honest, deterministic metric.
+    pub tokenizer: Box<dyn crate::tokenizer::Tokenizer>,
 }
 
 impl SmartCrusher {
@@ -247,6 +272,7 @@ impl SmartCrusher {
         observers: Vec<Box<dyn Observer>>,
         compaction: Option<CompactionStage>,
         ccr_store: Option<Arc<dyn CcrStore>>,
+        tokenizer: Box<dyn crate::tokenizer::Tokenizer>,
     ) -> Self {
         SmartCrusher {
             config,
@@ -257,6 +283,7 @@ impl SmartCrusher {
             observers,
             compaction,
             ccr_store,
+            tokenizer,
         }
     }
 
@@ -695,44 +722,111 @@ impl SmartCrusher {
             };
         }
 
-        // ── Lossless-first attempt ──
+        // ── Lossless candidate ──
         //
-        // Run the compaction stage if present, then check the savings
-        // ratio against `config.lossless_min_savings_ratio`. If the
-        // lossless rendering shrinks the input by at least that much,
-        // ship it — nothing dropped, no CCR retrieval needed.
-        // Otherwise fall through to the lossy path.
-        if let Some(stage) = &self.compaction {
-            let (c, rendered) = stage.run(items);
-            if c.was_compacted() {
+        // Run the compaction stage if present. The lossless render keeps
+        // every row (nothing dropped); it is a valid candidate only when
+        // it actually compacted and clears the byte-savings gate — below
+        // that gate the rendering is not worth shipping over either the
+        // raw array or the lossy view, so it is not a real alternative.
+        let lossless_candidate: Option<CrushArrayResult> = self
+            .compaction
+            .as_ref()
+            .and_then(|stage| {
+                let (c, rendered) = stage.run(items);
+                if !c.was_compacted() {
+                    return None;
+                }
                 let input_bytes = estimate_array_bytes(&item_strings);
                 let savings_ratio = if input_bytes > 0 {
                     1.0 - (rendered.len() as f64 / input_bytes as f64)
                 } else {
                     0.0
                 };
-                if savings_ratio >= self.config.lossless_min_savings_ratio {
-                    let kind = compaction_kind_str(&c);
-                    return CrushArrayResult {
-                        items: items.to_vec(), // nothing dropped
-                        strategy_info: format!("lossless:{kind}"),
-                        ccr_hash: None,
-                        dropped_summary: String::new(),
-                        compacted: Some(rendered),
-                        compaction_kind: Some(kind),
-                    };
+                if savings_ratio < self.config.lossless_min_savings_ratio {
+                    return None;
                 }
-            }
-        }
+                let kind = compaction_kind_str(&c);
+                Some(CrushArrayResult {
+                    items: items.to_vec(), // nothing dropped
+                    strategy_info: format!("lossless:{kind}"),
+                    ccr_hash: None,
+                    dropped_summary: String::new(),
+                    compacted: Some(rendered),
+                    compaction_kind: Some(kind),
+                })
+            });
 
-        // ── Lossy path: compress inline + cache full original via CCR ──
+        // ── Lossy-recoverable candidate ──
         //
-        // The runtime caller (PyO3 bridge / proxy server) is expected
-        // to stash the full input keyed by `ccr_hash` so a retrieval
-        // tool can serve dropped rows back to the LLM on demand.
-        // **No data is lost** — "lossy" here means "compressed view
-        // inline; full payload retrievable via CCR cache."
+        // Compress inline + cache the full original via CCR. The runtime
+        // caller stashes the full input keyed by `ccr_hash` so a retrieval
+        // tool can serve dropped rows back to the LLM on demand. **No data
+        // is lost** — "lossy" means "compressed view inline; full payload
+        // retrievable via CCR cache." When the array is not safe to crush
+        // (the analyzer's `Skip` gate) there is NO lossy alternative — the
+        // outcome carries the `skip:<reason>` passthrough so the routing
+        // layer can ship it when there's also no lossless render.
+        let lossy = self.crush_array_lossy(items, query_context, &item_strings, adaptive_k);
+
+        // ── Route between the recoverable renders ──
         //
+        // When BOTH a lossless render and a lossy DROP render exist they
+        // are each 100% recoverable: lossless shows every row; lossy
+        // surfaces a `<<ccr:HASH>>` pointer to the CCR-stored originals.
+        // So the choice is a pure size decision with no information loss.
+        // Under `MinTokens` (the default) ship the fewer-TOKEN render
+        // (bytes mislead — hex vs base64); ties prefer lossless (more rows
+        // visible). Under `LosslessFirst` keep the legacy behavior:
+        // lossless wins whenever it cleared its gate.
+        match (lossless_candidate, lossy) {
+            (Some(lossless), LossyOutcome::Crushed(lossy)) => match self.config.routing_policy {
+                RoutingPolicy::LosslessFirst => lossless,
+                RoutingPolicy::MinTokens => {
+                    let lossless_tokens = self.render_token_count(&lossless);
+                    let lossy_tokens = self.render_token_count(&lossy);
+                    // Lossy wins only when STRICTLY fewer tokens; ties (and
+                    // lossless-fewer) → lossless: more rows visible at no
+                    // extra token cost.
+                    if lossy_tokens < lossless_tokens {
+                        lossy
+                    } else {
+                        lossless
+                    }
+                }
+            },
+            // Lossless render valid but the array isn't droppable (Skip):
+            // ship lossless — it shows every row losslessly. (A non-
+            // droppable array should never drop, and lossless never drops.)
+            (Some(lossless), LossyOutcome::Skip(_)) => lossless,
+            // Only the lossy DROP render is valid → ship it (unchanged).
+            (None, LossyOutcome::Crushed(lossy)) => lossy,
+            // No lossless render and the array isn't droppable → the
+            // `skip:<reason>` passthrough (preserves pre-routing behavior).
+            (None, LossyOutcome::Skip(passthrough)) => passthrough,
+        }
+    }
+
+    /// Build the lossy-recoverable render of `items` (row-drop + CCR
+    /// sentinel). Returns [`LossyOutcome::Skip`] (carrying the
+    /// `skip:<reason>` passthrough) when the array is not safe to crush
+    /// (the analyzer's `Skip` gate) — there is no DROP render in that
+    /// case. Otherwise returns [`LossyOutcome::Crushed`] with the
+    /// row-dropped render. The store write + recovery pointer are emitted
+    /// exactly as before via [`SmartCrusher::persist_dropped`]: a chosen
+    /// lossy render is ALWAYS recoverable.
+    ///
+    /// Factored out of `crush_array` so the routing layer can size this
+    /// candidate against the lossless one before deciding which to ship.
+    /// Behavior is byte-identical to the pre-routing lossy path — only
+    /// the place it is *called from* changed.
+    fn crush_array_lossy(
+        &self,
+        items: &[Value],
+        query_context: &str,
+        item_strings: &[String],
+        adaptive_k: usize,
+    ) -> LossyOutcome {
         // CCR-BACKED AGGRESSIVE BUDGET: when a CCR store is configured,
         // every dropped row is guaranteed recoverable (unconditional
         // persist + surfaced `<<ccr:HASH>>` pointer — the invariant the
@@ -742,9 +836,7 @@ impl SmartCrusher {
         // `prioritize_indices`) — not a generic cross-section, so the
         // keep budget is halved. Without a store the drop would be
         // unrecoverable and the budget stays at the full `adaptive_k`
-        // (legacy / parity mode). The tier-1 passthrough boundary above
-        // still uses the FULL `adaptive_k`, so which arrays enter the
-        // lossy path is unchanged — only how much they keep visible.
+        // (legacy / parity mode).
         let effective_max_items = if self.ccr_store.is_some() {
             ccr_backed_keep_budget(adaptive_k)
         } else {
@@ -752,20 +844,22 @@ impl SmartCrusher {
         };
         let analysis = self.analyzer.analyze_array(items);
 
-        // Crushability gate: not safe to crush → passthrough, no CCR.
+        // Crushability gate: not safe to crush → no DROP candidate. Carry
+        // the `skip:<reason>` passthrough so the caller can ship it when
+        // there's also no lossless render.
         if analysis.recommended_strategy == CompressionStrategy::Skip {
             let reason = match &analysis.crushability {
                 Some(c) => format!("skip:{}", c.reason),
                 None => String::new(),
             };
-            return CrushArrayResult {
+            return LossyOutcome::Skip(CrushArrayResult {
                 items: items.to_vec(),
                 strategy_info: reason,
                 ccr_hash: None,
                 dropped_summary: String::new(),
                 compacted: None,
                 compaction_kind: None,
-            };
+            });
         }
 
         let plan = self.planner().create_plan(
@@ -774,7 +868,7 @@ impl SmartCrusher {
             query_context,
             None, // preserve_fields (TOIN — stubbed)
             Some(effective_max_items),
-            Some(&item_strings),
+            Some(item_strings),
         );
         let mut result = self.execute_plan(&plan, items);
 
@@ -795,18 +889,6 @@ impl SmartCrusher {
         // are dropped we hash the full original and stash it in the
         // configured store so a dropped needle is *always* recoverable
         // — never silently lost.
-        //
-        // DESIGN.md sub-step 1A (kill silent loss) + Defect 1: BOTH the
-        // store write AND the prompt-visible recovery pointer are
-        // UNCONDITIONAL. When `dropped_count > 0` we always compute the
-        // canonical bytes, the hash, write to the store (if configured),
-        // and surface the `<<ccr:HASH>>` pointer in `dropped_summary`.
-        // `enable_ccr_marker` no longer suppresses the pointer — a drop
-        // without a recovery pointer is a silent loss, which the
-        // invariant forbids. See [`SmartCrusher::persist_dropped`] — the
-        // shared helper that both this DICT path and the non-dict
-        // string/number/mixed paths route through so every dropped item
-        // (any array type) is CCR-recoverable + signalled identically.
         let dropped_count = items.len().saturating_sub(result.len());
         let (ccr_hash, dropped_summary) = match self.persist_dropped(items, dropped_count) {
             Some(persisted) => (Some(persisted.hash), persisted.marker),
@@ -821,11 +903,8 @@ impl SmartCrusher {
         // table that is meaningfully smaller than the JSON array form,
         // ship that rendering with the `{"_ccr_dropped": ...}` sentinel
         // appended as a final line. Every kept value stays verbatim in
-        // the output (same lossless encodings the pure-lossless path
-        // uses: schema header, constant-column fold, ditto marks) and
-        // the recovery pointer still names the full original — so the
-        // information content of the output is IDENTICAL to the JSON
-        // form, at fewer tokens. Gated on:
+        // the output and the recovery pointer still names the full
+        // original. Gated on:
         // - no `OpaqueRef` substitution (survivor values must stay
         //   verbatim — same rule as the small-array lossless zone);
         // - absolute saving ≥ `LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES`
@@ -855,7 +934,7 @@ impl SmartCrusher {
                         let kind = compaction_kind_str(&c);
                         let rendered_with_sentinel =
                             format!("{}\n{sentinel_line}", rendered.trim_end_matches('\n'));
-                        return CrushArrayResult {
+                        return LossyOutcome::Crushed(CrushArrayResult {
                             items: result,
                             strategy_info: format!(
                                 "{}+compact:{kind}",
@@ -865,20 +944,58 @@ impl SmartCrusher {
                             dropped_summary,
                             compacted: Some(rendered_with_sentinel),
                             compaction_kind: Some(kind),
-                        };
+                        });
                     }
                 }
             }
         }
 
-        CrushArrayResult {
+        LossyOutcome::Crushed(CrushArrayResult {
             items: result,
             strategy_info: analysis.recommended_strategy.as_str().to_string(),
             ccr_hash,
             dropped_summary,
             compacted: None,
             compaction_kind: None,
+        })
+    }
+
+    /// Count the tokens of the FINAL model-visible string a
+    /// `CrushArrayResult` renders to — the exact text `process_value`
+    /// substitutes for this array. Used by the `MinTokens` routing policy
+    /// to size the lossless vs lossy-recoverable candidates against each
+    /// other. The two renders are:
+    ///
+    /// - `compacted = Some(s)` → the string `s` (lossless table, or lossy
+    ///   survivor-compacted table whose last line is the sentinel).
+    /// - `compacted = None` → the JSON array `[..items, {"_ccr_dropped":
+    ///   marker}]` exactly as `process_value` emits it (the sentinel is
+    ///   only appended when something was dropped).
+    ///
+    /// This mirrors `process_value`'s `DictArray` substitution so the
+    /// token count reflects what the model actually sees, not an
+    /// approximation.
+    fn render_token_count(&self, result: &CrushArrayResult) -> usize {
+        let rendered = self.render_result_string(result);
+        self.tokenizer.count_text(&rendered)
+    }
+
+    /// Render a `CrushArrayResult` to the string `process_value`
+    /// substitutes for the array (see [`SmartCrusher::render_token_count`]).
+    fn render_result_string(&self, result: &CrushArrayResult) -> String {
+        if let Some(s) = &result.compacted {
+            return s.clone();
         }
+        let mut items = result.items.clone();
+        if !result.dropped_summary.is_empty() {
+            let mut sentinel = serde_json::Map::new();
+            sentinel.insert(
+                "_ccr_dropped".to_string(),
+                Value::String(result.dropped_summary.clone()),
+            );
+            items.push(Value::Object(sentinel));
+        }
+        crate::transforms::anchor_selector::python_safe_json_dumps(&Value::Array(items))
     }
 
     /// Shared CCR persist + sentinel logic — the single source of truth
@@ -2416,5 +2533,126 @@ mod tests {
             .get(&expected_hash)
             .expect("non-dict drop must be retrievable by hash");
         assert_eq!(recovered, canonical_array_json(&items));
+    }
+
+    // ---------- Phase 7: route-by-min-tokens ----------
+
+    /// Build a default-config crusher (MinTokens) plus a LosslessFirst
+    /// twin, both sharing one in-memory CCR store, so a routing test can
+    /// compare the two policies and still recover any dropped rows.
+    fn min_tokens_and_lossless_first(
+    ) -> (SmartCrusher, SmartCrusher, std::sync::Arc<crate::ccr::InMemoryCcrStore>) {
+        use crate::ccr::InMemoryCcrStore;
+        use crate::transforms::smart_crusher::SmartCrusherBuilder;
+        use std::sync::Arc;
+        let store = Arc::new(InMemoryCcrStore::new());
+        let store_dyn: Arc<dyn CcrStore> = Arc::clone(&store) as Arc<dyn CcrStore>;
+        let mk = |policy: RoutingPolicy| {
+            SmartCrusherBuilder::new(SmartCrusherConfig {
+                routing_policy: policy,
+                ..SmartCrusherConfig::default()
+            })
+            .with_default_oss_setup()
+            .with_default_compaction()
+            .with_ccr_store(Arc::clone(&store_dyn))
+            .build()
+        };
+        (mk(RoutingPolicy::MinTokens), mk(RoutingPolicy::LosslessFirst), store)
+    }
+
+    #[test]
+    fn min_tokens_ships_lossy_for_logs_shaped_data() {
+        // Logs-shaped: per-row entropy (40-hex commit + distinct subject)
+        // shipped 90× makes the lossless render token-expensive; dropping
+        // to a small visible sample + a `<<ccr:HASH>>` sentinel is far
+        // fewer tokens. MinTokens must pick the lossy DROP render — and
+        // the dropped rows must remain recoverable from the store.
+        let (min_tokens, lossless_first, store) = min_tokens_and_lossless_first();
+        let items: Vec<Value> = (0..90).map(log_shaped_row).collect();
+
+        let r_min = min_tokens.crush_array(&items, "", 1.0);
+        let r_loss = lossless_first.crush_array(&items, "", 1.0);
+
+        // MinTokens drops (lossy chosen): a hash is surfaced.
+        assert!(
+            r_min.ccr_hash.is_some(),
+            "MinTokens must ship the lossy DROP render for logs-shaped data; got strategy {:?}",
+            r_min.strategy_info
+        );
+        assert!(r_min.items.len() < items.len(), "lossy must actually drop rows");
+
+        // The chosen lossy render is fewer tokens than the lossless one.
+        let lossy_tokens = min_tokens.render_token_count(&r_min);
+        let lossless_tokens = lossless_first.render_token_count(&r_loss);
+        assert!(
+            lossy_tokens < lossless_tokens,
+            "lossy must be strictly fewer tokens (lossy={lossy_tokens}, lossless={lossless_tokens})"
+        );
+
+        // LosslessFirst ships the lossless render for the same data.
+        assert!(
+            r_loss.ccr_hash.is_none() && r_loss.compacted.is_some(),
+            "LosslessFirst must ship the lossless render; got strategy {:?}",
+            r_loss.strategy_info
+        );
+
+        // Recovery proof: every dropped row is retrievable from the store
+        // under the surfaced hash (the chosen lossy render loses nothing).
+        let h = r_min.ccr_hash.as_ref().unwrap();
+        let recovered = store.get(h).expect("dropped payload retrievable");
+        assert_eq!(recovered, canonical_array_json(&items));
+    }
+
+    #[test]
+    fn min_tokens_ships_lossless_when_it_is_fewer_tokens() {
+        // A low-cardinality tabular array whose every row collapses under
+        // dedup: the lossy path keeps the same content the lossless table
+        // shows, so the lossless render is ≤ tokens. Under MinTokens the
+        // tie-or-fewer goes to lossless (more rows visible). Nothing is
+        // dropped → the output is recoverable inline, no CCR needed.
+        let (min_tokens, lossless_first, _store) = min_tokens_and_lossless_first();
+        let items: Vec<Value> = (0..12).map(|_| json!({"a": 1, "b": 2})).collect();
+
+        let r_min = min_tokens.crush_array(&items, "", 1.0);
+        let r_loss = lossless_first.crush_array(&items, "", 1.0);
+
+        // MinTokens ships lossless: nothing dropped, compacted populated.
+        assert!(
+            r_min.ccr_hash.is_none() && r_min.compacted.is_some(),
+            "MinTokens must ship the lossless render when it is ≤ tokens; got strategy {:?}",
+            r_min.strategy_info
+        );
+        assert_eq!(r_min.items.len(), items.len(), "lossless drops nothing");
+
+        // LosslessFirst ships lossless too (same render for this shape).
+        assert!(
+            r_loss.ccr_hash.is_none() && r_loss.compacted.is_some(),
+            "LosslessFirst must ship lossless here; got strategy {:?}",
+            r_loss.strategy_info
+        );
+        // The chosen render is identical across policies in this case.
+        assert_eq!(r_min.compacted, r_loss.compacted);
+    }
+
+    #[test]
+    fn min_tokens_never_ships_more_tokens_than_lossless() {
+        // The core invariant: under MinTokens the shipped render is never
+        // MORE tokens than the lossless render would have been — for any
+        // droppable array where both candidates exist. (Lossy wins only
+        // when STRICTLY fewer; ties go to lossless.) Pin it on the
+        // logs-shaped family where lossy genuinely wins.
+        let (min_tokens, lossless_first, _store) = min_tokens_and_lossless_first();
+        let items: Vec<Value> = (0..90).map(log_shaped_row).collect();
+
+        let r_min = min_tokens.crush_array(&items, "", 1.0);
+        let r_loss = lossless_first.crush_array(&items, "", 1.0);
+
+        let min_tokens_count = min_tokens.render_token_count(&r_min);
+        let lossless_tokens = lossless_first.render_token_count(&r_loss);
+        assert!(
+            min_tokens_count <= lossless_tokens,
+            "MinTokens must never ship more tokens than lossless \
+             (chosen={min_tokens_count}, lossless={lossless_tokens})"
+        );
     }
 }

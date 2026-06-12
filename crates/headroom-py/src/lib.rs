@@ -20,8 +20,8 @@ use headroom_core::signals::{
 };
 use headroom_core::transforms::smart_crusher::compaction::DocumentCompactor;
 use headroom_core::transforms::smart_crusher::{
-    CrushResult as RustCrushResult, SmartCrusher as RustSmartCrusher,
-    SmartCrusherConfig as RustSmartCrusherConfig,
+    CrushResult as RustCrushResult, RoutingPolicy as RustRoutingPolicy,
+    SmartCrusher as RustSmartCrusher, SmartCrusherConfig as RustSmartCrusherConfig,
 };
 use headroom_core::transforms::tag_protector::{
     is_known_html_tag as rust_is_known_html_tag, known_html_tag_names as rust_known_html_tag_names,
@@ -478,6 +478,7 @@ impl PySmartCrusherConfig {
         relevance_threshold = 0.3,
         lossless_min_savings_ratio = 0.30,
         enable_ccr_marker = true,
+        routing_policy = "min-tokens",
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -499,8 +500,17 @@ impl PySmartCrusherConfig {
         relevance_threshold: f64,
         lossless_min_savings_ratio: f64,
         enable_ccr_marker: bool,
-    ) -> Self {
-        Self {
+        routing_policy: &str,
+    ) -> PyResult<Self> {
+        // Parse the kebab-case routing policy at the boundary so a typo
+        // is a clear ValueError, not a silent default.
+        let routing_policy = RustRoutingPolicy::from_str(routing_policy).ok_or_else(|| {
+            invalid_input(format!(
+                "unknown routing_policy {routing_policy:?}; expected one of: \
+                 \"min-tokens\", \"lossless-first\""
+            ))
+        })?;
+        Ok(Self {
             inner: RustSmartCrusherConfig {
                 enabled,
                 min_items_to_analyze,
@@ -520,8 +530,9 @@ impl PySmartCrusherConfig {
                 relevance_threshold,
                 lossless_min_savings_ratio,
                 enable_ccr_marker,
+                routing_policy,
             },
-        }
+        })
     }
 
     #[getter]
@@ -595,6 +606,10 @@ impl PySmartCrusherConfig {
     #[getter]
     fn enable_ccr_marker(&self) -> bool {
         self.inner.enable_ccr_marker
+    }
+    #[getter]
+    fn routing_policy(&self) -> &'static str {
+        self.inner.routing_policy.as_str()
     }
 
     fn __repr__(&self) -> String {

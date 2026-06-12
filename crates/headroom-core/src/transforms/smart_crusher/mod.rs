@@ -58,7 +58,7 @@ pub use analyzer::SmartAnalyzer;
 pub use anchors::{extract_query_anchors, item_matches_anchors};
 pub use builder::SmartCrusherBuilder;
 pub use classifier::{classify_array, ArrayType};
-pub use config::SmartCrusherConfig;
+pub use config::{RoutingPolicy, SmartCrusherConfig};
 pub use constraints::{
     default_oss_constraints, KeepErrorsConstraint, KeepStructuralOutliersConstraint,
 };
