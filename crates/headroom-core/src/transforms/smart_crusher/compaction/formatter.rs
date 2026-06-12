@@ -295,7 +295,9 @@ fn write_table(
                 // verbatim ISO timestamp and later cells are
                 // `{±delta_seconds}[/tz]` carry-forwards.
                 Some(ColumnEncoding::IsoDeltaSeconds) => return format!("{base}~"),
-                None => {}
+                // Dictionary columns keep a plain declaration — the
+                // `__dict:name=...` preamble line is their marker.
+                Some(ColumnEncoding::DictString { .. }) | None => {}
             }
             match &f.const_value {
                 Some(v) => format!("{base}={}", const_decl_value(v)),
@@ -310,21 +312,37 @@ fn write_table(
     }
     out.push('\n');
 
+    // Dictionary lines: each `DictString` column declares its distinct
+    // values once (first-appearance order, verbatim, CSV-escaped) on a
+    // `__dict:name=v0,v1,...` line; the rows below carry indexes. A
+    // plain data cell that happens to START with `__dict:` is CSV-quoted
+    // by `csv_render_str`, so these preamble lines stay unambiguous.
+    for f in &schema.fields {
+        if let Some(ColumnEncoding::DictString { values }) = &f.encoding {
+            out.push_str("__dict:");
+            out.push_str(&f.name);
+            out.push('=');
+            let segs: Vec<String> = values.iter().map(|v| csv_render_str(v)).collect();
+            out.push_str(&segs.join(","));
+            out.push('\n');
+        }
+    }
+
     // Rows. Constant and arithmetic columns are folded into the
     // declaration above. ISO-delta columns render through a streaming
     // per-column encoder (first value verbatim, then second deltas) —
     // the SAME encoder the compactor used to prove the round-trip at
-    // stamp time.
+    // stamp time. Dictionary columns render their cell's index.
     //
     // Ditto marks: a cell whose rendering is identical to the SAME
     // column's cell in the previous row renders as a bare `=`
     // (carry-forward). Lossless: the materialized value sits verbatim
     // in the first row of its run; a literal string cell `"="` is
-    // CSV-quoted by `format_cell` so the bare marker is unambiguous.
+    // CSV-quoted by `csv_render_str` so the bare marker is unambiguous.
     // Cells rendering to 0–1 chars never ditto (no byte saving).
-    // Ditto applies AFTER encoding, so repeated identical deltas
-    // compress too; the decoder resolves ditto at the rendered-cell
-    // level before decoding deltas.
+    // Ditto applies AFTER encoding, so repeated identical deltas /
+    // indexes compress too; the decoder resolves ditto at the
+    // rendered-cell level before decoding.
     let visible_specs: Vec<&super::ir::FieldSpec> =
         schema.fields.iter().filter(|f| row_visible(f)).collect();
     let mut iso_states: Vec<Option<encodings::IsoDeltaState>> = visible_specs
@@ -334,19 +352,47 @@ fn write_table(
             _ => None,
         })
         .collect();
+    let dict_maps: Vec<Option<std::collections::HashMap<&str, usize>>> = visible_specs
+        .iter()
+        .map(|f| match &f.encoding {
+            Some(ColumnEncoding::DictString { values }) => Some(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (v.as_str(), i))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect();
     let mut prev: Vec<Option<String>> = Vec::new();
     for row in rows {
-        let rendered: Vec<String> = row
-            .0
-            .iter()
-            .zip(schema.fields.iter())
-            .filter(|(_, f)| row_visible(f))
-            .zip(iso_states.iter_mut())
-            .map(|((c, _), iso)| match (iso, c) {
-                (Some(state), CellValue::Scalar(Value::String(s))) => state.next_cell(s),
-                (_, c) => format_cell(c),
-            })
-            .collect();
+        let mut rendered: Vec<String> = Vec::with_capacity(visible_specs.len());
+        let mut slot = 0usize;
+        for (c, f) in row.0.iter().zip(schema.fields.iter()) {
+            if !row_visible(f) {
+                continue;
+            }
+            let cell = match (&f.encoding, c) {
+                (Some(ColumnEncoding::IsoDeltaSeconds), CellValue::Scalar(Value::String(s))) => {
+                    match iso_states[slot].as_mut() {
+                        Some(state) => state.next_cell(s),
+                        None => format_cell(c),
+                    }
+                }
+                (Some(ColumnEncoding::DictString { .. }), CellValue::Scalar(Value::String(s))) => {
+                    match dict_maps[slot].as_ref().and_then(|m| m.get(s.as_str())) {
+                        Some(idx) => idx.to_string(),
+                        // Unreachable for stamped columns (the dict is
+                        // built from these exact rows); degrade verbatim.
+                        None => format_cell(c),
+                    }
+                }
+                _ => format_cell(c),
+            };
+            rendered.push(cell);
+            slot += 1;
+        }
         if prev.len() != rendered.len() {
             prev = vec![None; rendered.len()];
         }
@@ -393,12 +439,24 @@ fn const_decl_value(v: &Value) -> String {
     }
 }
 
+/// Render a plain string cell with the CSV-schema grammar guards: a
+/// literal `=` is quoted (ditto marker), a string starting `__dict:` is
+/// quoted (dictionary-line marker), and CSV-special chars quote as
+/// usual. Shared with the compactor's byte-gate simulation so stamping
+/// decisions measure EXACTLY what the formatter ships.
+pub(super) fn csv_render_str(s: &str) -> String {
+    if s == "=" || s.starts_with("__dict:") || needs_csv_quote(s) {
+        csv_quote(s)
+    } else {
+        s.to_string()
+    }
+}
+
 fn format_cell(c: &CellValue) -> String {
     match c {
         CellValue::Missing => String::new(),
-        // A literal string cell `=` is CSV-quoted so the bare `=` ditto
-        // marker (see `write_table`) stays unambiguous on read-back.
-        CellValue::Scalar(Value::String(s)) if s == "=" => csv_quote(s),
+        // Grammar guards (ditto `=`, `__dict:` prefix) + CSV quoting.
+        CellValue::Scalar(Value::String(s)) => csv_render_str(s),
         CellValue::Scalar(v) => json_scalar_to_csv(v),
         CellValue::Nested(sub) => {
             // Render nested as compact JSON; CSV-quote because it
@@ -1170,6 +1228,124 @@ mod tests {
         let out = CsvSchemaFormatter::new().format(&c);
         assert!(!out.contains("string~"), "got: {out}");
         assert!(out.contains("2026-06-11T21:02:05.123+02:00"), "got: {out}");
+    }
+
+    // ── Dictionary encoding (CSV) ──
+
+    #[test]
+    fn csv_dict_column_emits_preamble_and_indexes() {
+        // Low-cardinality author-like column over many rows, repeating
+        // NON-consecutively (so ditto can't catch it — the dict case).
+        let authors = ["Alice Cooper", "Bob the Builder", "Carol Danvers"];
+        let items: Vec<Value> = (0..30)
+            .map(|i| {
+                json!({
+                    "author": authors[i % 3],
+                    "msg": format!("commit message number {i}"),
+                })
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        assert!(
+            lines[1].starts_with("__dict:author="),
+            "got line[1]: {}",
+            lines[1]
+        );
+        assert!(lines[1].contains("Alice Cooper"), "got: {}", lines[1]);
+        // Each distinct value appears exactly ONCE in the whole output.
+        for a in authors {
+            assert_eq!(out.matches(a).count(), 1, "{a} must appear exactly once");
+        }
+        // Rows carry indexes (first column: author sorts before msg).
+        assert!(lines[2].starts_with("0,"), "got: {}", lines[2]);
+        assert!(lines[3].starts_with("1,"), "got: {}", lines[3]);
+        assert!(lines[4].starts_with("2,"), "got: {}", lines[4]);
+        assert!(lines[5].starts_with("0,"), "got: {}", lines[5]);
+    }
+
+    #[test]
+    fn csv_dict_round_trips_losslessly() {
+        let levels = ["info", "warning", "error", "critical"];
+        let items: Vec<Value> = (0..40)
+            .map(|i| {
+                json!({
+                    "level": levels[(i * 7) % 4],
+                    "msg": format!("event {i} fired"),
+                })
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let mut lines = out.trim_end().lines();
+        let _decl = lines.next().expect("decl");
+        let dict_line = lines.next().expect("dict line");
+        let payload = dict_line
+            .strip_prefix("__dict:level=")
+            .expect("dict preamble for level");
+        let values: Vec<&str> = payload.split(',').collect();
+        // Decode: resolve ditto on the index column, then look up.
+        let mut reconstructed: Vec<Value> = Vec::new();
+        let mut carry: Option<&str> = None;
+        for (i, line) in lines.enumerate() {
+            let (idx_cell, msg) = line.split_once(',').expect("two cells");
+            let resolved = if idx_cell == "=" {
+                carry.expect("ditto after a value")
+            } else {
+                carry = Some(idx_cell);
+                idx_cell
+            };
+            let level = values[resolved.parse::<usize>().expect("index")];
+            reconstructed.push(json!({"level": level, "msg": msg}));
+            let _ = i;
+        }
+        let originals: Vec<Value> = items.clone();
+        assert_eq!(reconstructed, originals, "dict round-trip must be exact");
+    }
+
+    #[test]
+    fn csv_dict_refuses_high_cardinality_and_tiny_columns() {
+        // All-distinct column: indexes save nothing — must stay plain.
+        let items: Vec<Value> = (0..20)
+            .map(|i| json!({"path": format!("src/module_{i}.py"), "n": format!("x{i}")}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        assert!(!out.contains("__dict:"), "got: {out}");
+        // Short values (1 char): index cells save nothing either.
+        let items: Vec<Value> = (0..20)
+            .map(|i| json!({"f": if i % 2 == 0 { "y" } else { "n" }, "n": format!("x{i}")}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        assert!(!out.contains("__dict:"), "1-char values must not dict: {out}");
+    }
+
+    #[test]
+    fn csv_data_cell_starting_with_dict_marker_is_quoted() {
+        let items = vec![
+            json!({"a": "__dict:fake=x,y", "b": 1}),
+            json!({"a": "plain", "b": 2}),
+            json!({"a": "other", "b": 4}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        assert!(
+            out.contains("\"__dict:fake=x,y\""),
+            "cell with __dict: prefix must be CSV-quoted: {out}"
+        );
+    }
+
+    #[test]
+    fn json_formatter_unchanged_by_dict_encoding() {
+        let items: Vec<Value> = (0..10)
+            .map(|i| json!({"level": if i % 2 == 0 { "information" } else { "warning-level" }, "n": i}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = JsonFormatter::new().format(&c);
+        assert!(!out.contains("__dict:"), "got: {out}");
+        assert!(out.matches("information").count() >= 5, "verbatim values: {out}");
     }
 
     #[test]

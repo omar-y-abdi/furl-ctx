@@ -232,6 +232,62 @@ def test_fractional_second_timestamps_stay_verbatim() -> None:
     assert not missing
 
 
+def test_dict_encoding_low_cardinality_column_round_trips() -> None:
+    # Shape mirrors the real git-log benchmark capture: a small set of
+    # authors repeats NON-consecutively across many rows (ditto cannot
+    # catch that), each subject is distinct. The dictionary line carries
+    # each distinct author verbatim exactly once; rows carry indexes.
+    authors = ["Alice Cooper", "Bob the Builder", "Carol Danvers", "Dan Abnett"]
+    items = [
+        {
+            "author": authors[(i * 3) % 4],
+            "subject": f"feat(area-{i % 10}): change number {i} with details",
+        }
+        for i in range(60)
+    ]
+    text = _compress_to_text(items)
+    lines = text.split("\n")
+    assert lines[1].startswith("__dict:author="), lines[:3]
+    for a in authors:
+        assert text.count(a) == 1, f"{a} must appear exactly once (in the dict line)"
+
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_dict_encoding_values_with_commas_round_trip() -> None:
+    # Dictionary values are CSV-escaped in the preamble line; commas and
+    # quotes inside a value must survive reconstruction exactly.
+    names = ['Smith, John', 'O"Hara, Anne', "plain name"]
+    items = [
+        {"name": names[(i * 2) % 3], "event": f"login attempt {i}"} for i in range(45)
+    ]
+    text = _compress_to_text(items)
+    assert "__dict:name=" in text, text.split("\n")[:3]
+
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_all_distinct_string_column_never_dict_encodes() -> None:
+    # An all-distinct column gains nothing from indexes — it must stay
+    # plain with every value verbatim (honest gate, no fake encoding).
+    items = [
+        {"path": f"src/pkg_{i}/module_{i}.py", "match": f"def handler_{i}():"}
+        for i in range(40)
+    ]
+    text = _compress_to_text(items)
+    assert "__dict:" not in text
+    for it in items:
+        assert it["path"] in text
+
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing
+
+
 def test_arith_fold_negative_step_round_trips() -> None:
     # Descending counters (e.g. remaining-retries) fold with a negative
     # step and reconstruct exactly.

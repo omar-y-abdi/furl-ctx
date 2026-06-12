@@ -30,6 +30,12 @@ Encodings understood:
   ``{±delta_seconds}[/tz]`` against the previous row (timezone spelling
   only when it changes). Reconstruction uses pure integer civil-calendar
   math and preserves the exact original spelling (``Z`` stays ``Z``).
+* **Dictionary columns** — a ``__dict:name=v0,v1,...`` line directly
+  after the declaration lists a low-cardinality string column's distinct
+  values (verbatim, CSV-escaped, first-appearance order); row cells in
+  that column are dictionary indexes. A plain data cell starting with
+  ``__dict:`` is CSV-quoted by the formatter, so the preamble lines are
+  unambiguous.
 
 Lines that do not parse as rows (e.g. the lossy-survivor
 ``{"_ccr_dropped": ...}`` sentinel line) are skipped; callers treat
@@ -272,12 +278,32 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
         row = {s.name: s.const_value for s in const_cols}
         return [dict(row) for _ in range(declared_count)]
 
+    # Dictionary preamble: `__dict:name=v0,v1,...` lines directly after
+    # the declaration. Only declared column names are accepted — any
+    # other line ends the preamble and is processed as a row.
+    var_names = {s.name for s in var_cols}
+    dict_values: dict[str, list[str]] = {}
+    body_start = 1
+    for line in lines[1:]:
+        if not line.startswith("__dict:") or "=" not in line:
+            break
+        name, payload = line[len("__dict:") :].split("=", 1)
+        if name not in var_names:
+            break
+        dict_values[name] = [
+            _unquote_csv(seg)
+            if seg.startswith('"') and seg.endswith('"') and len(seg) >= 2
+            else seg
+            for seg in split_unquoted(payload)
+        ]
+        body_start += 1
+
     rows: list[dict[str, Any]] = []
     carry_raw: list[str | None] = [None] * len(var_cols)
     # Per-column (epoch, tz) state for ISO-delta columns.
     iso_state: list[tuple[int, str] | None] = [None] * len(var_cols)
     ordinal = 0  # row index for arithmetic folds — counts every row line
-    for line in lines[1:]:
+    for line in lines[body_start:]:
         if not line or _is_sentinel_line(line):
             continue
         parts = split_unquoted(line)
@@ -301,6 +327,12 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
                     ok = False
                     break
                 row[spec.name] = value
+            elif spec.name in dict_values:
+                values = dict_values[spec.name]
+                if not resolved.isdigit() or int(resolved) >= len(values):
+                    ok = False  # never invent data on a bad index
+                    break
+                row[spec.name] = values[int(resolved)]
             else:
                 row[spec.name] = _decode_cell(resolved, spec.type_tag)
         if not ok:

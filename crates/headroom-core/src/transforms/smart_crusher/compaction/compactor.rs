@@ -207,6 +207,7 @@ fn build_homogeneous_table(
     stamp_constant_columns(&mut field_specs, &rows);
     stamp_arith_int_columns(&mut field_specs, &rows);
     stamp_iso_delta_columns(&mut field_specs, &rows);
+    stamp_dict_string_columns(&mut field_specs, &rows);
 
     Compaction::Table {
         schema: Schema {
@@ -495,6 +496,84 @@ fn stamp_iso_delta_columns(specs: &mut [FieldSpec], rows: &[Row]) {
         let enc = ditto_rendered_cost(encoded.iter().map(|s| s.as_str()));
         if enc < plain {
             spec.encoding = Some(ColumnEncoding::IsoDeltaSeconds);
+        }
+    }
+}
+
+/// Stamp [`ColumnEncoding::DictString`] on every low-cardinality string
+/// column where a `__dict:name=v0,v1,...` line plus per-row index cells
+/// render strictly smaller than the plain cells. Every distinct value
+/// appears verbatim exactly once (first-appearance order) in the
+/// dictionary line; reconstruction is a total index lookup, proven at
+/// stamp time by decoding the index cells back and comparing.
+///
+/// Gates: ≥ 3 rows; every cell a scalar string; 2 ≤ distinct < rows;
+/// no value contains a newline (line-grammar integrity); strict byte
+/// saving measured WITH ditto on both sides using the exact formatter
+/// quoting (`csv_render_str`).
+fn stamp_dict_string_columns(specs: &mut [FieldSpec], rows: &[Row]) {
+    use super::formatter::csv_render_str;
+
+    if rows.len() < 3 {
+        return;
+    }
+    for (col, spec) in specs.iter_mut().enumerate() {
+        if spec.const_value.is_some() || spec.encoding.is_some() {
+            continue;
+        }
+        let mut values: Vec<&str> = Vec::with_capacity(rows.len());
+        let mut all_strings = true;
+        for row in rows {
+            match row.0.get(col) {
+                Some(CellValue::Scalar(Value::String(s))) => values.push(s.as_str()),
+                _ => {
+                    all_strings = false;
+                    break;
+                }
+            }
+        }
+        if !all_strings {
+            continue;
+        }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut order: Vec<&str> = Vec::new();
+        for v in &values {
+            if seen.insert(v) {
+                order.push(v);
+            }
+        }
+        let k = order.len();
+        if k < 2 || k >= values.len() {
+            continue;
+        }
+        if order.iter().any(|v| v.contains('\n') || v.contains('\r')) {
+            continue;
+        }
+        let index_of: std::collections::HashMap<&str, usize> =
+            order.iter().enumerate().map(|(i, v)| (*v, i)).collect();
+        let idx_cells: Vec<String> = values.iter().map(|v| index_of[v].to_string()).collect();
+        // Prove the exact round-trip before stamping: decode every
+        // index cell back through the dictionary and compare.
+        let decoded: Option<Vec<&str>> = idx_cells
+            .iter()
+            .map(|c| c.parse::<usize>().ok().and_then(|i| order.get(i).copied()))
+            .collect();
+        if decoded.as_deref() != Some(values.as_slice()) {
+            continue;
+        }
+        let plain_cells: Vec<String> = values.iter().map(|v| csv_render_str(v)).collect();
+        let plain = ditto_rendered_cost(plain_cells.iter().map(|s| s.as_str()));
+        let idx_cost = ditto_rendered_cost(idx_cells.iter().map(|s| s.as_str()));
+        let dict_line = "__dict:".len()
+            + spec.name.len()
+            + 1 // '='
+            + order.iter().map(|v| csv_render_str(v).len()).sum::<usize>()
+            + k.saturating_sub(1) // commas
+            + 1; // newline
+        if dict_line + idx_cost < plain {
+            spec.encoding = Some(ColumnEncoding::DictString {
+                values: order.into_iter().map(|v| v.to_string()).collect(),
+            });
         }
     }
 }

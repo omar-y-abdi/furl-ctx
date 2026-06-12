@@ -62,6 +62,14 @@ pub enum ColumnEncoding {
     /// compactor PROVES the exact round-trip at stamp time
     /// (encode → decode → compare against every original string).
     IsoDeltaSeconds,
+    /// Low-cardinality string column. `values` holds every distinct
+    /// value in first-appearance order, each verbatim exactly once; the
+    /// CSV-schema formatter emits a `__dict:name=v0,v1,...` line after
+    /// the declaration and renders each cell as its dictionary index.
+    /// Stamped only when 2 ≤ |values| < rows, no value contains a
+    /// newline (line-grammar integrity), and the dictionary line plus
+    /// index cells are strictly smaller than the plain cells.
+    DictString { values: Vec<String> },
 }
 
 /// One column's metadata in a tabular compaction.
