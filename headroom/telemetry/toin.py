@@ -5,7 +5,8 @@
 TOIN observes; it never mutates request-time compression decisions. The
 request path is deterministic: SmartCrusher and the live-zone dispatcher
 read their static configuration only. TOIN's role is to record what
-happened so an offline aggregator (`headroom.cli.toin_publish`) can emit
+happened so an offline aggregator (the retired `toin_publish` CLI; removed in
+the compression-only amputation) can emit
 a `recommendations.toml` file the deploy pipeline ships to the proxy at
 the next restart.
 
@@ -53,8 +54,9 @@ detection).
         strategy="smart_crusher",
     )
 
-    # Aggregated recommendations are produced offline:
-    #   python -m headroom.cli.toin_publish --output recommendations.toml
+    # Aggregated recommendations are produced offline by an external
+    # aggregator (the in-repo toin_publish CLI was removed in the
+    # compression-only amputation):
     # The Rust proxy loads that file at startup; no per-request hint API.
 """
 
@@ -418,7 +420,8 @@ class ToolIntelligenceNetwork:
     patterns for different `(auth_mode, model_family, tool_signature)`
     slices. The `record_compression` / `record_retrieval` calls are the
     only request-time API; aggregated recommendations are emitted by
-    `headroom.cli.toin_publish` and consumed by the Rust proxy at startup.
+    an offline aggregator (the retired `toin_publish` CLI) and consumed
+    externally at startup.
 
     Thread-safe for concurrent access.
     """
@@ -960,7 +963,7 @@ class ToolIntelligenceNetwork:
         """**Deprecated.** Returns `None`. PR-B5 retired the request-time hint API.
 
         TOIN is observation-only; recommendations are emitted by the
-        offline `headroom.cli.toin_publish` CLI into `recommendations.toml`
+        offline aggregator (the retired `toin_publish` CLI) into `recommendations.toml`
         and loaded by the Rust proxy at startup. New code must not call
         this method. Existing call sites should migrate to reading the
         TOML file directly.
@@ -1166,7 +1169,7 @@ class ToolIntelligenceNetwork:
     def iter_patterns(self) -> list[tuple[PatternKey, ToolPattern]]:
         """Snapshot of `(key, pattern)` pairs for offline aggregation.
 
-        Used by `headroom.cli.toin_publish` to walk every aggregated
+        Used by offline aggregators (the retired `toin_publish` CLI) to walk every aggregated
         slice without exposing the live `_patterns` dict to external
         callers (deep-copies each pattern to prevent mutation).
         """

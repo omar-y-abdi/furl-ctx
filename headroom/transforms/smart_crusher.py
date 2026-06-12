@@ -240,9 +240,9 @@ class SmartCrusher(Transform):
         self._observer = observer
 
         # CCR config is preserved on `self` for callers that read it
-        # back (`headroom.proxy.server` does). Both `enabled=False` and
-        # `inject_retrieval_marker=False` collapse to the Rust crusher's
-        # `enable_ccr_marker=False` field.
+        # back (the retired proxy server did; external embedders still
+        # can). Both `enabled=False` and `inject_retrieval_marker=False`
+        # collapse to the Rust crusher's `enable_ccr_marker=False` field.
         #
         # That field does NOT skip the marker or the CCR store write
         # (Defect 1 corrected the prior comment, which claimed it did).
