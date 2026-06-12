@@ -167,6 +167,71 @@ def test_arith_fold_monotone_counter_round_trips() -> None:
     assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
 
 
+def test_iso_delta_timestamps_round_trip() -> None:
+    # Shape mirrors real structured logs: a strict-shape ISO-8601
+    # timestamp column (mixed timezone spellings, non-monotone order, a
+    # duplicate) plus low-entropy content columns. The column declares
+    # `ts:string~`, ships the first timestamp verbatim and second-deltas
+    # after; reconstruction is pure integer civil-calendar math.
+    tzs = ["+02:00", "+02:00", "-07:00", "Z", "+02:00", "-04:00"]
+    items = [
+        {
+            "ts": f"2026-06-{(i % 9) + 10:02d}T{(i * 7) % 24:02d}:{(i * 13) % 60:02d}:"
+            f"{(i * 17) % 60:02d}{tzs[i % 6]}",
+            "level": "info" if i % 4 else "warn",
+            "msg": f"request {i} completed",
+        }
+        for i in range(50)
+    ]
+    text = _compress_to_text(items)
+    decl = text.split("\n", 1)[0]
+    assert "ts:string~" in decl, decl
+    # Only the FIRST timestamp appears verbatim; the rest are deltas.
+    assert text.count("2026-06-") == 1, "later timestamps must be delta cells"
+
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_iso_delta_z_and_offset_spellings_survive() -> None:
+    # `Z` and `+00:00` are numerically equal but lexically distinct —
+    # reconstruction must preserve the original spelling of each row.
+    items = [
+        {"ts": f"2026-01-01T00:00:{i:02d}" + ("Z" if i % 2 else "+00:00"), "n": f"e{i}"}
+        for i in range(20)
+    ]
+    text = _compress_to_text(items)
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_fractional_second_timestamps_stay_verbatim() -> None:
+    # Non-strict shapes (fractional seconds) must NOT delta-encode —
+    # every value stays verbatim in the output and still round-trips.
+    # Constant columns keep the array on the lossless tabular route so
+    # the timestamp column's behavior is what the test isolates.
+    items = [
+        {
+            "ts": f"2026-06-11T21:02:{i:02d}.{i:03d}+02:00",
+            "host": "api-gateway-1",
+            "service": "checkout",
+            "status": 200,
+            "n": f"e{i}",
+        }
+        for i in range(30)
+    ]
+    text = _compress_to_text(items)
+    decl = text.split("\n", 1)[0]
+    assert "ts:string~" not in decl, decl
+    for it in items:
+        assert it["ts"] in text, f"verbatim timestamp missing: {it['ts']}"
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing
+
+
 def test_arith_fold_negative_step_round_trips() -> None:
     # Descending counters (e.g. remaining-retries) fold with a negative
     # step and reconstruct exactly.

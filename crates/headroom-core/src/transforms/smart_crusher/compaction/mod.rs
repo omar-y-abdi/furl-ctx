@@ -25,6 +25,7 @@
 
 pub mod classifier;
 pub mod compactor;
+pub mod encodings;
 pub mod formatter;
 pub mod ir;
 pub mod walker;

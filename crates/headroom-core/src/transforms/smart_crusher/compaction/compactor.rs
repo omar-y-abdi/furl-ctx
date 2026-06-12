@@ -206,6 +206,7 @@ fn build_homogeneous_table(
     flatten_uniform_nested(&mut field_specs, &mut rows, cfg);
     stamp_constant_columns(&mut field_specs, &rows);
     stamp_arith_int_columns(&mut field_specs, &rows);
+    stamp_iso_delta_columns(&mut field_specs, &rows);
 
     Compaction::Table {
         schema: Schema {
@@ -447,6 +448,73 @@ fn stamp_arith_int_columns(specs: &mut [FieldSpec], rows: &[Row]) {
             }
         }
     }
+}
+
+/// Stamp [`ColumnEncoding::IsoDeltaSeconds`] on every string column
+/// whose EVERY value is a strict-shape ISO-8601 timestamp and whose
+/// delta rendering is strictly smaller than the plain rendering.
+///
+/// The round-trip is PROVEN at stamp time: the column is encoded with
+/// the same streaming encoder the formatter uses, decoded back, and
+/// compared against every original string — only an exact match stamps.
+/// Byte costs are simulated WITH ditto marks (the formatter applies
+/// ditto after encoding), so the gate measures real rendered bytes.
+fn stamp_iso_delta_columns(specs: &mut [FieldSpec], rows: &[Row]) {
+    use super::encodings::{decode_iso_column, encode_iso_column};
+
+    if rows.len() < 3 {
+        return;
+    }
+    for (col, spec) in specs.iter_mut().enumerate() {
+        if spec.const_value.is_some() || spec.encoding.is_some() {
+            continue;
+        }
+        let mut values: Vec<&str> = Vec::with_capacity(rows.len());
+        let mut all_strings = true;
+        for row in rows {
+            match row.0.get(col) {
+                Some(CellValue::Scalar(Value::String(s))) => values.push(s.as_str()),
+                _ => {
+                    all_strings = false;
+                    break;
+                }
+            }
+        }
+        if !all_strings {
+            continue;
+        }
+        let Some(encoded) = encode_iso_column(&values) else {
+            continue;
+        };
+        // Prove the exact round-trip before stamping.
+        match decode_iso_column(&encoded) {
+            Some(decoded) if decoded == values => {}
+            _ => continue,
+        }
+        let plain = ditto_rendered_cost(values.iter().copied());
+        let enc = ditto_rendered_cost(encoded.iter().map(|s| s.as_str()));
+        if enc < plain {
+            spec.encoding = Some(ColumnEncoding::IsoDeltaSeconds);
+        }
+    }
+}
+
+/// Total rendered bytes of a column's cells as the CSV formatter would
+/// ship them: a cell identical to the previous one (and longer than one
+/// char) costs 1 byte (`=` ditto), otherwise its own length. ISO and
+/// delta cells never need CSV quoting (no commas/quotes/newlines).
+fn ditto_rendered_cost<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
+    let mut prev: Option<&str> = None;
+    let mut total = 0usize;
+    for cell in cells {
+        if cell.len() > 1 && prev == Some(cell) {
+            total += 1;
+        } else {
+            total += cell.len();
+        }
+        prev = Some(cell);
+    }
+    total
 }
 
 /// `Some((base, step))` when every cell in `col` is a scalar i64 forming
@@ -1147,6 +1215,55 @@ mod tests {
             Compaction::Table { schema, .. } => {
                 let n = schema.fields.iter().find(|f| f.name == "n").unwrap();
                 assert_eq!(n.encoding, None, "u64-beyond-i64 must not stamp");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iso_delta_is_stamped_on_strict_timestamp_columns() {
+        let items: Vec<Value> = (0..6)
+            .map(|i| {
+                json!({
+                    "date": format!("2026-06-1{}T0{}:00:00+02:00", i % 3 + 1, i),
+                    "v": format!("x{i}"),
+                })
+            })
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let date = schema.fields.iter().find(|f| f.name == "date").unwrap();
+                assert_eq!(date.encoding, Some(ColumnEncoding::IsoDeltaSeconds));
+                let v = schema.fields.iter().find(|f| f.name == "v").unwrap();
+                assert_eq!(v.encoding, None);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iso_delta_never_stamps_constant_or_short_columns() {
+        // A constant timestamp column is owned by the const fold.
+        let constant: Vec<Value> = (0..5)
+            .map(|i| json!({"date": "2026-06-11T21:02:05Z", "v": format!("x{i}")}))
+            .collect();
+        match compact(&constant, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let date = schema.fields.iter().find(|f| f.name == "date").unwrap();
+                assert!(date.const_value.is_some());
+                assert_eq!(date.encoding, None);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        // Two rows: below the minimum.
+        let short = vec![
+            json!({"date": "2026-06-11T21:02:05Z", "v": "a"}),
+            json!({"date": "2026-06-11T22:02:05Z", "v": "b"}),
+        ];
+        match compact(&short, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let date = schema.fields.iter().find(|f| f.name == "date").unwrap();
+                assert_eq!(date.encoding, None);
             }
             other => panic!("expected Table, got {other:?}"),
         }

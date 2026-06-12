@@ -54,6 +54,14 @@ pub enum ColumnEncoding {
     /// the exact values from the row index. Pure integer math — exact
     /// reconstruction by construction.
     ArithInt { base: i64, step: i64 },
+    /// Every value is a strict-shape ISO-8601 timestamp
+    /// (`YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)`). The CSV-schema formatter
+    /// marks the declaration `name:string~`, renders the first value
+    /// verbatim and each subsequent cell as `{±delta_seconds}[/tz]`
+    /// (tz spelling only when it changes). Stamped only after the
+    /// compactor PROVES the exact round-trip at stamp time
+    /// (encode → decode → compare against every original string).
+    IsoDeltaSeconds,
 }
 
 /// One column's metadata in a tabular compaction.

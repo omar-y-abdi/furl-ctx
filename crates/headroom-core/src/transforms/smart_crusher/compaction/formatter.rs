@@ -35,6 +35,7 @@
 
 use serde_json::{json, Value};
 
+use super::encodings;
 use super::ir::{CellValue, ColumnEncoding, Compaction, OpaqueKind, Row, Schema};
 
 /// Format a `Compaction` tree into bytes.
@@ -285,8 +286,16 @@ fn write_table(
             } else {
                 format!("{}:{}", f.name, f.type_tag)
             };
-            if let Some(ColumnEncoding::ArithInt { base: b, step }) = &f.encoding {
-                return format!("{base}={b}+{step}");
+            match &f.encoding {
+                Some(ColumnEncoding::ArithInt { base: b, step }) => {
+                    return format!("{base}={b}+{step}");
+                }
+                // ISO-delta marker: `name:string~`. The `~` suffix tells
+                // the decoder this column's first materialized cell is a
+                // verbatim ISO timestamp and later cells are
+                // `{±delta_seconds}[/tz]` carry-forwards.
+                Some(ColumnEncoding::IsoDeltaSeconds) => return format!("{base}~"),
+                None => {}
             }
             match &f.const_value {
                 Some(v) => format!("{base}={}", const_decl_value(v)),
@@ -302,7 +311,10 @@ fn write_table(
     out.push('\n');
 
     // Rows. Constant and arithmetic columns are folded into the
-    // declaration above.
+    // declaration above. ISO-delta columns render through a streaming
+    // per-column encoder (first value verbatim, then second deltas) —
+    // the SAME encoder the compactor used to prove the round-trip at
+    // stamp time.
     //
     // Ditto marks: a cell whose rendering is identical to the SAME
     // column's cell in the previous row renders as a bare `=`
@@ -310,6 +322,18 @@ fn write_table(
     // in the first row of its run; a literal string cell `"="` is
     // CSV-quoted by `format_cell` so the bare marker is unambiguous.
     // Cells rendering to 0–1 chars never ditto (no byte saving).
+    // Ditto applies AFTER encoding, so repeated identical deltas
+    // compress too; the decoder resolves ditto at the rendered-cell
+    // level before decoding deltas.
+    let visible_specs: Vec<&super::ir::FieldSpec> =
+        schema.fields.iter().filter(|f| row_visible(f)).collect();
+    let mut iso_states: Vec<Option<encodings::IsoDeltaState>> = visible_specs
+        .iter()
+        .map(|f| match f.encoding {
+            Some(ColumnEncoding::IsoDeltaSeconds) => Some(encodings::IsoDeltaState::new()),
+            _ => None,
+        })
+        .collect();
     let mut prev: Vec<Option<String>> = Vec::new();
     for row in rows {
         let rendered: Vec<String> = row
@@ -317,7 +341,11 @@ fn write_table(
             .iter()
             .zip(schema.fields.iter())
             .filter(|(_, f)| row_visible(f))
-            .map(|(c, _)| format_cell(c))
+            .zip(iso_states.iter_mut())
+            .map(|((c, _), iso)| match (iso, c) {
+                (Some(state), CellValue::Scalar(Value::String(s))) => state.next_cell(s),
+                (_, c) => format_cell(c),
+            })
             .collect();
         if prev.len() != rendered.len() {
             prev = vec![None; rendered.len()];
@@ -1065,6 +1093,99 @@ mod tests {
         let decl = out.lines().next().unwrap();
         assert!(!decl.contains("n:int="), "got decl: {decl}");
         assert!(out.contains("1,a\n2,b\n4,c\n"), "got: {out}");
+    }
+
+    // ── ISO-delta encoding (CSV) ──
+
+    #[test]
+    fn csv_iso_delta_marks_declaration_and_renders_deltas() {
+        let items: Vec<Value> = (0..10)
+            .map(|i| {
+                json!({
+                    "date": format!("2026-06-11T21:{:02}:05+02:00", i * 3),
+                    "v": format!("subject {i}"),
+                })
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        assert!(lines[0].contains("date:string~"), "got decl: {}", lines[0]);
+        // First row carries the verbatim timestamp; later rows carry
+        // second deltas (180s apart, same tz → no spelling).
+        assert!(lines[1].starts_with("2026-06-11T21:00:05+02:00,"), "got: {}", lines[1]);
+        assert!(lines[2].starts_with("+180,"), "got: {}", lines[2]);
+        assert!(lines[3].starts_with("+180,") || lines[3].starts_with("=,"), "got: {}", lines[3]);
+    }
+
+    #[test]
+    fn csv_iso_delta_round_trips_losslessly() {
+        use super::super::encodings::decode_iso_column;
+        // Real-shaped commit dates: non-monotone, mixed timezones,
+        // distinct deltas (no ditto interference in this fixture).
+        let dates = [
+            "2026-06-11T21:02:05-07:00",
+            "2026-06-11T19:55:13+02:00",
+            "2026-06-11T18:55:19+02:00",
+            "2026-06-10T19:11:46-07:00",
+            "2026-06-10T21:53:18-04:00",
+            "2026-06-12T00:00:00Z",
+        ];
+        let items: Vec<Value> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| json!({"date": *d, "v": format!("commit {i}")}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let mut lines = out.trim_end().lines();
+        let decl = lines.next().expect("decl");
+        assert!(decl.contains("date:string~"), "got decl: {decl}");
+        // Extract the first (date) cell of each row and decode the
+        // column with the shared decoder — exact reconstruction.
+        let cells: Vec<String> = lines
+            .map(|l| l.split(',').next().unwrap().to_string())
+            .collect();
+        let decoded = decode_iso_column(&cells).expect("decode");
+        assert_eq!(decoded, dates, "ISO-delta round-trip must be exact");
+    }
+
+    #[test]
+    fn csv_iso_delta_not_stamped_on_nonconforming_values() {
+        // One fractional-second timestamp poisons the column — it must
+        // stay plain (every value verbatim).
+        let items: Vec<Value> = (0..5)
+            .map(|i| {
+                json!({
+                    "date": if i == 3 {
+                        "2026-06-11T21:02:05.123+02:00".to_string()
+                    } else {
+                        format!("2026-06-11T2{i}:02:05+02:00")
+                    },
+                    "v": format!("x{i}"),
+                })
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        assert!(!out.contains("string~"), "got: {out}");
+        assert!(out.contains("2026-06-11T21:02:05.123+02:00"), "got: {out}");
+    }
+
+    #[test]
+    fn json_formatter_unchanged_by_iso_delta() {
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"date": format!("2026-06-1{i}T00:00:00Z"), "v": i}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = JsonFormatter::new().format(&c);
+        for i in 0..4 {
+            assert!(
+                out.contains(&format!("2026-06-1{i}T00:00:00Z")),
+                "JSON formatter must keep verbatim timestamps: {out}"
+            );
+        }
+        assert!(!out.contains("string~"), "got: {out}");
     }
 
     #[test]

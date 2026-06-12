@@ -258,19 +258,26 @@ _SUBJECT_THINGS = [
 
 
 def _log_shaped_rows(n: int = 90) -> list[dict]:
-    # High-entropy distinct rows (git-log shaped): hex/ISO identity columns,
+    # High-entropy distinct rows (git-log shaped): hex identity columns,
     # low-cardinality author, genuinely varied unique subjects (uniformly
     # templated subjects trip the engine's `skip:unique_entities_no_signal`
     # crushability gate and never reach the lossy path). Forces the LOSSY
     # path, then the survivor-compaction rendering: a JSON string whose
     # final line is the `{"_ccr_dropped": ...}` sentinel.
+    #
+    # The dates carry MICROSECOND precision deliberately: strict-shape
+    # second-precision ISO columns now delta-encode losslessly, which
+    # pushed the previous fixture over the 0.30 lossless gate and off the
+    # lossy path this test exists to pin. Fractional seconds are entirely
+    # realistic for logs and are (honestly) refused by the strict
+    # encoder, keeping this fixture lossy. The assertions are unchanged.
     return [
         {
             "commit": f"{i * 2654435761 + 12345:040x}",
             "author": f"Author {i % 7}",
             "date": (
                 f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"
-                f"T{i % 24:02d}:{(i * 13) % 60:02d}:00+02:00"
+                f"T{i % 24:02d}:{(i * 13) % 60:02d}:00.{(i * 104729) % 1000000:06d}+02:00"
             ),
             "subject": (
                 f"{_SUBJECT_PREFIXES[i % 8]}({_SUBJECT_AREAS[i % 10]}): "

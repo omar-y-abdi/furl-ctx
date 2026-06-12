@@ -24,6 +24,12 @@ Encodings understood:
   decodes to ``BASE + STEP*i``. Unambiguous against a constant: an int
   constant renders as a bare integer, never two integers joined by
   ``+``.
+* **ISO-delta** — ``name:string~`` marks a column of strict-shape
+  ISO-8601 timestamps (``YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)``). The first
+  materialized cell is the full timestamp verbatim; each later cell is
+  ``{±delta_seconds}[/tz]`` against the previous row (timezone spelling
+  only when it changes). Reconstruction uses pure integer civil-calendar
+  math and preserves the exact original spelling (``Z`` stays ``Z``).
 
 Lines that do not parse as rows (e.g. the lossy-survivor
 ``{"_ccr_dropped": ...}`` sentinel line) are skipped; callers treat
@@ -40,7 +46,73 @@ from typing import Any
 
 _HEADER_RE = re.compile(r"^\[(\d+)\]\{(.+)\}$")
 _ARITH_RE = re.compile(r"^(-?\d+)\+(-?\d+)$")
+_ISO_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$"
+)
+_DELTA_RE = re.compile(r"^([+-]\d+)(?:/(Z|[+-]\d{2}:\d{2}))?$")
 _CCR_SENTINEL_KEY = "_ccr_dropped"
+
+
+def _days_from_civil(y: int, m: int, d: int) -> int:
+    """Days since 1970-01-01 (proleptic Gregorian, Hinnant's algorithm).
+
+    Valid for years >= 1, where every division operates on non-negative
+    values — identical semantics to the Rust encoder.
+    """
+    y -= m <= 2
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (m - 3 if m > 2 else m + 9) + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def _civil_from_days(z: int) -> tuple[int, int, int]:
+    """Inverse of :func:`_days_from_civil`."""
+    z += 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    d = doy - (153 * mp + 2) // 5 + 1
+    m = mp + 3 if mp < 10 else mp - 9
+    return (y + 1 if m <= 2 else y, m, d)
+
+
+def _tz_offset_seconds(tz: str) -> int:
+    return 0 if tz == "Z" else (1 if tz[0] == "+" else -1) * (
+        int(tz[1:3]) * 3600 + int(tz[4:6]) * 60
+    )
+
+
+def _parse_iso(s: str) -> tuple[int, str] | None:
+    """Strict ISO-8601 parse -> ``(epoch_seconds, tz_spelling)``."""
+    m = _ISO_RE.match(s)
+    if not m:
+        return None
+    y, mo, d, h, mi, sec = (int(m.group(i)) for i in range(1, 7))
+    tz = m.group(7)
+    if y < 1 or not 1 <= mo <= 12 or not 1 <= d <= 31:
+        return None
+    if h > 23 or mi > 59 or sec > 59:
+        return None
+    days = _days_from_civil(y, mo, d)
+    if _civil_from_days(days) != (y, mo, d):
+        return None  # invalid calendar date (e.g. Feb 30)
+    epoch = days * 86400 + h * 3600 + mi * 60 + sec - _tz_offset_seconds(tz)
+    return epoch, tz
+
+
+def _render_iso(epoch: int, tz: str) -> str | None:
+    """Render ``(epoch, tz_spelling)`` back to the exact ISO string."""
+    local = epoch + _tz_offset_seconds(tz)
+    days, sod = divmod(local, 86400)
+    y, m, d = _civil_from_days(days)
+    if not 1 <= y <= 9999:
+        return None
+    return f"{y:04d}-{m:02d}-{d:02d}T{sod // 3600:02d}:{(sod % 3600) // 60:02d}:{sod % 60:02d}{tz}"
 
 
 @dataclass(frozen=True)
@@ -56,6 +128,8 @@ class ColumnSpec:
     const_value: Any
     # (base, step) of an arithmetic fold; None when not arith-encoded.
     arith: tuple[int, int] | None = None
+    # True when the column is ISO-delta encoded (``name:string~``).
+    iso_delta: bool = False
 
 
 def split_unquoted(s: str) -> list[str]:
@@ -136,6 +210,16 @@ def _parse_header_segment(seg: str) -> ColumnSpec | None:
             has_const=True,
             const_value=value,
         )
+    if decl.endswith("~"):
+        bare = decl[:-1]
+        return ColumnSpec(
+            name=name,
+            type_tag=bare.rstrip("?"),
+            nullable=bare.endswith("?"),
+            has_const=False,
+            const_value=None,
+            iso_delta=True,
+        )
     return ColumnSpec(
         name=name,
         type_tag=decl.rstrip("?"),
@@ -190,6 +274,8 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
 
     rows: list[dict[str, Any]] = []
     carry_raw: list[str | None] = [None] * len(var_cols)
+    # Per-column (epoch, tz) state for ISO-delta columns.
+    iso_state: list[tuple[int, str] | None] = [None] * len(var_cols)
     ordinal = 0  # row index for arithmetic folds — counts every row line
     for line in lines[1:]:
         if not line or _is_sentinel_line(line):
@@ -209,7 +295,14 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
             else:
                 resolved = raw
                 carry_raw[j] = raw
-            row[spec.name] = _decode_cell(resolved, spec.type_tag)
+            if spec.iso_delta:
+                value = _decode_iso_delta_cell(resolved, iso_state, j)
+                if value is None:
+                    ok = False
+                    break
+                row[spec.name] = value
+            else:
+                row[spec.name] = _decode_cell(resolved, spec.type_tag)
         if not ok:
             ordinal += 1
             continue
@@ -221,3 +314,37 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
         rows.append(row)
         ordinal += 1
     return rows
+
+
+def _decode_iso_delta_cell(
+    resolved: str, iso_state: list[tuple[int, str] | None], j: int
+) -> str | None:
+    """Decode one (ditto-resolved) cell of an ISO-delta column.
+
+    A ``{±delta}[/tz]`` cell advances the column's carried epoch (the
+    timezone spelling carries forward unless restated); a full
+    strict-shape ISO cell (re)seeds the state verbatim. Returns ``None``
+    when the cell cannot be decoded (e.g. a delta with no seed) — the
+    caller skips the row rather than inventing data.
+    """
+    delta_m = _DELTA_RE.match(resolved)
+    if delta_m:
+        state = iso_state[j]
+        if state is None:
+            return None  # delta before any seed: undecodable
+        epoch, tz = state
+        epoch += int(delta_m.group(1))
+        if delta_m.group(2):
+            tz = delta_m.group(2)
+        rendered = _render_iso(epoch, tz)
+        if rendered is None:
+            return None
+        iso_state[j] = (epoch, tz)
+        return rendered
+    parsed = _parse_iso(resolved)
+    if parsed is not None:
+        iso_state[j] = parsed
+        return resolved
+    # Not delta, not ISO — verbatim string; state resets.
+    iso_state[j] = None
+    return resolved
