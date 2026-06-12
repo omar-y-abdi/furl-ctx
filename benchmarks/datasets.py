@@ -11,6 +11,11 @@ real coding-agent use case the engine targets:
 3. ``search`` — real ``rg --json`` match objects (distinct ``path`` /
                 ``line_number`` / ``absolute_offset`` — the canonical
                 "90 distinct search results" case).
+4. ``repeated_logs`` — real captured ``ping`` replies (recurring content
+                ``{bytes, from, ttl}`` + a monotone ``icmp_seq`` identity
+                counter — the canonical "one varying identity field defeats
+                whole-item dedup, field-aware dedup collapses it" case that
+                Improvement 2 targets).
 
 Raw captures are snapshotted under ``benchmarks/data/`` so a run is
 reproducible and the numbers are auditable. The capture commands are
@@ -24,6 +29,7 @@ objects) used for retention / drop scoring.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -299,13 +305,97 @@ def build_search_dataset(*, limit: int = 90, refresh: bool = False) -> Dataset:
     )
 
 
+# ---------------------------------------------------------------------------
+# Dataset 4 — REPEATED_LOGS: real `ping` replies (recurring content +
+# monotone identity counter). The canonical field-aware dedup case (Imp2).
+# ---------------------------------------------------------------------------
+
+# A fixed, reproducible local capture: 100 ICMP echo replies to loopback.
+# Each reply's *content* is byte-identical ({bytes, from, ttl}); only the
+# monotone ``icmp_seq`` counter and the measured ``time`` vary per reply.
+# ``icmp_seq`` is exactly the "VaryingIdentity" column the whole-item hash
+# mistakes for content (every row hashes unique) and that the field-aware
+# stable-projection hash excludes (rows collapse on their shared content).
+_PING_CMD: tuple[str, ...] = ("ping", "-c", "100", "-i", "0.01", "127.0.0.1")
+_PING_RE = re.compile(
+    r"^(?P<bytes>\d+) bytes from (?P<from>\S+): "
+    r"icmp_seq=(?P<seq>\d+) ttl=(?P<ttl>\d+) time=(?P<time>[\d.]+) ms$"
+)
+
+
+def _parse_ping(raw: str) -> list[dict[str, Any]]:
+    """Parse captured ``ping`` stdout into structured reply rows.
+
+    Only ``icmp_seq=`` reply lines are kept (header / summary lines are
+    skipped). Each row preserves every real field: the recurring content
+    (``bytes`` / ``from`` / ``ttl``), the monotone identity counter
+    (``icmp_seq``), and the real measured latency (``time_ms``).
+    """
+    rows: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        m = _PING_RE.match(line.strip())
+        if m is None:
+            continue
+        rows.append(
+            {
+                "bytes": int(m.group("bytes")),
+                "from": m.group("from"),
+                "icmp_seq": int(m.group("seq")),
+                "ttl": int(m.group("ttl")),
+                "time_ms": float(m.group("time")),
+            }
+        )
+    return rows
+
+
+def build_repeated_logs_dataset(*, limit: int = 90, refresh: bool = False) -> Dataset:
+    """Real ping replies — recurring content + a monotone identity counter.
+
+    This is the canonical Improvement-2 case: the value-bearing content
+    (``bytes`` / ``from`` / ``ttl``) recurs identically across every row,
+    while ``icmp_seq`` is a strictly-monotone identity counter (unique per
+    row) that forces a unique *whole-item* hash for every row — defeating the
+    pre-Imp2 dedup/cluster/fill. The field-aware *stable-projection* hash
+    excludes ``icmp_seq`` and collapses the rows onto their shared content.
+    """
+    name = "repeated_logs"
+    provenance = (
+        "ping -c 100 -i 0.01 127.0.0.1 (icmp_seq reply lines) — real ICMP echo "
+        "replies. Content {bytes=64, from=127.0.0.1, ttl=64} recurs identically; "
+        "only the monotone icmp_seq counter (+ real time latency) vary. icmp_seq "
+        "is the canonical VaryingIdentity field that forces unique whole-item "
+        "hashes and that the field-aware stable hash excludes."
+    )
+    raw = _capture(name, list(_PING_CMD), provenance, refresh=refresh)
+    rows = _parse_ping(raw)
+    items = rows[:limit]
+    content = json.dumps(items, ensure_ascii=False)
+    messages = [
+        {"role": "user", "content": "Summarize the ping results."},
+        {"role": "tool", "content": content, "tool_call_id": "ping_call"},
+    ]
+    return Dataset(
+        name=name,
+        query="Summarize the ping results.",
+        items=items,
+        messages=messages,
+        provenance=provenance,
+    )
+
+
 def all_datasets(*, refresh: bool = False) -> list[Dataset]:
-    """Build the three real datasets. Deterministic from committed snapshots."""
+    """Build the four real datasets. Deterministic from committed snapshots."""
     return [
         build_code_dataset(refresh=refresh),
         build_logs_dataset(refresh=refresh),
         build_search_dataset(refresh=refresh),
+        build_repeated_logs_dataset(refresh=refresh),
     ]
+
+
+def repeated_log_rows(*, limit: int, refresh: bool = False) -> list[dict[str, Any]]:
+    """Return ``limit`` real ping reply rows — used by the Imp2 A/B harness."""
+    return build_repeated_logs_dataset(limit=limit, refresh=refresh).items
 
 
 def search_rows(*, limit: int, refresh: bool = False) -> list[dict[str, Any]]:

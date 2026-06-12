@@ -1,0 +1,300 @@
+{
+  "schema": "headroom.imp3.final.v1",
+  "captured_at_utc": "2026-06-12T14:13:11.586100+00:00",
+  "git_commit": "c86c3deb792c57f0ca5593dabc4536906d2c9083",
+  "engine_model": "gpt-4o",
+  "python": "3.13.12",
+  "platform": "macOS-15.7.6-x86_64-i386-64bit-Mach-O",
+  "provenance": [
+    {
+      "dataset": "code",
+      "snapshot": "benchmarks/data/code.raw.json",
+      "snapshot_bytes": 185070,
+      "n_items_default": 7,
+      "provenance": "Read of this repo's own source files: headroom/compress.py, headroom/tokenizer.py, headroom/config.py, headroom/transforms/smart_crusher.py, headroom/transforms/search_compressor.py, headroom/transforms/log_compressor.py, headroom/cache/compression_store.py (relative to repo root)."
+    },
+    {
+      "dataset": "logs",
+      "snapshot": "benchmarks/data/logs.raw.json",
+      "snapshot_bytes": 58377,
+      "n_items_default": 90,
+      "provenance": "git log --pretty=format:'%H<US>%an<US>%ae<US>%aI<US>%s' -n 300 (unit-separated), parsed to {commit,author,email,date,subject} rows."
+    },
+    {
+      "dataset": "search",
+      "snapshot": "benchmarks/data/search.raw.json",
+      "snapshot_bytes": 379314,
+      "n_items_default": 90,
+      "provenance": "rg --json 'def ' headroom/ \u2014 match objects parsed to {path,line_number,absolute_offset,lines} rows."
+    },
+    {
+      "dataset": "repeated_logs",
+      "snapshot": "benchmarks/data/repeated_logs.raw.json",
+      "snapshot_bytes": 6242,
+      "n_items_default": 90,
+      "provenance": "ping -c 100 -i 0.01 127.0.0.1 (icmp_seq reply lines) \u2014 real ICMP echo replies. Content {bytes=64, from=127.0.0.1, ttl=64} recurs identically; only the monotone icmp_seq counter (+ real time latency) vary. icmp_seq is the canonical VaryingIdentity field that forces unique whole-item hashes and that the field-aware stable hash excludes."
+    }
+  ],
+  "datasets": [
+    {
+      "name": "code@7",
+      "n_input_items": 7,
+      "tokens_before": 41025,
+      "tokens_after": 41025,
+      "lossless_reduction": 0.0,
+      "n_present": 7,
+      "n_dropped": 0,
+      "n_recoverable": 0,
+      "lossy_drop_ratio": 0.0,
+      "information_retention": 1.0,
+      "took_lossy_path": false,
+      "transforms": [
+        "router:protected:user_message"
+      ]
+    },
+    {
+      "name": "logs@90",
+      "n_input_items": 90,
+      "tokens_before": 8595,
+      "tokens_after": 2059,
+      "lossless_reduction": 0.7604421175101803,
+      "n_present": 23,
+      "n_dropped": 67,
+      "n_recoverable": 67,
+      "lossy_drop_ratio": 0.7444444444444445,
+      "information_retention": 1.0,
+      "took_lossy_path": true,
+      "transforms": [
+        "router:protected:user_message",
+        "router:mixed:0.13"
+      ]
+    },
+    {
+      "name": "search@90",
+      "n_input_items": 90,
+      "tokens_before": 4102,
+      "tokens_after": 2462,
+      "lossless_reduction": 0.39980497318381275,
+      "n_present": 90,
+      "n_dropped": 0,
+      "n_recoverable": 0,
+      "lossy_drop_ratio": 0.0,
+      "information_retention": 1.0,
+      "took_lossy_path": false,
+      "transforms": [
+        "router:protected:user_message",
+        "router:smart_crusher:0.35"
+      ]
+    },
+    {
+      "name": "repeated_logs@90",
+      "n_input_items": 90,
+      "tokens_before": 3621,
+      "tokens_after": 1662,
+      "lossless_reduction": 0.5410107705053853,
+      "n_present": 90,
+      "n_dropped": 0,
+      "n_recoverable": 0,
+      "lossy_drop_ratio": 0.0,
+      "information_retention": 1.0,
+      "took_lossy_path": false,
+      "transforms": [
+        "router:protected:user_message",
+        "router:smart_crusher:0.00"
+      ]
+    }
+  ],
+  "imp2_ab": {
+    "dataset": "repeated_logs",
+    "n_rows": 90,
+    "exclude_set": [
+      "icmp_seq"
+    ],
+    "families_off": 90,
+    "families_on": 58,
+    "collapse_ratio": 0.35555555555555557,
+    "largest_family_on": 5,
+    "engine_max_dup_count": 3,
+    "engine_strategy": "top_n"
+  },
+  "needle_recall": {
+    "overall_output_or_ccr": 1.0,
+    "overall_visible_only": 0.7222222222222222,
+    "by_family": {
+      "search": {
+        "recall_output_or_ccr": 1.0,
+        "recall_visible_only": 1.0,
+        "trials": 9
+      },
+      "logs": {
+        "recall_output_or_ccr": 1.0,
+        "recall_visible_only": 0.4444444444444444,
+        "trials": 9
+      }
+    },
+    "trials": [
+      {
+        "family": "search",
+        "cardinality": 30,
+        "position": "start",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 31
+      },
+      {
+        "family": "search",
+        "cardinality": 30,
+        "position": "middle",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 31
+      },
+      {
+        "family": "search",
+        "cardinality": 30,
+        "position": "end",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 31
+      },
+      {
+        "family": "search",
+        "cardinality": 90,
+        "position": "start",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 91
+      },
+      {
+        "family": "search",
+        "cardinality": 90,
+        "position": "middle",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 91
+      },
+      {
+        "family": "search",
+        "cardinality": 90,
+        "position": "end",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 91
+      },
+      {
+        "family": "search",
+        "cardinality": 300,
+        "position": "start",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 298
+      },
+      {
+        "family": "search",
+        "cardinality": 300,
+        "position": "middle",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 298
+      },
+      {
+        "family": "search",
+        "cardinality": 300,
+        "position": "end",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 298
+      },
+      {
+        "family": "logs",
+        "cardinality": 30,
+        "position": "start",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 16
+      },
+      {
+        "family": "logs",
+        "cardinality": 30,
+        "position": "middle",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 16
+      },
+      {
+        "family": "logs",
+        "cardinality": 30,
+        "position": "end",
+        "recalled": true,
+        "in_output": false,
+        "ccr_recoverable": true,
+        "n_visible_rows": 16
+      },
+      {
+        "family": "logs",
+        "cardinality": 90,
+        "position": "start",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 23
+      },
+      {
+        "family": "logs",
+        "cardinality": 90,
+        "position": "middle",
+        "recalled": true,
+        "in_output": false,
+        "ccr_recoverable": true,
+        "n_visible_rows": 23
+      },
+      {
+        "family": "logs",
+        "cardinality": 90,
+        "position": "end",
+        "recalled": true,
+        "in_output": false,
+        "ccr_recoverable": true,
+        "n_visible_rows": 23
+      },
+      {
+        "family": "logs",
+        "cardinality": 300,
+        "position": "start",
+        "recalled": true,
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 32
+      },
+      {
+        "family": "logs",
+        "cardinality": 300,
+        "position": "middle",
+        "recalled": true,
+        "in_output": false,
+        "ccr_recoverable": true,
+        "n_visible_rows": 32
+      },
+      {
+        "family": "logs",
+        "cardinality": 300,
+        "position": "end",
+        "recalled": true,
+        "in_output": false,
+        "ccr_recoverable": true,
+        "n_visible_rows": 32
+      }
+    ]
+  }
+}
