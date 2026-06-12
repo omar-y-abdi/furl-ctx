@@ -48,6 +48,16 @@ pub struct FieldSpec {
     pub type_tag: String,
     /// True if at least one row had this field absent or `null`.
     pub nullable: bool,
+    /// `Some(v)` when EVERY row holds the identical scalar `v` in this
+    /// column (constant-column fold). The value lives here once instead
+    /// of repeating per row; formatters MAY exploit it (the CSV-schema
+    /// formatter declares `name:type=value` and omits the column from
+    /// rows). Rows in the IR still carry the full cells, so formatters
+    /// that ignore this field (JSON, Markdown-KV) render byte-identical
+    /// output to the pre-fold engine. Lossless by construction: the
+    /// constant is verbatim in the declaration and every row is
+    /// reconstructible from header + row cells alone.
+    pub const_value: Option<Value>,
 }
 
 /// Column set for a homogeneous table.
@@ -189,11 +199,13 @@ mod tests {
                     name: "id".into(),
                     type_tag: "int".into(),
                     nullable: false,
+                    const_value: None,
                 },
                 FieldSpec {
                     name: "name".into(),
                     type_tag: "string".into(),
                     nullable: false,
+                    const_value: None,
                 },
             ],
         };
