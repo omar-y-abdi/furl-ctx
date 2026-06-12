@@ -68,29 +68,20 @@ def detect_install_mode(port: int) -> str:
     Resolution order:
 
     1. ``HEADROOM_AGENT_TYPE`` env var set → ``wrapped`` (spawned by ``headroom wrap``).
-    2. A ``DeploymentManifest`` on disk whose port matches ``port`` → ``persistent``.
-    3. Otherwise → ``on_demand``.
+    2. Otherwise → ``on_demand``.
 
-    Any failure falls back to ``unknown`` so a broken install subsystem
-    doesn't silence telemetry.
+    The ``persistent`` classification (DeploymentManifest lookup) was retired
+    with the install subsystem in the compression-only amputation. ``port`` is
+    kept for signature stability with the beacon caller.
+
+    Any failure falls back to ``unknown`` so a broken environment doesn't
+    silence telemetry.
     """
 
+    del port  # manifest-by-port lookup retired with headroom.install
     try:
         if os.environ.get("HEADROOM_AGENT_TYPE"):
             return "wrapped"
-
-        try:
-            from headroom.install.state import list_manifests
-
-            for manifest in list_manifests():
-                if getattr(manifest, "port", None) == port:
-                    return "persistent"
-        except Exception:
-            logger.debug(
-                "Beacon: manifest lookup failed during install_mode detection",
-                exc_info=True,
-            )
-
         return "on_demand"
     except Exception:
         logger.debug("Beacon: detect_install_mode crashed", exc_info=True)
