@@ -268,6 +268,50 @@ class TestLineDeduplication:
         # Numbers normalized to "N", so all three are treated as identical pattern
         assert len(deduped) == 1
 
+    def test_dedupe_leading_timestamp_variation(self):
+        """DESIGN.md Imp2: identical messages with different leading
+        ISO-8601 timestamps collapse (timestamp is per-line noise).
+        Mirrors the Rust `dedupe_collapses_leading_timestamp_variation`
+        test for Python/Rust lockstep."""
+        compressor = LogCompressor()
+        lines = [
+            LogLine(
+                line_number=1,
+                content="2026-06-12T10:00:00Z worker started processing batch",
+                level=LogLevel.INFO,
+            ),
+            LogLine(
+                line_number=2,
+                content="2026-06-12T10:00:05Z worker started processing batch",
+                level=LogLevel.INFO,
+            ),
+            LogLine(
+                line_number=3,
+                content="2026-06-12T10:00:09Z worker started processing batch",
+                level=LogLevel.INFO,
+            ),
+        ]
+        deduped = compressor._dedupe_similar(lines)
+        assert len(deduped) == 1
+
+    def test_dedupe_leading_timestamp_keeps_distinct_messages(self):
+        """The leading-timestamp strip must NOT collapse distinct messages."""
+        compressor = LogCompressor()
+        lines = [
+            LogLine(
+                line_number=1,
+                content="2026-06-12T10:00:00Z connection established",
+                level=LogLevel.INFO,
+            ),
+            LogLine(
+                line_number=2,
+                content="2026-06-12T10:00:05Z connection refused",
+                level=LogLevel.INFO,
+            ),
+        ]
+        deduped = compressor._dedupe_similar(lines)
+        assert len(deduped) == 2
+
     def test_dedupe_similar_with_paths(self):
         """Similar warnings with different paths are deduplicated.
 

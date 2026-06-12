@@ -34,7 +34,7 @@ use std::collections::{BTreeSet, HashSet};
 use super::config::SmartCrusherConfig;
 use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
 use super::types::{ArrayAnalysis, FieldStats};
-use crate::transforms::anchor_selector::compute_item_hash;
+use crate::transforms::anchor_selector::stable_item_hash;
 
 /// Collapse content-duplicate indices to their lowest representative.
 ///
@@ -43,12 +43,15 @@ use crate::transforms::anchor_selector::compute_item_hash;
 /// given content fingerprint. Subsequent matches drop. Out-of-bounds
 /// indices skip.
 ///
-/// `compute_item_hash` returns the same MD5[:16] string Python computes
-/// (via `anchor_selector::python_json_dumps_sort_keys`), so the dedup
-/// outcome is byte-equal across languages.
+/// The grouping hash is the field-aware [`stable_item_hash`]: when `exclude`
+/// is empty it is byte-equal to `compute_item_hash` (so the dedup outcome is
+/// byte-equal across languages and unchanged for non-identity data); when
+/// `exclude` lists high-cardinality identity columns, two rows that differ
+/// ONLY in those columns hash equal and collapse (DESIGN.md Improvement 2).
 pub fn deduplicate_indices_by_content(
     keep_indices: &BTreeSet<usize>,
     items: &[Value],
+    exclude: &BTreeSet<String>,
 ) -> BTreeSet<usize> {
     if keep_indices.is_empty() {
         return BTreeSet::new();
@@ -61,7 +64,7 @@ pub fn deduplicate_indices_by_content(
         if idx >= items.len() {
             continue;
         }
-        let h = item_content_hash(&items[idx], idx);
+        let h = item_content_hash(&items[idx], idx, exclude);
         seen.entry(h).or_insert(idx);
     }
     seen.values().copied().collect()
@@ -84,6 +87,7 @@ pub fn fill_remaining_slots(
     items: &[Value],
     n: usize,
     effective_max: usize,
+    exclude: &BTreeSet<String>,
 ) -> BTreeSet<usize> {
     let remaining = effective_max.saturating_sub(keep_indices.len());
     if remaining == 0 {
@@ -91,11 +95,13 @@ pub fn fill_remaining_slots(
     }
 
     // Hashes of items we're already keeping — bound the working set
-    // we won't re-add.
+    // we won't re-add. Uses the stable-projection hash so a fill
+    // candidate that is identical-modulo-identity to a kept row counts
+    // as a duplicate and is skipped (real diversity, not identity noise).
     let mut seen: HashSet<String> = HashSet::new();
     for &idx in keep_indices {
         if idx < n {
-            seen.insert(item_content_hash(&items[idx], idx));
+            seen.insert(item_content_hash(&items[idx], idx, exclude));
         }
     }
 
@@ -122,7 +128,7 @@ pub fn fill_remaining_slots(
                 break 'outer;
             }
             let idx = candidates[i];
-            let h = item_content_hash(&items[idx], idx);
+            let h = item_content_hash(&items[idx], idx, exclude);
             if !seen.contains(&h) {
                 result.insert(idx);
                 seen.insert(h);
@@ -156,17 +162,20 @@ pub fn prioritize_indices(
     n: usize,
     analysis: Option<&ArrayAnalysis>,
     effective_max: usize,
+    exclude: &BTreeSet<String>,
 ) -> BTreeSet<usize> {
-    // Dedup pass.
+    // Dedup pass. Uses the field-aware stable hash (`exclude` lists
+    // identity columns); empty `exclude` => byte-equal to the prior
+    // whole-item dedup.
     let mut current = if config.dedup_identical_items {
-        deduplicate_indices_by_content(keep_indices, items)
+        deduplicate_indices_by_content(keep_indices, items, exclude)
     } else {
         keep_indices.clone()
     };
 
     // Fill pass.
     if current.len() < effective_max && current.len() < n {
-        current = fill_remaining_slots(&current, items, n, effective_max);
+        current = fill_remaining_slots(&current, items, n, effective_max, exclude);
     }
 
     if current.len() <= effective_max {
@@ -281,17 +290,20 @@ fn is_numeric_field_with_variance(stats: &FieldStats) -> bool {
     stats.field_type == "numeric" && stats.mean_val.is_some() && stats.variance.unwrap_or(0.0) > 0.0
 }
 
-/// Hash function used by all three orchestration helpers.
+/// Hash function used by all orchestration helpers.
 ///
-/// Wraps `compute_item_hash` (which does Python-compatible
-/// json.dumps + md5[:16]) with a fail-safe fallback: if the item is
-/// not a JSON object, fall back to `__idx_<i>__` so the index is
-/// effectively a unique key. Mirrors Python's
-/// `try/except (TypeError, ValueError, RecursionError)` block which
-/// also falls back to `f"__idx_{idx}__"` on serialization failure.
-fn item_content_hash(item: &Value, idx: usize) -> String {
+/// Wraps the field-aware [`stable_item_hash`] (Python-compatible
+/// json.dumps over the non-excluded keys + md5[:16]) with a fail-safe
+/// fallback: if the item is not a JSON object/array, fall back to a
+/// scalar hash (or `__idx_<i>__` on an unrepresentable value). Mirrors
+/// Python's `try/except (TypeError, ValueError, RecursionError)` block
+/// which also falls back to `f"__idx_{idx}__"` on serialization failure.
+///
+/// When `exclude` is empty, [`stable_item_hash`] is byte-equal to
+/// `compute_item_hash`, so this is unchanged for non-identity data.
+fn item_content_hash(item: &Value, idx: usize, exclude: &BTreeSet<String>) -> String {
     if item.is_object() || item.is_array() {
-        compute_item_hash(item)
+        stable_item_hash(item, exclude)
     } else {
         // Python: `else: content = str(item)` for non-dict items —
         // they get a real hash too. We don't strictly need that for
@@ -322,11 +334,16 @@ mod tests {
         indices.iter().copied().collect()
     }
 
+    /// Empty exclude-set → stable hash == whole-item hash (legacy behavior).
+    fn no_exclude() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
     // ---------- deduplicate_indices_by_content ----------
 
     #[test]
     fn dedup_empty_input() {
-        let result = deduplicate_indices_by_content(&BTreeSet::new(), &[]);
+        let result = deduplicate_indices_by_content(&BTreeSet::new(), &[], &no_exclude());
         assert!(result.is_empty());
     }
 
@@ -338,7 +355,7 @@ mod tests {
             json!({"name": "bob"}),
         ];
         let kept = idx_set(&[0, 1, 2]);
-        let result = deduplicate_indices_by_content(&kept, &items);
+        let result = deduplicate_indices_by_content(&kept, &items, &no_exclude());
         // Items 0 and 1 collapse to the lower (0); item 2 is unique.
         assert_eq!(result, idx_set(&[0, 2]));
     }
@@ -347,7 +364,7 @@ mod tests {
     fn dedup_all_distinct_unchanged() {
         let items = vec![json!({"id": 1}), json!({"id": 2}), json!({"id": 3})];
         let kept = idx_set(&[0, 1, 2]);
-        let result = deduplicate_indices_by_content(&kept, &items);
+        let result = deduplicate_indices_by_content(&kept, &items, &no_exclude());
         assert_eq!(result, idx_set(&[0, 1, 2]));
     }
 
@@ -355,7 +372,7 @@ mod tests {
     fn dedup_skips_out_of_bounds() {
         let items = vec![json!({"a": 1})];
         let kept = idx_set(&[0, 5, 10]);
-        let result = deduplicate_indices_by_content(&kept, &items);
+        let result = deduplicate_indices_by_content(&kept, &items, &no_exclude());
         assert_eq!(result, idx_set(&[0]));
     }
 
@@ -365,9 +382,29 @@ mod tests {
         // because we serialize with sort_keys=True.
         let items = vec![json!({"b": 2, "a": 1}), json!({"a": 1, "b": 2})];
         let kept = idx_set(&[0, 1]);
-        let result = deduplicate_indices_by_content(&kept, &items);
+        let result = deduplicate_indices_by_content(&kept, &items, &no_exclude());
         assert_eq!(result.len(), 1);
         assert!(result.contains(&0));
+    }
+
+    #[test]
+    fn dedup_collapses_rows_differing_only_in_excluded_identity() {
+        // Two log rows: same message, different timestamp/id. With the
+        // identity columns excluded they project to the same stable hash
+        // and collapse to the lower index (DESIGN.md Imp2).
+        let items = vec![
+            json!({"ts": "2026-06-12T10:00:00Z", "id": "aaaa1111", "msg": "disk full"}),
+            json!({"ts": "2026-06-12T10:00:05Z", "id": "bbbb2222", "msg": "disk full"}),
+            json!({"ts": "2026-06-12T10:00:09Z", "id": "cccc3333", "msg": "ok"}),
+        ];
+        let kept = idx_set(&[0, 1, 2]);
+        let exclude: BTreeSet<String> = ["ts".to_string(), "id".to_string()].into_iter().collect();
+        let result = deduplicate_indices_by_content(&kept, &items, &exclude);
+        // 0 and 1 collapse (same msg modulo ts/id); 2 is distinct.
+        assert_eq!(result, idx_set(&[0, 2]));
+        // ...and WITHOUT the exclude they stay distinct (every row unique).
+        let result_full = deduplicate_indices_by_content(&kept, &items, &no_exclude());
+        assert_eq!(result_full, idx_set(&[0, 1, 2]));
     }
 
     // ---------- fill_remaining_slots ----------
@@ -376,7 +413,7 @@ mod tests {
     fn fill_when_at_or_over_budget_returns_unchanged() {
         let items: Vec<Value> = (0..10).map(|i| json!({"id": i})).collect();
         let kept = idx_set(&[0, 1, 2, 3, 4]);
-        let result = fill_remaining_slots(&kept, &items, items.len(), 5);
+        let result = fill_remaining_slots(&kept, &items, items.len(), 5, &no_exclude());
         assert_eq!(result, kept);
     }
 
@@ -384,7 +421,7 @@ mod tests {
     fn fill_adds_diverse_uniques_up_to_max() {
         let items: Vec<Value> = (0..20).map(|i| json!({"id": i})).collect();
         let kept = idx_set(&[0, 5]);
-        let result = fill_remaining_slots(&kept, &items, items.len(), 10);
+        let result = fill_remaining_slots(&kept, &items, items.len(), 10, &no_exclude());
         assert!(result.len() <= 10);
         assert!(result.len() >= 2);
         assert!(result.contains(&0));
@@ -397,7 +434,7 @@ mod tests {
         let mut items: Vec<Value> = (0..10).map(|i| json!({"id": i})).collect();
         items.extend(std::iter::repeat_with(|| json!({"id": 0})).take(10));
         let kept = idx_set(&[0]); // Already keeps the canonical {"id": 0}.
-        let result = fill_remaining_slots(&kept, &items, items.len(), 15);
+        let result = fill_remaining_slots(&kept, &items, items.len(), 15, &no_exclude());
         // The 10 dupes (indices 10..20) all hash to the same as items[0]
         // and shouldn't be added. Only unique indices [1..10) should fill.
         for i in 10..20 {
@@ -411,7 +448,7 @@ mod tests {
     fn prioritize_under_budget_passthrough_after_dedup() {
         let items: Vec<Value> = (0..5).map(|i| json!({"id": i})).collect();
         let kept = idx_set(&[0, 1, 2]);
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10);
+        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude());
         // 3 items < max 10 → fill kicks in; we get 5 (all items).
         assert_eq!(result.len(), 5);
     }
@@ -424,7 +461,7 @@ mod tests {
             json!({"name": "bob"}),
         ];
         let kept = idx_set(&[0, 1, 2]);
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10);
+        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude());
         // Dedup collapses 0+1 to 0; fill stays put because n=3 already covered.
         assert_eq!(result, idx_set(&[0, 2]));
     }
@@ -437,7 +474,7 @@ mod tests {
             .collect();
         items.push(json!({"id": 30, "msg": "FATAL: out of memory"}));
         let kept: BTreeSet<usize> = (0..items.len()).collect();
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10);
+        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude());
         assert!(
             result.contains(&30),
             "error item must survive prioritization"
@@ -449,7 +486,7 @@ mod tests {
         // No errors / outliers / anomalies → first 3 + last 2 anchors fill.
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i, "v": i})).collect();
         let kept: BTreeSet<usize> = (5..15).collect();
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10);
+        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude());
         // With no critical items and budget 10, dedup is a no-op (all
         // distinct) and fill keeps us at <= 10. We should see at least
         // some of items 0..3 OR 28..30 covered through fill.

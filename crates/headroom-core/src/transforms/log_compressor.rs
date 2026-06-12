@@ -995,6 +995,15 @@ fn score_log_line(line: &LogLine) -> f32 {
 /// `=` keeps the message identifier intact so segfault and heap
 /// overflow at different addresses stay distinct entries.
 fn normalize_for_dedupe(content: &str) -> String {
+    // DESIGN.md Imp2 broadening: a leading identity token (ISO-8601
+    // timestamp, UUID, or long hex run) is pure per-line noise — it can
+    // never be the message identifier. Template it to a placeholder
+    // FIRST so two otherwise-identical messages with different leading
+    // timestamps/ids dedupe. This is applied only to the LEADING token,
+    // so a distinct error category (which lives in the message body
+    // after the timestamp) is still preserved by the prefix split below.
+    let content = strip_leading_identity(content);
+
     let split_at = content.find([':', '=']).unwrap_or(content.len());
     let prefix = &content[..split_at];
     let suffix = &content[split_at..];
@@ -1011,6 +1020,109 @@ fn normalize_for_dedupe(content: &str) -> String {
     let stage2 = hex_re.replace_all(&stage1, "ADDR");
     let stage3 = path_re.replace_all(&stage2, "/PATH/");
     format!("{}{}", prefix, stage3)
+}
+
+/// Template a single leading identity token (ISO-8601 datetime, UUID, or
+/// >=12-char hex run) plus any immediately-following whitespace into the
+/// fixed placeholder `<TS> `. Returns the original string unchanged when no
+/// leading identity token is present, so non-timestamped lines are
+/// untouched. Only the FIRST token is considered — the message body that
+/// distinguishes error categories is preserved.
+fn strip_leading_identity(s: &str) -> std::borrow::Cow<'_, str> {
+    let token_len = leading_identity_len(s);
+    if token_len == 0 {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    // Consume trailing whitespace after the token so the placeholder
+    // normalizes the gap too.
+    let rest = s[token_len..].trim_start();
+    std::borrow::Cow::Owned(format!("<TS> {}", rest))
+}
+
+/// Length (in bytes) of a leading identity token, or 0 if none.
+fn leading_identity_len(s: &str) -> usize {
+    let bytes = s.as_bytes();
+
+    // ISO-8601 datetime: YYYY-MM-DDTHH:MM:SS (>=19 chars), optionally with
+    // fractional seconds / timezone offset that we let run on as digits/
+    // +/-/:/./Z.
+    if is_iso8601_prefix(bytes) {
+        let mut end = 19;
+        // Extend over fractional seconds + timezone: . , : + - and digits,
+        // plus a trailing Z.
+        while end < bytes.len() {
+            let b = bytes[end];
+            if b.is_ascii_digit() || matches!(b, b'.' | b':' | b'+' | b'-' | b'Z') {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        return end;
+    }
+
+    // First whitespace-delimited token, tested for UUID / long-hex shape.
+    let tok_end = bytes
+        .iter()
+        .position(|b| b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let token = &s[..tok_end];
+    if is_uuid_token(token) || is_long_hex_token(token) {
+        return tok_end;
+    }
+    0
+}
+
+/// `YYYY-MM-DDTHH:MM:SS` / `YYYY-MM-DD HH:MM:SS` prefix check.
+fn is_iso8601_prefix(b: &[u8]) -> bool {
+    b.len() >= 19
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[4] == b'-'
+        && b[5].is_ascii_digit()
+        && b[6].is_ascii_digit()
+        && b[7] == b'-'
+        && b[8].is_ascii_digit()
+        && b[9].is_ascii_digit()
+        && (b[10] == b'T' || b[10] == b' ')
+        && b[11].is_ascii_digit()
+        && b[12].is_ascii_digit()
+        && b[13] == b':'
+        && b[14].is_ascii_digit()
+        && b[15].is_ascii_digit()
+        && b[16] == b':'
+        && b[17].is_ascii_digit()
+        && b[18].is_ascii_digit()
+}
+
+/// 8-4-4-4-12 hex UUID.
+fn is_uuid_token(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, &c) in b.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if c != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !c.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// A run of >=12 hex digits (commit hashes, request ids).
+fn is_long_hex_token(s: &str) -> bool {
+    s.len() >= 12 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn digit_regex() -> &'static Regex {
@@ -1180,6 +1292,50 @@ mod tests {
         ];
         let deduped = c.dedupe_similar(warnings);
         assert_eq!(deduped.len(), 1);
+    }
+
+    #[test]
+    fn dedupe_collapses_leading_timestamp_variation() {
+        // DESIGN.md Imp2 broadening: identical messages with different
+        // leading ISO-8601 timestamps now collapse — the timestamp is
+        // pure per-line identity noise, never the message identifier.
+        let c = cmp();
+        let lines = vec![
+            LogLine::new(0, "2026-06-12T10:00:00Z worker started processing batch"),
+            LogLine::new(1, "2026-06-12T10:00:05Z worker started processing batch"),
+            LogLine::new(2, "2026-06-12T10:00:09Z worker started processing batch"),
+        ];
+        let deduped = c.dedupe_similar(lines);
+        assert_eq!(deduped.len(), 1, "same message, varying timestamp -> one survivor");
+    }
+
+    #[test]
+    fn dedupe_leading_timestamp_keeps_distinct_messages() {
+        // The leading-timestamp strip must NOT collapse distinct messages.
+        let c = cmp();
+        let lines = vec![
+            LogLine::new(0, "2026-06-12T10:00:00Z connection established"),
+            LogLine::new(1, "2026-06-12T10:00:05Z connection refused"),
+        ];
+        let deduped = c.dedupe_similar(lines);
+        assert_eq!(deduped.len(), 2, "different messages stay distinct");
+    }
+
+    #[test]
+    fn strip_leading_identity_templates_uuid_and_hex() {
+        assert_eq!(
+            strip_leading_identity("550e8400-e29b-41d4-a716-446655440000 request done").as_ref(),
+            "<TS> request done"
+        );
+        assert_eq!(
+            strip_leading_identity("0795e63ede83 build started").as_ref(),
+            "<TS> build started"
+        );
+        // No leading identity -> unchanged.
+        assert_eq!(
+            strip_leading_identity("INFO server ready").as_ref(),
+            "INFO server ready"
+        );
     }
 
     #[test]

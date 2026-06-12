@@ -354,6 +354,76 @@ pub fn compute_item_hash(item: &Value) -> String {
     hex[..16].to_string()
 }
 
+/// Field-aware **stable-projection** hash (DESIGN.md Improvement 2).
+///
+/// Identical to [`compute_item_hash`] EXCEPT that, when `item` is a JSON
+/// object, any top-level key in `exclude` is omitted from the serialization
+/// before hashing. This is the dedup/cluster/fill grouping hash: by dropping
+/// high-cardinality identity columns (timestamps, ids, hashes) two rows that
+/// differ ONLY in those columns project to the same bytes and collapse.
+///
+/// **This is a SEPARATE hash from [`compute_item_hash`].** The full-item
+/// canonical hash used for the CCR retrieve key is unchanged — only this
+/// projection hash filters keys. When `exclude` is empty the output is
+/// byte-identical to [`compute_item_hash`] (same serializer, same key set),
+/// so non-identity data is completely unaffected and parity is preserved.
+///
+/// Exclusion applies only at the top level of an object item — nested objects
+/// are serialized whole (an identity column is a top-level field of a row).
+pub fn stable_item_hash(item: &Value, exclude: &BTreeSet<String>) -> String {
+    // No exclusions, or not an object → identical to the full-item hash.
+    if exclude.is_empty() || !item.is_object() {
+        return compute_item_hash(item);
+    }
+    let mut out = String::new();
+    write_python_json_filtered(
+        item,
+        &mut out,
+        JsonFmt {
+            sort_keys: true,
+            compact: false,
+            ensure_ascii: true,
+        },
+        exclude,
+    );
+    let digest = Md5::digest(out.as_bytes());
+    let hex = format!("{:x}", digest);
+    hex[..16].to_string()
+}
+
+/// Like [`write_python_json_inner`] but, for the TOP-LEVEL object only, omits
+/// keys present in `exclude`. Nested values use the unfiltered writer so the
+/// bytes match `python_json_dumps_sort_keys` for everything that survives.
+fn write_python_json_filtered(
+    value: &Value,
+    out: &mut String,
+    fmt: JsonFmt,
+    exclude: &BTreeSet<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            let item_sep = if fmt.compact { "," } else { ", " };
+            let kv_sep = if fmt.compact { ":" } else { ": " };
+            out.push('{');
+            let mut keys: Vec<&String> = map.keys().filter(|k| !exclude.contains(*k)).collect();
+            if fmt.sort_keys {
+                keys.sort();
+            }
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(item_sep);
+                }
+                write_python_json_string(key, out, fmt.ensure_ascii);
+                out.push_str(kv_sep);
+                write_python_json_inner(&map[key.as_str()], out, fmt);
+            }
+            out.push('}');
+        }
+        // Non-objects are hashed whole (no top-level keys to filter).
+        other => write_python_json_inner(other, out, fmt),
+    }
+}
+
 /// Python json.dumps formatting flags used by the writer below.
 #[derive(Clone, Copy)]
 struct JsonFmt {
@@ -950,6 +1020,66 @@ mod tests {
             "hash {} must be hex",
             h
         );
+    }
+
+    // ---------- stable_item_hash (field-aware projection) ----------
+
+    #[test]
+    fn stable_hash_empty_exclude_equals_full_hash() {
+        // CONTRACT: empty exclude-set => byte-identical to compute_item_hash.
+        // This is what preserves Python/Rust parity and leaves non-identity
+        // data (search, code) completely unaffected.
+        let item = json!({"a": 1, "b": "x", "c": [1, 2, 3]});
+        let empty = BTreeSet::new();
+        assert_eq!(stable_item_hash(&item, &empty), compute_item_hash(&item));
+    }
+
+    #[test]
+    fn stable_hash_collapses_rows_differing_only_in_excluded_fields() {
+        // Two rows identical except the excluded identity columns -> same
+        // stable hash. This is the dedup win (DESIGN.md Imp2).
+        let a = json!({"ts": "2026-06-12T10:00:00Z", "id": "aaaa", "msg": "disk full"});
+        let b = json!({"ts": "2026-06-12T10:00:09Z", "id": "bbbb", "msg": "disk full"});
+        let exclude: BTreeSet<String> =
+            ["ts".to_string(), "id".to_string()].into_iter().collect();
+        assert_eq!(
+            stable_item_hash(&a, &exclude),
+            stable_item_hash(&b, &exclude),
+            "rows differing only in excluded identity columns must hash equal"
+        );
+        // ...and they DIFFER without the exclude (every row unique).
+        assert_ne!(compute_item_hash(&a), compute_item_hash(&b));
+    }
+
+    #[test]
+    fn stable_hash_distinguishes_rows_differing_in_content() {
+        // Excluding identity does NOT collapse rows with different content.
+        let a = json!({"ts": "t0", "msg": "disk full"});
+        let b = json!({"ts": "t1", "msg": "out of memory"});
+        let exclude: BTreeSet<String> = ["ts".to_string()].into_iter().collect();
+        assert_ne!(stable_item_hash(&a, &exclude), stable_item_hash(&b, &exclude));
+    }
+
+    #[test]
+    fn stable_hash_excluding_key_equals_full_hash_of_projected_item() {
+        // The projection hash over {a,b,c}\{b} must equal the full hash of
+        // the literal {a,c} object — i.e. it's a true key projection.
+        let item = json!({"a": 1, "b": "drop me", "c": 3});
+        let exclude: BTreeSet<String> = ["b".to_string()].into_iter().collect();
+        let projected = json!({"a": 1, "c": 3});
+        assert_eq!(
+            stable_item_hash(&item, &exclude),
+            compute_item_hash(&projected)
+        );
+    }
+
+    #[test]
+    fn stable_hash_non_object_ignores_exclude() {
+        // Arrays/scalars have no top-level keys to filter -> identical to
+        // the full hash regardless of the exclude set.
+        let arr = json!([1, 2, 3]);
+        let exclude: BTreeSet<String> = ["x".to_string()].into_iter().collect();
+        assert_eq!(stable_item_hash(&arr, &exclude), compute_item_hash(&arr));
     }
 
     // ---------- AnchorWeights ----------

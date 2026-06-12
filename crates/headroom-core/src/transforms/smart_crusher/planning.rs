@@ -33,6 +33,7 @@ use super::analyzer::SmartAnalyzer;
 use super::anchors::{extract_query_anchors, item_matches_anchors};
 use super::config::SmartCrusherConfig;
 use super::field_detect::detect_score_field_statistically;
+use super::field_role::compute_exclude_set;
 use super::hashing::hash_field_name;
 use super::orchestration::prioritize_indices;
 use super::traits::Constraint;
@@ -122,6 +123,14 @@ impl<'a> SmartCrusherPlanner<'a> {
             return plan;
         }
 
+        // Field-aware exclude-set (DESIGN.md Imp2): names of the
+        // high-cardinality identity columns (timestamps, ids, hashes)
+        // that defeat whole-item dedup. Derived once from the analysis +
+        // item samples; threaded into dedup/cluster/fill grouping via the
+        // stable-projection hash. Empty when no identity column exists
+        // (e.g. real search results), so those datasets are unaffected.
+        let exclude = compute_exclude_set(&analysis.field_stats, items);
+
         match analysis.recommended_strategy {
             CompressionStrategy::TimeSeries => self.plan_time_series(
                 analysis,
@@ -131,6 +140,7 @@ impl<'a> SmartCrusherPlanner<'a> {
                 preserve_fields,
                 max_items,
                 item_strings,
+                &exclude,
             ),
             CompressionStrategy::ClusterSample => self.plan_cluster_sample(
                 analysis,
@@ -140,6 +150,7 @@ impl<'a> SmartCrusherPlanner<'a> {
                 preserve_fields,
                 max_items,
                 item_strings,
+                &exclude,
             ),
             CompressionStrategy::TopN => self.plan_top_n(
                 analysis,
@@ -149,6 +160,7 @@ impl<'a> SmartCrusherPlanner<'a> {
                 preserve_fields,
                 max_items,
                 item_strings,
+                &exclude,
             ),
             // SmartSample, None, Skip-already-handled, all fall here.
             _ => self.plan_smart_sample(
@@ -159,6 +171,7 @@ impl<'a> SmartCrusherPlanner<'a> {
                 preserve_fields,
                 max_items,
                 item_strings,
+                &exclude,
             ),
         }
     }
@@ -175,6 +188,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         preserve_fields: Option<&[String]>,
         max_items: usize,
         item_strings: Option<&[String]>,
+        exclude: &BTreeSet<String>,
     ) -> CompressionPlan {
         let n = items.len();
         let mut keep: BTreeSet<usize> = BTreeSet::new();
@@ -223,7 +237,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep =
-            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items);
+            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items, exclude);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -240,6 +254,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         preserve_fields: Option<&[String]>,
         max_items: usize,
         item_strings: Option<&[String]>,
+        exclude: &BTreeSet<String>,
     ) -> CompressionPlan {
         // Locate the highest-confidence score field. If none, fall back
         // to plan_smart_sample.
@@ -262,6 +277,7 @@ impl<'a> SmartCrusherPlanner<'a> {
                 preserve_fields,
                 max_items,
                 item_strings,
+                exclude,
             );
         };
 
@@ -349,6 +365,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         preserve_fields: Option<&[String]>,
         max_items: usize,
         item_strings: Option<&[String]>,
+        exclude: &BTreeSet<String>,
     ) -> CompressionPlan {
         let n = items.len();
         let mut keep: BTreeSet<usize> = BTreeSet::new();
@@ -408,7 +425,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep =
-            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items);
+            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items, exclude);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -425,6 +442,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         preserve_fields: Option<&[String]>,
         max_items: usize,
         item_strings: Option<&[String]>,
+        exclude: &BTreeSet<String>,
     ) -> CompressionPlan {
         let n = items.len();
         let mut keep: BTreeSet<usize> = BTreeSet::new();
@@ -460,7 +478,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep =
-            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items);
+            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items, exclude);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -776,7 +794,7 @@ mod tests {
             strategy: CompressionStrategy::SmartSample,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_smart_sample(&analysis, &items, plan_in, "", None, 10, None);
+        let plan = p.plan_smart_sample(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
         assert!(
             plan.keep_indices.contains(&30),
             "error item must survive plan_smart_sample"
@@ -803,7 +821,7 @@ mod tests {
             strategy: CompressionStrategy::SmartSample,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_smart_sample(&analysis, &items, plan_in, &query, None, 10, None);
+        let plan = p.plan_smart_sample(&analysis, &items, plan_in, &query, None, 10, None, &BTreeSet::new());
         assert!(
             plan.keep_indices.contains(&17),
             "item matching query UUID must be kept; got {:?}",
@@ -824,7 +842,7 @@ mod tests {
             strategy: CompressionStrategy::TopN,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_top_n(&analysis, &items, plan_in, "", None, 10, None);
+        let plan = p.plan_top_n(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
         // Falling through to smart_sample produces a plan without sort_field set.
         assert!(plan.sort_field.is_none());
     }
@@ -843,7 +861,7 @@ mod tests {
             strategy: CompressionStrategy::TopN,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_top_n(&analysis, &items, plan_in, "", None, 10, None);
+        let plan = p.plan_top_n(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
         // Top scores are at indices 0..7 (highest score = first item).
         assert!(
             plan.keep_indices.contains(&0),
@@ -871,7 +889,7 @@ mod tests {
             strategy: CompressionStrategy::ClusterSample,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_cluster_sample(&analysis, &items, plan_in, "", None, 10, None);
+        let plan = p.plan_cluster_sample(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
         // High-cardinality field "msg" (unique_ratio = 1.0) is the
         // cluster field.
         assert_eq!(plan.cluster_field.as_deref(), Some("msg"));
@@ -896,7 +914,7 @@ mod tests {
             strategy: CompressionStrategy::TimeSeries,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_time_series(&analysis, &items, plan_in, "", None, 30, None);
+        let plan = p.plan_time_series(&analysis, &items, plan_in, "", None, 30, None, &BTreeSet::new());
         // Whatever change points the analyzer finds, the window ±2
         // around them should appear in keep_indices.
         assert!(!plan.keep_indices.is_empty());

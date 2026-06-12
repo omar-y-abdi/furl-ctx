@@ -288,6 +288,68 @@ def test_ccr_marker_off_still_persists_and_is_retrievable(fresh_toin):
     assert recovered_items == original_items, "recovered payload must equal the original array"
 
 
+def test_imp2_stable_hash_collapses_identity_varying_rows(fresh_toin):
+    """DESIGN.md Imp2 — field-aware stable-projection hash on the LOSSY path.
+
+    A JSON array of log rows that are identical EXCEPT for a varying
+    request-id must collapse via HONEST dedup on the lossy path: the kept
+    representatives carry a `_dup_count` recording how many original rows
+    shared their content, rather than every distinct-by-id row being
+    deleted. This proves the stable hash excludes identity columns from
+    grouping while the canonical CCR hash stays full-item.
+
+    Note: for cleanly-tabular repeated data the engine's *lossless*
+    columnar path wins (it keeps ALL rows AND compresses — strictly better
+    than dedup), so we force the lossy path with
+    `lossless_min_savings_ratio=0.99` to exercise the dedup grouping that
+    Imp2 changes. The honest-dedup win is real on the path it applies to.
+    """
+    import json as _json
+
+    # 90 rows, 3 distinct messages, each repeated 30x with a unique
+    # request-id (the "one varying field defeats dedup" shape). Whole-item
+    # hashing makes all 90 unique; the stable projection (excluding the
+    # identity req_id) sees only 3 distinct rows.
+    messages = ["disk full on /dev/sda1", "auth token refreshed", "cache miss for key user:42"]
+    items = [
+        {"req_id": f"{i:040x}", "level": "INFO", "msg": messages[i % 3]}
+        for i in range(90)
+    ]
+
+    # Force the lossy path (lossless columnar would otherwise keep all
+    # rows and never reach the dedup grouping Imp2 touches).
+    crusher = SmartCrusher(SmartCrusherConfig(lossless_min_savings_ratio=0.99))
+    result = crusher.crush_array_json(_json.dumps(items), query="", bias=1.0)
+
+    kept = result.get("items")
+    kept_rows = _json.loads(kept) if isinstance(kept, str) else kept
+    kept_rows = [r for r in kept_rows if not (isinstance(r, dict) and set(r.keys()) == {"_ccr_dropped"})]
+
+    # The varying req_id column is excluded from the dedup grouping, so
+    # the kept representatives collapse to the 3 distinct messages and
+    # carry `_dup_count = 30`. Without Imp2 every row hashed unique and
+    # the survivors would be 15 arbitrary distinct-by-id rows with no
+    # dup_count at all.
+    dup_counts = [r.get("_dup_count") for r in kept_rows if isinstance(r, dict) and "_dup_count" in r]
+    assert dup_counts, (
+        "expected representatives to carry _dup_count after identity-aware "
+        f"collapse; kept rows: {kept_rows}"
+    )
+    assert all(c == 30 for c in dup_counts), f"each of 3 messages repeated 30x; got {dup_counts}"
+    # All 3 distinct value-bearing messages survive — none silently lost.
+    kept_msgs = {r.get("msg") for r in kept_rows if isinstance(r, dict)}
+    for m in messages:
+        assert m in kept_msgs, f"distinct message {m!r} must survive; got {kept_msgs}"
+
+    # CCR canonical hash is unchanged + the full original is recoverable
+    # (the canonical hash is full-item, not the stable projection).
+    ccr_hash = result.get("ccr_hash")
+    assert ccr_hash, "lossy drop should produce a CCR hash"
+    recovered = crusher.ccr_get(str(ccr_hash))
+    assert recovered is not None
+    assert _json.loads(recovered) == items
+
+
 # ─── Custom scorer / relevance_config override ─────────────────────────
 
 

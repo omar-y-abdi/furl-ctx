@@ -792,7 +792,7 @@ fn top_n_by_count(strs: &[&str], n: usize) -> Vec<(String, usize)> {
 // Implemented as direct char-position checks rather than full regex to
 // avoid pulling in a regex compilation for every call site. Same
 // behavior on the prefixes Python checks.
-fn is_iso_datetime(s: &str) -> bool {
+pub(crate) fn is_iso_datetime(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() < 19 {
         return false;
@@ -818,7 +818,7 @@ fn is_iso_datetime(s: &str) -> bool {
         && is_digit(b[18])
 }
 
-fn is_iso_date(s: &str) -> bool {
+pub(crate) fn is_iso_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10 {
         return false;

@@ -40,6 +40,7 @@ use serde_json::Value;
 use super::analyzer::SmartAnalyzer;
 use super::builder::SmartCrusherBuilder;
 use super::classifier::{classify_array, ArrayType};
+use super::field_role::compute_exclude_set;
 use super::compaction::{
     classify_cell, emit_opaque_ccr_marker, try_parse_json_container, CellClass, ClassifyConfig,
     Compaction, CompactionStage,
@@ -673,7 +674,19 @@ impl SmartCrusher {
             Some(effective_max_items),
             Some(&item_strings),
         );
-        let result = self.execute_plan(&plan, items);
+        let mut result = self.execute_plan(&plan, items);
+
+        // Field-aware multiplicity (DESIGN.md Imp2). When rows that are
+        // identical-except-identity collapse under the stable-projection
+        // hash, the kept representative carries a `_dup_count` so the
+        // model knows N rows existed. This fires ONLY when real
+        // duplication is present (group size > 1); for all-distinct data
+        // (e.g. unique-subject git logs, search results) every group is
+        // size 1, no key is added, and the output bytes are unchanged.
+        let exclude = compute_exclude_set(&analysis.field_stats, items);
+        if !exclude.is_empty() {
+            annotate_dup_counts(&mut result, items, &exclude);
+        }
 
         // CCR persistence + marker emission. **The store write is the
         // cornerstone of CCR's no-data-loss guarantee:** whenever rows
@@ -922,6 +935,50 @@ impl IntoIterator for GroupBuckets {
 /// is already JSON-native, so plain canonical JSON suffices.
 fn canonical_json_for_match(value: &Value) -> String {
     crate::transforms::anchor_selector::python_json_dumps_sort_keys(value)
+}
+
+/// Stamp `_dup_count` on kept rows whose stable-projection-hash family
+/// (over ALL original `items`, with `exclude` identity columns filtered)
+/// has more than one member (DESIGN.md Imp2).
+///
+/// `_dup_count = N` records that N original rows shared this row's
+/// value-bearing content (differing only in excluded identity columns).
+/// Rows in a singleton family are left untouched, so all-distinct input
+/// is byte-for-byte unchanged. The representative keeps its own real
+/// varying values; the dropped duplicates remain CCR-recoverable from
+/// the full-original store entry.
+fn annotate_dup_counts(
+    kept: &mut [Value],
+    all_items: &[Value],
+    exclude: &std::collections::BTreeSet<String>,
+) {
+    use crate::transforms::anchor_selector::stable_item_hash;
+
+    // Family sizes over the WHOLE original array.
+    let mut family_size: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for item in all_items {
+        if item.is_object() || item.is_array() {
+            *family_size
+                .entry(stable_item_hash(item, exclude))
+                .or_insert(0) += 1;
+        }
+    }
+
+    for row in kept.iter_mut() {
+        if !row.is_object() {
+            continue;
+        }
+        let h = stable_item_hash(row, exclude);
+        let count = family_size.get(&h).copied().unwrap_or(1);
+        if count > 1 {
+            if let Some(obj) = row.as_object_mut() {
+                // Don't clobber a real `_dup_count` field the caller
+                // already had (extremely unlikely; defensive).
+                obj.entry("_dup_count")
+                    .or_insert_with(|| Value::from(count));
+            }
+        }
+    }
 }
 
 /// Maps a `Compaction` to a stable kind tag exposed via `CrushArrayResult`.

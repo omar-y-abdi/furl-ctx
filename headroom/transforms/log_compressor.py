@@ -147,6 +147,36 @@ def _format_from_str(name: str) -> LogFormat:
     }.get(name, LogFormat.GENERIC)
 
 
+# Leading-identity templates (DESIGN.md Imp2). Mirror Rust
+# `log_compressor::strip_leading_identity`: a leading ISO-8601 datetime,
+# UUID, or >=12-char hex run is pure per-line identity noise. Anchored to
+# the start so only the LEADING token is templated — the message body that
+# distinguishes error categories is preserved.
+import re as _re
+
+_LEADING_ISO8601 = _re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"
+)
+_LEADING_UUID = _re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?=\s|$)"
+)
+_LEADING_HEX = _re.compile(r"^[0-9a-fA-F]{12,}(?=\s|$)")
+
+
+def _strip_leading_identity(content: str) -> str:
+    """Template a single leading identity token (ISO-8601 / UUID / long
+    hex) plus following whitespace into the placeholder ``<TS> ``.
+
+    Returns the input unchanged when no leading identity token is present.
+    Mirrors Rust `strip_leading_identity`."""
+    for pat in (_LEADING_ISO8601, _LEADING_UUID, _LEADING_HEX):
+        m = pat.match(content)
+        if m:
+            rest = content[m.end():].lstrip()
+            return f"<TS> {rest}"
+    return content
+
+
 class LogCompressor:
     """Rust-backed log compressor.
 
@@ -395,7 +425,12 @@ class LogCompressor:
     def _dedupe_similar(self, lines: list[LogLine]) -> list[LogLine]:
         """Conservative dedupe — preserves message prefix, only
         normalises trailing variable region (digits, hex, paths).
-        Mirrors Rust `normalize_for_dedupe`."""
+
+        DESIGN.md Imp2 broadening: also templates a LEADING identity token
+        (ISO-8601 timestamp, UUID, or long hex run) to a placeholder before
+        the prefix split, so identical messages with different leading
+        timestamps/ids collapse. Mirrors Rust `normalize_for_dedupe` +
+        `strip_leading_identity`."""
         import re
 
         seen: set[str] = set()
@@ -405,7 +440,7 @@ class LogCompressor:
         path_re = re.compile(r"/[\w/]+/")
 
         for line in lines:
-            content = line.content
+            content = _strip_leading_identity(line.content)
             split_at = next((i for i, c in enumerate(content) if c in (":", "=")), len(content))
             prefix = content[:split_at]
             suffix = content[split_at:]
