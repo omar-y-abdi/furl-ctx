@@ -193,6 +193,7 @@ fn build_homogeneous_table(
                     .iter()
                     .filter_map(|v| v.as_object())
                     .any(|o| matches!(o.get(k), Some(Value::Null))),
+            const_value: None,
         })
         .collect();
 
@@ -202,6 +203,7 @@ fn build_homogeneous_table(
         .collect();
 
     flatten_uniform_nested(&mut field_specs, &mut rows, cfg);
+    stamp_constant_columns(&mut field_specs, &rows);
 
     Compaction::Table {
         schema: Schema {
@@ -298,6 +300,7 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
                 name: format!("{parent_name}.{k}"),
                 type_tag: "string".into(),
                 nullable: false,
+                const_value: None,
             })
             .collect();
         let n_new = new_specs.len();
@@ -340,6 +343,54 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
         }
 
         i += n_new;
+    }
+}
+
+/// Stamp [`FieldSpec::const_value`] on every column whose cells are the
+/// SAME scalar in every row (constant-column fold, DESIGN-style RLE for
+/// constant columns).
+///
+/// Fold conditions (all must hold):
+/// - ≥ 2 rows (a 1-row "constant" saves nothing);
+/// - every cell is `CellValue::Scalar` (no `Missing` / `Nested` /
+///   `OpaqueRef`) and all values are equal;
+/// - the value is not `Null` and not the empty string — both render as
+///   an empty CSV cell, which would make the `name:type=` declaration
+///   ambiguous with "no constant".
+///
+/// The rows keep their cells (IR stays lossless / formatter-agnostic);
+/// only formatters that understand `const_value` change their output.
+fn stamp_constant_columns(specs: &mut [FieldSpec], rows: &[Row]) {
+    if rows.len() < 2 {
+        return;
+    }
+    for (col, spec) in specs.iter_mut().enumerate() {
+        let mut first: Option<&Value> = None;
+        let mut constant = true;
+        for row in rows {
+            match row.0.get(col) {
+                Some(CellValue::Scalar(v)) => match first {
+                    None => first = Some(v),
+                    Some(seen) if seen == v => {}
+                    Some(_) => {
+                        constant = false;
+                        break;
+                    }
+                },
+                _ => {
+                    constant = false;
+                    break;
+                }
+            }
+        }
+        let foldable = match first {
+            Some(Value::Null) | None => false,
+            Some(Value::String(s)) if s.is_empty() => false,
+            Some(_) => constant,
+        };
+        if foldable {
+            spec.const_value = first.cloned();
+        }
     }
 }
 
@@ -528,6 +579,7 @@ fn bucket_by(items: &[Value], discriminator: &str, cfg: &CompactConfig) -> Compa
                                 name: "value".into(),
                                 type_tag: "json".into(),
                                 nullable: false,
+                                const_value: None,
                             }],
                         },
                         rows: group_items
@@ -852,6 +904,66 @@ mod tests {
                 assert!(!id.nullable);
             }
             other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn constant_columns_are_stamped() {
+        let items = vec![
+            json!({"bytes": 64, "from": "127.0.0.1", "seq": 0, "t": 0.1}),
+            json!({"bytes": 64, "from": "127.0.0.1", "seq": 1, "t": 0.2}),
+            json!({"bytes": 64, "from": "127.0.0.1", "seq": 2, "t": 0.1}),
+        ];
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, rows, .. } => {
+                let by_name = |n: &str| {
+                    schema
+                        .fields
+                        .iter()
+                        .find(|f| f.name == n)
+                        .unwrap_or_else(|| panic!("missing field {n}"))
+                };
+                assert_eq!(by_name("bytes").const_value, Some(json!(64)));
+                assert_eq!(by_name("from").const_value, Some(json!("127.0.0.1")));
+                assert_eq!(by_name("seq").const_value, None);
+                assert_eq!(by_name("t").const_value, None);
+                // IR rows still carry the full cells (formatter-agnostic).
+                assert_eq!(rows[0].len(), schema.fields.len());
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn null_and_empty_constants_are_not_folded() {
+        let items = vec![
+            json!({"id": 1, "n": null, "e": ""}),
+            json!({"id": 2, "n": null, "e": ""}),
+        ];
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                for f in &schema.fields {
+                    assert_eq!(f.const_value, None, "field {} must not fold", f.name);
+                }
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_cell_blocks_constant_fold() {
+        // Same value where present, but absent in one row → not constant.
+        let items = vec![
+            json!({"id": 1, "tag": "x"}),
+            json!({"id": 2, "tag": "x"}),
+            json!({"id": 3}),
+        ];
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let tag = schema.fields.iter().find(|f| f.name == "tag").unwrap();
+                assert_eq!(tag.const_value, None);
+            }
+            other => panic!("expected Table, got {other:?}"),
         }
     }
 

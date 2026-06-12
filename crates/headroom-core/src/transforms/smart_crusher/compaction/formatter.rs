@@ -261,6 +261,11 @@ fn write_table(
     fmt: &CsvSchemaFormatter,
 ) {
     // Declaration line: [N]{col:type,col:type,...}
+    //
+    // Constant-column fold: a column with `const_value = Some(v)`
+    // declares `name:type=v` here and is OMITTED from every row below —
+    // the value appears verbatim exactly once. Lossless: rows are
+    // reconstructible from the declaration + remaining cells.
     out.push('[');
     out.push_str(&rows.len().to_string());
     out.push_str("]{");
@@ -268,10 +273,14 @@ fn write_table(
         .fields
         .iter()
         .map(|f| {
-            if f.nullable {
+            let base = if f.nullable {
                 format!("{}:{}?", f.name, f.type_tag)
             } else {
                 format!("{}:{}", f.name, f.type_tag)
+            };
+            match &f.const_value {
+                Some(v) => format!("{base}={}", const_decl_value(v)),
+                None => base,
             }
         })
         .collect();
@@ -282,11 +291,35 @@ fn write_table(
     }
     out.push('\n');
 
-    // Rows.
+    // Rows. Constant columns are folded into the declaration above.
     for row in rows {
-        let cells: Vec<String> = row.0.iter().map(format_cell).collect();
+        let cells: Vec<String> = row
+            .0
+            .iter()
+            .zip(schema.fields.iter())
+            .filter(|(_, f)| f.const_value.is_none())
+            .map(|(c, _)| format_cell(c))
+            .collect();
         out.push_str(&cells.join(","));
         out.push('\n');
+    }
+}
+
+/// Render a folded constant for the `name:type=value` declaration.
+///
+/// Same scalar rendering as a row cell, with extra CSV-quoting for
+/// strings containing `{` `}` `=` so the declaration's `{...}` grammar
+/// and the `=` separator stay unambiguous for read-back.
+fn const_decl_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => {
+            if needs_csv_quote(s) || s.contains('{') || s.contains('}') || s.contains('=') {
+                csv_quote(s)
+            } else {
+                s.clone()
+            }
+        }
+        _ => json_scalar_to_csv(v),
     }
 }
 
@@ -612,6 +645,7 @@ mod tests {
                     name: "blob".into(),
                     type_tag: "ccr".into(),
                     nullable: false,
+                    const_value: None,
                 }],
             },
             rows: vec![std::mem::replace(&mut row, Row::new(vec![]))],
@@ -715,6 +749,7 @@ mod tests {
                     name: "x".into(),
                     type_tag: "int".into(),
                     nullable: false,
+                    const_value: None,
                 }],
             },
             rows,
@@ -724,6 +759,107 @@ mod tests {
         assert!(with_summary.contains("__dropped:3"));
         let without = CsvSchemaFormatter::new().format(&c);
         assert!(!without.contains("__dropped"));
+    }
+
+    // ── Constant-column fold (CSV) ──
+
+    #[test]
+    fn csv_constant_columns_fold_into_declaration() {
+        let items = vec![
+            json!({"bytes": 64, "from": "127.0.0.1", "seq": 0, "t": 0.1}),
+            json!({"bytes": 64, "from": "127.0.0.1", "seq": 1, "t": 0.2}),
+            json!({"bytes": 64, "from": "127.0.0.1", "seq": 2, "t": 0.3}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        // Declaration carries the constants once.
+        assert!(lines[0].contains("bytes:int=64"), "got: {}", lines[0]);
+        assert!(
+            lines[0].contains("from:string=127.0.0.1"),
+            "got: {}",
+            lines[0]
+        );
+        // Variable columns stay bare in the declaration.
+        assert!(lines[0].contains("seq:int"), "got: {}", lines[0]);
+        // Rows hold ONLY the variable cells (fields sort alphabetically
+        // at equal frequency: bytes,from,seq,t → seq,t after fold).
+        assert_eq!(lines[1], "0,0.1");
+        assert_eq!(lines[2], "1,0.2");
+        assert_eq!(lines[3], "2,0.3");
+    }
+
+    #[test]
+    fn csv_constant_fold_round_trips_losslessly() {
+        // A consumer holding only the output reconstructs every row:
+        // parse `name:type=value` constants + per-row variable cells.
+        let items: Vec<Value> = (0..20)
+            .map(|i| json!({"bytes": 64, "from": "127.0.0.1", "seq": i, "ttl": 64}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let mut lines = out.trim_end().lines();
+        let decl = lines.next().expect("declaration line");
+        let body = decl
+            .strip_prefix("[20]{")
+            .and_then(|s| s.strip_suffix('}'))
+            .expect("decl shape");
+        let mut const_cols: Vec<(String, Value)> = Vec::new();
+        let mut var_cols: Vec<String> = Vec::new();
+        for col in body.split(',') {
+            let (name, rest) = col.split_once(':').expect("name:type");
+            match rest.split_once('=') {
+                Some((_t, raw)) => {
+                    let v = serde_json::from_str::<Value>(raw)
+                        .unwrap_or_else(|_| Value::String(raw.to_string()));
+                    const_cols.push((name.to_string(), v));
+                }
+                None => var_cols.push(name.to_string()),
+            }
+        }
+        let mut reconstructed: Vec<Value> = Vec::new();
+        for line in lines {
+            let mut obj = serde_json::Map::new();
+            for (name, v) in &const_cols {
+                obj.insert(name.clone(), v.clone());
+            }
+            for (name, raw) in var_cols.iter().zip(line.split(',')) {
+                let v = serde_json::from_str::<Value>(raw)
+                    .unwrap_or_else(|_| Value::String(raw.to_string()));
+                obj.insert(name.clone(), v);
+            }
+            reconstructed.push(Value::Object(obj));
+        }
+        assert_eq!(reconstructed, items, "round-trip must be lossless");
+    }
+
+    #[test]
+    fn csv_constant_string_with_separator_chars_is_quoted() {
+        let items = vec![
+            json!({"id": 1, "tag": "a=b,{c}"}),
+            json!({"id": 2, "tag": "a=b,{c}"}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let decl = out.lines().next().unwrap();
+        assert!(
+            decl.contains(r#"tag:string="a=b,{c}""#),
+            "constant with separator chars must be CSV-quoted, got: {decl}"
+        );
+    }
+
+    #[test]
+    fn json_formatter_unchanged_by_constant_fold() {
+        // The JSON formatter ignores const_value — byte-identical output
+        // to the pre-fold engine (rows keep all cells).
+        let items = vec![
+            json!({"bytes": 64, "seq": 0}),
+            json!({"bytes": 64, "seq": 1}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = JsonFormatter::new().format(&c);
+        assert!(out.contains("\"_rows\":[[64,0],[64,1]]"), "got: {out}");
+        assert!(!out.contains("const"), "got: {out}");
     }
 
     #[test]
@@ -904,6 +1040,7 @@ mod tests {
                     name: "x".into(),
                     type_tag: "int".into(),
                     nullable: false,
+                    const_value: None,
                 }],
             },
             rows,

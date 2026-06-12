@@ -53,29 +53,85 @@ def _repr(x: object) -> str:
     return json.dumps(x, sort_keys=True, ensure_ascii=False)
 
 
+def _split_unquoted(s: str) -> list[str]:
+    """Split on commas that are OUTSIDE CSV double-quoted segments."""
+    parts: list[str] = []
+    buf: list[str] = []
+    in_quotes = False
+    for ch in s:
+        if ch == '"':
+            in_quotes = not in_quotes
+            buf.append(ch)
+        elif ch == "," and not in_quotes:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return parts
+
+
+def _decode_cell(raw: str) -> object:
+    """One CSV cell back to a JSON value (same fallbacks as before)."""
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        return raw[1:-1].replace('""', '"')
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return raw
+
+
 def _decode_csv_schema(text: str, recovered: set[str]) -> None:
     """Decode a lossless CSV-schema body (``[N]{cols}\\n<rows>``) back to
     JSON objects. Those rows are present verbatim in the output — lossless
-    — so they count as recovered-from-output-alone."""
+    — so they count as recovered-from-output-alone.
+
+    Understands the constant-column fold: a ``name:type=value`` column
+    declares its (verbatim) constant once in the header and is omitted
+    from every row; the decoder re-attaches it to each reconstructed row.
+    """
     if not text.startswith("["):
         return
     lines = text.split("\n")
     header = re.match(r"\[\d+\]\{(.+)\}$", lines[0])
     if not header:
         return
-    cols = [c.split(":")[0] for c in header.group(1).split(",")]
+    var_cols: list[str] = []
+    const_cols: list[tuple[str, object]] = []
+    for seg in _split_unquoted(header.group(1)):
+        name = seg.split(":")[0]
+        decl = seg.split(":", 1)[1] if ":" in seg else ""
+        if "=" in decl:
+            type_tag, raw = decl.split("=", 1)
+            if type_tag.rstrip("?") == "string":
+                # The type tag says string — never coerce (a numeric-
+                # looking constant like "123" stays a string).
+                if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+                    raw = raw[1:-1].replace('""', '"')
+                const_cols.append((name, raw))
+            else:
+                const_cols.append((name, _decode_cell(raw)))
+        else:
+            var_cols.append(name)
+    if not var_cols and const_cols:
+        # Degenerate fully-constant table: every row is identical and
+        # carried entirely by the declaration.
+        recovered.add(_repr(dict(const_cols)))
+        return
     for line in lines[1:]:
         if not line:
             continue
-        parts = line.split(",", len(cols) - 1)
-        if len(parts) != len(cols):
+        parts = line.split(",", len(var_cols) - 1)
+        if len(parts) != len(var_cols):
             continue
         row = {}
-        for col, raw in zip(cols, parts):
+        for col, raw in zip(var_cols, parts):
             try:
                 row[col] = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
                 row[col] = raw
+        for col, value in const_cols:
+            row[col] = value
         recovered.add(_repr(row))
 
 
