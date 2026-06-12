@@ -49,6 +49,13 @@ fn hello() -> &'static str {
     headroom_core::hello()
 }
 
+/// Build the `ValueError` raised for invalid caller input at the FFI
+/// boundary. Centralized so every binding reports bad input the same way
+/// (and none of them panic — see `crush_array_json`).
+fn invalid_input(msg: String) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(msg)
+}
+
 fn type_name(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
@@ -582,6 +589,10 @@ impl PySmartCrusherConfig {
         self.inner.relevance_threshold
     }
     #[getter]
+    fn lossless_min_savings_ratio(&self) -> f64 {
+        self.inner.lossless_min_savings_ratio
+    }
+    #[getter]
     fn enable_ccr_marker(&self) -> bool {
         self.inner.enable_ccr_marker
     }
@@ -747,6 +758,10 @@ impl PySmartCrusher {
     /// This surfaces `CrushArrayResult` to Python so tests and the proxy
     /// runtime can reach the CCR hash directly (rather than parsing it
     /// out of the prompt marker).
+    /// Raises `ValueError` when `items_json` is not valid JSON or not a
+    /// JSON array — boundary validation, not a panic: PyO3 panics map to
+    /// `pyo3_runtime.PanicException`, a `BaseException` that escapes the
+    /// proxy's `except Exception` handlers.
     #[pyo3(signature = (items_json, query = "", bias = 1.0))]
     fn crush_array_json<'py>(
         &self,
@@ -754,7 +769,7 @@ impl PySmartCrusher {
         items_json: &str,
         query: &str,
         bias: f64,
-    ) -> Bound<'py, PyDict> {
+    ) -> PyResult<Bound<'py, PyDict>> {
         // GIL-release pattern: own the inputs, do all heavy compute
         // (JSON parse, crush, re-serialize) without the GIL, then
         // re-acquire to build the PyDict from the owned outputs.
@@ -763,24 +778,29 @@ impl PySmartCrusher {
         let (kept_json, ccr_hash, dropped_summary, strategy_info, compacted, compaction_kind) = py
             .allow_threads(|| {
                 let parsed: serde_json::Value = serde_json::from_str(&items_json)
-                    .unwrap_or_else(|e| panic!("items_json must be JSON: {e}"));
+                    .map_err(|e| invalid_input(format!("items_json must be JSON: {e}")))?;
                 let items = match parsed {
                     serde_json::Value::Array(a) => a,
-                    other => panic!("items_json must be a JSON array, got {}", type_name(&other)),
+                    other => {
+                        return Err(invalid_input(format!(
+                            "items_json must be a JSON array, got {}",
+                            type_name(&other)
+                        )))
+                    }
                 };
                 let result = self.inner.crush_array(&items, &query, bias);
                 let kept_json = serde_json::to_string(&serde_json::Value::Array(result.items))
-                    .expect("serialize kept items");
-                (
+                    .map_err(|e| invalid_input(format!("failed to serialize kept items: {e}")))?;
+                Ok::<_, PyErr>((
                     kept_json,
                     result.ccr_hash,
                     result.dropped_summary,
                     result.strategy_info,
                     result.compacted,
                     result.compaction_kind,
-                )
-            });
-        build_crush_array_dict(
+                ))
+            })?;
+        Ok(build_crush_array_dict(
             py,
             kept_json,
             ccr_hash,
@@ -788,7 +808,7 @@ impl PySmartCrusher {
             strategy_info,
             compacted,
             compaction_kind,
-        )
+        ))
     }
 
     /// Run the document-level walker on `doc_json` (JSON string) and
@@ -804,19 +824,22 @@ impl PySmartCrusher {
     /// pass without per-array lossy crushing — useful when the caller
     /// wants document-shape compaction (forms, configs, mixed records)
     /// rather than statistical row drop.
-    fn compact_document_json(&self, py: Python<'_>, doc_json: &str) -> String {
+    /// Raises `ValueError` when `doc_json` is not valid JSON — boundary
+    /// validation, not a panic (same rationale as `crush_array_json`).
+    fn compact_document_json(&self, py: Python<'_>, doc_json: &str) -> PyResult<String> {
         // Heavy: JSON parse + recursive walker + tabular compaction +
         // re-serialize. None of it touches Python; release the GIL.
         let doc_json = doc_json.to_string();
         py.allow_threads(|| {
             let parsed: serde_json::Value = serde_json::from_str(&doc_json)
-                .unwrap_or_else(|e| panic!("doc_json must be JSON: {e}"));
+                .map_err(|e| invalid_input(format!("doc_json must be JSON: {e}")))?;
             let mut dc = DocumentCompactor::new();
             if let Some(store) = self.inner.ccr_store() {
                 dc = dc.with_ccr_store(store.clone());
             }
             let out = dc.compact(parsed);
-            serde_json::to_string(&out).expect("serialize compacted document")
+            serde_json::to_string(&out)
+                .map_err(|e| invalid_input(format!("failed to serialize compacted document: {e}")))
         })
     }
 
