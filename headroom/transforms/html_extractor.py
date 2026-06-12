@@ -20,15 +20,38 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-import trafilatura
-from trafilatura.settings import use_config
+# trafilatura is an OPTIONAL dependency (`pip install headroom-ai[html]`).
+# Guard the import so importing this module — or running compress() — never
+# hard-fails when it is absent. HTML extraction simply becomes unavailable:
+# `is_html_content` (pure regex) and the dataclasses below still work, and
+# `HTMLExtractor.__init__` raises a clear ImportError that ContentRouter's
+# `_get_html_extractor` already catches to degrade gracefully (the HTML
+# strategy falls through and the content is routed elsewhere).
+try:
+    import trafilatura
+    from trafilatura.settings import use_config
 
-# Suppress trafilatura's internal parse-error noise (e.g. "parsed tree length: 0")
-# which appears at WARNING level on every document that fails to extract content.
-# These are expected failures for non-article pages; log them only at CRITICAL.
-logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
+    # Suppress trafilatura's internal parse-error noise (e.g. "parsed tree
+    # length: 0") which appears at WARNING level on every document that fails
+    # to extract content. These are expected failures for non-article pages;
+    # log them only at CRITICAL.
+    logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
+    _TRAFILATURA_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only without the html extra
+    trafilatura = None  # type: ignore[assignment]
+    use_config = None  # type: ignore[assignment]
+    _TRAFILATURA_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+def is_trafilatura_available() -> bool:
+    """Whether the optional ``trafilatura`` dependency is importable.
+
+    HTML content extraction requires it (``pip install headroom-ai[html]``).
+    When absent, ``HTMLExtractor`` cannot be constructed.
+    """
+    return _TRAFILATURA_AVAILABLE
 
 
 @dataclass
@@ -92,7 +115,17 @@ class HTMLExtractor:
 
         Args:
             config: Extraction configuration.
+
+        Raises:
+            ImportError: If the optional ``trafilatura`` dependency is not
+                installed (``pip install headroom-ai[html]``). ContentRouter's
+                ``_get_html_extractor`` catches this to degrade gracefully.
         """
+        if not _TRAFILATURA_AVAILABLE:
+            raise ImportError(
+                "HTMLExtractor requires the optional 'trafilatura' dependency. "
+                "Install it with: pip install headroom-ai[html]"
+            )
         self.config = config or HTMLExtractorConfig()
         self._trafilatura_config = self._build_trafilatura_config()
 

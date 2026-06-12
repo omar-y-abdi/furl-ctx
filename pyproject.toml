@@ -75,6 +75,12 @@ mcp = [
     "mcp>=1.0.0",
     "httpx>=0.24.0",
 ]
+# HTML content extraction with trafilatura (article/main-content detection,
+# boilerplate removal). Powers the HTMLExtractor / HTML routing strategy in
+# headroom.transforms.html_extractor; absent => HTML extraction degrades off.
+html = [
+    "trafilatura>=1.6",
+]
 # Rich progress bars for the binary downloader (headroom.binaries).
 progress = [
     "rich>=13.0.0",
@@ -91,7 +97,7 @@ dev = [
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
-    "headroom-ai[code,ml,relevance,mcp,progress]",
+    "headroom-ai[code,ml,relevance,mcp,progress,html]",
 ]
 
 [project.urls]
