@@ -1,4 +1,64 @@
-# BENCHMARKS — Headroom Engine, Phase-2 honest benchmark (before → after)
+# BENCHMARKS — Headroom Engine honest benchmarks
+
+## Phase-3: lossless column encodings (before → after)
+
+- Baseline commit: `8e005090` (Phase-2 final). Final commit: `590c9c02`
+  (constant-column fold `f04ad614` → ditto marks `1d5ff57b` → small-array
+  lossless `590c9c02`).
+- Token model: `gpt-4o` (real tiktoken BPE). All data real and committed
+  under `benchmarks/data/`; re-run with `.venv/bin/python -m benchmarks.run_bench`.
+
+Three additive, zero-loss encodings in the CSV-schema lossless rendering:
+
+1. **Constant-column fold** — a column with the identical scalar in every
+   row declares `name:type=value` once in the `[N]{...}` header and is
+   omitted from rows. Null/empty constants never fold (ambiguous empty cell).
+2. **Ditto marks** — a cell identical to the same column's previous-row cell
+   renders as bare `=` (carry-forward); a literal `=` data cell is CSV-quoted;
+   0–1-char cells never ditto.
+3. **Small-array lossless routing** — arrays at/below `adaptive_k` (the common
+   case for tool output) now attempt the lossless stage, gated by: no
+   `OpaqueRef` substitution anywhere, ≥256 absolute bytes saved, and the
+   existing 0.30 ratio gate. Passthrough stays the default for tiny /
+   opaque-bearing / low-saving arrays.
+
+Every encoding keeps every distinct value verbatim in the output and every
+row reconstructible from the output alone — the CCR-recovery contract
+decoder (`tests/test_ccr_recovery_invariant.py`) learned both encodings and
+`tests/test_lossless_column_encodings.py` pins the round-trips through
+public `compress()`.
+
+| dataset | tok before | tok after (P2 → P3) | lossless reduction | drop | retention |
+|---|---:|---:|---:|---:|---:|
+| code@7 | 41025 | 41025 → 41025 | 0.0% → 0.0% (entropy floor; opaque gate keeps passthrough) | 0% | 100% |
+| logs@90 | 8595 | 2059 → 2059 | LOSSY, unchanged (see honest read) | 74.4% | 100% |
+| search@90 | 4102 | 2462 → **1803** | 40.0% → **56.0%** (ditto on path runs) | 0% | 100% |
+| repeated_logs@90 | 3621 | 1662 → **588** | 54.1% → **83.8%** (const fold + ditto) | 0% | 100% |
+| disk@9 (NEW, real `df -k`) | 694 | passthrough → **347** | 0% → **50.0%** (small-array routing) | 0% | 100% |
+
+Needle-recall: overall (output OR CCR) stays **100.0%**; visible-in-output
+recall rose **72.2% → 88.9%** (logs family 44.4% → 77.8%) because the smaller
+lossless rendering now crosses the 0.30 gate for more log-array cardinalities
+— those trials flipped lossy → lossless, keeping the needle visible.
+
+**Honest read (Phase-3).**
+- `logs@90` stays LOSSY: with ditto the lossless rendering reaches 26.97%
+  byte savings — still under the 0.30 gate. The remaining row content
+  (40-hex commit hash, ISO date, 90 distinct subjects) is genuine entropy.
+  Dictionary-encoding the author/email columns was measured at ≈ +2.6pp
+  (36 distinct authors over 90 rows — too high-cardinality) and would NOT
+  flip the route; not implemented.
+- `code@7` remains 0% — large distinct source files at the entropy floor;
+  the small-array opaque gate intentionally refuses to substitute file
+  contents with CCR pointers.
+- Delta/range encoding of monotone numeric columns (icmp_seq 0..89,
+  absolute_offset) would shrink further but reconstructed values are no
+  longer verbatim in the output; deferred pending a reconstruction-aware
+  retention metric.
+
+---
+
+# Phase-2 honest benchmark (before → after)
 
 - Baseline commit: `0795e63e` (pre-1A / pre-Imp2 / pre-1B) — from `benchmarks/baseline_results.json`.
 - Final commit: `031d4bc6` (1A unconditional CCR persist → Imp2 field-aware stable
