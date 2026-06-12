@@ -25,7 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from benchmarks import datasets as ds_mod
-from benchmarks.metrics import BENCH_MODEL, CaseMetrics, measure_case
+from benchmarks.metrics import (
+    BENCH_MODEL,
+    CaseMetrics,
+    measure_case,
+    measure_conversation_case,
+)
 from benchmarks.needle_recall import (
     NeedleResult,
     recall_rate,
@@ -44,12 +49,18 @@ DATA_DIR = HERE / "data"
 
 
 def run_datasets() -> list[CaseMetrics]:
-    """Measure all three real datasets at their default cardinality."""
+    """Measure all real datasets at their default cardinality.
+
+    Single-tool datasets keep the strict last-message scoring
+    (``measure_case``); multi-turn conversation datasets are scored across
+    all messages (``measure_conversation_case``).
+    """
     results: list[CaseMetrics] = []
     for dataset in ds_mod.all_datasets():
         name = f"{dataset.name}@{len(dataset.items)}"
+        measure = measure_conversation_case if dataset.conversation else measure_case
         results.append(
-            measure_case(name, dataset.query, dataset.items, dataset.messages)
+            measure(name, dataset.query, dataset.items, dataset.messages)
         )
     return results
 
