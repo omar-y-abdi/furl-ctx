@@ -48,175 +48,36 @@ classifiers = [
 dependencies = [
     # Core: lightweight compression (SmartCrusher, ContentRouter, CCR, TOIN)
     "tiktoken>=0.5.0",            # Tokenizer for all compressors
-    "pydantic>=2.0.0",            # Config and data models
-    "litellm>=1.86.2,<2.0",        # Model registry, pricing, and provider support
-    "click>=8.1.0",               # CLI framework
-    "rich>=13.0.0",               # Rich terminal output
-    "opentelemetry-api>=1.24.0",  # Safe no-op OTEL API for instrumentation
     "ast-grep-cli>=0.30.0",       # AST-aware code slicing (CodeCompressor); binary wheel
     "tomli>=2.0.0; python_version < '3.11'",  # tomllib backport for helper scripts
 ]
 
 [project.optional-dependencies]
-# Proxy server (most common install: pip install headroom-ai[proxy])
-proxy = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0,<1.0",
-    "httpx[http2]>=0.24.0",
-    "openai>=2.14.0",             # OpenAI API format support
-    "mcp>=1.0.0",                 # MCP server (headroom_compress, retrieve, stats)
-    "magika>=0.6.0",              # ML content detection for ContentRouter
-    "zstandard>=0.20.0",          # Decompress zstd request bodies (Codex, etc.)
-    "websockets>=13.0",           # WebSocket proxy for /v1/responses (Codex gpt-5.4+)
-    "onnxruntime>=1.16.0",        # Kompress ONNX INT8 text compression (no torch needed)
-    "transformers>=4.30.0,<6.0",  # Tokenizer only (for Kompress)
-    "watchdog>=4.0.0",            # File watcher for live code graph reindexing (--code-graph)
-    "sqlite-vec>=0.1.6",          # Vector index for memory (--memory). Lightweight, no torch.
-]
-# Production ASGI/WSGI server — Unix-only (gunicorn does not support Windows).
-# Kept separate from [proxy] so that dev, CI, and Windows users are not forced
-# to install a non-functional package.  Production deployments should use:
-#   pip install headroom-ai[proxy,proxy-prod]
-proxy-prod = [
-    "headroom-ai[proxy]",
-    "gunicorn>=21.0.0; sys_platform != 'win32'",
-]
-# AST-based code compression (tree-sitter)
+# AST-based code compression (tree-sitter), complementing the bundled
+# ast-grep CLI used by the CodeCompressor.
 code = [
     "tree-sitter-language-pack>=0.10.0",
 ]
-# ML-based compression with Kompress (ModernBERT).
-# (The legacy [llmlingua] extra was removed in 0.9.x — no live code path used it.
-# Use [ml] for the supported ML compression dependencies.)
+# ML-based compression with Kompress (ModernBERT). ONNX INT8 runtime keeps
+# this torch-free; transformers supplies the tokenizer only.
 ml = [
-    "torch>=2.0.0",
+    "onnxruntime>=1.16.0",
     "transformers>=4.30.0,<6.0",
-    # transformers >= 5.x requires huggingface-hub >= 1.5.0,<2.0; pinning
-    # the floor here prevents Kompress from silently falling back to
-    # "unavailable" when a sibling install (e.g. `pip install
-    # strands-agents`) drags huggingface-hub backwards.
     "huggingface-hub>=1.5.0,<2.0",
 ]
-# Memory system (hierarchical memory with vector search)
-memory = [
-    "hnswlib>=0.8.0",
-    "sqlite-vec>=0.1.6",
-    "sentence-transformers>=2.2.0,<6.0",
-]
-# Qdrant + Neo4j memory backend helpers
-memory-stack = [
-    "mem0ai>=1.0.0,<2.0",
-    "qdrant-client>=1.9.0,<2.0",
-    "neo4j>=5.20.0,<7.0",
-]
-# Apple-Silicon GPU (MPS) offload for the memory embedder. Opt in at runtime with
-# HEADROOM_EMBEDDER_RUNTIME=pytorch_mps. macOS-only; intentionally excluded from [all].
-pytorch-mps = [
-    "torch>=2.0.0; sys_platform == 'darwin'",
-    "sentence-transformers>=2.2.0; sys_platform == 'darwin'",
-]
-# Semantic relevance scoring with embeddings.
-# Uses `fastembed` (BAAI/bge-small-en-v1.5 by default — 33M params,
-# 384 dims, ~30 MB int8-quantized ONNX). Same library + model used by
-# the Rust SmartCrusher (`fastembed` crate), giving byte-equal embeddings
-# across the language boundary. Replaced sentence-transformers in
-# Stage 3c.1 — fastembed is faster (~2-3x), smaller (no torch
-# dependency), and outranks all-MiniLM-L6-v2 on MTEB by ~6 points.
+# Semantic relevance scoring with embeddings (fastembed, torch-free ONNX).
 relevance = [
     "fastembed>=0.4.0",
     "numpy>=1.24.0",
 ]
-# Image compression (ML-based routing + OCR)
-#
-# OCR backend uses ONNX Runtime regardless of Python version. The
-# rapidocr ecosystem split into two flavors after 1.4.x:
-#   * rapidocr-onnxruntime 1.4.x — bundled-ORT package, capped at
-#     Python <3.13 by its requires-python metadata. Drop-in for our
-#     existing v1 tuple-shaped API call.
-#   * rapidocr 3.x — engine-agnostic core, supports Python 3.13+.
-#     Returns a RapidOCROutput dataclass (txts, scores, boxes, ...).
-#     Needs `onnxruntime` installed separately to use the ORT backend.
-#
-# `headroom/image/compressor.py` adapts both API shapes at runtime via
-# a try/except cascade. See issue #372 for context.
-image = [
-    "pillow>=10.0.0",
-    "sentencepiece>=0.1.99",  # Required by SigLIP tokenizer (SiglipTokenizer)
-    # Python 3.6–3.12: keep the proven ORT-bundled package directly.
-    # ~15 MB ONNX models auto-downloaded on first use.
-    "rapidocr-onnxruntime>=1.4.0,<2; python_version<'3.13'",
-    # Python 3.13+: rapidocr-onnxruntime is unavailable (its wheels
-    # declare requires-python<3.13). Use the successor `rapidocr` 3.x
-    # core + `onnxruntime` engine; same ORT backend, just split into
-    # two packages. Total install size and inference speed unchanged.
-    "rapidocr>=3.0,<4; python_version>='3.13'",
-    "onnxruntime>=1.7,<2; python_version>='3.13'",
-]
-# Report generation
-reports = [
-    "jinja2>=3.0.0",
-]
-# OpenTelemetry metrics export
-otel = [
-    "opentelemetry-sdk>=1.24.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.24.0",
-]
-# any-llm multi-provider backend (requires Python 3.11+)
-anyllm = [
-    "any-llm-sdk>=1.0.0; python_version >= '3.11'",
-]
-# LangChain integration
-langchain = [
-    "langchain-core>=1.3.3,<4.0",
-    "langchain-openai>=1.1.14,<2.0",
-]
-# Agno agent framework integration
-agno = [
-    "agno>=1.0.0",
-]
-# AWS Strands Agents SDK integration
-strands = [
-    "strands-agents>=0.1.0",
-]
-# MCP server for Claude Code integration
+# MCP server for Claude Code integration (headroom.ccr.mcp_server).
 mcp = [
     "mcp>=1.0.0",
     "httpx>=0.24.0",
 ]
-# Voice filler detection
-voice = [
-    "onnxruntime>=1.16.0",
-    "transformers>=4.30.0,<6.0",
-    "torch>=2.0.0",
-]
-# Voice training (includes voice deps + training extras)
-voice-train = [
-    "headroom-ai[voice]",
-    "datasets>=2.14.0",
-    "accelerate>=0.20.0",
-]
-# Evaluation framework
-evals = [
-    "datasets>=2.14.0",
-    "sentence-transformers>=2.2.0,<6.0",
-    "numpy>=1.24.0",
-    "scikit-learn>=1.3.0",
-    "anthropic>=0.18.0",
-    "openai>=1.0.0",
-]
-# AWS Bedrock backend
-bedrock = [
-    "boto3>=1.28.0",
-]
-# HTML content extraction
-html = [
-    "trafilatura>=1.6.0",
-]
-# Comprehensive LLM benchmarks
-benchmark = [
-    "lm-eval[api]>=0.4.0",
-    "openai>=1.0.0",
-    "anthropic>=0.18.0",
+# Rich progress bars for the binary downloader (headroom.binaries).
+progress = [
+    "rich>=13.0.0",
 ]
 # Development dependencies
 dev = [
@@ -226,29 +87,12 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "pre-commit>=3.0.0",
-    "openai>=1.0.0",
-    "anthropic>=0.18.0",
-    "litellm>=1.86.2,<2.0",
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0,<1.0",
-    "httpx[http2]>=0.24.0",
-    "websockets>=13.0",
-    "opentelemetry-sdk>=1.24.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.24.0",
-    "ollama>=0.4.0",
-    "langchain-ollama>=0.2.0",
-    "hnswlib>=0.8.0",
-    "sqlite-vec>=0.1.6",
-    "sentence-transformers>=2.2.0,<6.0",
     "numpy>=1.24.0",
 ]
-# All optional dependencies (everything you need)
+# All optional dependencies (everything the compression library can use)
 all = [
-    "headroom-ai[proxy,code,ml,memory,relevance,image,reports,otel,evals,voice,html,benchmark,mcp]",
+    "headroom-ai[code,ml,relevance,mcp,progress]",
 ]
-
-[project.scripts]
-headroom = "headroom.cli:main"
 
 [project.urls]
 Homepage = "https://headroom-docs.vercel.app"
@@ -283,8 +127,8 @@ default = true
 [tool.maturin]
 # Where the Python package lives. With `python-source = "."` and the
 # package directory `headroom/` at repo root, maturin includes every file
-# under `headroom/` in the wheel — that picks up the dashboard HTML
-# templates and bundled YAML configs. `LICENSE` and `NOTICE` are listed
+# under `headroom/` in the wheel — that picks up the bundled YAML configs.
+# `LICENSE` and `NOTICE` are listed
 # explicitly because maturin sdists do not get the package-directory
 # treatment wheels do, and PEP 639 auto-discovery emits both files into
 # `License-File:` metadata — PyPI rejects sdists whose declared license
@@ -343,35 +187,18 @@ ignore_missing_imports = true
 # Per-module overrides for modules with dynamic typing patterns
 [[tool.mypy.overrides]]
 module = [
-    "headroom.proxy.server",
-    "headroom.proxy.cost",
-    "headroom.proxy.prometheus_metrics",
-    "headroom.proxy.semantic_cache",
-    "headroom.proxy.rate_limiter",
-    "headroom.proxy.request_logger",
     "headroom.proxy.helpers",
-    "headroom.integrations.langchain",
-    "headroom.integrations.mcp",
     "headroom.ccr.mcp_server",
     "headroom.relevance.embedding",
-    "headroom.reporting.generator",
 ]
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = [
     "headroom.tokenizers.*",
-    "headroom.providers.litellm",
-    "headroom.providers.google",
 ]
 disallow_untyped_defs = false
 warn_return_any = false
-
-# Handler mixins use self.* from HeadroomProxy via duck typing — mypy can't resolve these
-[[tool.mypy.overrides]]
-module = ["headroom.proxy.handlers.*"]
-disallow_untyped_defs = false
-ignore_errors = true
 
 # Ignore third-party stubs with syntax errors
 [[tool.mypy.overrides]]
