@@ -36,6 +36,26 @@ pub enum OpaqueKind {
     Other(String),
 }
 
+/// Reversible per-column encoding, stamped by the compactor when (and
+/// only when) the encoded rendering is strictly smaller AND decodes
+/// back to the exact original values.
+///
+/// Like [`FieldSpec::const_value`], encodings are advisory: the IR rows
+/// keep their full original cells, and only formatters that understand
+/// an encoding exploit it (today: the CSV-schema formatter). Formatters
+/// that ignore this field (JSON, Markdown-KV) render byte-identical
+/// output to the pre-encoding engine.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnEncoding {
+    /// The column is an exact arithmetic progression: row `i` holds
+    /// `base + step * i` (every cell a scalar i64, constant non-zero
+    /// step). The CSV-schema formatter declares `name:int=BASE+STEP`
+    /// once and omits the column from rows; the decoder regenerates
+    /// the exact values from the row index. Pure integer math — exact
+    /// reconstruction by construction.
+    ArithInt { base: i64, step: i64 },
+}
+
 /// One column's metadata in a tabular compaction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldSpec {
@@ -58,6 +78,14 @@ pub struct FieldSpec {
     /// constant is verbatim in the declaration and every row is
     /// reconstructible from header + row cells alone.
     pub const_value: Option<Value>,
+    /// `Some(enc)` when the column's values are exactly reproducible
+    /// through a reversible encoding (see [`ColumnEncoding`]). Stamped
+    /// only after a stamp-time decode-and-compare proves exact
+    /// round-trip AND the encoded rendering is strictly smaller.
+    /// Mutually exclusive with `const_value`. Rows in the IR still
+    /// carry the full cells, so encoding-unaware formatters are
+    /// byte-identical to the pre-encoding engine.
+    pub encoding: Option<ColumnEncoding>,
 }
 
 /// Column set for a homogeneous table.
@@ -223,12 +251,14 @@ mod tests {
                     type_tag: "int".into(),
                     nullable: false,
                     const_value: None,
+                    encoding: None,
                 },
                 FieldSpec {
                     name: "name".into(),
                     type_tag: "string".into(),
                     nullable: false,
                     const_value: None,
+                    encoding: None,
                 },
             ],
         };

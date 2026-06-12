@@ -72,10 +72,12 @@ def test_constant_columns_fold_and_round_trip() -> None:
 
 
 def test_constant_fold_does_not_fire_on_varying_columns() -> None:
-    items = [{"id": i, "msg": f"record-{i}-distinct-payload"} for i in range(50)]
+    # `id` hops non-arithmetically ((i*7) % 50 — distinct, varying step)
+    # so NEITHER the constant fold NOR the arithmetic fold may fire.
+    items = [{"id": (i * 7) % 50, "msg": f"record-{i}-distinct-payload"} for i in range(50)]
     text = _compress_to_text(items)
     decl = text.split("\n", 1)[0]
-    assert "=" not in decl, f"no constant exists, nothing may fold: {decl}"
+    assert "=" not in decl, f"no constant/progression exists, nothing may fold: {decl}"
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
     assert not missing
@@ -129,6 +131,52 @@ def test_repeated_numeric_cells_ditto_and_round_trip() -> None:
         for i in range(40)
     ]
     text = _compress_to_text(items)
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_arith_fold_monotone_counter_round_trips() -> None:
+    # Shape mirrors the real `ping` benchmark capture: the monotone
+    # icmp_seq counter is an exact arithmetic progression and folds into
+    # the declaration as `icmp_seq:int=0+1`; rows carry only the real
+    # varying latency. Reconstruction regenerates every counter value
+    # from the row index — exact, not verbatim.
+    items = [
+        {
+            "bytes": 64,
+            "from": "127.0.0.1",
+            "icmp_seq": i,
+            "ttl": 64,
+            "time_ms": round(0.031 + (i % 7) * 0.013, 3),
+        }
+        for i in range(60)
+    ]
+    text = _compress_to_text(items)
+    decl = text.split("\n", 1)[0]
+    assert "icmp_seq:int=0+1" in decl, decl
+    # The counter column is folded: no bare counter cells in the rows.
+    body_lines = text.split("\n")[1:]
+    assert all("," not in line for line in body_lines if line), (
+        "rows must carry only the latency cell after const + arith folds: "
+        f"{body_lines[:3]}"
+    )
+
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_arith_fold_negative_step_round_trips() -> None:
+    # Descending counters (e.g. remaining-retries) fold with a negative
+    # step and reconstruct exactly.
+    items = [
+        {"remaining": 500 - 5 * i, "event": f"attempt-{i}-of-100"} for i in range(40)
+    ]
+    text = _compress_to_text(items)
+    decl = text.split("\n", 1)[0]
+    assert "remaining:int=500+-5" in decl, decl
+
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
     assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"

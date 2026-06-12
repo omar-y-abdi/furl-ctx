@@ -46,7 +46,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::classifier::{classify_cell, CellClass, ClassifyConfig};
-use super::ir::{Bucket, CellValue, Compaction, FieldSpec, Row, Schema};
+use super::ir::{Bucket, CellValue, ColumnEncoding, Compaction, FieldSpec, Row, Schema};
 use crate::ccr::CcrStore;
 
 /// Config for the compactor.
@@ -194,6 +194,7 @@ fn build_homogeneous_table(
                     .filter_map(|v| v.as_object())
                     .any(|o| matches!(o.get(k), Some(Value::Null))),
             const_value: None,
+            encoding: None,
         })
         .collect();
 
@@ -204,6 +205,7 @@ fn build_homogeneous_table(
 
     flatten_uniform_nested(&mut field_specs, &mut rows, cfg);
     stamp_constant_columns(&mut field_specs, &rows);
+    stamp_arith_int_columns(&mut field_specs, &rows);
 
     Compaction::Table {
         schema: Schema {
@@ -301,6 +303,7 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
                 type_tag: "string".into(),
                 nullable: false,
                 const_value: None,
+                encoding: None,
             })
             .collect();
         let n_new = new_specs.len();
@@ -392,6 +395,84 @@ fn stamp_constant_columns(specs: &mut [FieldSpec], rows: &[Row]) {
             spec.const_value = first.cloned();
         }
     }
+}
+
+/// Stamp [`ColumnEncoding::ArithInt`] on every integer column that is an
+/// EXACT arithmetic progression (`value_i == base + step * i`, constant
+/// non-zero step). The CSV-schema formatter folds such a column into the
+/// declaration (`name:int=BASE+STEP`) and omits it from the rows; the
+/// decoder regenerates the exact values from the row index — pure
+/// integer math, exact reconstruction by construction (the detection IS
+/// the round-trip proof: every cell is checked against `base + step*i`).
+///
+/// Stamp conditions (all must hold):
+/// - ≥ 3 rows (a 2-row "progression" is a coincidence with negligible
+///   saving);
+/// - every cell is `Scalar` of an i64 (no `Missing`/`Null`/float — the
+///   column must be non-nullable by data, not just by schema);
+/// - the step is constant and non-zero (a zero step is a constant
+///   column — `stamp_constant_columns` already owns that fold);
+/// - no overflow anywhere in `base + step * i` (checked arithmetic);
+/// - at least one OTHER row-visible column remains (rows must not
+///   render as empty lines);
+/// - strict byte saving: the per-row cells + their commas outweigh the
+///   `=BASE+STEP` declaration suffix.
+fn stamp_arith_int_columns(specs: &mut [FieldSpec], rows: &[Row]) {
+    if rows.len() < 3 {
+        return;
+    }
+    for col in 0..specs.len() {
+        if specs[col].const_value.is_some() || specs[col].encoding.is_some() {
+            continue;
+        }
+        let visible = specs
+            .iter()
+            .filter(|f| f.const_value.is_none() && f.encoding.is_none())
+            .count();
+        if visible < 2 {
+            return; // folding any further column would empty the rows
+        }
+        if let Some((base, step)) = detect_arith_progression(rows, col) {
+            let cell_bytes: usize = rows
+                .iter()
+                .map(|r| match r.0.get(col) {
+                    Some(CellValue::Scalar(Value::Number(n))) => n.to_string().len(),
+                    _ => 0,
+                })
+                .sum();
+            let saved = cell_bytes + rows.len(); // cells + one comma per row
+            let decl_extra = format!("={base}+{step}").len();
+            if saved > decl_extra {
+                specs[col].encoding = Some(ColumnEncoding::ArithInt { base, step });
+            }
+        }
+    }
+}
+
+/// `Some((base, step))` when every cell in `col` is a scalar i64 forming
+/// the exact progression `base + step * i` with constant non-zero step.
+fn detect_arith_progression(rows: &[Row], col: usize) -> Option<(i64, i64)> {
+    let mut values: Vec<i64> = Vec::with_capacity(rows.len());
+    for row in rows {
+        match row.0.get(col) {
+            Some(CellValue::Scalar(Value::Number(n))) => values.push(n.as_i64()?),
+            _ => return None,
+        }
+    }
+    let base = *values.first()?;
+    let second = *values.get(1)?;
+    let step = second.checked_sub(base)?;
+    if step == 0 {
+        return None;
+    }
+    let mut expected = base;
+    for v in &values[1..] {
+        expected = expected.checked_add(step)?;
+        if *v != expected {
+            return None;
+        }
+    }
+    Some((base, step))
 }
 
 fn infer_type_tag_from_cells(rows: &[Row], col: usize, nullable: &mut bool) -> String {
@@ -580,6 +661,7 @@ fn bucket_by(items: &[Value], discriminator: &str, cfg: &CompactConfig) -> Compa
                                 type_tag: "json".into(),
                                 nullable: false,
                                 const_value: None,
+                                encoding: None,
                             }],
                         },
                         rows: group_items
@@ -945,6 +1027,126 @@ mod tests {
                 for f in &schema.fields {
                     assert_eq!(f.const_value, None, "field {} must not fold", f.name);
                 }
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arith_progression_is_stamped_with_exact_base_and_step() {
+        let items: Vec<Value> = (0..10)
+            .map(|i| json!({"seq": 5 + 2 * i, "v": format!("x{i}")}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, rows, .. } => {
+                let seq = schema.fields.iter().find(|f| f.name == "seq").unwrap();
+                assert_eq!(
+                    seq.encoding,
+                    Some(ColumnEncoding::ArithInt { base: 5, step: 2 })
+                );
+                // IR rows still carry the full cells (formatter-agnostic).
+                assert_eq!(rows[0].len(), schema.fields.len());
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arith_not_stamped_on_two_rows_or_nonconstant_step() {
+        let two = vec![json!({"n": 1, "v": "a"}), json!({"n": 2, "v": "b"})];
+        match compact(&two, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let n = schema.fields.iter().find(|f| f.name == "n").unwrap();
+                assert_eq!(n.encoding, None, "2-row progression must not stamp");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        let jagged = vec![
+            json!({"n": 1, "v": "a"}),
+            json!({"n": 2, "v": "b"}),
+            json!({"n": 4, "v": "c"}),
+        ];
+        match compact(&jagged, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let n = schema.fields.iter().find(|f| f.name == "n").unwrap();
+                assert_eq!(n.encoding, None, "non-constant step must not stamp");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arith_not_stamped_when_it_would_empty_rows() {
+        // Constants fold bytes/ttl; folding seq too would leave empty
+        // row lines — the gate keeps the last visible column.
+        let items: Vec<Value> = (0..20)
+            .map(|i| json!({"bytes": 64, "seq": i, "ttl": 64}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let seq = schema.fields.iter().find(|f| f.name == "seq").unwrap();
+                assert_eq!(seq.encoding, None);
+                assert_eq!(seq.const_value, None);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arith_not_stamped_on_float_or_nullable_columns() {
+        let floats: Vec<Value> = (0..5)
+            .map(|i| json!({"x": i as f64 + 0.5, "v": format!("a{i}")}))
+            .collect();
+        match compact(&floats, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let x = schema.fields.iter().find(|f| f.name == "x").unwrap();
+                assert_eq!(x.encoding, None, "float column must not stamp");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        let sparse = vec![
+            json!({"n": 0, "v": "a"}),
+            json!({"n": 1, "v": "b"}),
+            json!({"v": "c"}),
+        ];
+        match compact(&sparse, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let n = schema.fields.iter().find(|f| f.name == "n").unwrap();
+                assert_eq!(n.encoding, None, "missing cell must block the fold");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arith_detection_is_i64_safe() {
+        // Values at the i64 ceiling fold without overflow (checked
+        // arithmetic), and u64-beyond-i64 values never stamp.
+        let at_ceiling: Vec<Value> = (0..3i64)
+            .map(|i| json!({"n": i64::MAX - 2 + i, "v": format!("x{i}")}))
+            .collect();
+        match compact(&at_ceiling, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let n = schema.fields.iter().find(|f| f.name == "n").unwrap();
+                assert_eq!(
+                    n.encoding,
+                    Some(ColumnEncoding::ArithInt {
+                        base: i64::MAX - 2,
+                        step: 1
+                    })
+                );
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        let beyond = vec![
+            json!({"n": u64::MAX - 2, "v": "a"}),
+            json!({"n": u64::MAX - 1, "v": "b"}),
+            json!({"n": u64::MAX, "v": "c"}),
+        ];
+        match compact(&beyond, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let n = schema.fields.iter().find(|f| f.name == "n").unwrap();
+                assert_eq!(n.encoding, None, "u64-beyond-i64 must not stamp");
             }
             other => panic!("expected Table, got {other:?}"),
         }

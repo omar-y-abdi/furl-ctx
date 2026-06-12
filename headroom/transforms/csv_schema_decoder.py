@@ -19,6 +19,11 @@ Encodings understood:
 * **Ditto marks** — a bare ``=`` cell carries forward the SAME column's
   previous *rendered* cell (a literal ``=`` data cell is CSV-quoted by
   the formatter, so the bare marker is unambiguous).
+* **Arithmetic fold** — ``name:int=BASE+STEP`` declares an exact
+  integer progression; the column is omitted from rows and row ``i``
+  decodes to ``BASE + STEP*i``. Unambiguous against a constant: an int
+  constant renders as a bare integer, never two integers joined by
+  ``+``.
 
 Lines that do not parse as rows (e.g. the lossy-survivor
 ``{"_ccr_dropped": ...}`` sentinel line) are skipped; callers treat
@@ -34,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 _HEADER_RE = re.compile(r"^\[(\d+)\]\{(.+)\}$")
+_ARITH_RE = re.compile(r"^(-?\d+)\+(-?\d+)$")
 _CCR_SENTINEL_KEY = "_ccr_dropped"
 
 
@@ -48,6 +54,8 @@ class ColumnSpec:
     # legitimate `None` (JSON null) constant, so totality needs the flag.
     has_const: bool
     const_value: Any
+    # (base, step) of an arithmetic fold; None when not arith-encoded.
+    arith: tuple[int, int] | None = None
 
 
 def split_unquoted(s: str) -> list[str]:
@@ -100,6 +108,17 @@ def _parse_header_segment(seg: str) -> ColumnSpec | None:
     name, decl = seg.split(":", 1)
     if "=" in decl:
         type_tag, raw = decl.split("=", 1)
+        if type_tag.rstrip("?") == "int":
+            arith = _ARITH_RE.match(raw)
+            if arith:
+                return ColumnSpec(
+                    name=name,
+                    type_tag="int",
+                    nullable=False,
+                    has_const=False,
+                    const_value=None,
+                    arith=(int(arith.group(1)), int(arith.group(2))),
+                )
         if type_tag.rstrip("?") == "string":
             # String-tagged constant: never coerce (a numeric-looking
             # constant like "123" stays a string).
@@ -160,9 +179,10 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
         specs.append(spec)
 
     const_cols = [s for s in specs if s.has_const]
-    var_cols = [s for s in specs if not s.has_const]
+    arith_cols = [s for s in specs if s.arith is not None]
+    var_cols = [s for s in specs if not s.has_const and s.arith is None]
 
-    if not var_cols and const_cols:
+    if not var_cols and const_cols and not arith_cols:
         # Degenerate fully-constant table: every row is identical and
         # carried entirely by the declaration; [N] gives the count.
         row = {s.name: s.const_value for s in const_cols}
@@ -170,11 +190,13 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
 
     rows: list[dict[str, Any]] = []
     carry_raw: list[str | None] = [None] * len(var_cols)
+    ordinal = 0  # row index for arithmetic folds — counts every row line
     for line in lines[1:]:
         if not line or _is_sentinel_line(line):
             continue
         parts = split_unquoted(line)
         if len(parts) != len(var_cols):
+            ordinal += 1  # malformed row still occupies its index
             continue
         row = {}
         ok = True
@@ -189,8 +211,13 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
                 carry_raw[j] = raw
             row[spec.name] = _decode_cell(resolved, spec.type_tag)
         if not ok:
+            ordinal += 1
             continue
         for spec in const_cols:
             row[spec.name] = spec.const_value
+        for spec in arith_cols:
+            base, step = spec.arith  # type: ignore[misc]
+            row[spec.name] = base + step * ordinal
         rows.append(row)
+        ordinal += 1
     return rows

@@ -32,7 +32,7 @@ pub mod walker;
 pub use classifier::{classify_cell, CellClass, ClassifyConfig};
 pub use compactor::{compact, CompactConfig};
 pub use formatter::{CsvSchemaFormatter, Formatter, JsonFormatter, MarkdownKvFormatter};
-pub use ir::{Bucket, CellValue, Compaction, FieldSpec, OpaqueKind, Row, Schema};
+pub use ir::{Bucket, CellValue, ColumnEncoding, Compaction, FieldSpec, OpaqueKind, Row, Schema};
 pub use walker::{
     compact_document, emit_opaque_ccr_marker, try_parse_json_container, DocumentCompactor,
 };

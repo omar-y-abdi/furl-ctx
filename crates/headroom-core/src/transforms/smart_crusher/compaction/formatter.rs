@@ -35,7 +35,7 @@
 
 use serde_json::{json, Value};
 
-use super::ir::{CellValue, Compaction, OpaqueKind, Row, Schema};
+use super::ir::{CellValue, ColumnEncoding, Compaction, OpaqueKind, Row, Schema};
 
 /// Format a `Compaction` tree into bytes.
 pub trait Formatter: Send + Sync {
@@ -266,6 +266,13 @@ fn write_table(
     // declares `name:type=v` here and is OMITTED from every row below —
     // the value appears verbatim exactly once. Lossless: rows are
     // reconstructible from the declaration + remaining cells.
+    //
+    // Arithmetic fold: a column stamped `ArithInt { base, step }` is an
+    // exact progression `base + step*i`; it declares `name:int=BASE+STEP`
+    // here and is OMITTED from every row below. Unambiguous against a
+    // constant declaration: an int constant renders as a bare integer,
+    // never two integers joined by `+`. Lossless: the decoder
+    // regenerates value_i = base + step*i from the row index.
     out.push('[');
     out.push_str(&rows.len().to_string());
     out.push_str("]{");
@@ -278,6 +285,9 @@ fn write_table(
             } else {
                 format!("{}:{}", f.name, f.type_tag)
             };
+            if let Some(ColumnEncoding::ArithInt { base: b, step }) = &f.encoding {
+                return format!("{base}={b}+{step}");
+            }
             match &f.const_value {
                 Some(v) => format!("{base}={}", const_decl_value(v)),
                 None => base,
@@ -291,7 +301,8 @@ fn write_table(
     }
     out.push('\n');
 
-    // Rows. Constant columns are folded into the declaration above.
+    // Rows. Constant and arithmetic columns are folded into the
+    // declaration above.
     //
     // Ditto marks: a cell whose rendering is identical to the SAME
     // column's cell in the previous row renders as a bare `=`
@@ -305,7 +316,7 @@ fn write_table(
             .0
             .iter()
             .zip(schema.fields.iter())
-            .filter(|(_, f)| f.const_value.is_none())
+            .filter(|(_, f)| row_visible(f))
             .map(|(c, _)| format_cell(c))
             .collect();
         if prev.len() != rendered.len() {
@@ -328,6 +339,12 @@ fn write_table(
             *slot = Some(cell.clone());
         }
     }
+}
+
+/// Is this column rendered per-row (true) or folded entirely into the
+/// declaration line (false — constant fold / arithmetic fold)?
+fn row_visible(f: &super::ir::FieldSpec) -> bool {
+    f.const_value.is_none() && !matches!(f.encoding, Some(ColumnEncoding::ArithInt { .. }))
 }
 
 /// Render a folded constant for the `name:type=value` declaration.
@@ -674,6 +691,7 @@ mod tests {
                     type_tag: "ccr".into(),
                     nullable: false,
                     const_value: None,
+                    encoding: None,
                 }],
             },
             rows: vec![std::mem::replace(&mut row, Row::new(vec![]))],
@@ -778,6 +796,7 @@ mod tests {
                     type_tag: "int".into(),
                     nullable: false,
                     const_value: None,
+                    encoding: None,
                 }],
             },
             rows,
@@ -808,13 +827,14 @@ mod tests {
             "got: {}",
             lines[0]
         );
-        // Variable columns stay bare in the declaration.
-        assert!(lines[0].contains("seq:int"), "got: {}", lines[0]);
-        // Rows hold ONLY the variable cells (fields sort alphabetically
-        // at equal frequency: bytes,from,seq,t → seq,t after fold).
-        assert_eq!(lines[1], "0,0.1");
-        assert_eq!(lines[2], "1,0.2");
-        assert_eq!(lines[3], "2,0.3");
+        // The monotone counter folds as an arithmetic progression.
+        assert!(lines[0].contains("seq:int=0+1"), "got: {}", lines[0]);
+        // Rows hold ONLY the remaining variable cells (fields sort
+        // alphabetically at equal frequency: bytes,from,seq,t → t after
+        // const + arith folds).
+        assert_eq!(lines[1], "0.1");
+        assert_eq!(lines[2], "0.2");
+        assert_eq!(lines[3], "0.3");
     }
 
     #[test]
@@ -882,7 +902,7 @@ mod tests {
     fn csv_consecutive_repeats_render_as_ditto() {
         let items = vec![
             json!({"path": "src/a.py", "line": 10, "txt": "def f():"}),
-            json!({"path": "src/a.py", "line": 20, "txt": "def g():"}),
+            json!({"path": "src/a.py", "line": 21, "txt": "def g():"}),
             json!({"path": "src/b.py", "line": 30, "txt": "def h():"}),
             json!({"path": "src/b.py", "line": 40, "txt": "def i():"}),
         ];
@@ -890,19 +910,22 @@ mod tests {
         let out = CsvSchemaFormatter::new().format(&c);
         let lines: Vec<&str> = out.trim_end().lines().collect();
         // Columns sort alphabetically at equal frequency: line,path,txt.
+        // (`line` steps 11,9,10 — non-constant, so no arithmetic fold.)
         assert_eq!(lines[1], "10,src/a.py,def f():");
-        assert_eq!(lines[2], "20,=,def g():", "repeat path must ditto");
+        assert_eq!(lines[2], "21,=,def g():", "repeat path must ditto");
         assert_eq!(lines[3], "30,src/b.py,def h():", "run break re-materializes");
         assert_eq!(lines[4], "40,=,def i():");
     }
 
     #[test]
     fn csv_ditto_round_trips_losslessly() {
+        // `line` alternates step 4,2 (non-constant) so the arithmetic
+        // fold stays out of the way — this test pins DITTO round-trip.
         let items: Vec<Value> = (0..30)
             .map(|i| {
                 json!({
                     "path": format!("src/m_{}.py", i / 5),
-                    "line": 3 * i + 1,
+                    "line": 3 * i + 1 + (i % 2),
                     "code": if i % 5 < 2 { 200 } else { 503 },
                 })
             })
@@ -949,11 +972,14 @@ mod tests {
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
         let lines: Vec<&str> = out.trim_end().lines().collect();
-        // First materialization is the QUOTED literal; the consecutive
-        // repeat dittos the quoted form (carry-forward yields `"="`).
-        assert_eq!(lines[1], "1,\"=\"");
-        assert_eq!(lines[2], "2,=");
-        assert_eq!(lines[3], "3,+");
+        // `id` arith-folds into the declaration; `op` is the only row
+        // cell. First materialization is the QUOTED literal; the
+        // consecutive repeat dittos the quoted form (carry-forward
+        // yields `"="`).
+        assert!(lines[0].contains("id:int=1+1"), "got: {}", lines[0]);
+        assert_eq!(lines[1], "\"=\"");
+        assert_eq!(lines[2], "=");
+        assert_eq!(lines[3], "+");
     }
 
     #[test]
@@ -967,9 +993,94 @@ mod tests {
         ];
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
-        // 1-char cells never ditto — `=` would save nothing.
-        // (Columns sort alphabetically at equal frequency: flag,id.)
-        assert!(out.contains("y,1\ny,2\nn,3\n"), "got: {out}");
+        // 1-char cells never ditto — `=` would save nothing. (`id`
+        // arith-folds into the declaration; `flag` is the only row cell.)
+        assert!(out.contains("y\ny\nn\n"), "got: {out}");
+    }
+
+    // ── Arithmetic fold (CSV) ──
+
+    #[test]
+    fn csv_arith_fold_round_trips_losslessly() {
+        // A consumer holding only the output reconstructs every row:
+        // `name:int=BASE+STEP` regenerates value_i = BASE + STEP*i.
+        let items: Vec<Value> = (0..40)
+            .map(|i| json!({"seq": 7 + 3 * i, "t": format!("v{}", i * i)}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let mut lines = out.trim_end().lines();
+        let decl = lines.next().expect("declaration line");
+        assert!(decl.contains("seq:int=7+3"), "got decl: {decl}");
+        let mut reconstructed: Vec<Value> = Vec::new();
+        for (i, line) in lines.enumerate() {
+            reconstructed.push(json!({"seq": 7 + 3 * (i as i64), "t": line}));
+        }
+        assert_eq!(reconstructed, items, "arith round-trip must be lossless");
+    }
+
+    #[test]
+    fn csv_arith_fold_handles_negative_step() {
+        let items: Vec<Value> = (0..10)
+            .map(|i| json!({"countdown": 100 - 5 * i, "v": format!("x{i}")}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let decl = out.lines().next().unwrap();
+        assert!(decl.contains("countdown:int=100+-5"), "got decl: {decl}");
+        // Rows carry only `v`.
+        assert!(out.contains("\nx0\nx1\n"), "got: {out}");
+    }
+
+    #[test]
+    fn csv_arith_fold_never_empties_rows() {
+        // bytes/ttl are constants, seq is a perfect progression — but
+        // folding seq too would leave EMPTY row lines (unreconstructible
+        // row count). The last visible column must stay in the rows.
+        let items: Vec<Value> = (0..20)
+            .map(|i| json!({"bytes": 64, "seq": i, "ttl": 64}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        assert!(
+            !lines[0].contains("seq:int=0+1"),
+            "seq must NOT fold when it is the last row-visible column: {}",
+            lines[0]
+        );
+        assert_eq!(lines[1..].len(), 20, "every row line present");
+        assert_eq!(lines[1], "0");
+        assert_eq!(lines[20], "19");
+    }
+
+    #[test]
+    fn csv_non_constant_step_does_not_fold() {
+        let items = vec![
+            json!({"n": 1, "v": "a"}),
+            json!({"n": 2, "v": "b"}),
+            json!({"n": 4, "v": "c"}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let decl = out.lines().next().unwrap();
+        assert!(!decl.contains("n:int="), "got decl: {decl}");
+        assert!(out.contains("1,a\n2,b\n4,c\n"), "got: {out}");
+    }
+
+    #[test]
+    fn json_formatter_unchanged_by_arith_fold() {
+        // The JSON formatter ignores `encoding` — byte-identical output
+        // to the pre-encoding engine (rows keep all cells).
+        let items: Vec<Value> = (0..5)
+            .map(|i| json!({"seq": i, "v": format!("x{i}")}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = JsonFormatter::new().format(&c);
+        assert!(
+            out.contains("\"_rows\":[[0,\"x0\"],[1,\"x1\"],[2,\"x2\"],[3,\"x3\"],[4,\"x4\"]]"),
+            "got: {out}"
+        );
+        assert!(!out.contains("encoding"), "got: {out}");
     }
 
     #[test]
@@ -1165,6 +1276,7 @@ mod tests {
                     type_tag: "int".into(),
                     nullable: false,
                     const_value: None,
+                    encoding: None,
                 }],
             },
             rows,
