@@ -103,6 +103,22 @@ pub struct CrushArrayResult {
     pub compaction_kind: Option<&'static str>,
 }
 
+/// Result of [`SmartCrusher::persist_dropped`] — the CCR hash that keys
+/// the stored full-original array plus the (gated) prompt-visible marker
+/// text. `Some(_)` only when rows were actually dropped; the store write
+/// (when a store is configured) has already happened by the time this is
+/// returned.
+struct DroppedPersist {
+    /// 12-char SHA-256 hex prefix of the canonical full-original array.
+    /// Always returned when something was dropped — callers may mirror
+    /// or retrieve it regardless of the marker gate.
+    hash: String,
+    /// `<<ccr:HASH N_rows_offloaded>>` marker, or empty when
+    /// `enable_ccr_marker` is off. Only the marker TEXT is gated; the
+    /// store write is unconditional.
+    marker: String,
+}
+
 /// Top-level SmartCrusher.
 ///
 /// Three pluggable extensions (Stage 3c.2 PR1):
@@ -437,19 +453,48 @@ impl SmartCrusher {
                             let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
                             let (crushed, strategy) = crush_string_array(&strs, &self.config, bias);
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
-                            let crushed_values: Vec<Value> =
+                            let mut crushed_values: Vec<Value> =
                                 crushed.into_iter().map(Value::String).collect();
+                            // 1A (non-dict path): persist the full original
+                            // + append a CCR-Dropped sentinel whenever rows
+                            // were dropped, so every distinct string is
+                            // recoverable via `ccr_get(hash)` — never
+                            // silently lost. Store write is unconditional
+                            // (inside `persist_dropped`); the sentinel TEXT
+                            // is gated by `enable_ccr_marker`.
+                            let dropped = n.saturating_sub(crushed_values.len());
+                            if let Some(sentinel) = self.ccr_dropped_sentinel(arr, dropped) {
+                                crushed_values.push(sentinel);
+                            }
                             return (Value::Array(crushed_values), info_parts.join(","));
                         }
                         ArrayType::NumberArray => {
                             let (crushed, strategy) = crush_number_array(arr, &self.config, bias);
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
+                            let mut crushed = crushed;
+                            // 1A (non-dict path): same guarantee as the
+                            // string branch — persist + sentinel on drop.
+                            let dropped = n.saturating_sub(crushed.len());
+                            if let Some(sentinel) = self.ccr_dropped_sentinel(arr, dropped) {
+                                crushed.push(sentinel);
+                            }
                             return (Value::Array(crushed), info_parts.join(","));
                         }
                         ArrayType::MixedArray => {
                             let (crushed, strategy) =
                                 self.crush_mixed_array(arr, query_context, bias);
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
+                            let mut crushed = crushed;
+                            // 1A (non-dict path): the mixed crusher drops
+                            // str/number subgroup items (and its own
+                            // dropped_summary was previously discarded).
+                            // Persist the full original + sentinel here so
+                            // every dropped item across all subgroups is
+                            // recoverable.
+                            let dropped = n.saturating_sub(crushed.len());
+                            if let Some(sentinel) = self.ccr_dropped_sentinel(arr, dropped) {
+                                crushed.push(sentinel);
+                            }
                             return (Value::Array(crushed), info_parts.join(","));
                         }
                         // NestedArray, BoolArray, Empty → fall through
@@ -697,44 +742,16 @@ impl SmartCrusher {
         // DESIGN.md sub-step 1A (kill silent loss): persistence is
         // UNCONDITIONAL. When `dropped_count > 0` we always compute the
         // canonical bytes, the hash, and write to the store (if one is
-        // configured). The `enable_ccr_marker` gate now controls ONLY
-        // the prompt-visible marker TEXT (`dropped_summary`), not the
-        // store write. This makes the previously-silent
-        // `enable_ccr_marker=false` drop path recoverable: the payload
-        // is in the store keyed by `ccr_hash` and a caller can serve it
-        // back via `ccr_get(hash)` even without injecting marker text.
-        //
-        // Rationale: the canonical serialization is computed once here
-        // regardless; the marginal cost of unconditional persistence is
-        // a single store write. Store/TTL pressure is bounded by the
-        // store's existing capacity + TTL policy.
+        // configured). The `enable_ccr_marker` gate controls ONLY the
+        // prompt-visible marker TEXT (`dropped_summary`), not the store
+        // write. See [`SmartCrusher::persist_dropped`] — the shared
+        // helper that both this DICT path and the non-dict
+        // string/number/mixed paths route through so every dropped item
+        // (any array type) is CCR-recoverable + signalled identically.
         let dropped_count = items.len().saturating_sub(result.len());
-        let (ccr_hash, dropped_summary) = if dropped_count > 0 {
-            // Serialize the original array exactly ONCE. The hash is
-            // taken over those bytes, and (if a store is configured) the
-            // same bytes get stored — eliminating a redundant tree clone
-            // (`items.to_vec()`) and a redundant `serde_json::to_string`
-            // pass that the previous version did per dropped array.
-            let canonical = canonical_array_json(items);
-            let h = hash_canonical(&canonical);
-
-            // ── Unconditional persist (1A) ──
-            if let Some(store) = &self.ccr_store {
-                store.put(&h, &canonical);
-            }
-
-            // ── Gated marker TEXT only ──
-            // The hash is always returned (callers may mirror/retrieve
-            // it); only the prompt-visible marker text is suppressed
-            // when the gate is off.
-            let marker = if self.config.enable_ccr_marker {
-                format!("<<ccr:{h} {dropped_count}_rows_offloaded>>")
-            } else {
-                String::new()
-            };
-            (Some(h), marker)
-        } else {
-            (None, String::new())
+        let (ccr_hash, dropped_summary) = match self.persist_dropped(items, dropped_count) {
+            Some(persisted) => (Some(persisted.hash), persisted.marker),
+            None => (None, String::new()),
         };
 
         CrushArrayResult {
@@ -745,6 +762,80 @@ impl SmartCrusher {
             compacted: None,
             compaction_kind: None,
         }
+    }
+
+    /// Shared CCR persist + sentinel logic — the single source of truth
+    /// for sub-step 1A's "kill silent loss" guarantee across **every**
+    /// lossy array path (dict / string / number / mixed).
+    ///
+    /// When `dropped_count > 0`, serialize the FULL `original_items`
+    /// array exactly once into canonical JSON, hash those bytes, and
+    /// **unconditionally** write `(hash → canonical)` to the configured
+    /// CCR store (if any). The store write is the cornerstone of the
+    /// no-data-loss guarantee: a dropped needle is always retrievable
+    /// via `ccr_get(hash)`, never silently lost. The marker TEXT
+    /// (`<<ccr:HASH N_rows_offloaded>>`) is gated behind
+    /// `config.enable_ccr_marker`; only the prompt-visible text is
+    /// suppressed when the gate is off — never the store write.
+    ///
+    /// Returns `None` when nothing was dropped (no hash, no marker, no
+    /// store write). Centralizing this here keeps the canonicalization
+    /// and hash scheme byte-identical across all callers — the dict path
+    /// behavior is unchanged, and the non-dict paths now inherit the
+    /// exact same contract.
+    fn persist_dropped(
+        &self,
+        original_items: &[Value],
+        dropped_count: usize,
+    ) -> Option<DroppedPersist> {
+        if dropped_count == 0 {
+            return None;
+        }
+
+        // Serialize the original array exactly ONCE. The hash is taken
+        // over those bytes, and (if a store is configured) the same
+        // bytes get stored — no redundant clone or re-serialize.
+        let canonical = canonical_array_json(original_items);
+        let hash = hash_canonical(&canonical);
+
+        // ── Unconditional persist (1A) ──
+        if let Some(store) = &self.ccr_store {
+            store.put(&hash, &canonical);
+        }
+
+        // ── Gated marker TEXT only ──
+        let marker = if self.config.enable_ccr_marker {
+            format!("<<ccr:{hash} {dropped_count}_rows_offloaded>>")
+        } else {
+            String::new()
+        };
+
+        Some(DroppedPersist { hash, marker })
+    }
+
+    /// Build the `{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>"}`
+    /// sentinel object for a non-dict array drop, persisting the full
+    /// original via [`SmartCrusher::persist_dropped`] first.
+    ///
+    /// Returns `None` when nothing was dropped OR when the marker gate
+    /// is off and there is therefore no sentinel TEXT to inject (the
+    /// store write still happened inside `persist_dropped`, so the
+    /// payload is recoverable via the returned hash even though no
+    /// prompt-visible sentinel is appended). This mirrors how the dict
+    /// path only appends its sentinel when `dropped_summary` is
+    /// non-empty (crusher.rs DictArray branch).
+    fn ccr_dropped_sentinel(
+        &self,
+        original_items: &[Value],
+        dropped_count: usize,
+    ) -> Option<Value> {
+        let persisted = self.persist_dropped(original_items, dropped_count)?;
+        if persisted.marker.is_empty() {
+            return None;
+        }
+        let mut sentinel = serde_json::Map::new();
+        sentinel.insert("_ccr_dropped".to_string(), Value::String(persisted.marker));
+        Some(Value::Object(sentinel))
     }
 
     /// Compress a mixed-type array by grouping items by type and
@@ -1641,5 +1732,274 @@ mod tests {
             store_len_after > store_len_before,
             "default should write to ccr_store"
         );
+    }
+
+    // ---------- 1A non-dict silent-loss regression (adversarial) ----------
+    //
+    // The defect these pin: the NON-dict crush paths
+    // (`crush_string_array`, `crush_number_array`, `crush_mixed_array`)
+    // dropped distinct items with NO store write and NO sentinel — a
+    // dropped needle was *silently* lost (markers=[], store empty,
+    // `ccr_get` returns nothing). Now `process_value`'s String/Number/
+    // Mixed branches route the full original through `persist_dropped`
+    // and append a `_ccr_dropped` sentinel, so every distinct dropped
+    // item is recoverable via `ccr_get(hash)` — same guarantee the dict
+    // path already had.
+
+    use std::collections::HashSet;
+
+    /// Build a default-config crusher with an in-memory CCR store
+    /// attached, returning both so tests can inspect the store.
+    fn crusher_with_store() -> (SmartCrusher, std::sync::Arc<crate::ccr::InMemoryCcrStore>) {
+        use crate::ccr::InMemoryCcrStore;
+        use std::sync::Arc;
+        let store = Arc::new(InMemoryCcrStore::new());
+        let store_dyn: Arc<dyn CcrStore> = Arc::clone(&store) as Arc<dyn CcrStore>;
+        let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
+            .with_default_oss_setup()
+            .with_default_compaction()
+            .with_ccr_store(store_dyn)
+            .build();
+        (c, store)
+    }
+
+    /// Recursively collect every `<<ccr:HASH N_rows_offloaded>>` hash
+    /// from a crushed JSON tree (string-leaf markers AND `_ccr_dropped`
+    /// object sentinels) plus every kept scalar's canonical repr.
+    fn collect_scalars_and_hashes(
+        node: &Value,
+        scalars: &mut HashSet<String>,
+        hashes: &mut Vec<String>,
+    ) {
+        match node {
+            Value::Array(a) => {
+                for x in a {
+                    collect_scalars_and_hashes(x, scalars, hashes);
+                }
+            }
+            Value::Object(map) => {
+                if let Some(Value::String(s)) = map.get("_ccr_dropped") {
+                    if let Some(h) = extract_ccr_hash(s) {
+                        hashes.push(h);
+                    }
+                    return;
+                }
+                for v in map.values() {
+                    collect_scalars_and_hashes(v, scalars, hashes);
+                }
+            }
+            Value::String(s) => {
+                if let Some(h) = extract_ccr_hash(s) {
+                    hashes.push(h);
+                } else {
+                    scalars.insert(canonical_json_for_match(node));
+                }
+            }
+            _ => {
+                scalars.insert(canonical_json_for_match(node));
+            }
+        }
+    }
+
+    /// Pull the 12-char hash out of a `<<ccr:HASH N_rows_offloaded>>`
+    /// marker string, if present.
+    fn extract_ccr_hash(s: &str) -> Option<String> {
+        let start = s.find("<<ccr:")? + "<<ccr:".len();
+        let rest = &s[start..];
+        let end = rest.find(' ')?;
+        Some(rest[..end].to_string())
+    }
+
+    /// Run the full public `crush()` path over `items`, then assert that
+    /// EVERY distinct input is recoverable: present in the kept output OR
+    /// restorable from the CCR store under an emitted hash. Returns
+    /// `(total, recovered, n_markers, store_len)`.
+    fn assert_no_silent_loss(
+        c: &SmartCrusher,
+        store: &crate::ccr::InMemoryCcrStore,
+        items: &[Value],
+    ) {
+        let content = serde_json::to_string(items).unwrap();
+        let result = c.crush(&content, "", 1.0);
+        let out: Value = serde_json::from_str(&result.compressed).unwrap();
+
+        let mut kept_scalars: HashSet<String> = HashSet::new();
+        let mut hashes: Vec<String> = Vec::new();
+        collect_scalars_and_hashes(&out, &mut kept_scalars, &mut hashes);
+
+        // A drop must emit at least one marker + populate the store.
+        assert!(
+            !hashes.is_empty(),
+            "expected a <<ccr:..>> sentinel after dropping rows; got none. compressed={}",
+            &result.compressed[..result.compressed.len().min(200)]
+        );
+        assert!(store.len() > 0, "ccr_store must be populated on drop");
+
+        let mut recovered: HashSet<String> = kept_scalars;
+        for h in &hashes {
+            let payload = store
+                .get(h)
+                .unwrap_or_else(|| panic!("hash {h} must resolve in store"));
+            let restored: Vec<Value> = serde_json::from_str(&payload).unwrap();
+            for x in restored {
+                recovered.insert(canonical_json_for_match(&x));
+            }
+        }
+
+        let distinct_inputs: HashSet<String> =
+            items.iter().map(canonical_json_for_match).collect();
+        let lost: Vec<&String> = distinct_inputs.difference(&recovered).collect();
+        assert!(
+            lost.is_empty(),
+            "{} distinct items silently lost (recovered {}/{}); first lost: {:?}",
+            lost.len(),
+            distinct_inputs.len() - lost.len(),
+            distinct_inputs.len(),
+            lost.iter().take(3).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn string_array_drops_are_ccr_recoverable() {
+        // 1000 distinct strings → adversarial counterexample (was 964
+        // silently lost).
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..1000)
+            .map(|i| json!(format!("log-line-entry-number-{i}-payload")))
+            .collect();
+        assert_no_silent_loss(&c, &store, &items);
+    }
+
+    #[test]
+    fn number_array_drops_are_ccr_recoverable() {
+        // 1000 distinct numbers (was 985 silently lost).
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..1000).map(|i| json!(i)).collect();
+        assert_no_silent_loss(&c, &store, &items);
+    }
+
+    #[test]
+    fn mixed_array_drops_are_ccr_recoverable() {
+        // 700 mixed str+number items (was 679 silently lost).
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..700)
+            .map(|i| {
+                if i % 2 == 0 {
+                    json!(format!("event-{i}"))
+                } else {
+                    json!(i)
+                }
+            })
+            .collect();
+        assert_no_silent_loss(&c, &store, &items);
+    }
+
+    #[test]
+    fn unicode_string_array_drops_are_ccr_recoverable() {
+        // 1000 distinct unicode strings → the canonical bytes + hash
+        // round-trip non-ASCII content losslessly.
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..1000)
+            .map(|i| {
+                let cp = char::from_u32(0x4E00 + (i % 2000) as u32).unwrap_or('日');
+                json!(format!("café-{i}-日本語-{cp}"))
+            })
+            .collect();
+        assert_no_silent_loss(&c, &store, &items);
+    }
+
+    #[test]
+    fn dict_array_recovery_still_green_after_refactor() {
+        // Control: the dict path (already 1A-covered) must keep
+        // recovering 100% after extracting the shared `persist_dropped`
+        // helper. Pins that the refactor didn't regress the dict path.
+        let (c, store) = crusher_with_store();
+        // Low-uniqueness dicts so the analyzer is willing to crush, and
+        // a high lossless threshold so the lossy/CCR path fires rather
+        // than lossless compaction.
+        let cfg = SmartCrusherConfig {
+            lossless_min_savings_ratio: 0.99,
+            ..SmartCrusherConfig::default()
+        };
+        let store_dyn: std::sync::Arc<dyn CcrStore> =
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn CcrStore>;
+        let c2 = SmartCrusherBuilder::new(cfg)
+            .with_default_oss_setup()
+            .with_default_compaction()
+            .with_ccr_store(store_dyn)
+            .build();
+        let _ = &c; // silence: reuse store handle from helper
+        let items: Vec<Value> = (0..200).map(|i| json!({"status": "ok", "seq": i})).collect();
+        assert_no_silent_loss(&c2, &store, &items);
+    }
+
+    #[test]
+    fn persist_dropped_hash_is_byte_identical_to_inline_dict_scheme() {
+        // The shared helper must produce the SAME hash the dict path
+        // produced inline before the refactor: SHA-256(canonical) → 12
+        // hex chars over `canonical_array_json(items)`. Pin it so the
+        // CCR retrieve contract is provably unchanged.
+        let (c, _store) = crusher_with_store();
+        let items: Vec<Value> = (0..30).map(|i| json!({"id": i})).collect();
+        let persisted = c
+            .persist_dropped(&items, 5)
+            .expect("dropped_count>0 → Some");
+        let expected = hash_canonical(&canonical_array_json(&items));
+        assert_eq!(persisted.hash, expected, "hash scheme must be unchanged");
+        assert_eq!(persisted.hash.len(), 12);
+        assert!(persisted.marker.contains(&format!("<<ccr:{expected} 5_rows_offloaded>>")));
+        // Zero dropped → None (no hash, no marker, no store write).
+        assert!(c.persist_dropped(&items, 0).is_none());
+    }
+
+    #[test]
+    fn non_dict_drop_persists_store_even_with_marker_gated_off() {
+        // 1A contract parity with the dict path: with
+        // `enable_ccr_marker=false`, the non-dict string path suppresses
+        // the prompt-visible sentinel TEXT (so `ccr_dropped_sentinel`
+        // returns None and nothing is appended), but the store write is
+        // UNCONDITIONAL — the dropped payload is still recoverable by
+        // hash. Pins that marker-gating never re-introduces silent loss.
+        use crate::ccr::InMemoryCcrStore;
+        use std::sync::Arc;
+
+        let store = Arc::new(InMemoryCcrStore::new());
+        let store_dyn: Arc<dyn CcrStore> = Arc::clone(&store) as Arc<dyn CcrStore>;
+        let cfg = SmartCrusherConfig {
+            enable_ccr_marker: false,
+            ..SmartCrusherConfig::default()
+        };
+        let c = SmartCrusherBuilder::new(cfg)
+            .with_default_oss_setup()
+            .with_default_compaction()
+            .with_ccr_store(store_dyn)
+            .build();
+
+        let items: Vec<Value> = (0..200)
+            .map(|i| json!(format!("distinct-string-{i}")))
+            .collect();
+        let content = serde_json::to_string(&items).unwrap();
+
+        let store_before = store.len();
+        let result = c.crush(&content, "", 1.0);
+        let store_after = store.len();
+
+        // Marker TEXT suppressed → no `_ccr_dropped`/`<<ccr:` in output.
+        assert!(
+            !result.compressed.contains("<<ccr:"),
+            "marker text must be gated off, got: {}",
+            &result.compressed[..result.compressed.len().min(200)]
+        );
+        // ...but the store DID grow — persistence is unconditional, so
+        // the payload is recoverable by hash (computed from the input).
+        assert!(
+            store_after > store_before,
+            "ccr_store must grow even with enable_ccr_marker=false (1A)"
+        );
+        let expected_hash = hash_canonical(&canonical_array_json(&items));
+        let recovered = store
+            .get(&expected_hash)
+            .expect("non-dict drop must be retrievable by hash even when marker is off");
+        assert_eq!(recovered, canonical_array_json(&items));
     }
 }
