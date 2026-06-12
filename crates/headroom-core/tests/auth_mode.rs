@@ -173,19 +173,28 @@ fn classify_under_10us_per_call() {
         std::hint::black_box(classify(&h));
     }
 
-    let iters = 100_000;
-    let start = Instant::now();
-    for _ in 0..iters {
-        std::hint::black_box(classify(&h));
+    // Time several independent batches and assert on the FASTEST one.
+    // A single long mean is at the mercy of the scheduler — this test
+    // flaked when other builds ran concurrently — but the minimum of N
+    // batches measures "how fast CAN it run": contention inflates some
+    // batches, while a genuine code regression slows down all of them.
+    let batches = 10;
+    let iters_per_batch = 10_000;
+    let mut best_per_call_ns = u128::MAX;
+    for _ in 0..batches {
+        let start = Instant::now();
+        for _ in 0..iters_per_batch {
+            std::hint::black_box(classify(&h));
+        }
+        let per_call_ns = start.elapsed().as_nanos() / iters_per_batch as u128;
+        best_per_call_ns = best_per_call_ns.min(per_call_ns);
     }
-    let elapsed = start.elapsed();
-    let per_call_ns = elapsed.as_nanos() / iters as u128;
 
     // 10us = 10_000 ns. Asserting 10x headroom guards against perf
     // regressions even on a contended CI runner.
     assert!(
-        per_call_ns < 10_000,
-        "classify took {} ns/call (limit: 10_000 ns); regression suspected",
-        per_call_ns
+        best_per_call_ns < 10_000,
+        "classify took {} ns/call at best (limit: 10_000 ns); regression suspected",
+        best_per_call_ns
     );
 }
