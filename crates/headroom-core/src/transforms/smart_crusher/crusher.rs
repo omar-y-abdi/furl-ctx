@@ -675,20 +675,28 @@ impl SmartCrusher {
         );
         let result = self.execute_plan(&plan, items);
 
-        // Emit CCR-Dropped marker iff rows were actually dropped AND
-        // the marker gate is on. **The marker is the cornerstone of
-        // CCR's no-data-loss guarantee:** we hash the full original,
-        // stash it in the configured store, and emit a marker pointing
-        // at that hash. The runtime later serves the original back via
-        // retrieval tool calls.
+        // CCR persistence + marker emission. **The store write is the
+        // cornerstone of CCR's no-data-loss guarantee:** whenever rows
+        // are dropped we hash the full original and stash it in the
+        // configured store so a dropped needle is *always* recoverable
+        // — never silently lost.
         //
-        // When `enable_ccr_marker` is false (Python shim's path for
-        // `ccr_config.enabled=False` or `inject_retrieval_marker=False`)
-        // we keep the row drops (compression is still requested) but
-        // skip the marker text and the store write — there's no point
-        // storing a payload that nothing in the prompt can reference.
+        // DESIGN.md sub-step 1A (kill silent loss): persistence is
+        // UNCONDITIONAL. When `dropped_count > 0` we always compute the
+        // canonical bytes, the hash, and write to the store (if one is
+        // configured). The `enable_ccr_marker` gate now controls ONLY
+        // the prompt-visible marker TEXT (`dropped_summary`), not the
+        // store write. This makes the previously-silent
+        // `enable_ccr_marker=false` drop path recoverable: the payload
+        // is in the store keyed by `ccr_hash` and a caller can serve it
+        // back via `ccr_get(hash)` even without injecting marker text.
+        //
+        // Rationale: the canonical serialization is computed once here
+        // regardless; the marginal cost of unconditional persistence is
+        // a single store write. Store/TTL pressure is bounded by the
+        // store's existing capacity + TTL policy.
         let dropped_count = items.len().saturating_sub(result.len());
-        let (ccr_hash, dropped_summary) = if dropped_count > 0 && self.config.enable_ccr_marker {
+        let (ccr_hash, dropped_summary) = if dropped_count > 0 {
             // Serialize the original array exactly ONCE. The hash is
             // taken over those bytes, and (if a store is configured) the
             // same bytes get stored — eliminating a redundant tree clone
@@ -696,10 +704,21 @@ impl SmartCrusher {
             // pass that the previous version did per dropped array.
             let canonical = canonical_array_json(items);
             let h = hash_canonical(&canonical);
-            let marker = format!("<<ccr:{h} {dropped_count}_rows_offloaded>>");
+
+            // ── Unconditional persist (1A) ──
             if let Some(store) = &self.ccr_store {
                 store.put(&h, &canonical);
             }
+
+            // ── Gated marker TEXT only ──
+            // The hash is always returned (callers may mirror/retrieve
+            // it); only the prompt-visible marker text is suppressed
+            // when the gate is off.
+            let marker = if self.config.enable_ccr_marker {
+                format!("<<ccr:{h} {dropped_count}_rows_offloaded>>")
+            } else {
+                String::new()
+            };
             (Some(h), marker)
         } else {
             (None, String::new())
@@ -1468,11 +1487,21 @@ mod tests {
     // ---------- enable_ccr_marker gate (PR #301 re-land) ----------
 
     #[test]
-    fn enable_ccr_marker_false_suppresses_marker_and_store() {
-        // The Rust-side gate. Compression still runs (rows drop) but
-        // the result carries no marker text, no hash, and the CCR
-        // store does NOT grow — there's no point storing what nothing
-        // in the prompt can reference.
+    fn enable_ccr_marker_false_suppresses_marker_but_still_persists() {
+        // DESIGN.md sub-step 1A (kill silent loss). The
+        // `enable_ccr_marker=false` gate now suppresses ONLY the
+        // prompt-visible marker TEXT. The CCR store write is
+        // UNCONDITIONAL whenever rows drop, so a dropped needle is
+        // always recoverable via the store — never silently lost.
+        //
+        // This replaces the prior
+        // `enable_ccr_marker_false_suppresses_marker_and_store` test,
+        // which asserted the OLD silent-loss behavior (store did NOT
+        // grow). That behavior was the exact failure 1A eliminates: a
+        // forced drop with the marker OFF now persists + is
+        // retrievable. Fixture updated because the engine now behaves
+        // identically-better on both the Rust path and (via the
+        // returned hash) the Python mirror.
         use crate::ccr::InMemoryCcrStore;
         use crate::transforms::smart_crusher::SmartCrusherBuilder;
         use std::sync::Arc;
@@ -1494,17 +1523,29 @@ mod tests {
 
         // Rows were dropped (we built 50, kept fewer).
         assert!(result.items.len() < items.len(), "lossy path didn't fire");
-        // Gate held: no marker, no hash.
-        assert!(result.ccr_hash.is_none(), "ccr_hash should be None");
+        // Marker TEXT is suppressed by the gate...
         assert!(
             result.dropped_summary.is_empty(),
-            "dropped_summary should be empty, got: {:?}",
+            "dropped_summary should be empty (marker text gated off), got: {:?}",
             result.dropped_summary
         );
-        // Store did NOT grow.
+        // ...but the hash is still returned so callers can mirror/retrieve.
+        let h = result
+            .ccr_hash
+            .as_ref()
+            .expect("ccr_hash should be returned even with marker off (1A)");
+        // ...and the store DID grow — persistence is unconditional now.
+        assert!(
+            store_len_after > store_len_before,
+            "ccr_store must grow even with enable_ccr_marker=false (1A: kill silent loss)"
+        );
+        // The dropped payload is recoverable: the canonical original
+        // array round-trips out of the store under the returned hash.
+        let recovered = store.get(h).expect("dropped payload must be retrievable");
+        let canonical = canonical_array_json(&items);
         assert_eq!(
-            store_len_after, store_len_before,
-            "ccr_store grew despite enable_ccr_marker=false"
+            recovered, canonical,
+            "recovered payload must equal the canonical original array"
         );
     }
 

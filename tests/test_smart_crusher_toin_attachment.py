@@ -175,9 +175,11 @@ def test_non_json_input_does_not_record(fresh_toin):
 def test_ccr_inject_marker_false_suppresses_markers_in_output(fresh_toin):
     """`inject_retrieval_marker=False` is honored end-to-end now. The
     Rust crusher's `enable_ccr_marker` flips off and the lossy path
-    skips both the `<<ccr:HASH>>` marker text and the CCR store write.
-    Compression itself still happens — rows still drop — just without
-    a retrieval pointer in the prompt."""
+    skips the `<<ccr:HASH>>` marker TEXT in the prompt. Per DESIGN.md
+    1A the CCR store write itself is now UNCONDITIONAL — the dropped
+    payload is still persisted + recoverable by hash; only the
+    prompt-visible pointer is suppressed. This test pins the
+    prompt-visible behavior: no marker text, no sentinel key."""
     from headroom.config import CCRConfig
 
     crusher = SmartCrusher(
@@ -217,12 +219,13 @@ def test_ccr_inject_marker_true_emits_markers_when_lossy(fresh_toin):
 
 
 def test_ccr_enabled_false_suppresses_markers_in_output(fresh_toin):
-    """`CCRConfig.enabled=False` is the master kill-switch and must
-    behave the same as `inject_retrieval_marker=False`: no marker text,
-    no sentinel key, no CCR store write. Both flags collapse to the
-    Rust-side `enable_ccr_marker=False` gate; storing a payload under
-    `enabled=False` would be a surprise side effect the user
-    explicitly opted out of."""
+    """`CCRConfig.enabled=False` is the master kill-switch for the
+    prompt-visible marker and must behave the same as
+    `inject_retrieval_marker=False`: no marker text, no sentinel key in
+    the output. Both flags collapse to the Rust-side
+    `enable_ccr_marker=False` gate. Per DESIGN.md 1A the underlying CCR
+    store write is unconditional (so a dropped needle is never silently
+    lost); this test pins only the prompt-visible suppression."""
     from headroom.config import CCRConfig
 
     crusher = SmartCrusher(
@@ -239,6 +242,50 @@ def test_ccr_enabled_false_suppresses_markers_in_output(fresh_toin):
 
     assert "<<ccr:" not in result.compressed, f"expected no marker, got: {result.compressed!r}"
     assert "_ccr_dropped" not in result.compressed
+
+
+def test_ccr_marker_off_still_persists_and_is_retrievable(fresh_toin):
+    """DESIGN.md sub-step 1A — kill silent loss.
+
+    With `inject_retrieval_marker=False` the prompt sees no `<<ccr:>>`
+    pointer, but a forced row drop must STILL persist the original to
+    the CCR store and be recoverable by hash. This is the exact failure
+    1A eliminates: a dropped needle is never silently, unrecoverably
+    lost — only the in-prompt pointer is suppressed.
+
+    We drive the structured `crush_array_json` path (which always
+    surfaces `ccr_hash` when rows drop) and assert:
+      1. the marker text is absent from the kept rendering,
+      2. a `ccr_hash` is still returned,
+      3. `ccr_get(hash)` round-trips the canonical original array.
+    """
+    import json as _json
+
+    from headroom.config import CCRConfig
+
+    crusher = SmartCrusher(
+        SmartCrusherConfig(),
+        ccr_config=CCRConfig(enabled=True, inject_retrieval_marker=False),
+    )
+    payload = _bigger_array(60)
+    result = crusher.crush_array_json(payload, query="", bias=1.0)
+
+    strategy = str(result.get("strategy_info") or "")
+    if not result.get("ccr_hash"):
+        pytest.skip(f"payload didn't trigger a row drop (strategy={strategy!r})")
+
+    # Marker text suppressed in the rendered kept rows / summary.
+    dropped_summary = str(result.get("dropped_summary") or "")
+    assert "<<ccr:" not in dropped_summary, f"marker text should be gated off, got: {dropped_summary!r}"
+
+    # ...but the hash is returned and the original is recoverable.
+    ccr_hash = str(result["ccr_hash"])
+    recovered = crusher.ccr_get(ccr_hash)
+    assert recovered is not None, "dropped payload must be retrievable from the CCR store (1A)"
+
+    original_items = _json.loads(payload)
+    recovered_items = _json.loads(recovered)
+    assert recovered_items == original_items, "recovered payload must equal the original array"
 
 
 # ─── Custom scorer / relevance_config override ─────────────────────────
