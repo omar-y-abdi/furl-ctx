@@ -33,6 +33,7 @@ import pytest
 
 from headroom.cache.compression_store import get_compression_store
 from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 # Row-drop pointer:   <<ccr:HASH N_rows_offloaded>>
 _DROP_RE = re.compile(r"<<ccr:([a-f0-9]{6,}) (\d+)_rows_offloaded>>")
@@ -53,95 +54,22 @@ def _repr(x: object) -> str:
     return json.dumps(x, sort_keys=True, ensure_ascii=False)
 
 
-def _split_unquoted(s: str) -> list[str]:
-    """Split on commas that are OUTSIDE CSV double-quoted segments."""
-    parts: list[str] = []
-    buf: list[str] = []
-    in_quotes = False
-    for ch in s:
-        if ch == '"':
-            in_quotes = not in_quotes
-            buf.append(ch)
-        elif ch == "," and not in_quotes:
-            parts.append("".join(buf))
-            buf = []
-        else:
-            buf.append(ch)
-    parts.append("".join(buf))
-    return parts
-
-
-def _decode_cell(raw: str) -> object:
-    """One CSV cell back to a JSON value (same fallbacks as before)."""
-    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
-        return raw[1:-1].replace('""', '"')
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return raw
-
-
 def _decode_csv_schema(text: str, recovered: set[str]) -> None:
     """Decode a lossless CSV-schema body (``[N]{cols}\\n<rows>``) back to
-    JSON objects. Those rows are present verbatim in the output — lossless
-    — so they count as recovered-from-output-alone.
+    JSON objects via the documented reference decoder
+    (``headroom.transforms.csv_schema_decoder``). Those rows are exactly
+    reconstructible from the output — lossless — so they count as
+    recovered-from-output-alone.
 
-    Understands the constant-column fold: a ``name:type=value`` column
-    declares its (verbatim) constant once in the header and is omitted
-    from every row; the decoder re-attaches it to each reconstructed row.
-
-    Understands ditto marks: a bare ``=`` cell carries forward the same
-    column's value from the previous row (the materialized value sits
-    verbatim in the first row of its run; a literal ``=`` data cell is
-    CSV-quoted by the formatter, so bare ``=`` is unambiguous).
+    The decoder understands every column encoding the CSV-schema
+    formatter emits (constant fold, ditto marks, and the reversible
+    column encodings); "recoverable" here means decode-and-compare
+    equality, not verbatim string presence.
     """
-    if not text.startswith("["):
+    rows = decode_csv_schema_rows(text)
+    if rows is None:
         return
-    lines = text.split("\n")
-    header = re.match(r"\[\d+\]\{(.+)\}$", lines[0])
-    if not header:
-        return
-    var_cols: list[str] = []
-    const_cols: list[tuple[str, object]] = []
-    for seg in _split_unquoted(header.group(1)):
-        name = seg.split(":")[0]
-        decl = seg.split(":", 1)[1] if ":" in seg else ""
-        if "=" in decl:
-            type_tag, raw = decl.split("=", 1)
-            if type_tag.rstrip("?") == "string":
-                # The type tag says string — never coerce (a numeric-
-                # looking constant like "123" stays a string).
-                if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
-                    raw = raw[1:-1].replace('""', '"')
-                const_cols.append((name, raw))
-            else:
-                const_cols.append((name, _decode_cell(raw)))
-        else:
-            var_cols.append(name)
-    if not var_cols and const_cols:
-        # Degenerate fully-constant table: every row is identical and
-        # carried entirely by the declaration.
-        recovered.add(_repr(dict(const_cols)))
-        return
-    carry: dict[str, object] = {}
-    for line in lines[1:]:
-        if not line:
-            continue
-        parts = line.split(",", len(var_cols) - 1)
-        if len(parts) != len(var_cols):
-            continue
-        row = {}
-        for col, raw in zip(var_cols, parts):
-            if raw == "=" and col in carry:
-                row[col] = carry[col]
-                continue
-            try:
-                row[col] = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                row[col] = raw
-            carry[col] = row[col]
-        for col, value in const_cols:
-            row[col] = value
+    for row in rows:
         recovered.add(_repr(row))
 
 

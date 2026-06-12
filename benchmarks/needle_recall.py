@@ -25,9 +25,11 @@ from typing import Any
 from benchmarks.datasets import build_logs_dataset, search_rows
 from benchmarks.metrics import (
     BENCH_MODEL,
+    _decoded_row_signatures,
     _emitted_ccr_hashes,
     _item_in_recovered,
     _item_present,
+    _item_signature,
     _output_row_signatures,
     _recovered_originals,
     _stringify,
@@ -141,7 +143,8 @@ def _trial(
     output_text = _stringify(result.messages[-1].get("content"))
 
     row_sigs = _output_row_signatures(output_text)
-    in_output = _item_present(family.needle, output_text, row_sigs)
+    decoded_sigs = _decoded_row_signatures(output_text)
+    in_output = _item_present(family.needle, output_text, row_sigs, decoded_sigs)
 
     emitted = _emitted_ccr_hashes(output_text)
     recovered = _recovered_originals(emitted, family.query)
@@ -150,7 +153,7 @@ def _trial(
     n_visible = (
         len(row_sigs)
         if row_sigs is not None
-        else _count_visible_columnar(output_text, array)
+        else _count_visible_columnar(output_text, array, decoded_sigs)
     )
 
     return NeedleResult(
@@ -164,8 +167,20 @@ def _trial(
     )
 
 
-def _count_visible_columnar(output_text: str, array: list[dict[str, Any]]) -> int:
-    """Count distinct array rows visibly present in a columnar rendering."""
+def _count_visible_columnar(
+    output_text: str,
+    array: list[dict[str, Any]],
+    decoded_sigs: set[str] | None,
+) -> int:
+    """Count distinct array rows present in a columnar rendering.
+
+    Reconstruction-aware: when the rendering decodes (CSV-schema), a row
+    counts only if it is EXACTLY reconstructible from the output alone.
+    The verbatim-substring scan remains only as the fallback for
+    non-decodable text renderings.
+    """
+    if decoded_sigs is not None:
+        return sum(1 for row in array if _item_signature(row) in decoded_sigs)
     count = 0
     for row in array:
         vals = [str(v) for v in row.values()]

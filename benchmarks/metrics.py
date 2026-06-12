@@ -31,6 +31,7 @@ from headroom import compress
 from headroom.cache.compression_store import get_compression_store
 from headroom.tokenizer import Tokenizer
 from headroom.tokenizers import get_tokenizer
+from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 # The model used for token counting. gpt-4o resolves to the real tiktoken
 # BPE tokenizer in the engine's registry (genuine token counts, not an
@@ -189,16 +190,54 @@ def _output_row_signatures(output_text: str) -> set[str] | None:
     return sigs
 
 
-def _item_present(item: Any, output_text: str, row_sigs: set[str] | None) -> bool:
+def _decoded_row_signatures(output_text: str) -> set[str] | None:
+    """Canonical signatures of rows EXACTLY reconstructed from a columnar
+    (CSV-schema) rendering via the documented reference decoder.
+
+    The lossless columnar path ships a JSON *string* whose body is the
+    ``[N]{schema}\\nrow\\n...`` table (the lossy-survivor variant appends a
+    sentinel line, which the decoder skips). Decoding it back to row
+    objects and comparing canonical signatures is the reconstruction-aware
+    retention test: a row counts as present only when the output alone
+    reproduces it EXACTLY — including through reversible column encodings
+    whose cells are not verbatim copies of the original values.
+
+    Returns ``None`` when the output is not a CSV-schema rendering.
+    """
+    text = output_text
+    try:
+        parsed = json.loads(output_text)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    if isinstance(parsed, str):
+        text = parsed
+    rows = decode_csv_schema_rows(text)
+    if rows is None:
+        return None
+    return {_item_signature(row) for row in rows}
+
+
+def _item_present(
+    item: Any,
+    output_text: str,
+    row_sigs: set[str] | None,
+    decoded_sigs: set[str] | None = None,
+) -> bool:
     """Is ``item`` represented in the visible output?
 
-    Two renderings:
+    Three renderings, strictest applicable test first:
     - JSON array of rows -> exact canonical-signature membership (``row_sigs``).
-    - Columnar/text rendering -> every scalar field value must appear verbatim
-      in the output text (conservative: all values must survive).
+    - CSV-schema rendering -> DECODE-AND-COMPARE: the row must be exactly
+      reconstructible from the output alone (``decoded_sigs``). Verbatim
+      string presence does NOT count — reversible encodings are judged by
+      reconstruction, and an unreconstructible row is NOT present.
+    - Any other text rendering -> every scalar field value must appear
+      verbatim in the output text (conservative fallback).
     """
     if row_sigs is not None:
         return _item_signature(item) in row_sigs
+    if decoded_sigs is not None:
+        return _item_signature(item) in decoded_sigs
     values = _scalar_values(item)
     if not values:
         return _item_signature(item) in output_text
@@ -284,11 +323,12 @@ def measure_case(
     recovered = _recovered_originals(emitted_hashes, query)
 
     row_sigs = _output_row_signatures(output_text)
+    decoded_sigs = _decoded_row_signatures(output_text)
     n_present = 0
     n_dropped = 0
     n_recoverable = 0
     for item in items:
-        if _item_present(item, output_text, row_sigs):
+        if _item_present(item, output_text, row_sigs, decoded_sigs):
             n_present += 1
         else:
             n_dropped += 1
