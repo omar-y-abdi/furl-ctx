@@ -356,3 +356,77 @@ def measure_case(
         took_lossy_path=took_lossy_path,
         transforms=tuple(result.transforms_applied),
     )
+
+
+def measure_conversation_case(
+    name: str,
+    query: str,
+    items: list[Any],
+    messages: list[dict[str, Any]],
+    *,
+    model: str = BENCH_MODEL,
+) -> CaseMetrics:
+    """Conversation-level variant of :func:`measure_case`.
+
+    For multi-turn payloads the unit of information is the CONVERSATION, not
+    one message: a distinct item counts as *present* when it is visible in
+    ANY message of the compressed output (exact row-signature membership on
+    JSON-array renderings, decode-and-compare on CSV-schema renderings,
+    verbatim-scalar fallback otherwise — the same strictness ladder as
+    :func:`measure_case`, applied per message). An item not visible anywhere
+    counts as *recoverable* only when a ``{"_ccr_dropped": ...}`` sentinel
+    surfaced in SOME message carries a ``<<ccr:HASH>>`` pointer that resolves
+    in the CCR store to an original containing the item.
+    """
+    tok = _make_tokenizer(model)
+    result = compress(messages, model=model)
+
+    texts = [_stringify(m.get("content")) for m in result.messages]
+
+    tokens_before = result.tokens_before or tok.count_messages(messages)
+    tokens_after = result.tokens_after or tok.count_messages(result.messages)
+    lossless_reduction = (
+        (tokens_before - tokens_after) / tokens_before if tokens_before > 0 else 0.0
+    )
+
+    emitted_hashes: set[str] = set()
+    for text in texts:
+        emitted_hashes |= _emitted_ccr_hashes(text)
+    recovered = _recovered_originals(emitted_hashes, query)
+
+    views = [
+        (text, _output_row_signatures(text), _decoded_row_signatures(text))
+        for text in texts
+    ]
+    n_present = 0
+    n_dropped = 0
+    n_recoverable = 0
+    for item in items:
+        if any(_item_present(item, text, rs, ds) for text, rs, ds in views):
+            n_present += 1
+        else:
+            n_dropped += 1
+            if _item_in_recovered(item, recovered):
+                n_recoverable += 1
+
+    n_input = len(items)
+    lossy_drop_ratio = n_dropped / n_input if n_input else 0.0
+    information_retention = (
+        (n_present + n_recoverable) / n_input if n_input else 1.0
+    )
+    took_lossy_path = n_dropped > 0
+
+    return CaseMetrics(
+        name=name,
+        n_input_items=n_input,
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        lossless_reduction=lossless_reduction,
+        n_present=n_present,
+        n_dropped=n_dropped,
+        n_recoverable=n_recoverable,
+        lossy_drop_ratio=lossy_drop_ratio,
+        information_retention=information_retention,
+        took_lossy_path=took_lossy_path,
+        transforms=tuple(result.transforms_applied),
+    )

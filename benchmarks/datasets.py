@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,11 @@ class Dataset:
         items: The list of distinct row objects (for retention/drop scoring).
         messages: The chat-style payload passed to ``compress()``.
         provenance: Human-readable capture command + source description.
+        conversation: True for multi-turn cases whose retention/presence is
+            scored across ALL messages (an item counts as retained when it is
+            visible in ANY message of the compressed conversation, or
+            recoverable via a pointer surfaced in ANY message). Single-tool
+            cases keep the stricter last-message scoring.
     """
 
     name: str
@@ -56,6 +62,7 @@ class Dataset:
     items: list[Any]
     messages: list[dict[str, Any]]
     provenance: str
+    conversation: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -456,14 +463,126 @@ def build_disk_dataset(*, refresh: bool = False) -> Dataset:
     )
 
 
+# ---------------------------------------------------------------------------
+# Dataset 6 — MULTITURN: the SAME real tool I/O captured across successive
+# turns of one conversation. The cross-message redundancy case: per-message
+# compression pays full price for every repetition; only conversation-level
+# dedup can remove it.
+# ---------------------------------------------------------------------------
+
+# Each command is genuinely invoked TWICE (two separate real runs, both raw
+# captures snapshotted). `rg --sort path` is the deterministic form agents
+# get from sorted search tools: across two runs of an unchanged tree the
+# parsed match rows are byte-identical (verified at capture time — the raw
+# `--json` streams differ only in elapsed-time stats events, which the
+# parser never reads). `df -k` runs seconds apart genuinely DRIFT (free
+# blocks / inode counts move), giving the honest near-identical pair.
+_MULTITURN_RG_CMD: tuple[str, ...] = ("rg", "--json", "--sort", "path", "def ", "headroom/")
+_MULTITURN_DF_CMD: tuple[str, ...] = ("df", "-k")
+_MULTITURN_RG_LIMIT = 90
+# Successive agent turns are seconds apart, not microseconds — space the two
+# df captures accordingly so the snapshot reflects real inter-turn drift
+# (free-space / inode counters move on a live machine).
+_MULTITURN_TURN_SPACING_S = 3.0
+
+
+def _multiturn_signature(item: Any) -> str:
+    """Canonical signature for distinct-item dedup across the four captures."""
+    return json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+
+def build_multiturn_dataset(*, refresh: bool = False) -> Dataset:
+    """Real repeated tool I/O across turns: rg twice (identical) + df twice
+    (drifted).
+
+    The canonical cross-message case: an agent re-runs the same search to
+    confirm nothing changed (parsed rows byte-identical between the two real
+    invocations) and re-checks disk usage (rows genuinely drift between
+    runs). Per-message compression treats each tool output independently and
+    pays for every repetition; the redundancy lives BETWEEN messages.
+    """
+    name = "multiturn"
+    provenance = (
+        "Two real consecutive invocations each of: "
+        f"`{' '.join(_MULTITURN_RG_CMD)}` (match rows parsed like the search "
+        "dataset, first 90 rows per run — byte-identical across the two runs "
+        "of the unchanged tree) and `df -k` (rows parsed like the disk "
+        "dataset, the two runs spaced ~3s apart like successive agent turns "
+        "— free-space/inode cells genuinely drift between runs). All four "
+        "raw captures snapshotted."
+    )
+    cached = None if refresh else _load_snapshot(name)
+    if cached is not None:
+        captures = json.loads(cached[0])
+    else:
+        captures = {"rg_run1": _run(list(_MULTITURN_RG_CMD))}
+        captures["rg_run2"] = _run(list(_MULTITURN_RG_CMD))
+        captures["df_run1"] = _run(list(_MULTITURN_DF_CMD))
+        time.sleep(_MULTITURN_TURN_SPACING_S)
+        captures["df_run2"] = _run(list(_MULTITURN_DF_CMD))
+        _snapshot(name, json.dumps(captures, ensure_ascii=False), provenance)
+
+    rg_rows_1 = _parse_rg_json(captures["rg_run1"])[:_MULTITURN_RG_LIMIT]
+    rg_rows_2 = _parse_rg_json(captures["rg_run2"])[:_MULTITURN_RG_LIMIT]
+    df_rows_1 = _parse_df(captures["df_run1"])
+    df_rows_2 = _parse_df(captures["df_run2"])
+
+    # Distinct union across all four captures (first-seen order) — the
+    # denominator for retention/drop scoring.
+    items: list[Any] = []
+    seen: set[str] = set()
+    for row in [*rg_rows_1, *rg_rows_2, *df_rows_1, *df_rows_2]:
+        sig = _multiturn_signature(row)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        items.append(row)
+
+    messages = [
+        {"role": "user", "content": "Where are functions defined in the codebase?"},
+        {
+            "role": "tool",
+            "content": json.dumps(rg_rows_1, ensure_ascii=False),
+            "tool_call_id": "multiturn_rg_1",
+        },
+        {"role": "user", "content": "Re-run the search to confirm the matches are unchanged."},
+        {
+            "role": "tool",
+            "content": json.dumps(rg_rows_2, ensure_ascii=False),
+            "tool_call_id": "multiturn_rg_2",
+        },
+        {"role": "user", "content": "How full are the disks?"},
+        {
+            "role": "tool",
+            "content": json.dumps(df_rows_1, ensure_ascii=False),
+            "tool_call_id": "multiturn_df_1",
+        },
+        {"role": "user", "content": "Check the disks again."},
+        {
+            "role": "tool",
+            "content": json.dumps(df_rows_2, ensure_ascii=False),
+            "tool_call_id": "multiturn_df_2",
+        },
+    ]
+    return Dataset(
+        name=name,
+        query="Where are functions defined in the codebase?",
+        items=items,
+        messages=messages,
+        provenance=provenance,
+        conversation=True,
+    )
+
+
 def all_datasets(*, refresh: bool = False) -> list[Dataset]:
-    """Build the five real datasets. Deterministic from committed snapshots."""
+    """Build the six real datasets. Deterministic from committed snapshots."""
     return [
         build_code_dataset(refresh=refresh),
         build_logs_dataset(refresh=refresh),
         build_search_dataset(refresh=refresh),
         build_repeated_logs_dataset(refresh=refresh),
         build_disk_dataset(refresh=refresh),
+        build_multiturn_dataset(refresh=refresh),
     ]
 
 
