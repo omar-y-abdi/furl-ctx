@@ -89,6 +89,11 @@ def _decode_csv_schema(text: str, recovered: set[str]) -> None:
     Understands the constant-column fold: a ``name:type=value`` column
     declares its (verbatim) constant once in the header and is omitted
     from every row; the decoder re-attaches it to each reconstructed row.
+
+    Understands ditto marks: a bare ``=`` cell carries forward the same
+    column's value from the previous row (the materialized value sits
+    verbatim in the first row of its run; a literal ``=`` data cell is
+    CSV-quoted by the formatter, so bare ``=`` is unambiguous).
     """
     if not text.startswith("["):
         return
@@ -118,6 +123,7 @@ def _decode_csv_schema(text: str, recovered: set[str]) -> None:
         # carried entirely by the declaration.
         recovered.add(_repr(dict(const_cols)))
         return
+    carry: dict[str, object] = {}
     for line in lines[1:]:
         if not line:
             continue
@@ -126,10 +132,14 @@ def _decode_csv_schema(text: str, recovered: set[str]) -> None:
             continue
         row = {}
         for col, raw in zip(var_cols, parts):
+            if raw == "=" and col in carry:
+                row[col] = carry[col]
+                continue
             try:
                 row[col] = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
                 row[col] = raw
+            carry[col] = row[col]
         for col, value in const_cols:
             row[col] = value
         recovered.add(_repr(row))

@@ -292,16 +292,41 @@ fn write_table(
     out.push('\n');
 
     // Rows. Constant columns are folded into the declaration above.
+    //
+    // Ditto marks: a cell whose rendering is identical to the SAME
+    // column's cell in the previous row renders as a bare `=`
+    // (carry-forward). Lossless: the materialized value sits verbatim
+    // in the first row of its run; a literal string cell `"="` is
+    // CSV-quoted by `format_cell` so the bare marker is unambiguous.
+    // Cells rendering to 0–1 chars never ditto (no byte saving).
+    let mut prev: Vec<Option<String>> = Vec::new();
     for row in rows {
-        let cells: Vec<String> = row
+        let rendered: Vec<String> = row
             .0
             .iter()
             .zip(schema.fields.iter())
             .filter(|(_, f)| f.const_value.is_none())
             .map(|(c, _)| format_cell(c))
             .collect();
+        if prev.len() != rendered.len() {
+            prev = vec![None; rendered.len()];
+        }
+        let cells: Vec<&str> = rendered
+            .iter()
+            .zip(prev.iter())
+            .map(|(cell, last)| {
+                if cell.len() > 1 && last.as_deref() == Some(cell.as_str()) {
+                    "="
+                } else {
+                    cell.as_str()
+                }
+            })
+            .collect();
         out.push_str(&cells.join(","));
         out.push('\n');
+        for (slot, cell) in prev.iter_mut().zip(rendered.iter()) {
+            *slot = Some(cell.clone());
+        }
     }
 }
 
@@ -326,6 +351,9 @@ fn const_decl_value(v: &Value) -> String {
 fn format_cell(c: &CellValue) -> String {
     match c {
         CellValue::Missing => String::new(),
+        // A literal string cell `=` is CSV-quoted so the bare `=` ditto
+        // marker (see `write_table`) stays unambiguous on read-back.
+        CellValue::Scalar(Value::String(s)) if s == "=" => csv_quote(s),
         CellValue::Scalar(v) => json_scalar_to_csv(v),
         CellValue::Nested(sub) => {
             // Render nested as compact JSON; CSV-quote because it
@@ -846,6 +874,102 @@ mod tests {
             decl.contains(r#"tag:string="a=b,{c}""#),
             "constant with separator chars must be CSV-quoted, got: {decl}"
         );
+    }
+
+    // ── Ditto marks (CSV) ──
+
+    #[test]
+    fn csv_consecutive_repeats_render_as_ditto() {
+        let items = vec![
+            json!({"path": "src/a.py", "line": 10, "txt": "def f():"}),
+            json!({"path": "src/a.py", "line": 20, "txt": "def g():"}),
+            json!({"path": "src/b.py", "line": 30, "txt": "def h():"}),
+            json!({"path": "src/b.py", "line": 40, "txt": "def i():"}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        // Columns sort alphabetically at equal frequency: line,path,txt.
+        assert_eq!(lines[1], "10,src/a.py,def f():");
+        assert_eq!(lines[2], "20,=,def g():", "repeat path must ditto");
+        assert_eq!(lines[3], "30,src/b.py,def h():", "run break re-materializes");
+        assert_eq!(lines[4], "40,=,def i():");
+    }
+
+    #[test]
+    fn csv_ditto_round_trips_losslessly() {
+        let items: Vec<Value> = (0..30)
+            .map(|i| {
+                json!({
+                    "path": format!("src/m_{}.py", i / 5),
+                    "line": 3 * i + 1,
+                    "code": if i % 5 < 2 { 200 } else { 503 },
+                })
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let mut lines = out.trim_end().lines();
+        let decl = lines.next().expect("declaration line");
+        let body = decl
+            .strip_prefix("[30]{")
+            .and_then(|s| s.strip_suffix('}'))
+            .expect("decl shape");
+        let cols: Vec<&str> = body
+            .split(',')
+            .map(|c| c.split(':').next().unwrap())
+            .collect();
+        let mut reconstructed: Vec<Value> = Vec::new();
+        let mut carry: Vec<Option<Value>> = vec![None; cols.len()];
+        for line in lines {
+            let mut obj = serde_json::Map::new();
+            for (j, (name, raw)) in cols.iter().zip(line.split(',')).enumerate() {
+                let v = if raw == "=" {
+                    carry[j].clone().expect("ditto never appears before a value")
+                } else {
+                    let v = serde_json::from_str::<Value>(raw)
+                        .unwrap_or_else(|_| Value::String(raw.to_string()));
+                    carry[j] = Some(v.clone());
+                    v
+                };
+                obj.insert((*name).to_string(), v);
+            }
+            reconstructed.push(Value::Object(obj));
+        }
+        assert_eq!(reconstructed, items, "ditto round-trip must be lossless");
+    }
+
+    #[test]
+    fn csv_literal_equals_cell_is_quoted_not_ditto() {
+        let items = vec![
+            json!({"id": 1, "op": "="}),
+            json!({"id": 2, "op": "="}),
+            json!({"id": 3, "op": "+"}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        // First materialization is the QUOTED literal; the consecutive
+        // repeat dittos the quoted form (carry-forward yields `"="`).
+        assert_eq!(lines[1], "1,\"=\"");
+        assert_eq!(lines[2], "2,=");
+        assert_eq!(lines[3], "3,+");
+    }
+
+    #[test]
+    fn csv_single_char_cells_never_ditto() {
+        // "y" repeats consecutively but the column is NOT constant
+        // (last row differs, so the const fold stays out of the way).
+        let items = vec![
+            json!({"id": 1, "flag": "y"}),
+            json!({"id": 2, "flag": "y"}),
+            json!({"id": 3, "flag": "n"}),
+        ];
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        // 1-char cells never ditto — `=` would save nothing.
+        // (Columns sort alphabetically at equal frequency: flag,id.)
+        assert!(out.contains("y,1\ny,2\nn,3\n"), "got: {out}");
     }
 
     #[test]
