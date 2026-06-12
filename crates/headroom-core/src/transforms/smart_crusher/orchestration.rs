@@ -211,15 +211,27 @@ pub fn prioritize_indices(
     // array can't blow far past `effective_max` and inflate tokens. The
     // identity columns are excluded (a unique uuid/timestamp per row is
     // noise, not a needle), reusing the Imp2 exclude-set.
+    //
+    // DEGENERACY GATE: "singleton" is a *rarity* signal — a needle is a
+    // row that is unusual relative to its peers. When a MAJORITY of rows
+    // are singletons (e.g. an all-distinct array: every git-log subject
+    // unique), the signal carries no information and pinning degenerates
+    // to first-K-by-index — exactly the positional bias 1B was built to
+    // remove (measured: on the all-distinct logs benchmark the pins were
+    // literally indices 0..cap-1). Skip pinning in that case; every
+    // skipped row remains CCR-recoverable via the unconditional persist
+    // + surfaced `<<ccr:HASH>>` pointer, so nothing is lost.
     let singleton_indices = field_value_singletons(items, exclude);
-    let singleton_cap = singleton_pin_cap(effective_max);
-    let mut singletons_pinned = 0usize;
-    for &idx in &singleton_indices {
-        if singletons_pinned >= singleton_cap {
-            break;
-        }
-        if prioritized.insert(idx) {
-            singletons_pinned += 1;
+    if singleton_signal_is_informative(singleton_indices.len(), items.len()) {
+        let singleton_cap = singleton_pin_cap(effective_max);
+        let mut singletons_pinned = 0usize;
+        for &idx in &singleton_indices {
+            if singletons_pinned >= singleton_cap {
+                break;
+            }
+            if prioritized.insert(idx) {
+                singletons_pinned += 1;
+            }
         }
     }
 
@@ -273,6 +285,18 @@ pub fn prioritize_indices(
 /// rescuing the mid-array needle that the lowest-index fill dropped.
 fn singleton_pin_cap(effective_max: usize) -> usize {
     effective_max
+}
+
+/// Is the field-value-singleton signal informative for this array?
+///
+/// A singleton row is a needle only when singletons are RARE — the
+/// signal is "this row is unusual relative to its peers". When a strict
+/// majority of rows are singletons the array is simply high-entropy
+/// (all-distinct subjects/messages) and "singleton" distinguishes
+/// nothing; pinning by it degenerates to first-K-by-index positional
+/// noise. At-most-half keeps the borderline case (exactly half) pinned.
+fn singleton_signal_is_informative(singleton_count: usize, n: usize) -> bool {
+    singleton_count * 2 <= n
 }
 
 /// Indices of rows carrying a value that appears EXACTLY ONCE across some
@@ -652,6 +676,54 @@ mod tests {
         let singletons = field_value_singletons(&items, &exclude);
         // Only the PANIC row is a singleton now (uuid uniqueness ignored).
         assert_eq!(singletons, vec![9]);
+    }
+
+    #[test]
+    fn singleton_signal_majority_is_uninformative() {
+        // All-distinct array: every row is a singleton -> no signal.
+        assert!(!singleton_signal_is_informative(90, 90));
+        assert!(!singleton_signal_is_informative(46, 90));
+        // Rare singletons -> real needles -> informative.
+        assert!(singleton_signal_is_informative(1, 30));
+        assert!(singleton_signal_is_informative(45, 90)); // exactly half stays pinned
+        assert!(singleton_signal_is_informative(0, 90));
+    }
+
+    #[test]
+    fn prioritize_skips_degenerate_singleton_pinning_on_all_distinct() {
+        // 90 all-distinct rows (every row a singleton under `msg`).
+        // Pinning would degenerate to indices 0..cap-1; the gate must
+        // skip it so the kept set stays at the budget, not budget+extras.
+        let items: Vec<Value> = (0..90)
+            .map(|i| json!({"msg": format!("unique subject number {} entirely", i)}))
+            .collect();
+        let kept: BTreeSet<usize> = (0..90).collect();
+        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 15, &no_exclude());
+        // No errors/outliers/anomalies fire on this shape; without the
+        // degenerate pinning the result is anchors + novelty fill, capped
+        // at the budget.
+        assert!(
+            result.len() <= 15,
+            "degenerate singleton pinning must not blow past the budget; got {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn prioritize_still_pins_minority_singleton_needle() {
+        // 29 identical rows + 1 unique-status needle: singletons are a
+        // minority (1/30) -> the signal is informative -> needle pinned.
+        let mut items: Vec<Value> = (0..29)
+            .map(|_| json!({"kind": "routine", "status": "ok"}))
+            .collect();
+        items.push(json!({"kind": "routine", "status": "PANIC"}));
+        let kept: BTreeSet<usize> = (0..30).collect();
+        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 5, &no_exclude());
+        assert!(
+            result.contains(&29),
+            "minority singleton needle must stay pinned; got {:?}",
+            result
+        );
     }
 
     // ---------- 1B: novelty-ranked fill ----------
