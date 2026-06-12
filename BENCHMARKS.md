@@ -1,5 +1,74 @@
 # BENCHMARKS — Headroom Engine honest benchmarks
 
+## Phase-4: CCR-backed removal maximization (before → after)
+
+- Baseline commit: `957ef601` (Phase-3 final). Final commit: `9ad7b4c2`
+  (singleton degeneracy gate `1c64f095` → CCR-backed budget + query
+  pinning `5772533b` → survivor compaction `9ad7b4c2`).
+- Frontier: maximize what the engine REMOVES from the visible output at
+  CONSTANT 100% information retention and 100% needle-recall
+  (output OR CCR). Every removed row carries a surfaced `<<ccr:HASH>>`
+  pointer and is byte-recoverable from the store.
+
+Three changes, all on the lossy dict-array path (lossless routes untouched):
+
+1. **Singleton-pin degeneracy gate** — the 1B field-value-singleton pin is
+   a *rarity* signal; on an all-distinct array EVERY row is a singleton and
+   the capped pin loop degenerated to first-K-by-index (measured: pins were
+   literally indices 0..14 on logs@90). Majority-singleton arrays now skip
+   pinning. 2059 → 1332 tok, drop 74.4% → 83.3%.
+2. **CCR-backed aggressive budget + query-relevant pinning** — with a CCR
+   store configured every drop is recoverable (the invariant the
+   adversarial loop locked), so the lossy keep budget halves
+   (`adaptive_k/2`, floor 5; storeless/parity mode keeps full budget; the
+   tier-1 passthrough boundary is unchanged). Counterweight shipped in the
+   same change: rows matching the query (deterministic anchors, uncapped +
+   high-confidence relevance ≥ max(2×0.3, 0.5), cap 3) are pinned like
+   critical items in the over-budget path. 1332 → 729 tok, drop 83.3% →
+   91.1%, and visible needle-recall rose to 100%.
+3. **Survivor compaction** — the lossy keep-set ships as the existing
+   lossless CSV-schema rendering (schema header, const-fold, ditto) with
+   the `{"_ccr_dropped": ...}` sentinel as the final line, when ≥ 64 bytes
+   smaller than the JSON-array form and no OpaqueRef. Pure rendering win:
+   same rows, verbatim values, same drop ratio. 729 → 665 tok.
+
+| dataset | tok before | tok after (P3 → P4) | drop | retention |
+|---|---:|---:|---:|---:|
+| logs@90 | 8595 | 2059 → **665** | 74.4% → **91.1%** | 100% → 100% |
+| code@7 | 41025 | 41025 → 41025 | 0% | 100% |
+| search@90 | 4102 | 1803 → 1803 | 0% | 100% |
+| repeated_logs@90 | 3621 | 588 → 588 | 0% | 100% |
+| disk@9 | 694 | 347 → 347 | 0% | 100% |
+
+Needle-recall: overall (output OR CCR) stays **100.0%**; visible-in-output
+rose **88.9% → 100.0%** (logs family 77.8% → 100.0%) — query-relevant
+pinning keeps the query-named row visible at every position/cardinality in
+both regimes, even while the generic budget halves.
+
+**Honest read (Phase-4).**
+- The lossy visible set is now at its principled floor: the 8 surviving
+  logs@90 rows are all constraint-pinned (errors / structural outliers /
+  numeric anomalies — the quality guarantee), plus schema + sentinel.
+  Going lower means cutting the critical-row guarantee; not done.
+- The harness learned the new survivor-table shape (JSON string whose
+  final line is the sentinel object) with the same strictness as the
+  array shape; recovery itself was verified through the real Python
+  store/retrieve surface (full 90-row original under the surfaced hash)
+  and locked by 4 new recovery-invariant tests (17 → 21).
+- **Semantic near-dup collapse beyond the stable-projection hash did NOT
+  pan out on this bench** — by construction: dup-heavy real data (ping,
+  paths) routes LOSSLESS (ditto/const-fold beat the 0.30 gate), so the
+  residual lossy cases are all-distinct arrays with nothing to collapse.
+  The Imp2 stable-hash dedup + `_dup_count` already covers the lossy dup
+  case.
+- **Route-by-min-tokens (lossy beats lossless on tokens: search 1803 →
+  ~250 est., repeated_logs 588 → ~100 est.) was evaluated and rejected**:
+  it would flip lossless-routed arrays to lossy drops, breaking the
+  pinned lossless round-trip suite (`test_lossless_column_encodings`) and
+  the lossless-first design contract. Deferred as a product decision.
+- `code@7` stays 0% — distinct source files at the entropy floor; no
+  fake gains.
+
 ## Phase-3: lossless column encodings (before → after)
 
 - Baseline commit: `8e005090` (Phase-2 final). Final commit: `590c9c02`
