@@ -2170,9 +2170,15 @@ class ContentRouter(Transform):
 
         # --- Pass 2: Parallel compression of all cache-miss messages ---
         if pending_tasks:
-            max_workers = min(
-                len(pending_tasks), int(os.environ.get("HEADROOM_COMPRESS_WORKERS", "4"))
-            )
+            raw_workers = os.environ.get("HEADROOM_COMPRESS_WORKERS", "4")
+            try:
+                configured_workers = int(raw_workers)
+            except ValueError:
+                logger.warning(
+                    "Invalid HEADROOM_COMPRESS_WORKERS=%r; using default 4", raw_workers
+                )
+                configured_workers = 4
+            max_workers = min(len(pending_tasks), configured_workers)
             t_parallel_start = time.perf_counter()
 
             if max_workers <= 1 or len(pending_tasks) == 1:

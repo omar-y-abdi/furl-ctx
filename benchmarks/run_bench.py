@@ -100,7 +100,7 @@ def _pct(x: float) -> str:
 
 def print_table(cases: list[CaseMetrics], needles: list[NeedleResult]) -> None:
     """Print the human-readable baseline table to stdout."""
-    print("\n=== DATASET METRICS (current engine, model=%s) ===" % BENCH_MODEL)
+    print(f"\n=== DATASET METRICS (current engine, model={BENCH_MODEL}) ===")
     print(
         f"{'dataset':12s} {'items':>5s} {'tok_before':>10s} {'tok_after':>9s} "
         f"{'lossless':>9s} {'drop':>7s} {'retain':>7s} {'path':>9s}"

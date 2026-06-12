@@ -43,6 +43,7 @@ exists only for unit testing.
 from __future__ import annotations
 
 import logging
+import re as _re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, cast
@@ -152,8 +153,6 @@ def _format_from_str(name: str) -> LogFormat:
 # UUID, or >=12-char hex run is pure per-line identity noise. Anchored to
 # the start so only the LEADING token is templated — the message body that
 # distinguishes error categories is preserved.
-import re as _re
-
 _LEADING_ISO8601 = _re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"
 )

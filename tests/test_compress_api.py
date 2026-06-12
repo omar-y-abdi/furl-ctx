@@ -5,7 +5,6 @@ import json
 from headroom.compress import CompressConfig, CompressResult, compress
 from headroom.hooks import CompressionHooks
 
-
 # =============================================================================
 # Tests: compress() function
 # =============================================================================

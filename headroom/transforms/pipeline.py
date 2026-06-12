@@ -18,9 +18,9 @@ from ..config import (
     TransformResult,
     WasteSignals,
 )
-from ._telemetry_noop import get_headroom_tracer, get_otel_metrics
 from ..tokenizer import Tokenizer
 from ..utils import deep_copy_messages
+from ._telemetry_noop import get_headroom_tracer, get_otel_metrics
 from .base import Transform
 from .cache_aligner import CacheAligner
 from .content_router import ContentRouter
@@ -108,9 +108,7 @@ class TransformPipeline:
         # non-config callers (CLI / SDK / tests) the env var
         # HEADROOM_INTERCEPT_ENABLED=1. Off by default while this ships — lets
         # users try it and compare before we make it the default.
-        import os as _os
-
-        if getattr(self.config, "intercept_tool_results", False) or _os.environ.get(
+        if getattr(self.config, "intercept_tool_results", False) or os.environ.get(
             "HEADROOM_INTERCEPT_ENABLED"
         ):
             from headroom.proxy.interceptors import ToolResultInterceptorTransform
@@ -440,7 +438,9 @@ class TransformPipeline:
                     if waste_signals.total() == 0:
                         waste_signals = None
                 except Exception:
-                    pass
+                    # Best-effort diagnostics only — never block the pipeline,
+                    # but never swallow silently either.
+                    logger.debug("Waste-signal detection failed (non-fatal)", exc_info=True)
 
             if pipeline_span is not None and pipeline_span.is_recording():
                 pipeline_span.set_attribute("headroom.tokens.after", tokens_after)
