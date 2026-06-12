@@ -7,6 +7,11 @@ Covers the CSV-schema formatter's column encodings:
   and is omitted from the rows. The value is verbatim in the output and
   every row is reconstructible from the output alone (zero loss).
 
+* **Ditto marks** — a cell identical to the SAME column's cell in the
+  previous row renders as a bare ``=``; a literal string cell ``"="`` is
+  CSV-quoted so the marker stays unambiguous. Reconstruction is
+  carry-forward of the last materialized value (zero loss).
+
 The reconstruction contract is the SAME decoder the CCR recovery
 invariant uses (``tests/test_ccr_recovery_invariant.py``): a consumer
 holding ONLY the output must be able to recover every distinct row.
@@ -74,3 +79,56 @@ def test_constant_fold_does_not_fire_on_varying_columns() -> None:
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
     assert not missing
+
+
+def test_ditto_marks_round_trip_consecutive_repeats() -> None:
+    # Shape mirrors the real rg-search benchmark capture: `path` repeats
+    # in consecutive runs (matches grouped per file), other columns vary.
+    items = [
+        {
+            "path": f"src/module_{i // 10}.py",
+            "line_number": 3 * i + 1,
+            "lines": f"def handler_{i}(request):",
+        }
+        for i in range(60)
+    ]
+    text = _compress_to_text(items)
+    body = text.split("\n")[1:]
+
+    # Runs of the same path render as ditto cells after the first row.
+    assert any(
+        line.startswith("=,") or ",=," in line or line.endswith(",=") for line in body
+    ), f"expected ditto marks in rows; first rows: {body[:3]}"
+    # Each distinct path appears exactly once (first row of its run).
+    for d in range(6):
+        assert text.count(f"src/module_{d}.py") == 1
+
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_literal_equals_sign_cell_is_not_mistaken_for_ditto() -> None:
+    # A real data cell whose value is exactly "=" must render CSV-quoted
+    # so bare `=` stays unambiguous, and must round-trip as the literal.
+    items = [
+        {"id": i, "op": "=" if i % 2 == 0 else f"op-{i}", "v": f"val-{i}"}
+        for i in range(40)
+    ]
+    text = _compress_to_text(items)
+    assert '"="' in text, f"literal '=' cell must be quoted: {text.split(chr(10))[:4]}"
+
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_repeated_numeric_cells_ditto_and_round_trip() -> None:
+    items = [
+        {"seq": i, "status_code": 200 if i % 5 else 503, "latency_ms": 12.5 + (i % 3)}
+        for i in range(40)
+    ]
+    text = _compress_to_text(items)
+    recovered = _reconstruct(text)
+    missing = {_repr(it) for it in items} - recovered
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
