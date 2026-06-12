@@ -204,6 +204,25 @@ pub fn prioritize_indices(
     prioritized.extend(&anomaly_indices);
     prioritized.extend(&learned_indices);
 
+    // 1B — Field-value singleton pinning. Rows carrying a value that
+    // appears EXACTLY ONCE across a (non-identity) field are needles:
+    // the over-budget fill used to drop them purely by index position.
+    // Pin them like structural outliers, but CAPPED so a high-singleton
+    // array can't blow far past `effective_max` and inflate tokens. The
+    // identity columns are excluded (a unique uuid/timestamp per row is
+    // noise, not a needle), reusing the Imp2 exclude-set.
+    let singleton_indices = field_value_singletons(items, exclude);
+    let singleton_cap = singleton_pin_cap(effective_max);
+    let mut singletons_pinned = 0usize;
+    for &idx in &singleton_indices {
+        if singletons_pinned >= singleton_cap {
+            break;
+        }
+        if prioritized.insert(idx) {
+            singletons_pinned += 1;
+        }
+    }
+
     // First 3 / last 2 anchors if we have room.
     let mut remaining = effective_max.saturating_sub(prioritized.len());
     if remaining > 0 {
@@ -222,20 +241,124 @@ pub fn prioritize_indices(
         }
     }
 
-    // Fill with other-important indices (ascending order).
+    // 1B — Novelty-ranked fill. The remaining budget used to be filled
+    // lowest-index-first, which dropped a distinct mid-array needle
+    // purely by position. Instead rank `current \ prioritized` by
+    // NOVELTY — rarity of the row's stable-hash family (rarer = more
+    // novel) with index as a deterministic tie-break — and fill the most
+    // novel first. Empty `exclude` keeps the stable hash byte-equal to
+    // the whole-item hash, so this is well-defined on every dataset.
     if remaining > 0 {
-        let mut others: Vec<usize> = current.difference(&prioritized).copied().collect();
-        others.sort();
-        for i in others {
+        let others: Vec<usize> = current.difference(&prioritized).copied().collect();
+        let ranked = rank_by_novelty(&others, items, exclude);
+        for i in ranked {
             if remaining == 0 {
                 break;
             }
-            prioritized.insert(i);
-            remaining -= 1;
+            if prioritized.insert(i) {
+                remaining -= 1;
+            }
         }
     }
 
     prioritized
+}
+
+/// Cap on how many field-value singletons the over-budget path pins
+/// (1B). Set to `effective_max` so pinned singletons can fill the budget
+/// but a singleton-heavy array (e.g. every row has a unique field value)
+/// cannot push survivors arbitrarily far past the target — they compete
+/// for the same budget as the other critical signals. Measured against
+/// the benchmark: this keeps the logs survivor count bounded while still
+/// rescuing the mid-array needle that the lowest-index fill dropped.
+fn singleton_pin_cap(effective_max: usize) -> usize {
+    effective_max
+}
+
+/// Indices of rows carrying a value that appears EXACTLY ONCE across some
+/// non-excluded field — true needles. Excludes identity columns (a
+/// per-row uuid/timestamp is unique-by-construction noise, not a needle).
+/// Returned in ascending index order (deterministic).
+fn field_value_singletons(items: &[Value], exclude: &BTreeSet<String>) -> Vec<usize> {
+    // Per-field value frequency (string-rendered, like the analyzer's
+    // uniqueness computation). One pass to count, one pass to flag.
+    let mut field_value_counts: std::collections::HashMap<&str, std::collections::HashMap<String, usize>> =
+        std::collections::HashMap::new();
+    for item in items {
+        if let Some(obj) = item.as_object() {
+            for (k, v) in obj {
+                if exclude.contains(k) || v.is_null() {
+                    continue;
+                }
+                let key = value_signature(v);
+                *field_value_counts
+                    .entry(k.as_str())
+                    .or_default()
+                    .entry(key)
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut out: Vec<usize> = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let is_singleton = obj.iter().any(|(k, v)| {
+            if exclude.contains(k) || v.is_null() {
+                return false;
+            }
+            field_value_counts
+                .get(k.as_str())
+                .and_then(|m| m.get(&value_signature(v)))
+                .copied()
+                .unwrap_or(0)
+                == 1
+        });
+        if is_singleton {
+            out.push(idx);
+        }
+    }
+    out
+}
+
+/// Stable per-value signature for frequency counting. Strings compare by
+/// content; everything else by canonical JSON (so `1` and `"1"` differ,
+/// matching the analyzer's value semantics).
+fn value_signature(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => crate::transforms::anchor_selector::python_json_dumps_sort_keys(other),
+    }
+}
+
+/// Rank `candidates` by descending NOVELTY: rarity of the row's
+/// stable-hash family across the whole array (a singleton family is
+/// maximally novel), with ascending index as a deterministic tie-break.
+fn rank_by_novelty(candidates: &[usize], items: &[Value], exclude: &BTreeSet<String>) -> Vec<usize> {
+    // Family sizes over the whole array (rarity signal).
+    let mut family_size: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        let h = item_content_hash(item, i, exclude);
+        *family_size.entry(h).or_insert(0) += 1;
+    }
+
+    let mut ranked: Vec<usize> = candidates.to_vec();
+    ranked.sort_by(|&a, &b| {
+        let fa = family_size
+            .get(&item_content_hash(&items[a], a, exclude))
+            .copied()
+            .unwrap_or(1);
+        let fb = family_size
+            .get(&item_content_hash(&items[b], b, exclude))
+            .copied()
+            .unwrap_or(1);
+        // Smaller family first (more novel); ties broken by lower index
+        // so the result is fully deterministic and stable.
+        fa.cmp(&fb).then(a.cmp(&b))
+    });
+    ranked
 }
 
 /// Compute numeric-anomaly indices from `analysis.field_stats`.
@@ -492,5 +615,69 @@ mod tests {
         // some of items 0..3 OR 28..30 covered through fill.
         // Cap is 10; ensure we don't exceed.
         assert!(result.len() <= 10);
+    }
+
+    // ---------- 1B: field-value singletons ----------
+
+    #[test]
+    fn field_value_singletons_finds_unique_value_rows() {
+        // 9 rows share status "ok"; one row has a unique status "PANIC".
+        // The PANIC row is a field-value singleton (a needle).
+        let mut items: Vec<Value> = (0..9).map(|i| json!({"i": i, "status": "ok"})).collect();
+        items.push(json!({"i": 9, "status": "PANIC"}));
+        let singletons = field_value_singletons(&items, &no_exclude());
+        // Every row has a unique `i`, so all are singletons under that
+        // field — the helper flags a row if ANY field value is unique.
+        // The point this test pins: the PANIC row is included.
+        assert!(singletons.contains(&9), "unique-status needle must be flagged");
+    }
+
+    #[test]
+    fn field_value_singletons_excludes_identity_columns() {
+        // With the id column excluded, only genuine value-needles remain.
+        let mut items: Vec<Value> = (0..9)
+            .map(|i| json!({"uuid": format!("{:040x}", i), "status": "ok"}))
+            .collect();
+        items.push(json!({"uuid": format!("{:040x}", 99), "status": "PANIC"}));
+        let exclude: BTreeSet<String> = ["uuid".to_string()].into_iter().collect();
+        let singletons = field_value_singletons(&items, &exclude);
+        // Only the PANIC row is a singleton now (uuid uniqueness ignored).
+        assert_eq!(singletons, vec![9]);
+    }
+
+    // ---------- 1B: novelty-ranked fill ----------
+
+    #[test]
+    fn rank_by_novelty_puts_rare_families_first() {
+        // 8 identical rows (family size 8) + 2 distinct rows (size 1 each).
+        // Novelty ranking must surface the two rare rows ahead of the
+        // common family.
+        let mut items: Vec<Value> = (0..8).map(|_| json!({"msg": "common"})).collect();
+        items.push(json!({"msg": "rare-A"})); // idx 8
+        items.push(json!({"msg": "rare-B"})); // idx 9
+        let candidates: Vec<usize> = (0..10).collect();
+        let ranked = rank_by_novelty(&candidates, &items, &no_exclude());
+        // The two rare rows (8, 9) rank ahead of the common family.
+        assert_eq!(&ranked[..2], &[8, 9], "rare rows first; got {:?}", ranked);
+    }
+
+    #[test]
+    fn prioritize_novelty_fill_rescues_mid_array_needle() {
+        // 30 rows: a flat common shape, with ONE distinct mid-array needle
+        // at index 15 that fires no error/outlier/anomaly constraint. The
+        // old lowest-index fill would drop it past budget; novelty fill
+        // surfaces it because its stable-hash family is size 1.
+        let mut items: Vec<Value> = (0..30)
+            .map(|_| json!({"kind": "routine", "payload": "same"}))
+            .collect();
+        items[15] = json!({"kind": "routine", "payload": "UNIQUE-NEEDLE-XYZ"});
+        // Force the over-budget path: keep everything, tiny budget.
+        let kept: BTreeSet<usize> = (0..30).collect();
+        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 5, &no_exclude());
+        assert!(
+            result.contains(&15),
+            "novelty fill must rescue the unique mid-array needle; got {:?}",
+            result
+        );
     }
 }
