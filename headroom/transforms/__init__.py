@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     )
     from headroom.transforms.base import Transform  # noqa: F401
     from headroom.transforms.cache_aligner import CacheAligner  # noqa: F401
+    from headroom.transforms.cross_message_dedup import CrossMessageDeduper  # noqa: F401
     from headroom.transforms.code_compressor import (  # noqa: F401
         CodeAwareCompressor,
         CodeCompressionResult,
@@ -106,6 +107,7 @@ __all__ = [
     "CompressionStrategy",
     # Other transforms
     "CacheAligner",
+    "CrossMessageDeduper",
     # HTML extraction (optional)
     "_HTML_EXTRACTOR_AVAILABLE",
 ]
@@ -184,6 +186,10 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "CompressionStrategy": ("headroom.transforms.content_router", "CompressionStrategy"),
     # Other transforms
     "CacheAligner": ("headroom.transforms.cache_aligner", "CacheAligner"),
+    "CrossMessageDeduper": (
+        "headroom.transforms.cross_message_dedup",
+        "CrossMessageDeduper",
+    ),
     # HTML extraction (optional dependency - requires trafilatura)
     "HTMLExtractor": ("headroom.transforms.html_extractor", "HTMLExtractor"),
     "HTMLExtractorConfig": ("headroom.transforms.html_extractor", "HTMLExtractorConfig"),

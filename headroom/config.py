@@ -487,6 +487,12 @@ class HeadroomConfig:
     # Env var HEADROOM_INTERCEPT_ENABLED=1 also enables (for CLI `--intercept-tool-results`).
     intercept_tool_results: bool = False
 
+    # Cross-message dedup: replace later byte-identical tool outputs with a
+    # recoverable <<ccr:HASH>> pointer to the first occurrence. Operates on
+    # content WITHIN messages only (never drops/reorders messages, never
+    # touches index 0, frozen prefixes, or cache_control blocks).
+    cross_message_dedup_enabled: bool = True
+
     # Debugging - opt-in diff artifact generation
     generate_diff_artifact: bool = False  # Enable to get detailed transform diffs
 

@@ -24,6 +24,7 @@ from ._telemetry_noop import get_headroom_tracer, get_otel_metrics
 from .base import Transform
 from .cache_aligner import CacheAligner
 from .content_router import ContentRouter
+from .cross_message_dedup import CrossMessageDeduper
 
 if TYPE_CHECKING:
     from ..providers.base import Provider
@@ -118,6 +119,13 @@ class TransformPipeline:
         # 1. Cache Aligner (prefix stabilization)
         if self.config.cache_aligner.enabled:
             transforms.append(CacheAligner(self.config.cache_aligner))
+
+        # 1b. Cross-message dedup — elide later byte-identical tool outputs
+        # (recoverable via <<ccr:HASH>>) BEFORE per-message compression so
+        # duplicates don't pay the compression price per copy. Earlier
+        # messages are never modified, so the cached prefix stays stable.
+        if getattr(self.config, "cross_message_dedup_enabled", True):
+            transforms.append(CrossMessageDeduper())
 
         # 2. Content-aware Compression
         # ContentRouter handles ALL content types intelligently:
