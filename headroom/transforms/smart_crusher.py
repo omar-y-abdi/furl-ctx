@@ -25,13 +25,19 @@ fallback. Build it locally with `scripts/build_rust_extension.sh`
   `strategy != "passthrough"` to ignore JSON re-canonicalization).
   The retired Python class did this inline; the bridge keeps the
   highest-traffic strategy fueling the learning loop.
-- **CCR marker emission** — honored end-to-end. Both
-  `ccr_config.enabled=False` and
-  `ccr_config.inject_retrieval_marker=False` flip the Rust crusher's
-  `enable_ccr_marker` field; the lossy row-drop path then skips both
-  the marker text and the CCR store write. Scope: gates only the
-  row-drop sentinel path. Stage-3c.2 opaque-string CCR substitutions
-  still emit always — they have no Python equivalent.
+- **CCR recovery pointer** — UNCONDITIONAL on every drop. Whenever the
+  lossy row-drop path drops a distinct item, the `<<ccr:HASH>>` recovery
+  pointer is surfaced in the output AND the CCR store is written,
+  regardless of `ccr_config.enabled` / `inject_retrieval_marker`. The
+  pointer is the retrieval key — a drop without it is silent loss, which
+  the recovery invariant forbids (Defect 1). `enabled` /
+  `inject_retrieval_marker` flip the Rust `enable_ccr_marker` field,
+  which the proxy/router reads back to decide whether to inject the
+  heavier `headroom_retrieve` TOOL into the request; they no longer gate
+  the pointer or the store write. The Python store mirror keys off the
+  `<<ccr:` pointer (now always present on a drop), so
+  `compression_store.retrieve(hash)` resolves it. Stage-3c.2
+  opaque-string CCR substitutions likewise always emit their pointer.
 - **Custom relevance scorer / scorer override** — fails loud.
   `relevance_config` and `scorer` constructor args remain in the
   signature for source compat, but the shim raises
@@ -236,25 +242,26 @@ class SmartCrusher(Transform):
         # CCR config is preserved on `self` for callers that read it
         # back (`headroom.proxy.server` does). Both `enabled=False` and
         # `inject_retrieval_marker=False` collapse to the Rust crusher's
-        # `enable_ccr_marker=False` gate — when either is off, the
-        # lossy row-drop path skips marker emission AND the CCR store
-        # write (no point storing a payload nothing in the prompt can
-        # reference; storing it under `enabled=False` would also be a
-        # surprise side effect the user explicitly disabled).
+        # `enable_ccr_marker=False` field.
+        #
+        # That field does NOT skip the marker or the CCR store write
+        # (Defect 1 corrected the prior comment, which claimed it did).
+        # The lossy row-drop path ALWAYS surfaces the `<<ccr:HASH>>`
+        # recovery pointer and ALWAYS writes the store when a distinct
+        # item is dropped, regardless of this flag — a drop without a
+        # recovery pointer is silent loss, which the recovery invariant
+        # forbids on the public `compress()` path. The flag is consumed
+        # by the proxy/router layer to decide whether to inject the
+        # heavier `headroom_retrieve` TOOL into the request; it is the
+        # retrieval-tool preference, not a data-loss switch.
         #
         # Default falls through to `CCRConfig()` so direct callers
         # (the proxy and tests that don't pass an explicit config) get
         # the documented dataclass defaults (`enabled=True,
-        # inject_retrieval_marker=True`). The previous override here
-        # set `inject_retrieval_marker=False` as a no-op-intent hack
-        # back when the Rust port silently ignored the flag; now that
-        # the flag is honored, that override would actively suppress
-        # markers + store writes for every caller.
+        # inject_retrieval_marker=True`).
         #
-        # Scope: gates ONLY the row-drop sentinel path. Stage-3c.2
-        # opaque-string CCR substitutions still emit always — they have
-        # no Python equivalent and no production caller has asked for
-        # them to be suppressed.
+        # Stage-3c.2 opaque-string CCR substitutions likewise always
+        # emit their pointer — they have no Python equivalent.
         if ccr_config is None:
             self._ccr_config = CCRConfig()
         else:

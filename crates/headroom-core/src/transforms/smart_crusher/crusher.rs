@@ -104,18 +104,19 @@ pub struct CrushArrayResult {
 }
 
 /// Result of [`SmartCrusher::persist_dropped`] — the CCR hash that keys
-/// the stored full-original array plus the (gated) prompt-visible marker
-/// text. `Some(_)` only when rows were actually dropped; the store write
-/// (when a store is configured) has already happened by the time this is
-/// returned.
+/// the stored full-original array plus the prompt-visible recovery
+/// pointer text. `Some(_)` only when rows were actually dropped; the
+/// store write (when a store is configured) has already happened by the
+/// time this is returned.
 struct DroppedPersist {
     /// 12-char SHA-256 hex prefix of the canonical full-original array.
     /// Always returned when something was dropped — callers may mirror
-    /// or retrieve it regardless of the marker gate.
+    /// or retrieve it.
     hash: String,
-    /// `<<ccr:HASH N_rows_offloaded>>` marker, or empty when
-    /// `enable_ccr_marker` is off. Only the marker TEXT is gated; the
-    /// store write is unconditional.
+    /// `<<ccr:HASH N_rows_offloaded>>` recovery pointer. ALWAYS
+    /// non-empty when rows were dropped (Defect 1): the pointer is the
+    /// recovery key, not a UX flag, so it is surfaced unconditionally on
+    /// every drop. The store write is likewise unconditional.
     marker: String,
 }
 
@@ -739,13 +740,15 @@ impl SmartCrusher {
         // configured store so a dropped needle is *always* recoverable
         // — never silently lost.
         //
-        // DESIGN.md sub-step 1A (kill silent loss): persistence is
+        // DESIGN.md sub-step 1A (kill silent loss) + Defect 1: BOTH the
+        // store write AND the prompt-visible recovery pointer are
         // UNCONDITIONAL. When `dropped_count > 0` we always compute the
-        // canonical bytes, the hash, and write to the store (if one is
-        // configured). The `enable_ccr_marker` gate controls ONLY the
-        // prompt-visible marker TEXT (`dropped_summary`), not the store
-        // write. See [`SmartCrusher::persist_dropped`] — the shared
-        // helper that both this DICT path and the non-dict
+        // canonical bytes, the hash, write to the store (if configured),
+        // and surface the `<<ccr:HASH>>` pointer in `dropped_summary`.
+        // `enable_ccr_marker` no longer suppresses the pointer — a drop
+        // without a recovery pointer is a silent loss, which the
+        // invariant forbids. See [`SmartCrusher::persist_dropped`] — the
+        // shared helper that both this DICT path and the non-dict
         // string/number/mixed paths route through so every dropped item
         // (any array type) is CCR-recoverable + signalled identically.
         let dropped_count = items.len().saturating_sub(result.len());
@@ -771,12 +774,14 @@ impl SmartCrusher {
     /// When `dropped_count > 0`, serialize the FULL `original_items`
     /// array exactly once into canonical JSON, hash those bytes, and
     /// **unconditionally** write `(hash → canonical)` to the configured
-    /// CCR store (if any). The store write is the cornerstone of the
-    /// no-data-loss guarantee: a dropped needle is always retrievable
-    /// via `ccr_get(hash)`, never silently lost. The marker TEXT
-    /// (`<<ccr:HASH N_rows_offloaded>>`) is gated behind
-    /// `config.enable_ccr_marker`; only the prompt-visible text is
-    /// suppressed when the gate is off — never the store write.
+    /// CCR store (if any), then **unconditionally** build the
+    /// `<<ccr:HASH N_rows_offloaded>>` recovery pointer. The store write
+    /// + pointer together are the cornerstone of the no-data-loss
+    /// guarantee: a dropped needle is always retrievable via
+    /// `ccr_get(hash)` AND nameable from the output via the pointer —
+    /// never silently lost. Neither is gated by `enable_ccr_marker`
+    /// (Defect 1): you cannot drop a distinct item without surfacing a
+    /// recovery pointer to it.
     ///
     /// Returns `None` when nothing was dropped (no hash, no marker, no
     /// store write). Centralizing this here keeps the canonicalization
@@ -803,12 +808,25 @@ impl SmartCrusher {
             store.put(&hash, &canonical);
         }
 
-        // ── Gated marker TEXT only ──
-        let marker = if self.config.enable_ccr_marker {
-            format!("<<ccr:{hash} {dropped_count}_rows_offloaded>>")
-        } else {
-            String::new()
-        };
+        // ── Unconditional recovery pointer (Defect 1) ──
+        //
+        // The `<<ccr:HASH N_rows_offloaded>>` marker is the RECOVERY
+        // KEY, not a UX nicety: it is the only way a consumer holding
+        // just the output can name the hash and pull the dropped rows
+        // back. It MUST be surfaced whenever data is dropped, regardless
+        // of `enable_ccr_marker`. The recovery invariant ("a dropped
+        // item is recoverable from the output alone") cannot hold if the
+        // pointer is suppressed while the rows are still dropped.
+        //
+        // `enable_ccr_marker` historically gated this text; that
+        // conflated the *data-loss recovery pointer* with the heavier
+        // *retrieval-tool injection* (advertising `headroom_retrieve`
+        // into the request), which is owned by the proxy/router layer
+        // (`CCRConfig.inject_tool` / `inject_retrieval_marker`), NOT by
+        // the crusher. The crusher's job is to never drop a distinct
+        // item without leaving a pointer to it; that pointer is now
+        // emitted unconditionally on every drop.
+        let marker = format!("<<ccr:{hash} {dropped_count}_rows_offloaded>>");
 
         Some(DroppedPersist { hash, marker })
     }
@@ -817,22 +835,18 @@ impl SmartCrusher {
     /// sentinel object for a non-dict array drop, persisting the full
     /// original via [`SmartCrusher::persist_dropped`] first.
     ///
-    /// Returns `None` when nothing was dropped OR when the marker gate
-    /// is off and there is therefore no sentinel TEXT to inject (the
-    /// store write still happened inside `persist_dropped`, so the
-    /// payload is recoverable via the returned hash even though no
-    /// prompt-visible sentinel is appended). This mirrors how the dict
-    /// path only appends its sentinel when `dropped_summary` is
-    /// non-empty (crusher.rs DictArray branch).
+    /// Returns `None` ONLY when nothing was dropped. Whenever rows were
+    /// dropped, the sentinel is always produced (Defect 1): the
+    /// recovery pointer is non-optional, so the output always carries a
+    /// `<<ccr:HASH>>` the consumer can resolve via `ccr_get(hash)` —
+    /// never a silent drop. This mirrors the dict path, where
+    /// `dropped_summary` is now likewise always non-empty on a drop.
     fn ccr_dropped_sentinel(
         &self,
         original_items: &[Value],
         dropped_count: usize,
     ) -> Option<Value> {
         let persisted = self.persist_dropped(original_items, dropped_count)?;
-        if persisted.marker.is_empty() {
-            return None;
-        }
         let mut sentinel = serde_json::Map::new();
         sentinel.insert("_ccr_dropped".to_string(), Value::String(persisted.marker));
         Some(Value::Object(sentinel))
@@ -1632,24 +1646,23 @@ mod tests {
         assert!(try_parse_json_container("{malformed").is_none());
     }
 
-    // ---------- enable_ccr_marker gate (PR #301 re-land) ----------
+    // ---------- recovery-pointer invariant (Defect 1) ----------
 
     #[test]
-    fn enable_ccr_marker_false_suppresses_marker_but_still_persists() {
-        // DESIGN.md sub-step 1A (kill silent loss). The
-        // `enable_ccr_marker=false` gate now suppresses ONLY the
-        // prompt-visible marker TEXT. The CCR store write is
-        // UNCONDITIONAL whenever rows drop, so a dropped needle is
-        // always recoverable via the store — never silently lost.
+    fn enable_ccr_marker_false_still_surfaces_recovery_pointer() {
+        // Defect 1 (kill silent loss, completed). With
+        // `enable_ccr_marker=false` the engine STILL surfaces the
+        // `<<ccr:HASH>>` recovery pointer in `dropped_summary` AND
+        // writes the store. The recovery pointer is the retrieval key,
+        // not a UX nicety: you cannot drop a distinct item without
+        // leaving a pointer to it. Suppressing the pointer while still
+        // dropping rows was the silent-loss bug this test now guards
+        // against.
         //
-        // This replaces the prior
-        // `enable_ccr_marker_false_suppresses_marker_and_store` test,
-        // which asserted the OLD silent-loss behavior (store did NOT
-        // grow). That behavior was the exact failure 1A eliminates: a
-        // forced drop with the marker OFF now persists + is
-        // retrievable. Fixture updated because the engine now behaves
-        // identically-better on both the Rust path and (via the
-        // returned hash) the Python mirror.
+        // (Previously this test asserted the OLD behavior —
+        // `dropped_summary.is_empty()` — which encoded exactly the
+        // silent loss the recovery invariant forbids on the public
+        // path. Fixture flipped to assert the invariant.)
         use crate::ccr::InMemoryCcrStore;
         use crate::transforms::smart_crusher::SmartCrusherBuilder;
         use std::sync::Arc;
@@ -1671,21 +1684,28 @@ mod tests {
 
         // Rows were dropped (we built 50, kept fewer).
         assert!(result.items.len() < items.len(), "lossy path didn't fire");
-        // Marker TEXT is suppressed by the gate...
+        // The recovery pointer IS surfaced even with the marker flag off.
         assert!(
-            result.dropped_summary.is_empty(),
-            "dropped_summary should be empty (marker text gated off), got: {:?}",
+            result.dropped_summary.contains("<<ccr:"),
+            "dropped_summary must carry the recovery pointer even with \
+             enable_ccr_marker=false (Defect 1), got: {:?}",
             result.dropped_summary
         );
-        // ...but the hash is still returned so callers can mirror/retrieve.
+        assert!(result.dropped_summary.contains("rows_offloaded"));
+        // The hash is returned so callers can mirror/retrieve.
         let h = result
             .ccr_hash
             .as_ref()
-            .expect("ccr_hash should be returned even with marker off (1A)");
-        // ...and the store DID grow — persistence is unconditional now.
+            .expect("ccr_hash should be returned on a drop");
+        // The pointer text references the same hash.
+        assert!(
+            result.dropped_summary.contains(h.as_str()),
+            "the pointer must reference the returned hash"
+        );
+        // ...and the store DID grow — persistence is unconditional.
         assert!(
             store_len_after > store_len_before,
-            "ccr_store must grow even with enable_ccr_marker=false (1A: kill silent loss)"
+            "ccr_store must grow on a drop (kill silent loss)"
         );
         // The dropped payload is recoverable: the canonical original
         // array round-trips out of the store under the returned hash.
@@ -1953,13 +1973,14 @@ mod tests {
     }
 
     #[test]
-    fn non_dict_drop_persists_store_even_with_marker_gated_off() {
-        // 1A contract parity with the dict path: with
-        // `enable_ccr_marker=false`, the non-dict string path suppresses
-        // the prompt-visible sentinel TEXT (so `ccr_dropped_sentinel`
-        // returns None and nothing is appended), but the store write is
-        // UNCONDITIONAL — the dropped payload is still recoverable by
-        // hash. Pins that marker-gating never re-introduces silent loss.
+    fn non_dict_drop_surfaces_pointer_and_persists_even_with_marker_off() {
+        // Defect 1: parity with the dict path. With
+        // `enable_ccr_marker=false`, the non-dict string path STILL
+        // surfaces the `<<ccr:HASH>>` recovery pointer in the output AND
+        // writes the store. The pointer is the recovery key; suppressing
+        // it while still dropping rows is the silent loss the invariant
+        // forbids. The hash carried by the pointer keys the canonical
+        // original in the store → fully recoverable from the output.
         use crate::ccr::InMemoryCcrStore;
         use std::sync::Arc;
 
@@ -1984,22 +2005,27 @@ mod tests {
         let result = c.crush(&content, "", 1.0);
         let store_after = store.len();
 
-        // Marker TEXT suppressed → no `_ccr_dropped`/`<<ccr:` in output.
+        // The recovery pointer IS in the output even with the flag off.
         assert!(
-            !result.compressed.contains("<<ccr:"),
-            "marker text must be gated off, got: {}",
+            result.compressed.contains("<<ccr:"),
+            "recovery pointer must be surfaced even with enable_ccr_marker=false \
+             (Defect 1), got: {}",
             &result.compressed[..result.compressed.len().min(200)]
         );
-        // ...but the store DID grow — persistence is unconditional, so
-        // the payload is recoverable by hash (computed from the input).
+        // The store grew — persistence is unconditional.
         assert!(
             store_after > store_before,
-            "ccr_store must grow even with enable_ccr_marker=false (1A)"
+            "ccr_store must grow on a drop (kill silent loss)"
         );
+        // The pointer carries the hash that keys the canonical original.
         let expected_hash = hash_canonical(&canonical_array_json(&items));
+        assert!(
+            result.compressed.contains(&expected_hash),
+            "the surfaced pointer must reference the canonical hash"
+        );
         let recovered = store
             .get(&expected_hash)
-            .expect("non-dict drop must be retrievable by hash even when marker is off");
+            .expect("non-dict drop must be retrievable by hash");
         assert_eq!(recovered, canonical_array_json(&items));
     }
 }

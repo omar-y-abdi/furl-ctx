@@ -51,6 +51,22 @@ pub struct CompactionStage {
 }
 
 impl CompactionStage {
+    /// Wire a CCR store into the stage so opaque-blob substitutions on
+    /// the lossless path persist the original under the marker hash
+    /// (Defect 2). The store lives on `config.ccr_store`; `run()` reads
+    /// it. Returns `self` for builder-style chaining.
+    ///
+    /// Idempotent + safe to call with the same store the row-drop path
+    /// uses — same hash → same bytes. Without this call the stage still
+    /// renders opaque markers (unchanged hash), but the originals are
+    /// unretrievable, which is the silent loss the public path forbids;
+    /// `SmartCrusherBuilder::with_ccr_store` calls this for the
+    /// production stage.
+    pub fn with_ccr_store(mut self, store: std::sync::Arc<dyn crate::ccr::CcrStore>) -> Self {
+        self.config.ccr_store = Some(store);
+        self
+    }
+
     /// CSV+schema formatter, default config — the recommended OSS preset.
     pub fn default_csv_schema() -> Self {
         Self {

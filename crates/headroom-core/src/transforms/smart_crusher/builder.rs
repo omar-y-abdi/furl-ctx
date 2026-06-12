@@ -145,9 +145,16 @@ impl SmartCrusherBuilder {
         self.with_compaction(CompactionStage::default_csv_schema())
     }
 
-    /// Plug in a CCR store. The lossy `crush_array` path stashes each
-    /// dropped array's full original here keyed by its hash, so the
-    /// runtime can serve retrieval tool calls with no data loss.
+    /// Plug in a CCR store. Both lossy and lossless paths stash their
+    /// originals here keyed by hash, so the runtime can serve retrieval
+    /// tool calls with no data loss:
+    ///
+    /// - The lossy `crush_array` path stashes each dropped array's full
+    ///   original (row-drop CCR).
+    /// - The lossless compaction stage stashes each substituted
+    ///   opaque-blob's original (Defect 2) — wired into the stage at
+    ///   [`build`](Self::build) so call order with `with_compaction`
+    ///   doesn't matter.
     pub fn with_ccr_store(mut self, store: Arc<dyn CcrStore>) -> Self {
         self.ccr_store = Some(store);
         self
@@ -168,6 +175,16 @@ impl SmartCrusherBuilder {
         let scorer = self
             .scorer
             .unwrap_or_else(|| Box::<HybridScorer>::default());
+        // Defect 2: propagate the CCR store into the compaction stage so
+        // lossless opaque-blob substitutions persist their originals
+        // under the marker hash. Done here (not in `with_compaction` /
+        // `with_ccr_store`) so the two builder calls compose in any
+        // order. The same `Arc` backs both the row-drop and opaque-blob
+        // writes — one store, one retrieve contract.
+        let compaction = match (self.compaction, &self.ccr_store) {
+            (Some(stage), Some(store)) => Some(stage.with_ccr_store(Arc::clone(store))),
+            (stage, _) => stage,
+        };
         SmartCrusher::from_parts(
             self.config,
             anchor_selector,
@@ -175,7 +192,7 @@ impl SmartCrusherBuilder {
             analyzer,
             self.constraints,
             self.observers,
-            self.compaction,
+            compaction,
             self.ccr_store,
         )
     }

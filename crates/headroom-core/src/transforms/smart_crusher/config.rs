@@ -62,20 +62,24 @@ pub struct SmartCrusherConfig {
     /// lossless when available; set to `1.0` to effectively disable
     /// the lossless path (lossy + CCR always).
     pub lossless_min_savings_ratio: f64,
-    /// Master gate for CCR-Dropped row-drop sentinels. When `false`,
-    /// the lossy `crush_array` path skips both the `<<ccr:HASH>>`
-    /// marker text AND the CCR-store write (no point storing a
-    /// payload nothing in the prompt can reference).
+    /// Retrieval-tool advertisement preference, mirrored from the
+    /// Python `CCRConfig` (`enabled and inject_retrieval_marker`). Read
+    /// back by the proxy/router layer to decide whether to inject the
+    /// `headroom_retrieve` TOOL into the request (the heavier behavior
+    /// this flag legitimately owns).
     ///
-    /// The Python shim flips this from
-    /// `ccr_config.enabled and ccr_config.inject_retrieval_marker`,
-    /// so either off-switch on the Python side disables the gate.
-    /// Default `true` — preserves prior behavior.
+    /// **It does NOT gate the data-loss recovery pointer.** Whenever the
+    /// lossy `crush_array` path drops a distinct item, the
+    /// `<<ccr:HASH N_rows_offloaded>>` pointer is surfaced AND the
+    /// CCR-store write happens UNCONDITIONALLY — regardless of this flag
+    /// (Defect 1). The recovery invariant ("a dropped item is
+    /// recoverable from the output alone") cannot hold if the pointer is
+    /// suppressed while the rows are still dropped; the pointer is the
+    /// retrieval key, not a UX nicety. A flag must never turn a drop
+    /// into a silent loss.
     ///
-    /// Scope: gates only the `crush_array` row-drop path. Stage-3c.2
-    /// opaque-string CCR substitutions (in `walker::process_value`)
-    /// still emit always; they have no Python equivalent and no
-    /// production caller has asked for them to be suppressed.
+    /// Default `true`. Stage-3c.2 opaque-string CCR substitutions (in
+    /// `walker::process_value`) likewise always emit their pointer.
     pub enable_ccr_marker: bool,
 }
 

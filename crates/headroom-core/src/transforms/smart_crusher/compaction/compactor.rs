@@ -40,15 +40,21 @@
 //! [`CellClass::Opaque`]: super::classifier::CellClass::Opaque
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::classifier::{classify_cell, CellClass, ClassifyConfig};
 use super::ir::{Bucket, CellValue, Compaction, FieldSpec, Row, Schema};
+use crate::ccr::CcrStore;
 
 /// Config for the compactor.
-#[derive(Debug, Clone)]
+///
+/// `Clone`/`Default`/manual `Debug`. The optional `ccr_store` cannot
+/// derive `Debug` (`dyn CcrStore` isn't `Debug`), so `Debug` is
+/// hand-written below to print only the store's presence.
+#[derive(Clone)]
 pub struct CompactConfig {
     pub classify: ClassifyConfig,
 
@@ -78,6 +84,32 @@ pub struct CompactConfig {
     /// Maximum bucket count — too many buckets means the discriminator
     /// is too granular (e.g. an ID column). Default: 8.
     pub max_buckets: usize,
+
+    /// Optional CCR store. When set, an opaque-blob cell substituted with
+    /// an `<<ccr:HASH,...>>` marker ALSO stashes the original bytes under
+    /// that hash (Defect 2): the marker becomes a recovery pointer, not a
+    /// silent loss. Without a store the marker still renders (same hash),
+    /// but the original is unretrievable — which is exactly the silent
+    /// loss the public path must avoid, so the production
+    /// `CompactionStage` always wires one in. `None` keeps the compactor
+    /// a pure function for the many tests + the parity formatters that
+    /// only inspect the IR.
+    pub ccr_store: Option<Arc<dyn CcrStore>>,
+}
+
+impl std::fmt::Debug for CompactConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactConfig")
+            .field("classify", &self.classify)
+            .field("min_items", &self.min_items)
+            .field("core_field_fraction", &self.core_field_fraction)
+            .field("heterogeneous_core_ratio", &self.heterogeneous_core_ratio)
+            .field("max_flatten_inner_keys", &self.max_flatten_inner_keys)
+            .field("min_buckets", &self.min_buckets)
+            .field("max_buckets", &self.max_buckets)
+            .field("ccr_store", &self.ccr_store.is_some())
+            .finish()
+    }
 }
 
 impl Default for CompactConfig {
@@ -90,6 +122,7 @@ impl Default for CompactConfig {
             max_flatten_inner_keys: 6,
             min_buckets: 2,
             max_buckets: 8,
+            ccr_store: None,
         }
     }
 }
@@ -218,12 +251,25 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
             CellValue::Scalar(parsed)
         }
         CellClass::Opaque(kind) => {
-            let bytes = match v {
-                Value::String(s) => s.as_bytes(),
+            let s = match v {
+                Value::String(s) => s,
                 _ => return CellValue::Scalar(v.clone()),
             };
+            let bytes = s.as_bytes();
+            let ccr_hash = hash_opaque(bytes);
+            // Defect 2: persist the original blob under the SAME hash the
+            // rendered `<<ccr:HASH,...>>` marker will carry, so a
+            // consumer holding only the output can recover it via
+            // `ccr_get(hash)`. Without this, the lossless:table path
+            // substitutes the blob with a marker but never stores the
+            // original → silent loss. The store write is unconditional
+            // when a store is configured and idempotent (same hash →
+            // same bytes); `None` keeps the compactor pure for tests.
+            if let Some(store) = &cfg.ccr_store {
+                store.put(&ccr_hash, s);
+            }
             CellValue::OpaqueRef {
-                ccr_hash: hash_opaque(bytes),
+                ccr_hash,
                 byte_size: bytes.len(),
                 kind,
             }
@@ -640,6 +686,92 @@ mod tests {
             }
             other => panic!("expected Table, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn opaque_blob_original_is_persisted_under_marker_hash() {
+        // Defect 2: when a CCR store is wired into the compact config,
+        // an opaque-blob substitution MUST persist the original bytes
+        // under the SAME hash the `OpaqueRef` / rendered marker carries,
+        // so a consumer holding only the output can recover it. Without
+        // a store wired in (the pure-function default) nothing is
+        // persisted — that path is for tests/parity formatters only.
+        use crate::ccr::InMemoryCcrStore;
+
+        let big = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".repeat(8);
+        let other = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210zyxwvutsrqponmlkjihgfedcba+/=".repeat(8);
+        let items = vec![
+            json!({"id": 1, "blob": big.clone()}),
+            json!({"id": 2, "blob": other.clone()}),
+        ];
+
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let mut config = CompactConfig::default();
+        config.ccr_store = Some(Arc::clone(&store));
+
+        let hash_big = hash_opaque(big.as_bytes());
+        let hash_other = hash_opaque(other.as_bytes());
+
+        // Pure default (no store) → nothing persisted.
+        let pure_store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let _ = compact(&items, &cfg());
+        assert!(
+            pure_store.get(&hash_big).is_none(),
+            "pure compact must not write to an unrelated store"
+        );
+        assert_eq!(store.len(), 0, "no compaction has run with the store yet");
+
+        // With a store wired in → every distinct blob is recoverable
+        // under the marker hash.
+        let c = compact(&items, &config);
+        assert!(c.was_compacted());
+        assert_eq!(
+            store.get(&hash_big).as_deref(),
+            Some(big.as_str()),
+            "first blob must be retrievable under its marker hash"
+        );
+        assert_eq!(
+            store.get(&hash_other).as_deref(),
+            Some(other.as_str()),
+            "second (distinct) blob must be retrievable under its marker hash"
+        );
+        assert_eq!(store.len(), 2, "both distinct blobs persisted");
+    }
+
+    #[test]
+    fn compaction_stage_with_store_persists_opaque_originals_end_to_end() {
+        // End-to-end through the real production seam: a CSV-schema
+        // CompactionStage with a CCR store wired in renders `<<ccr:...>>`
+        // markers AND persists the originals. This is the seam the
+        // public `compress()` path uses (Defect 2 fix point).
+        use super::super::CompactionStage;
+        use crate::ccr::InMemoryCcrStore;
+
+        let big = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".repeat(8);
+        let items = vec![
+            json!({"id": 1, "tag": "x", "blob": big.clone()}),
+            json!({"id": 2, "tag": "x", "blob": big.clone()}),
+        ];
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let stage = CompactionStage::default_csv_schema().with_ccr_store(Arc::clone(&store));
+
+        let (c, rendered) = stage.run(&items);
+        assert!(c.was_compacted());
+        assert!(
+            rendered.contains("<<ccr:"),
+            "marker must render: {rendered}"
+        );
+
+        let hash_big = hash_opaque(big.as_bytes());
+        assert!(
+            rendered.contains(&hash_big),
+            "rendered marker must carry the persisted hash"
+        );
+        assert_eq!(
+            store.get(&hash_big).as_deref(),
+            Some(big.as_str()),
+            "original blob recoverable from the store keyed by the marker hash"
+        );
     }
 
     #[test]
