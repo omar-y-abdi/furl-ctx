@@ -903,33 +903,6 @@ def jitter_delay_ms(base_ms: int, max_ms: int, attempt: int) -> float:
     return capped * (0.5 + random.random())
 
 
-# Image compression availability (do not retain a global compressor instance)
-_image_compressor_available: bool | None = None
-
-
-def _get_image_compressor():
-    """Create a short-lived image compressor on demand."""
-    global _image_compressor_available
-    if _image_compressor_available is False:
-        return None
-
-    try:
-        from headroom.image import ImageCompressor
-
-        # Callers own closing the compressor; this helper only memoizes whether
-        # the optional image stack is importable.
-        compressor = ImageCompressor()
-        if _image_compressor_available is None:
-            logger.info("Image compression enabled (model: chopratejas/technique-router)")
-        _image_compressor_available = True
-        return compressor
-    except ImportError as e:
-        if _image_compressor_available is not False:
-            logger.warning(f"Image compression not available: {e}")
-        _image_compressor_available = False
-        return None
-
-
 # Always-on file logging to the workspace logs directory for `headroom perf` analysis.
 # Resolved lazily so HEADROOM_WORKSPACE_DIR env-var changes are honored.
 
