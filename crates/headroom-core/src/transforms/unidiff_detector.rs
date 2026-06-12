@@ -1,7 +1,8 @@
 //! Unidiff-based diff detection (Stage 3d Tier 2).
 //!
-//! Sits behind [`crate::transforms::magika_detector`] in the Stage-3d
-//! detection pipeline. Magika is fast and right most of the time, but
+//! Sits behind `magika_detector` (Tier 1, compiled only with the
+//! `magika` feature) in the Stage-3d detection pipeline. When magika is
+//! present it is fast and right most of the time, but
 //! it's a probabilistic ML classifier — short, prose-prefixed, or
 //! "looks like code because the lines are code" diffs can slip past it
 //! into [`ContentType::PlainText`]. Tier 2 catches those by running

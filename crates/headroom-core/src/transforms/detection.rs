@@ -25,7 +25,7 @@
 //! magika failure — that's the whole point of having tiers. We
 //! deliberately do **not** treat tier-1 error as a hard failure of the
 //! entire chain; that would block all detection on a transient ONNX
-//! issue. Loud-on-error stays at the [`magika_detect`] entry point for
+//! issue. Loud-on-error stays at the `magika_detect` entry point for
 //! callers who care; the chain swallows the err with a log line.
 //!
 //! # SearchResults / BuildOutput
@@ -39,6 +39,9 @@
 //! for those specifically; not preemptively.
 
 use crate::transforms::content_detector::ContentType;
+// Tier-1 (magika) is compiled only with the `magika` feature. Without
+// it the chain runs Tier-2 (unidiff) + Tier-3 (fallthrough) only.
+#[cfg(feature = "magika")]
 use crate::transforms::magika_detector::magika_detect;
 use crate::transforms::unidiff_detector::is_diff;
 
@@ -53,6 +56,11 @@ pub fn detect(content: &str) -> ContentType {
     }
 
     // ── Tier 1: Magika ──────────────────────────────────────────
+    // Compiled in only with the `magika` feature. When the feature is
+    // off the ONNX runtime is not linked and detection starts at Tier 2;
+    // the deterministic Tier-2/Tier-3 detectors are the legitimate
+    // fallback for an absent (or failed) Tier-1.
+    #[cfg(feature = "magika")]
     match magika_detect(content) {
         Ok(ContentType::PlainText) => {
             // Magika says "I don't know" or "plain text". Continue
@@ -90,18 +98,24 @@ mod tests {
         assert_eq!(detect(""), ContentType::PlainText);
     }
 
+    // These three route exclusively via Tier-1 (magika) — Tier-2 only
+    // recognizes diffs, so without the `magika` feature JSON / source /
+    // HTML fall through to PlainText. Gated to the feature accordingly.
+    #[cfg(feature = "magika")]
     #[test]
     fn json_array_routes_via_tier_1() {
         let payload = r#"[{"id": 1}, {"id": 2}, {"id": 3}]"#;
         assert_eq!(detect(payload), ContentType::JsonArray);
     }
 
+    #[cfg(feature = "magika")]
     #[test]
     fn source_code_routes_via_tier_1() {
         let py = "def hello():\n    print('world')\n\nclass Foo:\n    pass\n";
         assert_eq!(detect(py), ContentType::SourceCode);
     }
 
+    #[cfg(feature = "magika")]
     #[test]
     fn html_routes_via_tier_1() {
         let html = "<!DOCTYPE html><html><body><h1>x</h1></body></html>";
@@ -190,16 +204,20 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "magika")]
     #[test]
     fn yaml_routes_to_source_code() {
         // YAML lives in magika's `code` group; the chain returns it
         // as SourceCode so the router picks the code-aware compressor.
+        // Tier-1-only — gated to the `magika` feature.
         let yaml = "name: my-app\nversion: 1.0\ndependencies:\n  - foo\n";
         assert_eq!(detect(yaml), ContentType::SourceCode);
     }
 
+    #[cfg(feature = "magika")]
     #[test]
     fn rust_source_routes_to_source_code() {
+        // Tier-1-only — gated to the `magika` feature.
         let rs = "use std::collections::HashMap;\n\n\
                   pub struct Counter { counts: HashMap<String, u32> }\n\n\
                   impl Counter {\n    \

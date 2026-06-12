@@ -31,33 +31,49 @@
 //! changes — the fallback path automatically goes dormant the moment
 //! `embedding.is_available()` flips to `true`.
 
+// `LazyLock` + `Regex` back the adaptive-alpha pattern detectors, which
+// only run on the embedding-fusion path. With the `embeddings` feature
+// off there is no fusion, so the patterns (and the imports they need)
+// are compiled out to avoid dead-code.
+#[cfg(feature = "embeddings")]
 use std::sync::LazyLock;
 
+#[cfg(feature = "embeddings")]
 use regex::Regex;
 
 use super::base::{RelevanceScore, RelevanceScorer};
 use super::bm25::BM25Scorer;
+// `EmbeddingScorer` is compiled only with the `embeddings` feature (it
+// pulls `fastembed`/`ort`). Without the feature, `HybridScorer` carries
+// no embedding scorer and `embedding_available` is always false, so the
+// score paths take the BM25-only fallback documented above.
+#[cfg(feature = "embeddings")]
 use super::embedding::EmbeddingScorer;
 
 // Regex patterns that indicate exact-match is important.
 // Translated literally from Python `hybrid.py:53-60`. The `[A-Z|a-z]`
 // in the email pattern is a Python typo — `|` inside `[...]` becomes
 // a literal pipe character, not alternation. We mirror that quirk
-// faithfully for parity.
+// faithfully for parity. Only used by `compute_alpha` on the embedding-
+// fusion path, so gated to the `embeddings` feature.
 
+#[cfg(feature = "embeddings")]
 static UUID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         .expect("UUID regex compiles")
 });
 
+#[cfg(feature = "embeddings")]
 static NUMERIC_ID_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d{4,}\b").expect("numeric ID regex compiles"));
 
+#[cfg(feature = "embeddings")]
 static HOSTNAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z]{2,})?\b")
         .expect("hostname regex compiles")
 });
 
+#[cfg(feature = "embeddings")]
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Python: r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"
     // The `|` inside `[A-Z|a-z]` is a literal pipe in Python — keep
@@ -70,40 +86,73 @@ pub struct HybridScorer {
     pub base_alpha: f64,
     pub adaptive: bool,
     pub bm25: BM25Scorer,
+    /// The semantic scorer. Present only with the `embeddings` feature;
+    /// without it the hybrid scorer is BM25-only and this field does not
+    /// exist.
+    #[cfg(feature = "embeddings")]
     pub embedding: EmbeddingScorer,
     /// Cached at construction time so we don't repeatedly call
     /// `embedding.is_available()`. Mirrors Python's
-    /// `self._embedding_available` field.
+    /// `self._embedding_available` field. Always `false` when the
+    /// `embeddings` feature is off.
     embedding_available: bool,
 }
 
 impl Default for HybridScorer {
     fn default() -> Self {
-        let embedding = EmbeddingScorer::default();
-        let embedding_available = embedding.is_available();
-        HybridScorer {
-            base_alpha: 0.5,
-            adaptive: true,
-            bm25: BM25Scorer::default(),
-            embedding,
-            embedding_available,
+        #[cfg(feature = "embeddings")]
+        {
+            let embedding = EmbeddingScorer::default();
+            let embedding_available = embedding.is_available();
+            HybridScorer {
+                base_alpha: 0.5,
+                adaptive: true,
+                bm25: BM25Scorer::default(),
+                embedding,
+                embedding_available,
+            }
+        }
+        #[cfg(not(feature = "embeddings"))]
+        {
+            HybridScorer {
+                base_alpha: 0.5,
+                adaptive: true,
+                bm25: BM25Scorer::default(),
+                embedding_available: false,
+            }
         }
     }
 }
 
 impl HybridScorer {
     pub fn new(alpha: f64, adaptive: bool) -> Self {
-        let embedding = EmbeddingScorer::default();
-        let embedding_available = embedding.is_available();
-        HybridScorer {
-            base_alpha: alpha,
-            adaptive,
-            bm25: BM25Scorer::default(),
-            embedding,
-            embedding_available,
+        #[cfg(feature = "embeddings")]
+        {
+            let embedding = EmbeddingScorer::default();
+            let embedding_available = embedding.is_available();
+            HybridScorer {
+                base_alpha: alpha,
+                adaptive,
+                bm25: BM25Scorer::default(),
+                embedding,
+                embedding_available,
+            }
+        }
+        #[cfg(not(feature = "embeddings"))]
+        {
+            HybridScorer {
+                base_alpha: alpha,
+                adaptive,
+                bm25: BM25Scorer::default(),
+                embedding_available: false,
+            }
         }
     }
 
+    /// Build a hybrid scorer from explicit BM25 + embedding scorers.
+    /// Only available with the `embeddings` feature — without it there
+    /// is no `EmbeddingScorer` type to pass.
+    #[cfg(feature = "embeddings")]
     pub fn with_scorers(
         alpha: f64,
         adaptive: bool,
@@ -126,6 +175,10 @@ impl HybridScorer {
 
     /// Compute the per-query alpha. Mirrors Python `_compute_alpha`
     /// (`hybrid.py:115-151`). Returns `[0.3, 0.9]`-clamped.
+    ///
+    /// Only used on the embedding-fusion path, so compiled in only with
+    /// the `embeddings` feature.
+    #[cfg(feature = "embeddings")]
     fn compute_alpha(&self, context: &str) -> f64 {
         if !self.adaptive {
             return self.base_alpha;
@@ -177,18 +230,27 @@ impl RelevanceScorer for HybridScorer {
             return self.boost_bm25_only(&bm25_result);
         }
 
-        let emb_result = self.embedding.score(item, context);
-        let alpha = self.compute_alpha(context);
-        let combined = alpha * bm25_result.score + (1.0 - alpha) * emb_result.score;
+        // Reachable only with the `embeddings` feature (otherwise
+        // `embedding_available` is always false and we returned above).
+        #[cfg(feature = "embeddings")]
+        {
+            let emb_result = self.embedding.score(item, context);
+            let alpha = self.compute_alpha(context);
+            let combined = alpha * bm25_result.score + (1.0 - alpha) * emb_result.score;
 
-        RelevanceScore::new(
-            combined,
-            format!(
-                "Hybrid (\u{3b1}={:.2}): BM25={:.2}, Semantic={:.2}",
-                alpha, bm25_result.score, emb_result.score
-            ),
-            bm25_result.matched_terms,
-        )
+            RelevanceScore::new(
+                combined,
+                format!(
+                    "Hybrid (\u{3b1}={:.2}): BM25={:.2}, Semantic={:.2}",
+                    alpha, bm25_result.score, emb_result.score
+                ),
+                bm25_result.matched_terms,
+            )
+        }
+        // Without the feature, the guard above always fires; this branch
+        // keeps the function total for the compiler.
+        #[cfg(not(feature = "embeddings"))]
+        self.boost_bm25_only(&bm25_result)
     }
 
     fn score_batch(&self, items: &[&str], context: &str) -> Vec<RelevanceScore> {
@@ -205,23 +267,35 @@ impl RelevanceScorer for HybridScorer {
                 .collect();
         }
 
-        let emb_results = self.embedding.score_batch(items, context);
-        let alpha = self.compute_alpha(context);
+        // Reachable only with the `embeddings` feature (otherwise
+        // `embedding_available` is always false and we returned above).
+        #[cfg(feature = "embeddings")]
+        {
+            let emb_results = self.embedding.score_batch(items, context);
+            let alpha = self.compute_alpha(context);
 
+            bm25_results
+                .into_iter()
+                .zip(emb_results)
+                .map(|(bm25_r, emb_r)| {
+                    let combined = alpha * bm25_r.score + (1.0 - alpha) * emb_r.score;
+                    RelevanceScore::new(
+                        combined,
+                        format!(
+                            "Hybrid (\u{3b1}={:.2}): BM25={:.2}, Emb={:.2}",
+                            alpha, bm25_r.score, emb_r.score
+                        ),
+                        bm25_r.matched_terms,
+                    )
+                })
+                .collect()
+        }
+        // Without the feature, the guard above always fires; this branch
+        // keeps the function total for the compiler.
+        #[cfg(not(feature = "embeddings"))]
         bm25_results
-            .into_iter()
-            .zip(emb_results)
-            .map(|(bm25_r, emb_r)| {
-                let combined = alpha * bm25_r.score + (1.0 - alpha) * emb_r.score;
-                RelevanceScore::new(
-                    combined,
-                    format!(
-                        "Hybrid (\u{3b1}={:.2}): BM25={:.2}, Emb={:.2}",
-                        alpha, bm25_r.score, emb_r.score
-                    ),
-                    bm25_r.matched_terms,
-                )
-            })
+            .iter()
+            .map(|r| self.boost_bm25_only(r))
             .collect()
     }
 
@@ -304,7 +378,11 @@ mod tests {
     }
 
     // ---------- adaptive alpha ----------
+    //
+    // `compute_alpha` only runs on the embedding-fusion path, so it is
+    // gated to the `embeddings` feature — and so are its tests.
 
+    #[cfg(feature = "embeddings")]
     #[test]
     fn alpha_uuid_query_pushes_to_high_bm25_weight() {
         let s = scorer();
@@ -316,6 +394,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "embeddings")]
     #[test]
     fn alpha_multiple_numeric_ids_boosts_alpha() {
         let s = scorer();
@@ -323,6 +402,7 @@ mod tests {
         assert!(alpha >= 0.75, "got {}", alpha);
     }
 
+    #[cfg(feature = "embeddings")]
     #[test]
     fn alpha_single_numeric_id_modest_boost() {
         let s = scorer();
@@ -331,6 +411,7 @@ mod tests {
         assert!(alpha < 0.75);
     }
 
+    #[cfg(feature = "embeddings")]
     #[test]
     fn alpha_hostname_modest_boost() {
         let s = scorer();
@@ -338,6 +419,7 @@ mod tests {
         assert!(alpha >= 0.6, "got {}", alpha);
     }
 
+    #[cfg(feature = "embeddings")]
     #[test]
     fn alpha_natural_language_query_is_base() {
         let s = scorer();
@@ -345,6 +427,7 @@ mod tests {
         assert_eq!(alpha, 0.5);
     }
 
+    #[cfg(feature = "embeddings")]
     #[test]
     fn alpha_clamped_within_range() {
         let s = scorer();
@@ -355,6 +438,7 @@ mod tests {
         assert!((0.3..=0.9).contains(&alpha));
     }
 
+    #[cfg(feature = "embeddings")]
     #[test]
     fn alpha_non_adaptive_returns_base() {
         let s = HybridScorer::new(0.7, false);

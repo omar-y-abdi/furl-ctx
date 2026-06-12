@@ -22,11 +22,16 @@
 
 mod base;
 mod bm25;
+// `embedding` is compiled only with the `embeddings` feature — it pulls
+// `fastembed`/`ort` (ONNX Runtime). With the feature off, `HybridScorer`
+// runs BM25-only and the `"embedding"` scorer tier is unavailable.
+#[cfg(feature = "embeddings")]
 mod embedding;
 mod hybrid;
 
 pub use base::{default_batch_score, RelevanceScore, RelevanceScorer};
 pub use bm25::BM25Scorer;
+#[cfg(feature = "embeddings")]
 pub use embedding::EmbeddingScorer;
 pub use hybrid::HybridScorer;
 
@@ -46,10 +51,23 @@ pub fn create_scorer(tier: &str) -> Result<Box<dyn RelevanceScorer + Send + Sync
         "bm25" => Ok(Box::new(BM25Scorer::default())),
         "hybrid" => Ok(Box::new(HybridScorer::default())),
         "embedding" => {
-            let s = EmbeddingScorer::default();
-            if s.is_available() {
-                Ok(Box::new(s))
-            } else {
+            #[cfg(feature = "embeddings")]
+            {
+                let s = EmbeddingScorer::default();
+                if s.is_available() {
+                    Ok(Box::new(s))
+                } else {
+                    Err(
+                        "EmbeddingScorer requires the ONNX backend (not yet implemented in Rust)"
+                            .to_string(),
+                    )
+                }
+            }
+            // Without the `embeddings` feature the ONNX backend isn't
+            // compiled in, so the tier is unavailable. Return the same
+            // error the available-but-unloaded path returns above.
+            #[cfg(not(feature = "embeddings"))]
+            {
                 Err(
                     "EmbeddingScorer requires the ONNX backend (not yet implemented in Rust)"
                         .to_string(),
