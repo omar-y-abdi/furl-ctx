@@ -732,8 +732,24 @@ impl SmartCrusher {
         // tool can serve dropped rows back to the LLM on demand.
         // **No data is lost** — "lossy" here means "compressed view
         // inline; full payload retrievable via CCR cache."
-
-        let effective_max_items = adaptive_k;
+        //
+        // CCR-BACKED AGGRESSIVE BUDGET: when a CCR store is configured,
+        // every dropped row is guaranteed recoverable (unconditional
+        // persist + surfaced `<<ccr:HASH>>` pointer — the invariant the
+        // adversarial loop locked). Under that guarantee the visible
+        // sample only has to carry the *signal* — errors, outliers,
+        // anomalies, query-relevant rows (all pinned beyond budget by
+        // `prioritize_indices`) — not a generic cross-section, so the
+        // keep budget is halved. Without a store the drop would be
+        // unrecoverable and the budget stays at the full `adaptive_k`
+        // (legacy / parity mode). The tier-1 passthrough boundary above
+        // still uses the FULL `adaptive_k`, so which arrays enter the
+        // lossy path is unchanged — only how much they keep visible.
+        let effective_max_items = if self.ccr_store.is_some() {
+            ccr_backed_keep_budget(adaptive_k)
+        } else {
+            adaptive_k
+        };
         let analysis = self.analyzer.analyze_array(items);
 
         // Crushability gate: not safe to crush → passthrough, no CCR.
@@ -1133,6 +1149,41 @@ fn annotate_dup_counts(
 /// need the `[N]{cols}` schema line to pay for itself — re-encoding a
 /// 3-row toy array to save a dozen bytes is churn, not compression.
 const SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES: usize = 256;
+
+/// Divisor applied to `adaptive_k` for the lossy keep budget when a CCR
+/// store guarantees recovery of every dropped row. 2 (halving) keeps a
+/// meaningful visible sample while the critical signals (errors /
+/// outliers / anomalies / query pins) remain exempt from the budget.
+const CCR_BACKED_KEEP_DIVISOR: usize = 2;
+
+/// Floor for the CCR-backed keep budget. `min_items_to_analyze` (5) is
+/// the engine's own notion of "too small to even analyze" — the visible
+/// sample never shrinks below it.
+const CCR_BACKED_KEEP_FLOOR: usize = 5;
+
+/// Lossy keep budget when every dropped row is CCR-recoverable.
+/// `adaptive_k / 2`, floored at [`CCR_BACKED_KEEP_FLOOR`], never above
+/// `adaptive_k` itself.
+fn ccr_backed_keep_budget(adaptive_k: usize) -> usize {
+    (adaptive_k / CCR_BACKED_KEEP_DIVISOR)
+        .max(CCR_BACKED_KEEP_FLOOR)
+        .min(adaptive_k)
+}
+
+#[cfg(test)]
+mod ccr_budget_tests {
+    use super::*;
+
+    #[test]
+    fn budget_halves_with_floor_and_cap() {
+        assert_eq!(ccr_backed_keep_budget(15), 7); // default max_items_after_crush
+        assert_eq!(ccr_backed_keep_budget(20), 10);
+        assert_eq!(ccr_backed_keep_budget(10), 5); // floor met exactly
+        assert_eq!(ccr_backed_keep_budget(8), 5); // floored at 5
+        assert_eq!(ccr_backed_keep_budget(4), 4); // never above adaptive_k
+        assert_eq!(ccr_backed_keep_budget(3), 3);
+    }
+}
 
 /// Maps a `Compaction` to a stable kind tag exposed via `CrushArrayResult`.
 fn compaction_kind_str(c: &Compaction) -> &'static str {
@@ -1841,6 +1892,45 @@ mod tests {
             recovered, canonical,
             "recovered payload must equal the canonical original array"
         );
+    }
+
+    #[test]
+    fn ccr_backed_store_tightens_lossy_budget_vs_storeless() {
+        // With a CCR store every dropped row is recoverable, so the
+        // lossy keep budget halves; without a store the legacy full
+        // `adaptive_k` budget applies (a tighter budget there would
+        // drop unrecoverable rows for nothing).
+        use crate::ccr::InMemoryCcrStore;
+        use crate::transforms::smart_crusher::SmartCrusherBuilder;
+        use std::sync::Arc;
+
+        let mk_cfg = || SmartCrusherConfig {
+            lossless_min_savings_ratio: 0.99, // force lossy path
+            ..SmartCrusherConfig::default()
+        };
+        let items: Vec<Value> = (0..60)
+            .map(|i| json!({"msg": format!("entirely distinct message number {}", i)}))
+            .collect();
+
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let with_store = SmartCrusherBuilder::new(mk_cfg())
+            .with_ccr_store(Arc::clone(&store))
+            .build();
+        let without_store = SmartCrusherBuilder::new(mk_cfg()).build();
+
+        let r_store = with_store.crush_array(&items, "", 1.0);
+        let r_legacy = without_store.crush_array(&items, "", 1.0);
+
+        assert!(
+            r_store.items.len() < r_legacy.items.len(),
+            "store-backed budget must keep fewer rows ({} vs {})",
+            r_store.items.len(),
+            r_legacy.items.len()
+        );
+        // Everything dropped under the tightened budget is recoverable.
+        let h = r_store.ccr_hash.as_ref().expect("hash on drop");
+        let recovered = store.get(h).expect("dropped payload retrievable");
+        assert_eq!(recovered, canonical_array_json(&items));
     }
 
     #[test]
