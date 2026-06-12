@@ -113,6 +113,24 @@ def _emitted_ccr_hashes(output_text: str) -> set[str]:
         if CCR_SENTINEL_KEY in output_text:
             hashes |= collect_ccr_hashes(output_text)
         return hashes
+    if isinstance(parsed, str):
+        # Lossy-survivor columnar rendering: the engine ships a JSON
+        # string (CSV-schema table) whose FINAL LINE is the sentinel
+        # object ``{"_ccr_dropped": "<<ccr:HASH ...>>"}``. Collect hashes
+        # only from sentinel-bearing lines that parse to a sentinel
+        # object — the exact same strictness as the array branch below
+        # (input-embedded ``<<ccr:`` strings in row values don't count).
+        hashes = set()
+        for line in parsed.split("\n"):
+            if CCR_SENTINEL_KEY not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get(CCR_SENTINEL_KEY), str):
+                hashes |= collect_ccr_hashes(obj[CCR_SENTINEL_KEY])
+        return hashes
     rows = parsed if isinstance(parsed, list) else [parsed]
     hashes = set()
     for row in rows:

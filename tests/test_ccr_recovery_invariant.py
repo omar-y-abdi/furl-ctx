@@ -312,6 +312,80 @@ def test_opaque_blob_recovers_from_output_marker(
     )
 
 
+_SUBJECT_PREFIXES = ["feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci"]
+_SUBJECT_AREAS = [
+    "crusher", "proxy", "ccr", "router", "bench",
+    "tokenizer", "store", "pipeline", "compaction", "relevance",
+]
+_SUBJECT_VERBS = [
+    "add", "remove", "rework", "guard", "pin",
+    "extend", "isolate", "deflake", "speed up", "harden",
+]
+_SUBJECT_THINGS = [
+    "the lossy budget", "novelty fill", "sentinel emission", "marker parsing",
+    "store mirroring", "field-role gates", "ditto marks", "schema folding",
+    "query anchors", "drop accounting", "TTL handling", "thread-local state",
+    "import guards", "error surfaces", "byte parity",
+]
+
+
+def _log_shaped_rows(n: int = 90) -> list[dict]:
+    # High-entropy distinct rows (git-log shaped): hex/ISO identity columns,
+    # low-cardinality author, genuinely varied unique subjects (uniformly
+    # templated subjects trip the engine's `skip:unique_entities_no_signal`
+    # crushability gate and never reach the lossy path). Forces the LOSSY
+    # path, then the survivor-compaction rendering: a JSON string whose
+    # final line is the `{"_ccr_dropped": ...}` sentinel.
+    return [
+        {
+            "commit": f"{i * 2654435761 + 12345:040x}",
+            "author": f"Author {i % 7}",
+            "date": (
+                f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"
+                f"T{i % 24:02d}:{(i * 13) % 60:02d}:00+02:00"
+            ),
+            "subject": (
+                f"{_SUBJECT_PREFIXES[i % 8]}({_SUBJECT_AREAS[i % 10]}): "
+                f"{_SUBJECT_VERBS[i % 10]} {_SUBJECT_THINGS[i % 15]} #{i + 100}"
+            ),
+        }
+        for i in range(n)
+    ]
+
+
+@pytest.mark.parametrize("ccr_enabled, ccr_inject_marker", _MARKER_OFF_MATRIX)
+def test_lossy_survivor_table_recovers_100pct(
+    ccr_enabled: bool, ccr_inject_marker: bool
+) -> None:
+    # The lossy-survivor CSV rendering (drop + sentinel LINE inside a JSON
+    # string) must satisfy the same invariant as every other shape: every
+    # distinct dropped row recoverable from the output alone.
+    items = _log_shaped_rows()
+    recovered = _recover_from_output(
+        items, ccr_enabled=ccr_enabled, ccr_inject_marker=ccr_inject_marker
+    )
+    distinct = {_repr(x) for x in items}
+    lost = distinct - recovered
+    assert not lost, (
+        f"lossy-survivor table: {len(lost)} of {len(distinct)} rows unrecoverable "
+        f"(enabled={ccr_enabled}, marker={ccr_inject_marker}); first: {list(lost)[:3]}"
+    )
+
+
+def test_lossy_survivor_table_surfaces_sentinel_line() -> None:
+    # Pin the shape itself: lossy drop + survivor compaction ships a JSON
+    # string whose final line is the sentinel object carrying the pointer.
+    items = _log_shaped_rows()
+    router = ContentRouter()
+    result = router.compress(json.dumps(items, ensure_ascii=False))
+    tree = json.loads(result.compressed)
+    assert isinstance(tree, str), "survivor compaction should ship a string rendering"
+    last_line = tree.split("\n")[-1]
+    sentinel = json.loads(last_line)
+    assert isinstance(sentinel, dict) and "_ccr_dropped" in sentinel
+    assert _DROP_RE.search(sentinel["_ccr_dropped"]), "sentinel carries the drop pointer"
+
+
 def test_opaque_blob_default_config_recovers() -> None:
     # Default ContentRouter (markers on) — the production default. Same
     # invariant: every opaque blob recoverable from the output's marker.

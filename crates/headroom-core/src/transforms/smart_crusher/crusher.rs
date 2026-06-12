@@ -813,6 +813,64 @@ impl SmartCrusher {
             None => (None, String::new()),
         };
 
+        // ── Survivor compaction: lossless re-encoding of the kept rows ──
+        //
+        // The lossy selection above decides WHICH rows stay visible; this
+        // step only decides how those rows are RENDERED. When the
+        // compaction stage can render the survivors as a CSV-schema
+        // table that is meaningfully smaller than the JSON array form,
+        // ship that rendering with the `{"_ccr_dropped": ...}` sentinel
+        // appended as a final line. Every kept value stays verbatim in
+        // the output (same lossless encodings the pure-lossless path
+        // uses: schema header, constant-column fold, ditto marks) and
+        // the recovery pointer still names the full original — so the
+        // information content of the output is IDENTICAL to the JSON
+        // form, at fewer tokens. Gated on:
+        // - no `OpaqueRef` substitution (survivor values must stay
+        //   verbatim — same rule as the small-array lossless zone);
+        // - absolute saving ≥ `LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES`
+        //   vs the exact bytes the JSON form would ship.
+        if !dropped_summary.is_empty() {
+            if let Some(stage) = &self.compaction {
+                let (c, rendered) = stage.run(&result);
+                if c.was_compacted() && !c.contains_opaque_ref() {
+                    let mut sentinel = serde_json::Map::new();
+                    sentinel.insert(
+                        "_ccr_dropped".to_string(),
+                        Value::String(dropped_summary.clone()),
+                    );
+                    let sentinel_line =
+                        crate::transforms::anchor_selector::python_safe_json_dumps(
+                            &Value::Object(sentinel.clone()),
+                        );
+                    let mut json_form_items = result.clone();
+                    json_form_items.push(Value::Object(sentinel));
+                    let json_form = crate::transforms::anchor_selector::python_safe_json_dumps(
+                        &Value::Array(json_form_items),
+                    );
+                    let compact_len = rendered.len() + 1 + sentinel_line.len();
+                    if json_form.len().saturating_sub(compact_len)
+                        >= LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES
+                    {
+                        let kind = compaction_kind_str(&c);
+                        let rendered_with_sentinel =
+                            format!("{}\n{sentinel_line}", rendered.trim_end_matches('\n'));
+                        return CrushArrayResult {
+                            items: result,
+                            strategy_info: format!(
+                                "{}+compact:{kind}",
+                                analysis.recommended_strategy.as_str()
+                            ),
+                            ccr_hash,
+                            dropped_summary,
+                            compacted: Some(rendered_with_sentinel),
+                            compaction_kind: Some(kind),
+                        };
+                    }
+                }
+            }
+        }
+
         CrushArrayResult {
             items: result,
             strategy_info: analysis.recommended_strategy.as_str().to_string(),
@@ -1160,6 +1218,12 @@ const CCR_BACKED_KEEP_DIVISOR: usize = 2;
 /// the engine's own notion of "too small to even analyze" — the visible
 /// sample never shrinks below it.
 const CCR_BACKED_KEEP_FLOOR: usize = 5;
+
+/// Minimum ABSOLUTE byte saving required before the lossy path ships
+/// its survivors as a CSV-schema rendering instead of a JSON array.
+/// Same churn-protection rationale as the small-array gate: re-encoding
+/// a handful of rows to save a few bytes is noise, not compression.
+const LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES: usize = 64;
 
 /// Lossy keep budget when every dropped row is CCR-recoverable.
 /// `adaptive_k / 2`, floored at [`CCR_BACKED_KEEP_FLOOR`], never above
@@ -1929,6 +1993,115 @@ mod tests {
         );
         // Everything dropped under the tightened budget is recoverable.
         let h = r_store.ccr_hash.as_ref().expect("hash on drop");
+        let recovered = store.get(h).expect("dropped payload retrievable");
+        assert_eq!(recovered, canonical_array_json(&items));
+    }
+
+    /// One realistic git-log-shaped row: identity columns (40-hex commit,
+    /// ISO date), a low-cardinality author, and a genuinely varied unique
+    /// subject built from rotating conventional-commit vocabulary.
+    fn log_shaped_row(i: usize) -> Value {
+        const PREFIXES: [&str; 8] = [
+            "feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci",
+        ];
+        const AREAS: [&str; 10] = [
+            "crusher", "proxy", "ccr", "router", "bench", "tokenizer", "store", "pipeline",
+            "compaction", "relevance",
+        ];
+        const VERBS: [&str; 10] = [
+            "add", "remove", "rework", "guard", "pin", "extend", "isolate", "deflake",
+            "speed up", "harden",
+        ];
+        const THINGS: [&str; 15] = [
+            "the lossy budget",
+            "novelty fill",
+            "sentinel emission",
+            "marker parsing",
+            "store mirroring",
+            "field-role gates",
+            "ditto marks",
+            "schema folding",
+            "query anchors",
+            "drop accounting",
+            "TTL handling",
+            "thread-local state",
+            "import guards",
+            "error surfaces",
+            "byte parity",
+        ];
+        json!({
+            "commit": format!("{:040x}", (i as u128 * 2_654_435_761 + 12_345)),
+            "author": format!("Author {}", i % 7),
+            "date": format!(
+                "2026-{:02}-{:02}T{:02}:{:02}:00+02:00",
+                (i % 12) + 1,
+                (i % 28) + 1,
+                i % 24,
+                (i * 13) % 60
+            ),
+            "subject": format!(
+                "{}({}): {} {} #{}",
+                PREFIXES[i % 8],
+                AREAS[i % 10],
+                VERBS[i % 10],
+                THINGS[i % 15],
+                i + 100
+            ),
+        })
+    }
+
+    #[test]
+    fn lossy_survivor_compaction_ships_table_with_sentinel_line() {
+        // When the lossy path drops rows AND the survivors render as a
+        // smaller CSV-schema table, the output is the rendering with the
+        // `{"_ccr_dropped": ...}` sentinel appended as the final line.
+        // Every survivor value stays verbatim; the dropped rows stay
+        // recoverable under the surfaced hash.
+        use crate::ccr::InMemoryCcrStore;
+        use crate::transforms::smart_crusher::SmartCrusherBuilder;
+        use std::sync::Arc;
+
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let cfg = SmartCrusherConfig {
+            lossless_min_savings_ratio: 0.99, // force the lossy path
+            ..SmartCrusherConfig::default()
+        };
+        let c = SmartCrusherBuilder::new(cfg)
+            .with_default_compaction()
+            .with_ccr_store(Arc::clone(&store))
+            .build();
+        // High-entropy distinct rows (git-log shaped): hex/ISO identity
+        // columns, repeating author, genuinely varied unique subjects
+        // (uniformly-templated subjects trip the
+        // `skip:unique_entities_no_signal` crushability gate and never
+        // reach the lossy path — mirroring how real logs behave).
+        let items: Vec<Value> = (0..60).map(log_shaped_row).collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+        assert!(result.items.len() < items.len(), "lossy path didn't fire");
+
+        let rendered = result
+            .compacted
+            .as_ref()
+            .expect("survivor compaction should win on key-heavy log rows");
+        // Sentinel is the final line and carries the recovery pointer.
+        let last_line = rendered.lines().last().expect("non-empty rendering");
+        assert!(
+            last_line.starts_with("{\"_ccr_dropped\":"),
+            "sentinel must be the final line, got: {last_line:?}"
+        );
+        assert!(last_line.contains("<<ccr:"), "sentinel carries the pointer");
+        // Every survivor's subject is verbatim in the rendering.
+        for row in &result.items {
+            let subject = row["subject"].as_str().unwrap();
+            assert!(
+                rendered.contains(subject),
+                "survivor value must stay verbatim: {subject}"
+            );
+        }
+        // Dropped rows recoverable under the surfaced hash.
+        let h = result.ccr_hash.as_ref().expect("hash on drop");
+        assert!(last_line.contains(h.as_str()), "pointer names the hash");
         let recovered = store.get(h).expect("dropped payload retrievable");
         assert_eq!(recovered, canonical_array_json(&items));
     }
