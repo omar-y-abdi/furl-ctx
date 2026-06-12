@@ -43,8 +43,9 @@ TOIN (Tool Output Intelligence Network) — observation-only since PR-B5:
     # Record retrieval (automatic via compression_store).
     toin.record_retrieval(sig_hash, retrieval_type, query, query_fields)
 
-    # Aggregated recommendations are emitted offline:
-    #   python -m headroom.cli.toin_publish --output recommendations.toml
+    # Aggregated recommendations are emitted offline by an external
+    # aggregator (the in-repo toin_publish CLI was removed in the
+    # compression-only amputation).
     # The Rust proxy loads that TOML at startup; there is no
     # request-time hint API.
 """
