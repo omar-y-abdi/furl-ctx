@@ -1,0 +1,71 @@
+7c318bd1aa4b4affab29761f15a9604323fe2a3bSindre Sorhussindresorhus@gmail.com2025-09-11T19:11:41+07:003.0.0
+dc4b4457aa476c7fa04e467761d19d4eb6cd1cbaSindre Sorhussindresorhus@gmail.com2025-09-11T17:20:39+07:00Add `transliterate` option
+b084182b39a376b0141b6184d22438a8ad95b644Sindre Sorhussindresorhus@gmail.com2025-09-11T17:00:34+07:00Add `locale` option
+f4595fec1fade6d8872e93f657bbe59b6d9c8b8dSindre Sorhussindresorhus@gmail.com2025-09-11T16:29:36+07:00Require Node.js 20
+d572cba97a8f661d201f4e8bdc0842bc532c9773Sindre Sorhussindresorhus@gmail.com2023-05-17T18:16:45+07:002.2.1
+c9cb96d38a69404c4565c3745c3986c590bb71e8Hannes Küttnerkuettner.hannes@gmail.com2023-05-17T13:12:49+02:00Improve compatibility with partial strings (#73)
+753c86aa90bc749a57e72af40c141fe630b880beSindre Sorhussindresorhus@gmail.com2023-01-30T14:44:49+07:002.2.0
+f235b346adc5dec065752431704e8d994899ea9cAustin Gatlinaustin@gatlin.io2023-01-30T18:43:27+11:00Add `preserveCharacters` option (#70)
+48a9112e20a79eae283ac17a9c262f1e94944487Austin Gatlinaustin@gatlin.io2023-01-28T20:31:28+11:00Remove contractions and possessives (#71)
+fe4d08984af1eb1e561cabf94ebee28f173590f5Sindre Sorhussindresorhus@gmail.com2022-10-05T15:04:03+07:002.1.1
+134d332676f16520cf94993f1297d13ad23f517fSindre Sorhussindresorhus@gmail.com2022-10-05T15:03:12+07:00Meta tweaks
+1aaea23c4825745bb426105998a195eaa2909e8eAustin Gatlinaustin.e.gatlin@gmail.com2022-10-05T18:54:41+11:00Fix handling of plural acronyms (#69)
+2cc3aff7a4fc1d5159394c874cce2d0a778269a5Sindre Sorhussindresorhus@gmail.com2022-07-08T02:36:46+02:00Meta tweaks
+b841d04d92533469714e586435ed4c1b3b451d8cSindre Sorhussindresorhus@gmail.com2021-05-13T15:38:11+07:002.1.0
+2aa56594af9309961565e5c33d09dc9a575f3e39Vahe Hovhannisyanvhpoet@gmail.com2021-05-13T01:36:33-07:00Add `preserveTrailingDash` option (#57)
+1a3336cf3e866342fd44b1ddb30f6dbd2739be68Tobias Nießentniessen@users.noreply.github.com2021-04-30T15:56:00+02:00Fix typo in docs (#58)
+b4ea95e37bc60d33d907ca173739bbbcc12f7c8eSindre Sorhussindresorhus@gmail.com2021-04-18T13:03:43+07:002.0.0
+12498c903aa0bcd44d0a66137f7d7f9e9e570204Sindre Sorhussindresorhus@gmail.com2021-04-18T12:53:19+07:00Require Node.js 12 and move to ESM
+261be4dcadadc61ec0c5abc972bd0f6d5c7ab767Richie Bendallrichiebendall@gmail.com2021-01-02T03:22:55+13:00Move to GitHub Actions (#56)
+7e889eebfe6949f8423f7bde9c217a56f5bedfbcSindre Sorhussindresorhus@gmail.com2020-07-18T22:41:52+08:001.1.0
+d7bf7cc06c63676b273fa496340f4a85a64d7fe8Arnovskyalex190030@gmail.com2020-07-18T17:26:38+03:00Add support for empty `separator` (#53)
+774c5b9b854fa068bdba4b5e129bae36e7a12bbeSindre Sorhussindresorhus@gmail.com2020-07-18T04:17:50+08:00Meta tweaks
+95ab9e1cbb5ae4cc712585d5c7d179b49373388bSindre Sorhussindresorhus@gmail.com2020-05-07T13:53:57+08:001.0.0
+3e3f7ed3dd07e2cb8410bb0cbff3396b37c0e140Sindre Sorhussindresorhus@gmail.com2020-05-07T13:52:37+08:00Meta tweaks
+1be97b43227b5ac4cc76d7e98090cd788098b74cTiago DaninTiagoDanin@outlook.com2020-05-07T02:44:29-03:00Revert fix to incorrect dashes (#35) (#45)
+9e1ec95bd48e49d01d2bdc3f2fe1d042b7712535Can Raucansrau@gmail.com2020-05-07T00:43:47-05:00Add counter for multiple occurences (#46)
+f1acfc9f54d636bcba44b656535cef80725e2be5Sindre Sorhussindresorhus@gmail.com2020-02-17T20:38:23+07:000.11.0
+aa5f88eac51ae2b39e65d8f5cc6edd3da2085ccdSindre Sorhussindresorhus@gmail.com2020-02-17T18:14:13+07:00Use `@sindresorhus/transliterate`
+948a82820e2640e0ea83814504f9dbfaae59bab2Sindre Sorhussindresorhus@gmail.com2020-02-12T04:55:12+07:000.10.1
+9a78d8f78cfee69635d1a82777159ee3ef44e5f5Ricardo Fernandes34801403+dgaussr@users.noreply.github.com2020-02-11T21:52:31+00:00Add leading underscore option (#43)
+8a6758161d9b1a93eacb90175cc8759d5d8c1609Sindre Sorhussindresorhus@gmail.com2020-01-21T23:11:56+07:000.10.0
+a67fb0757d53ee1ffc287980770db27c5c379a21Sindre Sorhussindresorhus@gmail.com2020-01-21T23:10:51+07:00Require Node.js 10
+9122e578a5e21b0d38955ccc2977213a7f41cbbdTiago DaninTiagoDanin@outlook.com2020-01-21T12:25:29-03:00Separate capitalized words (#36)
+5220d93fb1589a390c5de52d8607b18299f26384Sil van Diepenme@silvandiepen.com2020-01-21T16:19:54+01:00Add Armenian characters (#29)
+e95f1f748fe83e2fe6dadc0de70f48fd3815aac4Sindre Sorhussindresorhus@gmail.com2019-05-28T13:05:39+07:00Create funding.yml
+4835efa29f9fddc414e3d1d39ce9ccc8f455ce3fSindre Sorhussindresorhus@gmail.com2019-05-21T14:27:28+07:00Only use a CommonJS export for the TypeScript definition
+12b58bb3a8aa43364107cbeb894a5c2b70e9587aSindre Sorhussindresorhus@gmail.com2019-04-05T14:01:48+07:000.9.1
+2f37f26cfc4a61aff4f524056646d3f6c2286d89Dimitri BeninBendingBender@users.noreply.github.com2019-04-05T06:58:47+00:00Refactor TypeScript definition to CommonJS compatible export (#27)
+77505087d4fa415c0cd152d63ac56acf1289d1f7Sindre Sorhussindresorhus@gmail.com2019-03-08T15:25:01+07:000.9.0
+cc2e110235b0e0b03c426e79dce298eaac64b0c4Dimitri BeninBendingBender@users.noreply.github.com2019-03-08T08:22:41+00:00Require Node.js 8, add TypeScript definition (#23)
+14ddcb5ebf85f40f7fcf777f5b988424f244b6c9Sindre Sorhussindresorhus@gmail.com2019-01-14T09:33:30+07:000.8.0
+24917549c11e7b3cd9464259983de9b46dab1601Mohammad Hossein Mojtahedimhm5000@gmail.com2019-01-14T06:00:17+03:30Add languages Persian, Pashto and Urdu (#22)
+327eb273bfc6be19fdff971714808066b4f66651Sindre Sorhussindresorhus@gmail.com2019-01-03T11:35:03+07:000.7.0
+0e10e37895f87395fa483f2447263b338f7874e5Durulduruldoktoroglu@gmail.com2019-01-03T07:33:25+03:00Add support for Turkish (#20)
+e7af6679d654df029f9440296b4f971d9c431b02Sindre Sorhussindresorhus@gmail.com2018-10-31T13:55:44+07:000.6.0
+46554dfbb0caa3bde0d1a9c9fc531168bc9ccf64Sindre Sorhussindresorhus@gmail.com2018-10-31T13:53:53+07:00Readme tweaks
+acc5f453ac22af18eaa8091fe2e9bb79ef03995bSindre Sorhussindresorhus@gmail.com2018-10-31T13:51:17+07:00Add `decamelize` option
+45fa8e945ce849655c05b0cda96fdc63d74660f2Sindre Sorhussindresorhus@gmail.com2018-10-31T13:41:27+07:00Add support for Romanian
+36166361d04607bc67524391772d3b3dde930ef4Sindre Sorhussindresorhus@gmail.com2018-10-31T13:34:57+07:00Add support for Russian
+1ef647e945026aa4c0d9ac8bc2a0f0170149366eSindre Sorhussindresorhus@gmail.com2018-10-31T13:25:17+07:00Add support for Arabic
+43c2f5deea4cdf8852ce90cb7a50946808762070Sindre Sorhussindresorhus@gmail.com2018-10-31T13:16:45+07:00Add support for Vietnamese
+d484ea91eef6e50a0b44195725e9adbd368f68d1Sindre Sorhussindresorhus@gmail.com2018-10-31T13:07:18+07:00Transliterate German umlauts (#18)
+d2e722037e092d862c1dbb5f44f410ca838e0bebSindre Sorhussindresorhus@gmail.com2018-10-31T02:46:48+07:00Unicode normalize the string
+5bdaa1c73aa3e664c56f337f741bab6c0c8e6bf6Sindre Sorhussindresorhus@gmail.com2018-10-31T01:36:19+07:000.5.0
+1edd6559d14eeebf86d315c7ff983df85131e4b6Sindre Sorhussindresorhus@gmail.com2018-10-31T01:34:37+07:00Do custom replacements as the first transformation
+125fe7fb3dfee1ad44fec75bca2529d14921ee27Sindre Sorhussindresorhus@gmail.com2018-10-31T01:03:15+07:00Meta tweaks
+92c603c49f9d7fd141d0b3d151103533e9af15d4Thiago Lagdenlagden@gmail.com2018-10-30T15:00:05-03:00Add `lowercase` option (#11)
+59dce07fd33fe60efe1ad821bb3b57afbf40d79fSindre Sorhussindresorhus@gmail.com2018-10-13T21:09:48+07:000.4.0
+296fbd51ad808cc378032a3631025a55541772bbArfat Salmanginey.paradise@gmail.com2018-10-13T19:37:49+05:30Fix `customReplacements` option on empty string replacements (#16)
+96ddd5fd5bfc80f5f902cc9bd0b24cb61e9c279fSindre Sorhussindresorhus@gmail.com2018-04-29T21:30:07+07:000.3.0
+6dda8c7a6a521fd4ab3d040186d5d5f0f42dcebbSindre Sorhussindresorhus@gmail.com2018-04-29T21:29:15+07:00Minor tweaks
+c75e55d26f6e4992d448d61bba0a273552ca11e8Thomas Foricherthomas.foricher@gmail.com2018-04-29T16:24:07+02:00Add `customReplacements` option (#4)
+8a1f80c82d988a4f3704d0d06bb9088a18531b57Sindre Sorhussindresorhus@gmail.com2018-04-29T16:21:55+07:00Add link to the CLI for this module
+5b42e0427c7627dfccfeab0769e104df549efdcfSindre Sorhussindresorhus@gmail.com2018-04-23T20:57:34+07:000.2.0
+88c768ebe3fbbc1f1c12af9b1f3ebd22d2aac975Sindre Sorhussindresorhus@gmail.com2018-04-23T20:55:20+07:00Improve code readability
+4f94bd1c3bd352ee3c611af98ffc31258fabe68bAlison Monteiroalisonmonteiro.10@gmail.com2018-04-23T10:40:37-03:00Add `separator` option (#2)
+e407805c95b48e9040c9cd8f05f0dbf9472b809dJoshua Jabbourcode@joshuajabbour.com2018-04-18T10:15:35-07:00Use separator constant everywhere (#1)
+09c3c04fa9f97d57724e45aa417d45dabc682034Sindre Sorhussindresorhus@gmail.com2018-04-18T23:26:17+07:000.1.1
+f0d38cbce673c9535aa27334233bb17cfde1b437Sindre Sorhussindresorhus@gmail.com2018-04-18T23:25:37+07:00Forgot the `g` flag in some of the regexes
+eb70ec2a3de2bbdb078adcfa1778e059d95d91efSindre Sorhussindresorhus@gmail.com2018-04-18T22:42:07+07:000.1.0
+9138b4ec69975177c1f701189131888a1288cf15Sindre Sorhussindresorhus@gmail.com2018-04-18T22:33:46+07:00Init
