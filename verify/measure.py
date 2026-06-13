@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -124,6 +125,77 @@ def _emitted_drop_hashes(output_text: str) -> set[str]:
     return hashes
 
 
+def _find_sentinel_object(output_text: str) -> dict[str, Any] | None:
+    """Locate the ``{"_ccr_dropped": ..., "_ccr_rows": ...}`` sentinel object
+    in a compressed output (a JSON array/object tree, or a JSON-string-wrapped
+    CSV-schema table whose final line is the sentinel)."""
+
+    def walk(node: Any) -> dict[str, Any] | None:
+        if isinstance(node, dict):
+            if "_ccr_dropped" in node:
+                return node
+            for v in node.values():
+                found = walk(v)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for x in node:
+                found = walk(x)
+                if found is not None:
+                    return found
+        return None
+
+    try:
+        tree = json.loads(output_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    found = walk(tree)
+    if found is not None:
+        return found
+    if isinstance(tree, str):
+        last_line = tree.strip().rsplit("\n", 1)[-1]
+        try:
+            obj = json.loads(last_line)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(obj, dict) and "_ccr_dropped" in obj:
+            return obj
+    return None
+
+
+def _marker_key(marker: str) -> str | None:
+    """Pull the key out of ``<<ccr:KEY <sep>...>>`` (KEY may carry a ``#rows``
+    suffix for the granular row index)."""
+    start = marker.find(CCR_PREFIX)
+    if start == -1:
+        return None
+    rest = marker[start + len(CCR_PREFIX):]
+    end = len(rest)
+    for sep in (" ", ",", ">>"):
+        pos = rest.find(sep)
+        if pos != -1:
+            end = min(end, pos)
+    key = rest[:end]
+    return key or None
+
+
+def _active_crusher() -> Any:
+    """The SmartCrusher on the live singleton pipeline ``compress()`` just used
+    — its Rust CCR store holds the per-row chunks Frontier A wrote. Reaching it
+    via the engine's own public ``ccr_get`` is exactly what the engine's
+    proportional-retrieval test does. Returns ``None`` if unreachable."""
+    try:
+        from headroom.compress import _get_pipeline
+
+        pipeline = _get_pipeline()
+        for transform in getattr(pipeline, "transforms", []):
+            if type(transform).__name__ == "ContentRouter":
+                return transform._get_smart_crusher()
+    except Exception:  # pragma: no cover - defensive; falls back to whole-blob
+        return None
+    return None
+
+
 def _retrieve_originals(hashes: set[str], query: str | None) -> dict[str, str]:
     """Retrieve original content per hash from the engine's CCR store."""
     store = get_compression_store()
@@ -185,31 +257,6 @@ def _recovered_row_sigs(recovered: dict[str, str]) -> set[str]:
     return sigs
 
 
-def _scalar_values(item: Any) -> list[str]:
-    out: list[str] = []
-    if isinstance(item, dict):
-        for v in item.values():
-            out.extend(_scalar_values(v))
-    elif isinstance(item, list):
-        for v in item:
-            out.extend(_scalar_values(v))
-    elif isinstance(item, bool):
-        out.append("true" if item else "false")
-    elif item is None:
-        pass
-    else:
-        out.append(str(item))
-    return out
-
-
-def _present_in_text(item: Any, output_text: str) -> bool:
-    """Conservative fallback: every scalar value appears verbatim."""
-    values = _scalar_values(item)
-    if not values:
-        return _canonical(item) in output_text
-    return all(v in output_text for v in values)
-
-
 @dataclass(frozen=True)
 class HashCompare:
     """Per-case byte-exactness proof for the reconstruction."""
@@ -236,6 +283,15 @@ def hash_compare_structured(
     (visible rows + CSV-schema-decoded rows + CCR-retrieved rows) and compare
     its sha256 against the original item multiset's sha256.
 
+    STRICT by default: a row counts as reconstructed ONLY when its canonical
+    signature is produced by a documented recovery surface — visible verbatim,
+    decoded by ``decode_csv_schema_rows``, or retrieved from the CCR store via
+    the ``<<ccr:HASH>>`` pointer. There is NO lenient scalar-substring fallback:
+    an item whose scalars merely appear scattered in the text does NOT count, so
+    a non-round-tripping item FAILS (it lands in ``missing`` and flips
+    ``byte_exact`` to ``False``). This makes the harness's headline lossless
+    measurement the same strict round-trip ``strict_recheck.py`` performs.
+
     byte_exact is True ONLY when the reconstructed multiset hashes identically
     to the original — the strict "recoverable=100%" proof.
     """
@@ -253,14 +309,12 @@ def hash_compare_structured(
     if decoded is not None:
         reconstructable |= decoded
 
-    # Build the reconstructed multiset by matching each original item to a
-    # reconstructable signature, else (last resort) verbatim text presence.
+    # Match each original item ONLY to a documented-recovery signature. No
+    # scalar-substring fallback: a non-round-tripping item lands in `missing`.
     recon_sigs: list[str] = []
     missing: list[str] = []
-    for sig, it in zip(original_sigs, items):
+    for sig in original_sigs:
         if sig in reconstructable:
-            recon_sigs.append(sig)
-        elif _present_in_text(it, output_text):
             recon_sigs.append(sig)
         else:
             missing.append(sig)
@@ -315,6 +369,51 @@ def hash_compare_code(items: list[str], result_messages: list[dict[str, Any]]) -
 # ---------------------------------------------------------------------------
 
 
+def per_row_chunk_tokens(output_text: str, tok: Tokenizer) -> list[int] | None:
+    """REAL per-row retrieval cost (Frontier A's granular offload).
+
+    The granular CCR offload (commit cbf16a85) stores every dropped row as its
+    own individually-addressable canonical 1-element chunk and surfaces a single
+    ``_ccr_rows`` index marker (``<<ccr:HASH#rows N_chunks>>``). Retrieving ONE
+    row now fetches exactly that one row's chunk — not the whole blob — so the
+    retrieval cost is the sum of the ACTUAL chunk payloads pulled, not a
+    proportional slice of one monolithic blob.
+
+    We resolve the index and each per-row chunk through the engine's OWN
+    ``ccr_get`` surface (identical to ``tests/test_ccr_proportional_retrieval``),
+    and token-count the chunk bytes the engine would actually serve back.
+    Returns the per-chunk token sizes (one per dropped row), or ``None`` if the
+    output carries no granular row index (nothing offloaded / no store).
+    """
+    sentinel = _find_sentinel_object(output_text)
+    if sentinel is None or "_ccr_rows" not in sentinel:
+        return None
+    index_key = _marker_key(sentinel["_ccr_rows"])
+    if index_key is None:
+        return None
+    crusher = _active_crusher()
+    if crusher is None:
+        return None
+    index_raw = crusher.ccr_get(index_key)
+    if index_raw is None:
+        return None
+    try:
+        row_hashes = json.loads(index_raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(row_hashes, list):
+        return None
+    sizes: list[int] = []
+    for rh in row_hashes:
+        if not isinstance(rh, str):
+            continue
+        chunk = crusher.ccr_get(rh)
+        if chunk is None:
+            return None  # an unresolvable chunk => cannot model granular cost
+        sizes.append(tok.count_text(chunk))
+    return sizes
+
+
 def effective_savings(
     tokens_before: int,
     tokens_after: int,
@@ -322,29 +421,47 @@ def effective_savings(
     tok: Tokenizer,
     rates: tuple[float, ...] = (0.0, 0.25, 0.50),
     n_dropped_rows: int = 0,
+    chunk_tokens: list[int] | None = None,
 ) -> dict[str, float]:
     """Effective savings ratio once the model retrieves a fraction of the
-    DROPPED ROWS, INCLUDING round-trip overhead.
+    DROPPED ROWS, INCLUDING round-trip overhead — REAL granular-retrieval cost.
 
-    The engine offloads many rows into one (or few) CCR blob(s). A model that
-    needs r-fraction of the dropped rows pulls back a proportional r-fraction
-    of the offloaded content's tokens (a retrieval re-injects rows, and you pay
-    for the rows you pull). We charge:
+    Now that the engine offloads each dropped row as its own addressable chunk
+    (Frontier A, commit cbf16a85), retrieving ``k`` rows costs only those ``k``
+    chunks. We charge the ACTUAL bytes of the ``k`` LARGEST chunks (worst-case
+    the model needs the biggest rows first) plus a per-call overhead — exactly
+    the model the engine's own ``test_ccr_proportional_retrieval`` asserts:
 
-        retrieval_cost(r) = r * total_offloaded_tokens
-                            + ceil(r * n_dropped_rows) * per_call_overhead
+        k = ceil(r * n_dropped_rows)
+        retrieval_cost(r) = sum(sorted(chunk_tokens, desc)[:k])
+                            + k * per_call_overhead
 
-    i.e. the proportional content cost plus a small per-retrieved-row call
-    overhead. effective_after = tokens_after + retrieval_cost; savings =
-    (before - effective_after) / before. At r=0 the savings equal the raw
-    reduction; at r=1 you have paid back essentially all offloaded tokens.
+    effective_after = tokens_after + retrieval_cost; savings =
+    (before - effective_after) / before. At r=0 cost is 0 (savings == raw
+    reduction); at r=1 you pay back every offloaded chunk.
+
+    Fallback: if the granular row index is unavailable (``chunk_tokens is
+    None``) we fall back to the conservative WHOLE-BLOB model — ANY non-zero
+    retrieval pays the entire offloaded payload — which is the pre-granular
+    worst case and never flatters the engine.
     """
-    total_offloaded_tokens = sum(tok.count_text(blob) for blob in recovered.values())
     out: dict[str, float] = {}
+    if chunk_tokens is not None:
+        ordered = sorted(chunk_tokens, reverse=True)
+        for r in rates:
+            k = int(math.ceil(r * n_dropped_rows))
+            content_cost = sum(ordered[:k])
+            call_cost = k * RETRIEVE_CALL_OVERHEAD_TOKENS
+            effective_after = tokens_after + content_cost + call_cost
+            savings = (tokens_before - effective_after) / tokens_before if tokens_before else 0.0
+            out[f"{int(r * 100)}"] = savings
+        return out
+
+    total_offloaded_tokens = sum(tok.count_text(blob) for blob in recovered.values())
     for r in rates:
-        rows_pulled = int(round(r * n_dropped_rows))
-        content_cost = r * total_offloaded_tokens
-        call_cost = rows_pulled * RETRIEVE_CALL_OVERHEAD_TOKENS
+        k = int(math.ceil(r * n_dropped_rows))
+        content_cost = total_offloaded_tokens if k > 0 else 0
+        call_cost = k * RETRIEVE_CALL_OVERHEAD_TOKENS
         effective_after = tokens_after + content_cost + call_cost
         savings = (tokens_before - effective_after) / tokens_before if tokens_before else 0.0
         out[f"{int(r * 100)}"] = savings
@@ -564,7 +681,7 @@ def _measure_structured(case, result, transforms, tb, ta, tr, tok) -> CaseResult
     n_visible = n_dropped = n_recoverable = 0
     for it in case.items:
         sig = _canonical(it)
-        if sig in recon or (visible is None and decoded is None and _present_in_text(it, output_text)):
+        if sig in recon:
             n_visible += 1
         else:
             n_dropped += 1
@@ -575,7 +692,10 @@ def _measure_structured(case, result, transforms, tb, ta, tr, tok) -> CaseResult
     retention = (n_visible + n_recoverable) / n if n else 1.0
 
     hc = hash_compare_structured(case.items, output_text, recovered)
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    chunks = per_row_chunk_tokens(output_text, tok)
+    eff = effective_savings(
+        tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks
+    )
 
     needles: list[dict[str, Any]] = []
     markers = case.meta.get("needle_markers", [])
@@ -642,9 +762,6 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
             if ds is not None and sig in ds:
                 seen = True
                 break
-            if vs is None and ds is None and _present_in_text(it, t):
-                seen = True
-                break
         if seen:
             n_visible += 1
         else:
@@ -665,10 +782,8 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
     original_sigs = [_canonical(it) for it in case.items]
     recon_sigs: list[str] = []
     missing: list[str] = []
-    for sig, it in zip(original_sigs, case.items):
+    for sig in original_sigs:
         if sig in joined_recon:
-            recon_sigs.append(sig)
-        elif any(_present_in_text(it, t) for t, _vs, _ds in views):
             recon_sigs.append(sig)
         else:
             missing.append(sig)
@@ -676,7 +791,14 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
     reconstructed_sha = _multiset_sha(recon_sigs)
     byte_exact = reconstructed_sha == original_sha and not missing
 
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    chunks = None
+    for t in texts:
+        chunks = per_row_chunk_tokens(t, tok)
+        if chunks is not None:
+            break
+    eff = effective_savings(
+        tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks
+    )
 
     cp = check_cache_prefix(
         case.messages, result.messages, case.meta.get("cache_prefix_texts", [])
