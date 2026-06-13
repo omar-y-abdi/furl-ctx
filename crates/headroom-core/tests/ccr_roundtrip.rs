@@ -173,12 +173,46 @@ fn distinct_inputs_produce_distinct_store_entries() {
     let hb = rb.ccr_hash.unwrap();
     assert_ne!(ha, hb);
 
-    // Both originals retrievable.
+    // Both whole-blob originals retrievable (the byte-stable recovery
+    // key, unchanged by the granular model).
     let pa: Value = serde_json::from_str(&store.get(&ha).unwrap()).unwrap();
     let pb: Value = serde_json::from_str(&store.get(&hb).unwrap()).unwrap();
-    assert_eq!(pa, Value::Array(a));
-    assert_eq!(pb, Value::Array(b));
-    assert_eq!(store.len(), starting_len + 2);
+    assert_eq!(pa, Value::Array(a.clone()));
+    assert_eq!(pb, Value::Array(b.clone()));
+
+    // Granular model: besides the two distinct whole-blobs, each crush
+    // also stores PER-ROW chunks (so a single retrieve fetches one row,
+    // not the whole blob) plus a `{hash}#rows` index. The store therefore
+    // grows by 2 whole-blobs + 2 row indexes + the distinct per-row
+    // chunks across both inputs — not just 2. Pin the proportional-
+    // retrieval contract directly: every row of each input resolves to
+    // EXACTLY that one row via its own hash, addressed through the index.
+    for (blob_hash, original) in [(&ha, &a), (&hb, &b)] {
+        let index_raw = store
+            .get(&format!("{blob_hash}#rows"))
+            .expect("row index must be stored under {hash}#rows");
+        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
+        assert_eq!(
+            row_hashes.len(),
+            original.len(),
+            "row index must hold one hash per original row"
+        );
+        for (i, rh) in row_hashes.iter().enumerate() {
+            let row_payload = store
+                .get(rh)
+                .expect("each per-row chunk must resolve individually");
+            let row_arr: Vec<Value> = serde_json::from_str(&row_payload).unwrap();
+            assert_eq!(
+                row_arr,
+                vec![original[i].clone()],
+                "retrieving one row hash returns exactly that one row"
+            );
+        }
+    }
+
+    // The two whole-blobs are distinct entries; the total grew beyond the
+    // legacy "+2" because of the granular chunks + indexes.
+    assert!(store.len() > starting_len + 2);
 }
 
 #[test]

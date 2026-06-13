@@ -101,6 +101,49 @@ pub struct CrushArrayResult {
     /// Top-level [`Compaction`] variant tag — `"table"`, `"buckets"`,
     /// `"ccr"`. Mirrors `compacted` — populated only when lossless won.
     pub compaction_kind: Option<&'static str>,
+    /// Compact granular-retrieval marker (`<<ccr:HASH#rows N_chunks>>`)
+    /// carried alongside the whole-blob `dropped_summary`. Surfaced in
+    /// the `_ccr_rows` field of the `{"_ccr_dropped": ...}` sentinel so a
+    /// consumer can resolve the per-blob row index and retrieve ONE row
+    /// at a time instead of paying for the whole offloaded blob. `None`
+    /// when nothing was dropped or no store was configured.
+    pub row_index_marker: Option<String>,
+}
+
+/// Build the `{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>",
+/// "_ccr_rows": "<<ccr:HASH#rows N_chunks>>"}` sentinel object.
+///
+/// `_ccr_dropped` carries the byte-stable whole-blob recovery pointer
+/// (unchanged — the single-blob retrieve path + parity hash still hold).
+/// `_ccr_rows`, when present, is ONE compact marker naming the per-blob
+/// row index so retrieval is PROPORTIONAL: the consumer resolves the
+/// index, then fetches only the row(s) it needs (each `ccr_get(row_hash)`
+/// returns just that single row) instead of the whole offloaded payload.
+/// It is a single short string — surfacing it costs ~no prompt tokens
+/// and does not perturb the lossy-vs-lossless token routing. `_ccr_rows`
+/// is omitted when absent (no store configured), keeping the no-store
+/// sentinel byte-identical to the historical shape.
+fn ccr_sentinel_map(
+    dropped_summary: &str,
+    row_index_marker: Option<&str>,
+) -> serde_json::Map<String, Value> {
+    let mut sentinel = serde_json::Map::new();
+    sentinel.insert(
+        "_ccr_dropped".to_string(),
+        Value::String(dropped_summary.to_string()),
+    );
+    if let Some(idx) = row_index_marker {
+        sentinel.insert("_ccr_rows".to_string(), Value::String(idx.to_string()));
+    }
+    sentinel
+}
+
+/// Build the full sentinel `Value::Object` from a [`DroppedPersist`].
+fn build_ccr_sentinel(persisted: &DroppedPersist) -> Value {
+    Value::Object(ccr_sentinel_map(
+        &persisted.marker,
+        persisted.row_index_marker.as_deref(),
+    ))
 }
 
 /// Result of [`SmartCrusher::persist_dropped`] — the CCR hash that keys
@@ -118,6 +161,17 @@ struct DroppedPersist {
     /// recovery key, not a UX flag, so it is surfaced unconditionally on
     /// every drop. The store write is likewise unconditional.
     marker: String,
+    /// Compact GRANULAR-retrieval marker, e.g.
+    /// `<<ccr:9f3a2b#rows 50_chunks>>`. ONE short string (not a list), so
+    /// surfacing it costs ~no prompt tokens and never flips the
+    /// lossy-vs-lossless routing decision. It names the per-blob ROW
+    /// INDEX entry (`{hash}#rows`) the store now holds: a JSON array of
+    /// the per-row hashes. The retrieval layer resolves it to fetch only
+    /// the needed row(s) — `ccr_get(row_hash)` returns a 1-element array
+    /// holding exactly that row — instead of paying for the whole blob.
+    /// `None` when no store is configured to chunk into (the array hash +
+    /// whole-blob `marker` still cover recovery in that case).
+    row_index_marker: Option<String>,
 }
 
 /// Result of the lossy-recoverable render attempt in
@@ -468,10 +522,14 @@ impl SmartCrusher {
                             // unambiguously.
                             let mut items = result.items;
                             if !result.dropped_summary.is_empty() {
-                                let mut sentinel = serde_json::Map::new();
-                                sentinel.insert(
-                                    "_ccr_dropped".to_string(),
-                                    Value::String(result.dropped_summary),
+                                // The `_ccr_rows` marker names the per-blob
+                                // row index so retrieval is proportional
+                                // (resolve index, fetch only needed rows);
+                                // `_ccr_dropped` keeps the byte-stable
+                                // whole-blob pointer.
+                                let sentinel = ccr_sentinel_map(
+                                    &result.dropped_summary,
+                                    result.row_index_marker.as_deref(),
                                 );
                                 items.push(Value::Object(sentinel));
                             }
@@ -707,6 +765,7 @@ impl SmartCrusher {
                                 dropped_summary: String::new(),
                                 compacted: Some(rendered),
                                 compaction_kind: Some(kind),
+                                row_index_marker: None,
                             };
                         }
                     }
@@ -719,6 +778,7 @@ impl SmartCrusher {
                 dropped_summary: String::new(),
                 compacted: None,
                 compaction_kind: None,
+                row_index_marker: None,
             };
         }
 
@@ -754,6 +814,7 @@ impl SmartCrusher {
                     dropped_summary: String::new(),
                     compacted: Some(rendered),
                     compaction_kind: Some(kind),
+                    row_index_marker: None,
                 })
             });
 
@@ -936,6 +997,7 @@ impl SmartCrusher {
                 dropped_summary: String::new(),
                 compacted: None,
                 compaction_kind: None,
+                row_index_marker: None,
             });
         }
 
@@ -967,10 +1029,15 @@ impl SmartCrusher {
         // configured store so a dropped needle is *always* recoverable
         // — never silently lost.
         let dropped_count = items.len().saturating_sub(result.len());
-        let (ccr_hash, dropped_summary) = match self.persist_dropped(items, dropped_count) {
-            Some(persisted) => (Some(persisted.hash), persisted.marker),
-            None => (None, String::new()),
-        };
+        let (ccr_hash, dropped_summary, row_index_marker) =
+            match self.persist_dropped(items, dropped_count) {
+                Some(persisted) => (
+                    Some(persisted.hash),
+                    persisted.marker,
+                    persisted.row_index_marker,
+                ),
+                None => (None, String::new(), None),
+            };
 
         // ── Survivor compaction: lossless re-encoding of the kept rows ──
         //
@@ -990,11 +1057,7 @@ impl SmartCrusher {
             if let Some(stage) = &self.compaction {
                 let (c, rendered) = stage.run(&result);
                 if c.was_compacted() && !c.contains_opaque_ref() {
-                    let mut sentinel = serde_json::Map::new();
-                    sentinel.insert(
-                        "_ccr_dropped".to_string(),
-                        Value::String(dropped_summary.clone()),
-                    );
+                    let sentinel = ccr_sentinel_map(&dropped_summary, row_index_marker.as_deref());
                     let sentinel_line =
                         crate::transforms::anchor_selector::python_safe_json_dumps(
                             &Value::Object(sentinel.clone()),
@@ -1021,6 +1084,7 @@ impl SmartCrusher {
                             dropped_summary,
                             compacted: Some(rendered_with_sentinel),
                             compaction_kind: Some(kind),
+                            row_index_marker,
                         });
                     }
                 }
@@ -1034,6 +1098,7 @@ impl SmartCrusher {
             dropped_summary,
             compacted: None,
             compaction_kind: None,
+            row_index_marker,
         })
     }
 
@@ -1065,11 +1130,7 @@ impl SmartCrusher {
         }
         let mut items = result.items.clone();
         if !result.dropped_summary.is_empty() {
-            let mut sentinel = serde_json::Map::new();
-            sentinel.insert(
-                "_ccr_dropped".to_string(),
-                Value::String(result.dropped_summary.clone()),
-            );
+            let sentinel = ccr_sentinel_map(&result.dropped_summary, result.row_index_marker.as_deref());
             items.push(Value::Object(sentinel));
         }
         crate::transforms::anchor_selector::python_safe_json_dumps(&Value::Array(items))
@@ -1111,7 +1172,61 @@ impl SmartCrusher {
         let canonical = canonical_array_json(original_items);
         let hash = hash_canonical(&canonical);
 
-        // ── Unconditional persist (1A) ──
+        // ── GRANULAR per-row persist (proportional retrieval) ──
+        //
+        // Held-out audit (verify/heldout/REPORT.md, leniency #2): the
+        // single whole-blob offload makes the FIRST needed row cost the
+        // WHOLE payload — a single `<<ccr:HASH>>` retrieve returns every
+        // dropped row at once, so effective savings can go NEGATIVE the
+        // moment the model retrieves anything (logs@90 high: +55.7% @25%
+        // → −10.3% worst-case). Fix: ALSO stash each original row under
+        // its own canonical 1-element hash so retrieving ONE row fetches
+        // exactly one row, not the whole blob.
+        //
+        // Storing EVERY row (not only the dropped ones) is intentional:
+        // `persist_dropped` is told only `dropped_count`, not which rows
+        // survived, and a kept row hashed here is harmless (it's already
+        // visible). It guarantees that ANY row the model later asks for
+        // — dropped or not — resolves to just that single row. Each
+        // per-row entry is keyed by `hash_canonical` over the 1-element
+        // canonical array, so `ccr_get(row_hash)` returns exactly `[row]`.
+        //
+        // The per-row hashes are NOT inlined into the prompt (that would
+        // add O(n) pointer strings, bloat the lossy render, and flip the
+        // min-tokens routing toward lossless). Instead they go into a
+        // store-side ROW INDEX under `{hash}#rows` — a JSON array of the
+        // row hashes — and the prompt carries ONE compact marker naming
+        // that index. Retrieval: resolve the index (cheap), then fetch
+        // only the needed rows. Prompt cost ~flat; retrieval proportional.
+        //
+        // ── Write ORDER matters under a bounded LRU ──
+        // The per-row chunks + index are written FIRST, the whole-blob
+        // LAST. Per-row chunks are redundant with the whole-blob (both
+        // recover the same rows), so when the store is capacity-bound the
+        // FIFO eviction sheds the redundant chunks before the whole-blob
+        // — keeping the byte-stable single-blob recovery fallback alive
+        // even if proportional retrieval degrades. Recovery is therefore
+        // never worse than the pre-change single-blob guarantee.
+        let mut row_index_marker: Option<String> = None;
+        if let Some(store) = &self.ccr_store {
+            let mut row_hashes: Vec<String> = Vec::with_capacity(original_items.len());
+            for item in original_items {
+                let row_canonical = canonical_array_json(std::slice::from_ref(item));
+                let row_hash = hash_canonical(&row_canonical);
+                store.put(&row_hash, &row_canonical);
+                row_hashes.push(row_hash);
+            }
+            // Row index: `{hash}#rows` → ["rowhash0", "rowhash1", ...].
+            // Stored as a JSON array of strings so the retrieval layer can
+            // parse it and address each row independently.
+            let index_key = format!("{hash}#rows");
+            let index_payload = serde_json::to_string(&row_hashes).unwrap_or_default();
+            store.put(&index_key, &index_payload);
+            row_index_marker = Some(format!("<<ccr:{index_key} {dropped_count}_chunks>>"));
+        }
+
+        // ── Unconditional whole-blob persist (1A) — written LAST ──
+        // The byte-stable recovery key the invariant + parity depend on.
         if let Some(store) = &self.ccr_store {
             store.put(&hash, &canonical);
         }
@@ -1136,7 +1251,11 @@ impl SmartCrusher {
         // emitted unconditionally on every drop.
         let marker = format!("<<ccr:{hash} {dropped_count}_rows_offloaded>>");
 
-        Some(DroppedPersist { hash, marker })
+        Some(DroppedPersist {
+            hash,
+            marker,
+            row_index_marker,
+        })
     }
 
     /// Build the `{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>"}`
@@ -1155,9 +1274,7 @@ impl SmartCrusher {
         dropped_count: usize,
     ) -> Option<Value> {
         let persisted = self.persist_dropped(original_items, dropped_count)?;
-        let mut sentinel = serde_json::Map::new();
-        sentinel.insert("_ccr_dropped".to_string(), Value::String(persisted.marker));
-        Some(Value::Object(sentinel))
+        Some(build_ccr_sentinel(&persisted))
     }
 
     /// Compress a mixed-type array by grouping items by type and
@@ -2464,6 +2581,16 @@ mod tests {
                     if let Some(h) = extract_ccr_hash(s) {
                         hashes.push(h);
                     }
+                    // GRANULAR retrieval: the `_ccr_rows` marker names the
+                    // per-blob row index (`{hash}#rows`). The index key is
+                    // collected so the caller can resolve it to per-row
+                    // hashes and prove each row is individually
+                    // addressable + recoverable.
+                    if let Some(Value::String(idx)) = map.get("_ccr_rows") {
+                        if let Some(h) = extract_ccr_hash(idx) {
+                            hashes.push(h);
+                        }
+                    }
                     return;
                 }
                 for v in map.values() {
@@ -2517,16 +2644,50 @@ mod tests {
         );
         assert!(store.len() > 0, "ccr_store must be populated on drop");
 
+        // Resolve every surfaced hash. With the granular model a drop
+        // surfaces BOTH the whole-blob pointer (`_ccr_dropped`) and one
+        // per-row pointer per original row (`_ccr_rows`). When the array
+        // is large enough that the per-row chunks fill the bounded LRU,
+        // the (now-redundant) whole-blob entry MAY be evicted — that is
+        // acceptable precisely because the granular chunks recover every
+        // row on their own. So a hash that fails to resolve is tolerated
+        // here; the real invariant — every distinct input recovered — is
+        // asserted on the final `recovered` set below.
         let mut recovered: HashSet<String> = kept_scalars;
+        let mut n_resolved = 0usize;
         for h in &hashes {
-            let payload = store
-                .get(h)
-                .unwrap_or_else(|| panic!("hash {h} must resolve in store"));
+            let Some(payload) = store.get(h) else {
+                continue;
+            };
+            n_resolved += 1;
             let restored: Vec<Value> = serde_json::from_str(&payload).unwrap();
+            // A `{hash}#rows` ROW INDEX resolves to a JSON array of per-row
+            // hash STRINGS, not rows. Follow each one — the proportional
+            // retrieval path: one `ccr_get(row_hash)` per needed row,
+            // each returning exactly `[row]`. This is what makes a single
+            // needed row cost ONE row, not the whole blob.
+            if h.ends_with("#rows") {
+                for hv in &restored {
+                    if let Value::String(row_hash) = hv {
+                        if let Some(row_payload) = store.get(row_hash) {
+                            let row_arr: Vec<Value> =
+                                serde_json::from_str(&row_payload).unwrap();
+                            for x in row_arr {
+                                recovered.insert(canonical_json_for_match(&x));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             for x in restored {
                 recovered.insert(canonical_json_for_match(&x));
             }
         }
+        assert!(
+            n_resolved > 0,
+            "at least one surfaced <<ccr:..>> hash must resolve in the store"
+        );
 
         let distinct_inputs: HashSet<String> =
             items.iter().map(canonical_json_for_match).collect();

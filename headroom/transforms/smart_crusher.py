@@ -772,11 +772,17 @@ class SmartCrusher(Transform):
 
         where ``HASH`` is `[0-9a-f]+` and ``<sep>`` is one of the
         delimiters the Rust emitters use today: a single space (the
-        row-drop summary, ``<<ccr:abc 100_rows_offloaded>>``) or a
+        row-drop summary, ``<<ccr:abc 100_rows_offloaded>>``; or the
+        GRANULAR row-index marker ``<<ccr:abc#rows 100_chunks>>``) or a
         comma (the opaque-blob marker, ``<<ccr:abc,base64,4.5KB>>``).
         We accept either delimiter and tolerate `>>` as the terminator
         (the case where the marker is just `<<ccr:abc>>` with no
         suffix, used by the bare CCR helpers).
+
+        The granular row-index key carries a literal ``#rows`` suffix
+        (``abc#rows``); it is captured WITH the suffix so the mirror can
+        tell an index from a row/blob hash and expand it to per-row
+        chunks.
         """
         idx = 0
         prefix = "<<ccr:"
@@ -794,6 +800,12 @@ class SmartCrusher(Transform):
                 idx = cursor
                 continue
             hash_str = s[cursor:end].lower()
+            # Granular row-index key: `<<ccr:HASH#rows N_chunks>>`. Keep
+            # the `#rows` suffix so `_mirror_single_hash_to_python_store`
+            # recognizes the index and mirrors the per-row chunks.
+            if s[end:].startswith("#rows"):
+                hash_str = f"{hash_str}#rows"
+                end += len("#rows")
             sink.add(hash_str)
             idx = end
 
@@ -806,7 +818,23 @@ class SmartCrusher(Transform):
     ) -> None:
         """Mirror a single Rust-stored CCR entry into the Python
         compression_store, keyed by `ccr_hash`. Best-effort.
+
+        GRANULAR row-index keys (``HASH#rows``) are expanded: the index
+        (a JSON array of per-row hashes) is fetched from Rust and EACH
+        per-row chunk is mirrored into Python under its own hex hash, so
+        the Python ``/v1/retrieve`` can serve a SINGLE row instead of the
+        whole blob. The ``#rows`` key itself is not stored in Python (its
+        non-hex form fails the store's hex-hash validation, and Python
+        retrieve is keyed by the per-row hex hashes anyway).
         """
+        if ccr_hash.endswith("#rows"):
+            self._mirror_row_index_to_python_store(
+                ccr_hash,
+                strategy=strategy,
+                query_context=query_context,
+                tool_name=tool_name,
+            )
+            return
         canonical = self._rust.ccr_get(ccr_hash)
         if canonical is None:
             # Rust store doesn't have it — either the marker came from
@@ -856,6 +884,45 @@ class SmartCrusher(Transform):
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("CCR mirror: store.store() raised (%s)", e)
+
+    def _mirror_row_index_to_python_store(
+        self,
+        index_key: str,
+        strategy: str,
+        query_context: str,
+        tool_name: str | None,
+    ) -> None:
+        """Expand a granular row-index key (``HASH#rows``) and mirror each
+        per-row chunk into the Python compression_store under its own hex
+        hash. This is what makes Python-side ``/v1/retrieve`` PROPORTIONAL:
+        a single needed row resolves to exactly that one row, not the
+        whole offloaded blob. Best-effort — a missing index or chunk just
+        leaves the whole-blob fallback (mirrored from ``_ccr_dropped``)
+        in place.
+        """
+        index_raw = self._rust.ccr_get(index_key)
+        if index_raw is None:
+            logger.debug("CCR mirror: row index %s not in Rust store", index_key)
+            return
+        try:
+            row_hashes = json.loads(index_raw)
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("CCR mirror: row index %s is not valid JSON", index_key)
+            return
+        if not isinstance(row_hashes, list):
+            return
+        for row_hash in row_hashes:
+            if not isinstance(row_hash, str):
+                continue
+            # Each per-row chunk is a pure-hex hash keying a 1-element
+            # canonical array — mirror it like any whole-blob entry so
+            # Python retrieve can serve that single row.
+            self._mirror_single_hash_to_python_store(
+                row_hash,
+                strategy=strategy,
+                query_context=query_context,
+                tool_name=tool_name,
+            )
 
     def _extract_context_from_messages(self, messages: list[dict[str, Any]]) -> str:
         """Build a query string from the last 5 user messages + recent
