@@ -27,6 +27,19 @@ Reproduction path (mirrors ``verify/run.py::probe_result_cache_ccr_divergence``)
 
 Without the fix, step 5 fails: the sentinel is served but unbacked.
 With the fix, step 5 passes: ``_ensure_ccr_backed`` re-mirrored on the hit.
+
+BOTH-EXPIRED hardening (``test_both_stores_expired_*``): the Rust CCR store
+ALSO has a 300 s TTL (``crates/headroom-core/src/ccr/mod.rs`` DEFAULT_TTL),
+same as the Python store, while the result cache (CompressionCache) has a
+30-min TTL. After ~5 minutes BOTH CCR stores expire but the result cache still
+serves the crushed output → re-mirror finds nothing in the Rust store either →
+the served sentinel would be UNBACKED. The strengthened fix detects this and
+REFUSES to serve the stale output: it evicts the cache entry and recomputes
+(``self.compress()``), which re-creates + re-stores the CCR backing and emits a
+fresh backed sentinel. These tests simulate both stores expired with a stateful
+Rust shim (``_ExpiringRustShim``) that returns ``None`` from ``ccr_get`` until a
+fresh ``crush()`` re-stores — faithfully reproducing "old entry expired, but a
+recompute re-creates it".
 """
 
 from __future__ import annotations
@@ -114,6 +127,38 @@ def _make_messages(rows: list[dict]) -> list[dict]:
 
 def _make_tokenizer() -> Tokenizer:
     return Tokenizer(EstimatingTokenCounter())
+
+
+class _ExpiringRustShim:
+    """Wraps the Rust SmartCrusher to simulate the Rust CCR store's TTL expiry.
+
+    ``ccr_get`` returns ``None`` (entry expired) UNTIL a fresh ``crush()`` runs
+    — modelling "the original entry's 300 s TTL lapsed, but a recompute
+    re-creates and re-stores it". This is the faithful both-expired state: a
+    naive cache-hit serve cannot recover, only a recompute can.
+
+    Delegates every other attribute (including ``crush`` side effects that
+    re-populate the underlying store) to the real Rust object.
+    """
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self._restored = False
+
+    def crush(self, *args: object, **kwargs: object) -> object:
+        # A recompute re-stores into the live Rust store; from here on the
+        # (re-created, same-hash) entry resolves again.
+        self._restored = True
+        return self._inner.crush(*args, **kwargs)
+
+    def ccr_get(self, hash_key: str) -> str | None:
+        if not self._restored:
+            return None  # old entry expired
+        return self._inner.ccr_get(hash_key)
+
+    def __getattr__(self, name: str) -> object:
+        # Everything else (ccr_len, crush_array_json, etc.) delegates.
+        return getattr(self._inner, name)
 
 
 @pytest.fixture(autouse=True)
@@ -285,3 +330,117 @@ class TestResultCacheCCRDivergence:
             f"Expected result-cache hit on second apply(); got hits_delta={hits_delta}. "
             "The Tier-2 result cache may not be engaged for this content shape."
         )
+
+    # ------------------------------------------------------------------ #
+    # BOTH-EXPIRED hardening: Rust + Python CCR stores both gone (300 s TTL)
+    # while the result cache (30-min TTL) still holds the crushed output.
+    # The strengthened fix must NOT serve a dead pointer — it recomputes.
+    # ------------------------------------------------------------------ #
+
+    def test_both_stores_expired_recomputes_and_rebacks(self):
+        """Both CCR stores expired + result-cache HIT → recompute re-backs.
+
+        Failure mode (pre-strengthening): ``_ensure_ccr_backed`` re-mirror finds
+        nothing in the Rust store (also expired), the no-op leaves the sentinel
+        unbacked, and the stale cached output is served anyway → silent loss.
+
+        Expected (post-strengthening): the unbackable sentinel is detected, the
+        cache entry evicted, and a fresh compress() recomputes + re-stores the
+        CCR backing → the served sentinel resolves.
+        """
+        messages = _make_messages(_log_rows(90))
+        tokenizer = _make_tokenizer()
+        router = ContentRouter(ContentRouterConfig())
+
+        # First apply: cold cache → fresh compress, both stores backed.
+        r1 = router.apply(messages, tokenizer)
+        out1 = _flatten_content(r1.messages)
+        hashes1 = _extract_ccr_hashes(out1)
+        if not hashes1:
+            pytest.skip("No CCR drop produced for this fixture — cannot test invariant")
+
+        crusher = router._get_smart_crusher()
+        assert crusher is not None, "SmartCrusher must be available for this test"
+        assert crusher.ccr_len() >= 1, "Rust store should hold the backing after first apply"
+
+        # Simulate BOTH stores expired:
+        #   - Python store wiped
+        #   - Rust ccr_get returns None until a fresh crush() re-stores
+        reset_compression_store()
+        real_rust = crusher._rust
+        shim = _ExpiringRustShim(real_rust)
+        crusher._rust = shim
+        try:
+            # Second apply: result-cache HIT, but the served sentinel is
+            # unbackable from either store → the fix must recompute.
+            r2 = router.apply(messages, tokenizer)
+        finally:
+            crusher._rust = real_rust
+
+        out2 = _flatten_content(r2.messages)
+        hashes2 = _extract_ccr_hashes(out2)
+        assert hashes2, "Recomputed output must still surface a recovery sentinel"
+
+        # The recompute must have run (the shim's crush() flips _restored).
+        assert shim._restored, (
+            "Expected a recompute (fresh crush()) after the unbackable cache hit; "
+            "the fix did not fall through to the recompute path."
+        )
+
+        # Invariant: every served sentinel resolves in the Python store again.
+        py_store = get_compression_store()
+        for h in hashes2:
+            entry = py_store.retrieve(h)
+            assert entry is not None, (
+                f"BOTH-EXPIRED INVARIANT VIOLATED: served sentinel <<ccr:{h}>> is "
+                f"NOT backed after the cache hit. The fix served a dead pointer "
+                f"instead of recomputing."
+            )
+            assert entry.original_content, (
+                f"hash {h!r}: recomputed CCR entry has empty original_content"
+            )
+
+    def test_both_stores_expired_does_not_serve_stale_pointer(self):
+        """The served output after both-expired must be a backed recompute.
+
+        Strong form: the result cache must be re-populated with a FRESH entry
+        (the stale one evicted then re-put by the recompute), the recompute must
+        have run (shim flips ``_restored``), and every served sentinel resolves.
+        """
+        messages = _make_messages(_log_rows(90))
+        tokenizer = _make_tokenizer()
+        router = ContentRouter(ContentRouterConfig())
+
+        r1 = router.apply(messages, tokenizer)
+        if not _extract_ccr_hashes(_flatten_content(r1.messages)):
+            pytest.skip("No CCR drop produced — cannot test invariant")
+
+        crusher = router._get_smart_crusher()
+
+        reset_compression_store()
+        real_rust = crusher._rust
+        shim = _ExpiringRustShim(real_rust)
+        crusher._rust = shim
+        try:
+            r2 = router.apply(messages, tokenizer)
+        finally:
+            crusher._rust = real_rust
+
+        # The fix must have fallen through to a recompute (fresh crush()).
+        assert shim._restored, (
+            "Expected a recompute (fresh crush()) after the unbackable cache hit; "
+            "the fix served the stale cached output instead of recomputing."
+        )
+
+        # The cache must still hold a (freshly re-populated) entry for reuse.
+        assert router._cache.size >= 1, (
+            "Recompute should re-populate the result cache with a fresh, backed entry"
+        )
+
+        py_store = get_compression_store()
+        served = _extract_ccr_hashes(_flatten_content(r2.messages))
+        assert served, "Recomputed output must still surface a recovery sentinel"
+        for h in served:
+            assert py_store.retrieve(h) is not None, (
+                f"served sentinel <<ccr:{h}>> unbacked after both-expired recompute"
+            )

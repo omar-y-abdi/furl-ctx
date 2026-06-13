@@ -269,6 +269,16 @@ class CompressionCache:
         self._results.pop(key, None)
         self._skip[key] = time.time()
 
+    def invalidate(self, key: int) -> None:
+        """Drop a result entry without marking it skipped.
+
+        Used when a cached crushed output can no longer be safely served (its
+        ``<<ccr:HASH>>`` backing is gone and cannot be re-created from the
+        cache hit alone). The caller falls through to a fresh compress(), which
+        re-creates and re-stores the CCR backing and re-populates this cache.
+        """
+        self._results.pop(key, None)
+
     @property
     def size(self) -> int:
         return len(self._results)
@@ -1651,41 +1661,89 @@ class ContentRouter(Transform):
                 logger.debug("SmartCrusher not available")
         return self._smart_crusher
 
-    def _ensure_ccr_backed(self, cached_compressed: str, context: str) -> None:
-        """Re-mirror any ``<<ccr:HASH>>`` pointers in *cached_compressed* into
-        the Python compression_store so that a result-cache HIT never serves a
-        sentinel that points to an expired (or otherwise absent) CCR entry.
+    def _ensure_ccr_backed(self, cached_compressed: str, context: str) -> bool:
+        """Ensure every ``<<ccr:HASH>>`` pointer in *cached_compressed* resolves
+        in the Python ``compression_store`` (the store ``/v1/retrieve`` reads).
 
-        The Tier-2 result cache and the CCR store have INDEPENDENT lifetimes:
-        a result-cache HIT short-circuits ``smart_crush_content``, so the
-        normal Rust→Python mirror (``SmartCrusher._mirror_ccr_to_python_store``)
-        is never called.  After the CCR store entry expires the sentinel becomes
-        unresolvable — a signalled but unrecoverable drop.
+        Returns ``True`` iff, after a best-effort re-mirror, EVERY referenced
+        hash is backed by a live store entry. Returns ``False`` if any sentinel
+        is unbackable — the caller MUST then refuse to serve the stale cached
+        output and recompute instead.
 
-        This method is called on every Tier-2 result-cache HIT whose payload
-        contains ``<<ccr:``.  It delegates to the same bridge that fires on a
-        fresh compress: ``SmartCrusher._mirror_ccr_to_python_store``.  If the
-        Rust store still holds the entry, the Python store is refreshed (TTL
-        reset).  If the Rust store has also expired, the call is a no-op (the
-        SmartCrusher logs a debug message and returns), which is the same
-        outcome as a fresh compress on a fully-expired entry — not worse.
+        Why this is needed: the Tier-2 result cache (30-min TTL) and BOTH CCR
+        stores (Rust + Python, each 300-s TTL) have INDEPENDENT lifetimes. A
+        result-cache HIT short-circuits ``smart_crush_content``, so the normal
+        Rust→Python mirror never runs. After ~5 minutes BOTH CCR stores expire
+        while the result cache still holds the crushed output: serving it would
+        emit a ``<<ccr:HASH>>`` pointing to nothing — a signalled-but-
+        unrecoverable drop (silent data loss).
 
-        Best-effort: errors must not break serving the cached result.
+        The re-mirror (``SmartCrusher._mirror_ccr_to_python_store``) refreshes
+        the Python store from the Rust store when the Rust entry is still live.
+        If the Rust entry is ALSO gone, the re-mirror is a no-op and the hash
+        stays unbacked — this method reports that via ``False`` so the caller
+        can recompute (a fresh compress re-creates + re-stores the backing).
+
+        Best-effort on errors: a failure to verify is treated as unbacked
+        (``False``) so the caller falls back to the safe recompute path.
         """
-        if "<<ccr:" not in cached_compressed:
-            return
+        hashes = self._extract_ccr_hashes(cached_compressed)
+        if not hashes:
+            # No sentinels → nothing to back → trivially safe to serve.
+            return True
+
         crusher = self._get_smart_crusher()
-        if crusher is None:
-            return
+        if crusher is not None:
+            try:
+                crusher._mirror_ccr_to_python_store(
+                    rendered=cached_compressed,
+                    strategy="result_cache_hit",
+                    query_context=context,
+                    tool_name=None,
+                )
+            except Exception as e:  # pragma: no cover - best effort
+                logger.debug("_ensure_ccr_backed: mirror raised (non-fatal): %s", e)
+
+        # Verify against the authoritative Python store: a sentinel is "backed"
+        # only if `/v1/retrieve` would resolve it right now.
         try:
-            crusher._mirror_ccr_to_python_store(
-                rendered=cached_compressed,
-                strategy="result_cache_hit",
-                query_context=context,
-                tool_name=None,
-            )
-        except Exception as e:  # pragma: no cover - best effort
-            logger.debug("_ensure_ccr_backed: mirror raised (non-fatal): %s", e)
+            from ..cache.compression_store import get_compression_store
+
+            store = get_compression_store()
+        except Exception as e:  # pragma: no cover - defensive
+            # Cannot verify → assume unbacked, force the safe recompute path.
+            logger.debug("_ensure_ccr_backed: cannot get compression_store (%s)", e)
+            return False
+
+        for h in hashes:
+            if store.retrieve(h) is None:
+                logger.debug(
+                    "_ensure_ccr_backed: hash %s unbackable after re-mirror "
+                    "(both CCR stores expired) — recompute required",
+                    h,
+                )
+                return False
+        return True
+
+    @staticmethod
+    def _extract_ccr_hashes(text: str) -> set[str]:
+        """Collect every distinct ``<<ccr:HASH...>>`` hash in *text*.
+
+        Reuses SmartCrusher's marker scanner so the parse grammar stays in one
+        place (no regex; tolerates the row-drop, opaque-blob, and bare marker
+        forms).
+        """
+        if "<<ccr:" not in text:
+            return set()
+        from .smart_crusher import SmartCrusher
+
+        hashes: set[str] = set()
+        try:
+            parsed = json.loads(text)
+            SmartCrusher._collect_ccr_hashes(parsed, hashes)
+        except (json.JSONDecodeError, ValueError):
+            SmartCrusher._collect_ccr_hashes_from_string(text, hashes)
+        return hashes
 
     def _get_search_compressor(self) -> Any:
         """Get SearchCompressor (lazy load)."""
@@ -2245,21 +2303,35 @@ class ContentRouter(Transform):
                 # Re-check ratio against current min_ratio (shifts with context pressure)
                 if cached_ratio < min_ratio:
                     # Invariant: every <<ccr:HASH>> in a served output must be
-                    # backed by a live CCR store entry.  The CCR store has an
-                    # independent TTL from this result cache, so re-mirror on
-                    # every hit to refresh (or re-persist) the backing entry.
-                    self._ensure_ccr_backed(cached_compressed, context)
-                    result_slots[i] = {**message, "content": cached_compressed}
-                    transforms_applied.append(f"router:{cached_strategy}:{cached_ratio:.2f}")
-                    compressed_details.append(f"{cached_strategy}:{cached_ratio:.2f}")
+                    # backed by a live CCR store entry.  Both CCR stores (Rust +
+                    # Python, 300s TTL) expire independently of this result cache
+                    # (30-min TTL).  Re-mirror to refresh the backing; if a
+                    # sentinel is unbackable (both CCR stores already expired),
+                    # DO NOT serve the stale dead pointer — evict and recompute.
+                    if self._ensure_ccr_backed(cached_compressed, context):
+                        result_slots[i] = {**message, "content": cached_compressed}
+                        transforms_applied.append(f"router:{cached_strategy}:{cached_ratio:.2f}")
+                        compressed_details.append(f"{cached_strategy}:{cached_ratio:.2f}")
+                        route_counts.setdefault("cache_hit", 0)
+                        route_counts["cache_hit"] += 1
+                        continue
+                    # Unbackable sentinel — evict and fall through to recompute,
+                    # which re-creates + re-stores the CCR backing.
+                    self._cache.invalidate(content_key)
+                    route_counts.setdefault("cache_stale_recompute", 0)
+                    route_counts["cache_stale_recompute"] += 1
+                    route_counts.setdefault("cache_miss", 0)
+                    route_counts["cache_miss"] += 1
+                    pending_tasks.append((i, content, context, msg_bias, content_key))
+                    continue
                 else:
                     # Threshold tightened — no longer qualifies. Move to skip.
                     self._cache.move_to_skip(content_key)
                     result_slots[i] = message
                     route_counts["ratio_too_high"] += 1
-                route_counts.setdefault("cache_hit", 0)
-                route_counts["cache_hit"] += 1
-                continue
+                    route_counts.setdefault("cache_hit", 0)
+                    route_counts["cache_hit"] += 1
+                    continue
 
             # Cache miss — defer to parallel compression pass
             route_counts.setdefault("cache_miss", 0)
@@ -2590,10 +2662,21 @@ class ContentRouter(Transform):
                     cached = self._cache.get(content_key)
                     if cached is not None:
                         cached_compressed, cached_ratio, cached_strategy = cached
-                        if cached_ratio < min_ratio:
-                            # Re-mirror CCR entries so the independent CCR TTL
-                            # never leaves a served <<ccr:HASH>> sentinel unbacked.
-                            self._ensure_ccr_backed(cached_compressed, context)
+                        if cached_ratio >= min_ratio:
+                            # Threshold tightened — move to skip
+                            self._cache.move_to_skip(content_key)
+                            new_blocks.append(block)
+                            if route_counts is not None:
+                                route_counts["ratio_too_high"] += 1
+                                route_counts.setdefault("cache_hit", 0)
+                                route_counts["cache_hit"] += 1
+                            continue
+                        # Re-mirror CCR entries so the independent CCR TTL never
+                        # leaves a served <<ccr:HASH>> sentinel unbacked. If a
+                        # sentinel is unbackable (both CCR stores expired), evict
+                        # and fall through to recompute rather than serve a dead
+                        # pointer.
+                        if self._ensure_ccr_backed(cached_compressed, context):
                             new_blocks.append({**block, "content": cached_compressed})
                             transforms_applied.append(f"router:tool_result:{cached_strategy}")
                             if compressed_details is not None:
@@ -2601,16 +2684,15 @@ class ContentRouter(Transform):
                                     f"tool:{cached_strategy}:{cached_ratio:.2f}"
                                 )
                             any_compressed = True
-                        else:
-                            # Threshold tightened — move to skip
-                            self._cache.move_to_skip(content_key)
-                            new_blocks.append(block)
                             if route_counts is not None:
-                                route_counts["ratio_too_high"] += 1
+                                route_counts.setdefault("cache_hit", 0)
+                                route_counts["cache_hit"] += 1
+                            continue
+                        # Unbackable — evict and recompute below.
+                        self._cache.invalidate(content_key)
                         if route_counts is not None:
-                            route_counts.setdefault("cache_hit", 0)
-                            route_counts["cache_hit"] += 1
-                        continue
+                            route_counts.setdefault("cache_stale_recompute", 0)
+                            route_counts["cache_stale_recompute"] += 1
 
                     # Cache miss — run full compression
                     if route_counts is not None:
@@ -2683,10 +2765,18 @@ class ContentRouter(Transform):
                     cached = self._cache.get(content_key)
                     if cached is not None:
                         cached_compressed, cached_ratio, cached_strategy = cached
-                        if cached_ratio < min_ratio:
-                            # Re-mirror CCR entries so the independent CCR TTL
-                            # never leaves a served <<ccr:HASH>> sentinel unbacked.
-                            self._ensure_ccr_backed(cached_compressed, context)
+                        if cached_ratio >= min_ratio:
+                            self._cache.move_to_skip(content_key)
+                            new_blocks.append(block)
+                            if route_counts is not None:
+                                route_counts["ratio_too_high"] += 1
+                                route_counts.setdefault("cache_hit", 0)
+                                route_counts["cache_hit"] += 1
+                            continue
+                        # Re-mirror CCR entries; if a sentinel is unbackable
+                        # (both CCR stores expired), evict and recompute rather
+                        # than serve a dead pointer.
+                        if self._ensure_ccr_backed(cached_compressed, context):
                             new_blocks.append({**block, "text": cached_compressed})
                             transforms_applied.append(f"router:text_block:{cached_strategy}")
                             if compressed_details is not None:
@@ -2694,15 +2784,15 @@ class ContentRouter(Transform):
                                     f"text:{cached_strategy}:{cached_ratio:.2f}"
                                 )
                             any_compressed = True
-                        else:
-                            self._cache.move_to_skip(content_key)
-                            new_blocks.append(block)
                             if route_counts is not None:
-                                route_counts["ratio_too_high"] += 1
+                                route_counts.setdefault("cache_hit", 0)
+                                route_counts["cache_hit"] += 1
+                            continue
+                        # Unbackable — evict and recompute below.
+                        self._cache.invalidate(content_key)
                         if route_counts is not None:
-                            route_counts.setdefault("cache_hit", 0)
-                            route_counts["cache_hit"] += 1
-                        continue
+                            route_counts.setdefault("cache_stale_recompute", 0)
+                            route_counts["cache_stale_recompute"] += 1
 
                     # Cache miss — full compression
                     if route_counts is not None:
