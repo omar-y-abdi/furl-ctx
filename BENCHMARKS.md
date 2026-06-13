@@ -1,6 +1,133 @@
 # BENCHMARKS — Headroom Engine honest benchmarks
 
+> **Read this header first.** The single percentages in the per-phase dev
+> log below (e.g. "logs@90 = 93%", "multiturn = 70.8%") are **best-case,
+> low-entropy CEILINGS measured during development on the dev fixtures.**
+> Two independent, adversarial, out-of-sample verifications (`verify/` on
+> slugify/is-plain-obj; `verify/heldout/` on express/chalk/npm-cli) showed
+> they **degrade by 6–43pp on fresh high-entropy / near-unique / realistic
+> data** — exactly where real logs and listings live. This header is the
+> honest, tier-aware, sourced summary; treat it as authoritative and read
+> every dev figure below as a ceiling, not a typical.
+
+## Honest, tier-aware results (STRICT lossless + REAL granular-retrieval cost)
+
+**Sources (re-runnable, default params, real gpt-4o tiktoken, 6 fixed seeds/case, cold CCR per case):**
+- `verify/` — first independent verification (slugify/is-plain-obj), raw in
+  `verify/raw_results.json`, audit `verify/REPORT.md`.
+- `verify/heldout/` — second, disjoint, out-of-sample verification
+  (express/chalk/npm-cli, seeds `2000+211·i`), raw in
+  `verify/heldout/raw_results.json`, audit `verify/heldout/REPORT.md`,
+  strict spot-recheck `verify/heldout/strict_recheck.py`.
+
+Both harnesses are now **strict by default**: a row counts as recovered
+ONLY when a documented surface reproduces it — visible verbatim,
+`decode_csv_schema_rows`, or a CCR `<<ccr:HASH>>` retrieve. The lenient
+scalar-substring fallback that could mark a non-round-tripping row
+"recovered" was removed (`verify/measure.py`,
+`verify/heldout/measure.py`). Under the strict measurement, **every group
+in both sweeps is still byte-exact: 0 hash failures, 0 silent loss, 0
+cache-prefix violations** — the lossless contract is real, not an artifact
+of the fallback.
+
+### Token reduction — TYPICAL vs CEILING vs GENUINE-ENTROPY
+
+Mean token reduction across 6 seeds; tiers are entropy levels of the SAME
+family. "Typical" = medium/realistic entropy. "Ceiling" = low entropy (the
+dev headline tier). "Genuine/high" = near-unique rows (real logs/listings).
+All tiers byte-exact. (`verify/heldout/raw_results.json`, cross-checked
+against `verify/raw_results.json`.)
+
+| family | dev headline (CEILING) | TYPICAL (medium) | GENUINE / HIGH (near-unique) | byte-exact | source |
+|---|---:|---:|---:|:--:|---|
+| logs@90 | 93–96% (low) | **94.3%** [94.2–94.5] | **80.5%** genuine [77–84], **80.9%** high [77–84] | yes | verify + heldout |
+| search@90 | 92.7% (dev) | **93.3%** [93.2–93.6] | **93.4%** high [93.3–93.5] (now reliable, ±0.1pp) | yes | verify + heldout |
+| repeated_logs@90 | 97.1% | **95.7%** (tier-invariant, forced-redundant) | 95.7% | yes | verify |
+| disk@90 | — | **95.1%** [93.5–95.8] | **91.5%** high, ~92–95% genuine (CCR offload at size 90) | yes | verify |
+| disk@9 | 50% (small, lossless-only) | **59.7%** | **43.3%** high / **40.6%** genuine (no offload at size 9) | yes | verify + heldout |
+| multiturn@90 | 70.8% (@low/135) | **39.0%** medium | **28.3%** high [22.9–32.5] | yes | heldout |
+| code@7 | 0% (passthrough) | 0% | 0% (66% only when blobs are byte-identical → dedup) | yes | verify |
+
+**Honest reading of the degradations** (vs the dev headline, the POINT of
+the audits):
+
+- **logs**: the 93% headline is a low/medium-entropy figure. On near-unique
+  rows (fresh uuid message + random sha commit + per-row author/service) it
+  falls to **~80–82%** (−11 to −13pp), and the high tier is volatile across
+  seeds (75–91%). Still substantial — just not the headline.
+- **search@90**: the round-3 reliability fix **replicates** — high-entropy
+  search went from erratic (24–94% across seeds, first run) to **reliable
+  93.4–93.8%, spread ~0.1–0.3pp**, all byte-exact. This is the one headline
+  that holds across every tier on held-out data (not overfit to slugify).
+- **disk**: the "50% at size 9" claim is a small-payload, lossless-only
+  figure; at size 9 nothing is offloaded so reduction is pure per-row
+  structural folding → **~40–44%** on high/genuine. At size 90 CCR offload
+  kicks in and disk recovers to **~92–95%**.
+- **multiturn**: the 70.8% headline only holds at LOW entropy/size. At
+  realistic medium/high entropy and 90 turns the per-turn payload is below
+  the crush threshold, so little drops → **28–39%**. It only reaches the
+  headline at ~900 turns (84–97%). The dev figure was size/entropy-cherry-
+  picked; report it as a ceiling.
+
+### Effective savings UNDER RETRIEVAL — REAL granular-chunk cost model
+
+Compression that is recovered is only a win if recovery is cheap. The
+audit's leniency #2 charged a *proportional slice* of the offloaded blob,
+but pre-granular retrieval was **whole-blob**: one `<<ccr:HASH>>` retrieve
+returned every dropped row, so the FIRST needed row cost the entire
+payload and effective savings could go **NEGATIVE** (cost MORE than the
+uncompressed original). Frontier A's granular per-row offload (commit
+`cbf16a85`) fixes the engine; the harness now models the **real** cost —
+retrieving `k = ceil(r · n_dropped)` rows charges only the `k` largest
+actual per-row chunks, resolved through the engine's own `ccr_get`
+(identical to `tests/test_ccr_proportional_retrieval.py`).
+
+Effective savings = `1 − (compressed + retrieved) / raw`, mean over 6
+seeds, real gpt-4o tokens. **OLD** = the whole-blob model (any retrieval =
+full payload); **NEW** = the granular per-chunk model on the same cases:
+
+| case (tier) | raw reduction (0% retr.) | @25% OLD → NEW | @50% OLD → NEW |
+|---|---:|---|---|
+| logs@90 high | 80.9% | **−7.5% → +62.2%** | **−9.1% → +43.8%** |
+| logs@90 genuine | 80.5% | +5.6% → **+68.7%** | +3.2% → **+44.3%** |
+| search@90 high | 93.4% | +1.2% → **+66.1%** | −2.7% → **+41.0%** |
+| disk@90 genuine | ~94.5% | +4.9% → **+68.2%** | +2.4% → **+43.9%** |
+
+So under realistic partial retrieval the engine **stays net-positive at
+every fraction** (≈+40–68% @25%, ≈+40–44% @50%) instead of collapsing
+below zero. Cases where nothing is offloaded (multiturn@90, disk@9, small
+payloads) have **zero retrieval cost** — effective savings equal the raw
+reduction at every fraction. (`verify/heldout/measure.py::effective_savings`
++ `per_row_chunk_tokens`; OLD/NEW recomputed on the same seeds.)
+
+### What is genuinely guaranteed (holds at EVERY tier)
+
+- **Lossless recovery is real and byte-exact.** Under the de-cheated strict
+  measurement (no substring fallback), every group in both sweeps is
+  byte-exact: 0 hash failures, 0 silent needle loss, 0 cache-prefix
+  violations. Independent `strict_recheck.py` reconstructs purely from
+  visible rows + `decode_csv_schema_rows` + CCR retrieve and confirms
+  `strict_byte_exact=true, n_missing=0` on every spot case.
+- **No fake structural gain on genuine entropy.** The anti-cheat control
+  (pure-random sha1 rows) fires NO affix/head/dict fold (0/6 seeds); the
+  folds fire on structured tiers and decline on genuine — confirmed in both
+  sweeps (`no_structure_control`, `encoding_fire_struct_vs_genuine`).
+- **Prompt-cache safety holds.** Multiturn cases never drop index 0, never
+  reorder the cached prefix, never rewrite `cache_control`
+  (`cache_prefix_violations: 0`).
+- **The TTL/result-cache silent-loss bug stays fixed.** The divergence
+  probe reproduces backed recovery after simulated CCR expiry
+  (`any_silent_loss=False`).
+
+---
+
 ## Phase-7: route-by-min-tokens — ship the fewer-token recoverable render (before → after)
+
+> **Tier caveat:** the single token counts in this and every phase below are
+> dev-time CEILING figures on the dev fixtures. See the honest tier-aware
+> header for the typical/genuine-entropy numbers and effective-savings-
+> under-retrieval. The *mechanisms* described here are accurate; the
+> *percentages* are best-case.
 
 - Baseline: Phase-6 final (`7e446de7`). Policy default flipped
   `LosslessFirst → MinTokens`.
