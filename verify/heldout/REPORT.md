@@ -14,6 +14,33 @@ engine. Compression + reconstruction via the engine's own public surface only.
 
 ---
 
+## Follow-up (post-audit): both leniencies RESOLVED
+
+The two engine-favorable leniencies this report flagged have since been
+fixed; this report's tables below describe the **as-found** state and are
+kept for provenance. Current state:
+
+1. **Scalar-presence fallback removed — strict by default.** The
+   `_present_in_text` fallback in `hash_compare_structured` (and the
+   conversation path) is gone (`verify/measure.py`,
+   `verify/heldout/measure.py`): a row counts as recovered ONLY via a
+   documented surface (visible / `decode_csv_schema_rows` / CCR retrieve),
+   so a non-round-tripping item now FAILS. Re-ran the full held-out sweep
+   under the strict measure: **0 hash failures, 0 silent loss, 0
+   cache-prefix violations** — the lossless contract was never resting on
+   the fallback.
+2. **Proportional retrieval model replaced with REAL granular cost.**
+   Frontier A's granular per-row offload (commit `cbf16a85`) makes
+   retrieval proportional; `effective_savings` now charges only the `k`
+   largest ACTUAL per-row chunks (resolved via the engine's own
+   `ccr_get`), not a slice of one blob. The negative-savings collapse this
+   report found (logs@90 high `+55.7% @25% → −10.3%` whole-blob) no longer
+   occurs: granular stays **positive at every fraction** (logs@90 high
+   `+62% @25% / +44% @50%`). The honest, tier-aware summary now lives in
+   `BENCHMARKS.md`.
+
+---
+
 ## Bottom line
 
 The reported numbers **replicate at low/medium entropy and on the structured
