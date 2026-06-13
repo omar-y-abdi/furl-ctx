@@ -1651,6 +1651,42 @@ class ContentRouter(Transform):
                 logger.debug("SmartCrusher not available")
         return self._smart_crusher
 
+    def _ensure_ccr_backed(self, cached_compressed: str, context: str) -> None:
+        """Re-mirror any ``<<ccr:HASH>>`` pointers in *cached_compressed* into
+        the Python compression_store so that a result-cache HIT never serves a
+        sentinel that points to an expired (or otherwise absent) CCR entry.
+
+        The Tier-2 result cache and the CCR store have INDEPENDENT lifetimes:
+        a result-cache HIT short-circuits ``smart_crush_content``, so the
+        normal Rust→Python mirror (``SmartCrusher._mirror_ccr_to_python_store``)
+        is never called.  After the CCR store entry expires the sentinel becomes
+        unresolvable — a signalled but unrecoverable drop.
+
+        This method is called on every Tier-2 result-cache HIT whose payload
+        contains ``<<ccr:``.  It delegates to the same bridge that fires on a
+        fresh compress: ``SmartCrusher._mirror_ccr_to_python_store``.  If the
+        Rust store still holds the entry, the Python store is refreshed (TTL
+        reset).  If the Rust store has also expired, the call is a no-op (the
+        SmartCrusher logs a debug message and returns), which is the same
+        outcome as a fresh compress on a fully-expired entry — not worse.
+
+        Best-effort: errors must not break serving the cached result.
+        """
+        if "<<ccr:" not in cached_compressed:
+            return
+        crusher = self._get_smart_crusher()
+        if crusher is None:
+            return
+        try:
+            crusher._mirror_ccr_to_python_store(
+                rendered=cached_compressed,
+                strategy="result_cache_hit",
+                query_context=context,
+                tool_name=None,
+            )
+        except Exception as e:  # pragma: no cover - best effort
+            logger.debug("_ensure_ccr_backed: mirror raised (non-fatal): %s", e)
+
     def _get_search_compressor(self) -> Any:
         """Get SearchCompressor (lazy load)."""
         if self._search_compressor is None:
@@ -2208,6 +2244,11 @@ class ContentRouter(Transform):
                 cached_compressed, cached_ratio, cached_strategy = cached
                 # Re-check ratio against current min_ratio (shifts with context pressure)
                 if cached_ratio < min_ratio:
+                    # Invariant: every <<ccr:HASH>> in a served output must be
+                    # backed by a live CCR store entry.  The CCR store has an
+                    # independent TTL from this result cache, so re-mirror on
+                    # every hit to refresh (or re-persist) the backing entry.
+                    self._ensure_ccr_backed(cached_compressed, context)
                     result_slots[i] = {**message, "content": cached_compressed}
                     transforms_applied.append(f"router:{cached_strategy}:{cached_ratio:.2f}")
                     compressed_details.append(f"{cached_strategy}:{cached_ratio:.2f}")
@@ -2550,6 +2591,9 @@ class ContentRouter(Transform):
                     if cached is not None:
                         cached_compressed, cached_ratio, cached_strategy = cached
                         if cached_ratio < min_ratio:
+                            # Re-mirror CCR entries so the independent CCR TTL
+                            # never leaves a served <<ccr:HASH>> sentinel unbacked.
+                            self._ensure_ccr_backed(cached_compressed, context)
                             new_blocks.append({**block, "content": cached_compressed})
                             transforms_applied.append(f"router:tool_result:{cached_strategy}")
                             if compressed_details is not None:
@@ -2640,6 +2684,9 @@ class ContentRouter(Transform):
                     if cached is not None:
                         cached_compressed, cached_ratio, cached_strategy = cached
                         if cached_ratio < min_ratio:
+                            # Re-mirror CCR entries so the independent CCR TTL
+                            # never leaves a served <<ccr:HASH>> sentinel unbacked.
+                            self._ensure_ccr_backed(cached_compressed, context)
                             new_blocks.append({**block, "text": cached_compressed})
                             transforms_applied.append(f"router:text_block:{cached_strategy}")
                             if compressed_details is not None:
