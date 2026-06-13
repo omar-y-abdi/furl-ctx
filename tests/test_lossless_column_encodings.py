@@ -95,11 +95,15 @@ def test_constant_fold_does_not_fire_on_varying_columns() -> None:
 def test_ditto_marks_round_trip_consecutive_repeats() -> None:
     # Shape mirrors the real rg-search benchmark capture: `path` repeats
     # in consecutive runs (matches grouped per file), other columns vary.
+    # Distinct, NON-affix-sharing path tokens per run (so the column pins
+    # ditto in isolation and the cross-row affix fold finds nothing to
+    # share). `lines` is per-row unique; ditto fires on the repeating path.
+    runs = ["zeta", "Quark9", "moon!", "Vault", "iris7", "Omega"]
     items = [
         {
-            "path": f"src/module_{i // 10}.py",
+            "path": runs[i // 10],
             "line_number": 3 * i + 1,
-            "lines": f"def handler_{i}(request):",
+            "lines": f"snippet for row {i} here",
         }
         for i in range(60)
     ]
@@ -111,8 +115,8 @@ def test_ditto_marks_round_trip_consecutive_repeats() -> None:
         line.startswith("=,") or ",=," in line or line.endswith(",=") for line in body
     ), f"expected ditto marks in rows; first rows: {body[:3]}"
     # Each distinct path appears exactly once (first row of its run).
-    for d in range(6):
-        assert text.count(f"src/module_{d}.py") == 1
+    for d in runs:
+        assert text.count(d) == 1
 
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
@@ -233,12 +237,13 @@ def test_fractional_second_timestamps_stay_verbatim() -> None:
     ]
     text = _compress_to_text(items)
     decl = text.split("\n", 1)[0]
+    # The fractional second poisons the strict ISO-delta path: the column
+    # must NOT be `ts:string~`. It MAY be cross-row affix-folded (lossless),
+    # so the invariant we assert is exact round-trip, not verbatim presence.
     assert "ts:string~" not in decl, decl
-    for it in items:
-        assert it["ts"] in text, f"verbatim timestamp missing: {it['ts']}"
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
-    assert not missing
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
 
 
 def test_dict_encoding_low_cardinality_column_round_trips() -> None:
@@ -281,20 +286,21 @@ def test_dict_encoding_values_with_commas_round_trip() -> None:
 
 
 def test_all_distinct_string_column_never_dict_encodes() -> None:
-    # An all-distinct column gains nothing from indexes — it must stay
-    # plain with every value verbatim (honest gate, no fake encoding).
+    # An all-distinct column gains nothing from dictionary INDEXES — it
+    # must never be `__dict:` encoded (that would be a fake low-cardinality
+    # win). The shared path root / extension IS legitimate cross-row affix
+    # structure, which the engine may fold losslessly; the honest gate is
+    # "no dictionary encoding" + exact round-trip.
     items = [
         {"path": f"src/pkg_{i}/module_{i}.py", "match": f"def handler_{i}():"}
         for i in range(40)
     ]
     text = _compress_to_text(items)
-    assert "__dict:" not in text
-    for it in items:
-        assert it["path"] in text
+    assert "__dict:" not in text, "all-distinct column must not dict-encode"
 
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
-    assert not missing
+    assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
 
 
 def test_decimal_scale_fold_round_trips() -> None:

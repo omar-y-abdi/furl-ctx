@@ -209,6 +209,7 @@ fn build_homogeneous_table(
     stamp_iso_delta_columns(&mut field_specs, &rows);
     stamp_decimal_scaled_columns(&mut field_specs, &rows);
     stamp_dict_string_columns(&mut field_specs, &rows);
+    stamp_affix_columns(&mut field_specs, &rows);
 
     Compaction::Table {
         schema: Schema {
@@ -644,6 +645,104 @@ fn stamp_dict_string_columns(specs: &mut [FieldSpec], rows: &[Row]) {
         if dict_line + idx_cost < plain {
             spec.encoding = Some(ColumnEncoding::DictString {
                 values: order.into_iter().map(|v| v.to_string()).collect(),
+            });
+        }
+    }
+}
+
+/// Stamp [`ColumnEncoding::Affix`] on every plain string column whose
+/// every cell shares a common byte prefix and/or suffix (the structure
+/// that repeats across near-unique rows: shared path roots, URL roots,
+/// fixed key/template heads, file extensions). The affix is declared
+/// once on a `__affix:name=PREFIX,SUFFIX` preamble line and each row
+/// carries only its unique middle; reconstruction is pure byte
+/// concatenation (`prefix + middle + suffix`), proven at stamp time by
+/// stripping and rejoining every cell and comparing to the original.
+///
+/// Runs AFTER the dictionary stamp, so low-cardinality columns are
+/// already claimed by `DictString` (which is a strictly bigger win for
+/// few distinct values); affix catches the HIGH-cardinality near-unique
+/// columns the dictionary cannot fold.
+///
+/// Gates (all must hold):
+/// - ≥ 3 rows;
+/// - every cell a scalar string (no Missing/Nested/numeric);
+/// - the shared affix is non-empty (prefix or suffix);
+/// - the affix length is ≥ 2 bytes (a 1-byte affix barely pays for the
+///   `^` marker + the `__affix:` line);
+/// - the exact round-trip holds for every cell;
+/// - strict byte saving: the affix line + stripped+ditto cells render
+///   smaller than the plain+ditto cells.
+fn stamp_affix_columns(specs: &mut [FieldSpec], rows: &[Row]) {
+    use super::encodings::{common_affix, decode_affix_cell, encode_affix_cell};
+    use super::formatter::csv_render_str;
+
+    if rows.len() < 3 {
+        return;
+    }
+    for (col, spec) in specs.iter_mut().enumerate() {
+        if spec.const_value.is_some() || spec.encoding.is_some() {
+            continue;
+        }
+        let mut values: Vec<&str> = Vec::with_capacity(rows.len());
+        let mut all_strings = true;
+        for row in rows {
+            match row.0.get(col) {
+                Some(CellValue::Scalar(Value::String(s))) => values.push(s.as_str()),
+                _ => {
+                    all_strings = false;
+                    break;
+                }
+            }
+        }
+        if !all_strings {
+            continue;
+        }
+        let (prefix, suffix) = common_affix(&values);
+        if prefix.len() + suffix.len() < 2 {
+            continue;
+        }
+        // A prefix/suffix containing a newline would break the
+        // single-line `__affix:` preamble grammar; skip (CSV-quoting
+        // can't carry a literal newline on one line).
+        if prefix.contains('\n')
+            || prefix.contains('\r')
+            || suffix.contains('\n')
+            || suffix.contains('\r')
+        {
+            continue;
+        }
+        // Strip every cell and PROVE the exact round-trip.
+        let middles: Option<Vec<&str>> = values
+            .iter()
+            .map(|v| encode_affix_cell(v, prefix, suffix))
+            .collect();
+        let Some(middles) = middles else { continue };
+        let round_trip_ok = middles
+            .iter()
+            .zip(values.iter())
+            .all(|(mid, orig)| decode_affix_cell(mid, prefix, suffix) == **orig);
+        if !round_trip_ok {
+            continue;
+        }
+        // Byte gate: plain cells vs stripped middles, both WITH ditto and
+        // the exact formatter quoting, plus the one-time `__affix:` line.
+        let plain_cells: Vec<String> = values.iter().map(|v| csv_render_str(v)).collect();
+        let mid_cells: Vec<String> = middles.iter().map(|m| csv_render_str(m)).collect();
+        let plain = ditto_rendered_cost(plain_cells.iter().map(|s| s.as_str()));
+        let stripped = ditto_rendered_cost(mid_cells.iter().map(|s| s.as_str()));
+        let affix_line = "__affix:".len()
+            + spec.name.len()
+            + 1 // '='
+            + csv_render_str(prefix).len()
+            + 1 // ',' between prefix and suffix
+            + csv_render_str(suffix).len()
+            + 1 // newline
+            + 1; // the `^` marker on the declaration
+        if affix_line + stripped < plain {
+            spec.encoding = Some(ColumnEncoding::Affix {
+                prefix: prefix.to_string(),
+                suffix: suffix.to_string(),
             });
         }
     }

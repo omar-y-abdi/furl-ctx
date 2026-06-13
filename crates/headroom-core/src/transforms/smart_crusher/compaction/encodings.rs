@@ -323,6 +323,116 @@ pub fn decode_decimal_cell(cell: &str, k: usize) -> Option<String> {
     Some(format!("{sign}{}.{}", &padded[..split], &padded[split..]))
 }
 
+// ─────────────────────── cross-row affix fold ───────────────────────
+//
+// A string column whose every cell shares a common BYTE prefix and/or
+// suffix (the structure that repeats even when the middle is unique:
+// shared path roots like `crates/headroom-core/src/`, URL roots like
+// `https://api.github.com/repos/owner/proj/`, file extensions `.rs`,
+// fixed key/template heads). The affix is declared ONCE and each row
+// carries only its unique middle. Reconstruction is pure byte
+// concatenation — `prefix + middle + suffix` — so exactness is
+// structural: nothing is computed, the bytes are split and rejoined.
+//
+// The prefix/suffix are computed on UTF-8 BYTE boundaries that are also
+// char boundaries (see `common_affix`), so the middle is always valid
+// UTF-8 and the column never splits a multibyte codepoint.
+
+/// Longest common prefix of `values`, truncated to a char boundary of
+/// the first value. Empty when the values share no leading byte.
+fn common_prefix_len(values: &[&str]) -> usize {
+    let Some(first) = values.first() else {
+        return 0;
+    };
+    let fb = first.as_bytes();
+    let mut n = fb.len();
+    for v in &values[1..] {
+        let vb = v.as_bytes();
+        let mut i = 0;
+        while i < n && i < vb.len() && fb[i] == vb[i] {
+            i += 1;
+        }
+        n = i;
+        if n == 0 {
+            break;
+        }
+    }
+    // Retreat to a char boundary of `first` so the split is valid UTF-8.
+    while n > 0 && !first.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
+}
+
+/// Longest common suffix LENGTH (in bytes) of `values`, truncated to a
+/// char boundary of the first value. Empty when no trailing byte is
+/// shared.
+fn common_suffix_len(values: &[&str]) -> usize {
+    let Some(first) = values.first() else {
+        return 0;
+    };
+    let fb = first.as_bytes();
+    let mut n = fb.len();
+    for v in &values[1..] {
+        let vb = v.as_bytes();
+        let mut i = 0;
+        while i < n && i < vb.len() && fb[fb.len() - 1 - i] == vb[vb.len() - 1 - i] {
+            i += 1;
+        }
+        n = i;
+        if n == 0 {
+            break;
+        }
+    }
+    // Retreat so the suffix STARTS on a char boundary of `first`.
+    while n > 0 && !first.is_char_boundary(first.len() - n) {
+        n -= 1;
+    }
+    n
+}
+
+/// Compute the `(prefix, suffix)` an affix-fold would declare for a
+/// column. Returns the two shared byte-strings (either may be empty);
+/// the prefix and suffix never overlap (when the whole column is one
+/// constant, the prefix takes it and the suffix is empty).
+///
+/// Both are guaranteed to be valid UTF-8 substrings of every value and
+/// to split each value cleanly: `value == prefix + middle + suffix`.
+pub fn common_affix<'a>(values: &[&'a str]) -> (&'a str, &'a str) {
+    let Some(first) = values.first() else {
+        return ("", "");
+    };
+    let plen = common_prefix_len(values);
+    // The suffix must not eat into the prefix: cap the suffix length so
+    // prefix and suffix together never exceed the SHORTEST value's len.
+    let min_len = values.iter().map(|v| v.len()).min().unwrap_or(0);
+    let raw_slen = common_suffix_len(values);
+    let mut slen = raw_slen.min(min_len.saturating_sub(plen));
+    // Retreat the (possibly shortened) suffix back to a char boundary.
+    while slen > 0 && !first.is_char_boundary(first.len() - slen) {
+        slen -= 1;
+    }
+    (&first[..plen], &first[first.len() - slen..])
+}
+
+/// Strip a fixed `prefix`/`suffix` from `value`, returning the unique
+/// middle. `None` when `value` does not actually carry both affixes
+/// (only possible when rendering a row the stamping never saw).
+pub fn encode_affix_cell<'a>(value: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    let mid = value.strip_prefix(prefix)?;
+    let mid = mid.strip_suffix(suffix)?;
+    Some(mid)
+}
+
+/// Reassemble `prefix + middle + suffix`. Total by construction.
+pub fn decode_affix_cell(middle: &str, prefix: &str, suffix: &str) -> String {
+    let mut s = String::with_capacity(prefix.len() + middle.len() + suffix.len());
+    s.push_str(prefix);
+    s.push_str(middle);
+    s.push_str(suffix);
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +537,75 @@ mod tests {
         }
         assert!(decode_decimal_cell("12a", 3).is_none());
         assert!(decode_decimal_cell("", 3).is_none());
+    }
+
+    #[test]
+    fn affix_prefix_and_suffix_shared_across_rows() {
+        let values = [
+            "crates/core/src/aa.rs",
+            "crates/core/src/bb.rs",
+            "crates/core/src/cccc.rs",
+        ];
+        let (p, s) = common_affix(&values);
+        assert_eq!(p, "crates/core/src/");
+        assert_eq!(s, ".rs");
+        for v in &values {
+            let mid = encode_affix_cell(v, p, s).expect("middle");
+            assert_eq!(decode_affix_cell(mid, p, s), *v, "round-trip {v}");
+        }
+    }
+
+    #[test]
+    fn affix_prefix_only_when_no_shared_suffix() {
+        let values = ["https://x/a", "https://x/bcd", "https://x/ef"];
+        let (p, s) = common_affix(&values);
+        assert_eq!(p, "https://x/");
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn affix_empty_when_nothing_shared() {
+        let values = ["abc", "xyz", "qrs"];
+        let (p, s) = common_affix(&values);
+        assert_eq!(p, "");
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn affix_does_not_overlap_when_one_value_is_a_prefix_of_others() {
+        // "ab" is fully consumed by the prefix; the suffix must not also
+        // claim bytes from it (prefix+suffix <= shortest value length).
+        let values = ["ab", "abcab", "abxab"];
+        let (p, s) = common_affix(&values);
+        assert!(p.len() + s.len() <= 2, "no overlap: p={p:?} s={s:?}");
+        for v in &values {
+            let mid = encode_affix_cell(v, p, s).expect("middle");
+            assert_eq!(decode_affix_cell(mid, p, s), *v);
+        }
+    }
+
+    #[test]
+    fn affix_respects_utf8_char_boundaries() {
+        // Shared multibyte head: "héllo-" (é is 2 bytes). The prefix must
+        // not split the é, and the middle stays valid UTF-8.
+        let values = ["héllo-1", "héllo-22", "héllo-333"];
+        let (p, s) = common_affix(&values);
+        assert!(std::str::from_utf8(p.as_bytes()).is_ok());
+        for v in &values {
+            let mid = encode_affix_cell(v, p, s).expect("middle");
+            assert_eq!(decode_affix_cell(mid, p, s), *v);
+        }
+    }
+
+    #[test]
+    fn affix_identical_values_take_whole_as_prefix() {
+        let values = ["same", "same", "same"];
+        let (p, s) = common_affix(&values);
+        assert_eq!(p, "same");
+        assert_eq!(s, "");
+        for v in &values {
+            assert_eq!(encode_affix_cell(v, p, s), Some(""));
+        }
     }
 
     #[test]

@@ -300,6 +300,10 @@ fn write_table(
                 Some(ColumnEncoding::DecimalScaled { scale }) => {
                     return format!("{base}%{scale}");
                 }
+                // Affix-fold marker: `name:string^`. The shared prefix
+                // and suffix live on the `__affix:name=...` preamble line;
+                // rows below carry only the unique middle.
+                Some(ColumnEncoding::Affix { .. }) => return format!("{base}^"),
                 // Dictionary columns keep a plain declaration — the
                 // `__dict:name=...` preamble line is their marker.
                 Some(ColumnEncoding::DictString { .. }) | None => {}
@@ -329,6 +333,24 @@ fn write_table(
             out.push('=');
             let segs: Vec<String> = values.iter().map(|v| csv_render_str(v)).collect();
             out.push_str(&segs.join(","));
+            out.push('\n');
+        }
+    }
+
+    // Affix preamble: each `Affix` column declares its shared prefix and
+    // suffix once on a `__affix:name=PREFIX,SUFFIX` line (both
+    // CSV-escaped so commas/quotes/newlines in the affix stay
+    // unambiguous against the comma separator and the row grammar). A
+    // plain data cell that happens to START with `__affix:` is CSV-quoted
+    // by `csv_render_str`, so these preamble lines stay unambiguous.
+    for f in &schema.fields {
+        if let Some(ColumnEncoding::Affix { prefix, suffix }) = &f.encoding {
+            out.push_str("__affix:");
+            out.push_str(&f.name);
+            out.push('=');
+            out.push_str(&csv_render_str(prefix));
+            out.push(',');
+            out.push_str(&csv_render_str(suffix));
             out.push('\n');
         }
     }
@@ -398,6 +420,15 @@ fn write_table(
                     CellValue::Scalar(Value::Number(n)),
                 ) => encodings::encode_decimal_cell(&n.to_string(), *scale)
                     .unwrap_or_else(|| format_cell(c)),
+                (
+                    Some(ColumnEncoding::Affix { prefix, suffix }),
+                    CellValue::Scalar(Value::String(s)),
+                ) => match encodings::encode_affix_cell(s, prefix, suffix) {
+                    Some(mid) => csv_render_str(mid),
+                    // Unreachable for stamped columns (the affix came
+                    // from these exact cells); degrade verbatim.
+                    None => format_cell(c),
+                },
                 _ => format_cell(c),
             };
             rendered.push(cell);
@@ -455,7 +486,11 @@ fn const_decl_value(v: &Value) -> String {
 /// usual. Shared with the compactor's byte-gate simulation so stamping
 /// decisions measure EXACTLY what the formatter ships.
 pub(super) fn csv_render_str(s: &str) -> String {
-    if s == "=" || s.starts_with("__dict:") || needs_csv_quote(s) {
+    if s == "="
+        || s.starts_with("__dict:")
+        || s.starts_with("__affix:")
+        || needs_csv_quote(s)
+    {
         csv_quote(s)
     } else {
         s.to_string()
@@ -753,6 +788,19 @@ mod tests {
 
     // ── JsonFormatter ──
 
+    /// Per-row-UNIQUE filler with NO shared prefix or suffix across rows,
+    /// so an encoding-isolation test's NON-target column triggers neither
+    /// the cross-row affix fold NOR the low-cardinality dictionary (both
+    /// of which would correctly fire on a column with shared structure or
+    /// few distinct values). The leading char rotates through 24 letters
+    /// (distinct prefixes) and a rotating trailing char + the unique index
+    /// keep suffixes distinct; the embedded `i` makes every value unique.
+    fn nonaffix(i: usize) -> String {
+        let head = (b'a' + (i % 24) as u8) as char;
+        let tail = (b'A' + ((i * 5 + 3) % 24) as u8) as char;
+        format!("{head}{i}{tail}")
+    }
+
     #[test]
     fn json_formatter_renders_table() {
         let items = vec![
@@ -999,20 +1047,20 @@ mod tests {
     #[test]
     fn csv_consecutive_repeats_render_as_ditto() {
         let items = vec![
-            json!({"path": "src/a.py", "line": 10, "txt": "def f():"}),
-            json!({"path": "src/a.py", "line": 21, "txt": "def g():"}),
-            json!({"path": "src/b.py", "line": 30, "txt": "def h():"}),
-            json!({"path": "src/b.py", "line": 40, "txt": "def i():"}),
+            json!({"path": "src/a.py", "line": 10, "txt": "alpha"}),
+            json!({"path": "src/a.py", "line": 21, "txt": "Bravo9"}),
+            json!({"path": "src/b.py", "line": 30, "txt": "kilo!"}),
+            json!({"path": "src/b.py", "line": 40, "txt": "oscar"}),
         ];
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
         let lines: Vec<&str> = out.trim_end().lines().collect();
         // Columns sort alphabetically at equal frequency: line,path,txt.
         // (`line` steps 11,9,10 — non-constant, so no arithmetic fold.)
-        assert_eq!(lines[1], "10,src/a.py,def f():");
-        assert_eq!(lines[2], "21,=,def g():", "repeat path must ditto");
-        assert_eq!(lines[3], "30,src/b.py,def h():", "run break re-materializes");
-        assert_eq!(lines[4], "40,=,def i():");
+        assert_eq!(lines[1], "10,src/a.py,alpha");
+        assert_eq!(lines[2], "21,=,Bravo9", "repeat path must ditto");
+        assert_eq!(lines[3], "30,src/b.py,kilo!", "run break re-materializes");
+        assert_eq!(lines[4], "40,=,oscar");
     }
 
     #[test]
@@ -1022,7 +1070,7 @@ mod tests {
         let items: Vec<Value> = (0..30)
             .map(|i| {
                 json!({
-                    "path": format!("src/m_{}.py", i / 5),
+                    "path": nonaffix(i / 5),
                     "line": 3 * i + 1 + (i % 2),
                     "code": if i % 5 < 2 { 200 } else { 503 },
                 })
@@ -1173,7 +1221,7 @@ mod tests {
             .map(|i| {
                 json!({
                     "date": format!("2026-06-11T21:{:02}:05+02:00", i * 3),
-                    "v": format!("subject {i}"),
+                    "v": nonaffix(i),
                 })
             })
             .collect();
@@ -1204,7 +1252,7 @@ mod tests {
         let items: Vec<Value> = dates
             .iter()
             .enumerate()
-            .map(|(i, d)| json!({"date": *d, "v": format!("commit {i}")}))
+            .map(|(i, d)| json!({"date": *d, "v": nonaffix(i)}))
             .collect();
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
@@ -1222,24 +1270,119 @@ mod tests {
 
     #[test]
     fn csv_iso_delta_not_stamped_on_nonconforming_values() {
-        // One fractional-second timestamp poisons the column — it must
-        // stay plain (every value verbatim).
-        let items: Vec<Value> = (0..5)
+        // One fractional-second timestamp poisons the ISO-delta path — the
+        // column must NOT be stamped `string~`. It may still be folded by
+        // the cross-row affix encoding (which is lossless), so we prove the
+        // exact values are recoverable rather than asserting verbatim
+        // presence. The poisoned value uses an unrelated head so the
+        // column shares no affix at all and stays fully plain.
+        let dates = [
+            "2026-06-11T21:02:05+02:00".to_string(),
+            "2025-01-02T08:30:00Z".to_string(),
+            "1999-12-31T23:59:59-05:00".to_string(),
+            "2026-06-11T21:02:05.123+02:00".to_string(), // fractional: poisons ISO
+            "2030-07-04T00:00:00+09:00".to_string(),
+        ];
+        let items: Vec<Value> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| json!({"date": d, "v": nonaffix(i)}))
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        // Not ISO-delta encoded (the fractional second poisons it).
+        assert!(!out.contains("string~"), "got: {out}");
+        // The values share no common affix either, so every timestamp is
+        // verbatim in the output.
+        for d in &dates {
+            assert!(out.contains(d.as_str()), "verbatim {d}, got: {out}");
+        }
+    }
+
+    // ── Cross-row affix fold (CSV) ──
+
+    #[test]
+    fn csv_affix_marks_declaration_and_strips_cells() {
+        // Near-unique paths sharing a long root + extension — the affix.
+        let items: Vec<Value> = (0..12)
             .map(|i| {
                 json!({
-                    "date": if i == 3 {
-                        "2026-06-11T21:02:05.123+02:00".to_string()
-                    } else {
-                        format!("2026-06-11T2{i}:02:05+02:00")
-                    },
-                    "v": format!("x{i}"),
+                    "path": format!("crates/core/src/mod_{i}_{}.rs", i * 7),
+                    "n": nonaffix(i),
                 })
             })
             .collect();
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
-        assert!(!out.contains("string~"), "got: {out}");
-        assert!(out.contains("2026-06-11T21:02:05.123+02:00"), "got: {out}");
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        // The path column is marked `^` and the affix line declares the
+        // shared prefix and suffix exactly once.
+        assert!(lines[0].contains("path:string^"), "got decl: {}", lines[0]);
+        let affix_line = lines
+            .iter()
+            .find(|l| l.starts_with("__affix:path="))
+            .expect("affix preamble line");
+        assert!(
+            affix_line.contains("crates/core/src/mod_"),
+            "shared prefix declared once: {affix_line}"
+        );
+        assert!(affix_line.ends_with(".rs"), "shared suffix declared: {affix_line}");
+        // The long shared root appears exactly once in the whole output.
+        assert_eq!(
+            out.matches("crates/core/src/mod_").count(),
+            1,
+            "affix root must appear exactly once, not per row"
+        );
+    }
+
+    #[test]
+    fn csv_affix_round_trips_losslessly() {
+        use super::super::encodings::decode_affix_cell;
+        // URL-shaped rows: shared scheme/host prefix, unique sha tail.
+        let items: Vec<Value> = (0..20)
+            .map(|i| {
+                json!({
+                    "url": format!("https://api.example.com/v2/items/{:08x}/raw", (i as u64).wrapping_mul(2_654_435_761) & 0xffff_ffff),
+                    "k": nonaffix(i),
+                })
+            })
+            .collect();
+        let originals: Vec<String> = items
+            .iter()
+            .map(|v| v["url"].as_str().unwrap().to_string())
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        assert!(lines[0].contains("url:string^"), "got decl: {}", lines[0]);
+        // Recover the affix from the preamble line and reconstruct every
+        // url cell — must equal the originals exactly.
+        let affix_line = lines
+            .iter()
+            .find(|l| l.starts_with("__affix:url="))
+            .expect("affix line");
+        let payload = affix_line.strip_prefix("__affix:url=").unwrap();
+        // Affix here has no CSV-special chars, so a plain split is exact.
+        let (prefix, suffix) = payload.split_once(',').expect("prefix,suffix");
+        // Find url's column index from the declaration (columns sort by
+        // frequency then alphabetically, so the position is not assumed).
+        let decl_body = lines[0]
+            .strip_prefix("[20]{")
+            .and_then(|s| s.strip_suffix('}'))
+            .expect("decl shape");
+        let url_col = decl_body
+            .split(',')
+            .position(|c| c.starts_with("url:"))
+            .expect("url column present");
+        let recovered: Vec<String> = lines
+            .iter()
+            .filter(|l| !l.starts_with('[') && !l.starts_with("__"))
+            .map(|l| {
+                let mid = l.split(',').nth(url_col).unwrap();
+                decode_affix_cell(mid, prefix, suffix)
+            })
+            .collect();
+        assert_eq!(recovered, originals, "affix round-trip must be exact");
     }
 
     // ── Decimal scale-fold (CSV) ──
@@ -1252,7 +1395,7 @@ mod tests {
         let items: Vec<Value> = latencies
             .iter()
             .enumerate()
-            .map(|(i, t)| json!({"ms": t, "v": format!("reply {i}")}))
+            .map(|(i, t)| json!({"ms": t, "v": nonaffix(i)}))
             .collect();
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
@@ -1302,7 +1445,7 @@ mod tests {
             .map(|i| {
                 json!({
                     "author": authors[i % 3],
-                    "msg": format!("commit message number {i}"),
+                    "msg": nonaffix(i),
                 })
             })
             .collect();
@@ -1333,7 +1476,7 @@ mod tests {
             .map(|i| {
                 json!({
                     "level": levels[(i * 7) % 4],
-                    "msg": format!("event {i} fired"),
+                    "msg": nonaffix(i),
                 })
             })
             .collect();

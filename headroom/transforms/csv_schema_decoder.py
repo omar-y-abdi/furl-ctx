@@ -40,6 +40,13 @@ Encodings understood:
   cells are the integer value × 10^k (``53`` at k=3 decodes to
   ``0.053``). Decoding is pure string manipulation followed by a float
   parse — no float arithmetic — so the reconstructed value is exact.
+* **Affix fold** — ``name:string^`` marks a string column whose values
+  share a common byte prefix and/or suffix. A ``__affix:name=PREFIX,SUFFIX``
+  preamble line (both CSV-escaped) declares the shared affix once; each
+  row cell carries only its unique middle, reconstructed as
+  ``prefix + middle + suffix`` (pure byte concatenation — exact). A plain
+  data cell starting with ``__affix:`` is CSV-quoted by the formatter, so
+  the preamble lines are unambiguous.
 
 Lines that do not parse as rows (e.g. the lossy-survivor
 ``{"_ccr_dropped": ...}`` sentinel line) are skipped; callers treat
@@ -143,6 +150,11 @@ class ColumnSpec:
     # Fractional-digit count of a decimal scale-fold (``name:float%k``);
     # None when not scale-encoded.
     dec_scale: int | None = None
+    # ``(prefix, suffix)`` of a cross-row affix fold (``name:string^``);
+    # None when not affix-encoded. The shared affix lives on the
+    # ``__affix:name=PREFIX,SUFFIX`` preamble line; row cells carry only
+    # the unique middle, reconstructed as ``prefix + middle + suffix``.
+    affix: tuple[str, str] | None = None
 
 
 def split_unquoted(s: str) -> list[str]:
@@ -233,6 +245,18 @@ def _parse_header_segment(seg: str) -> ColumnSpec | None:
             const_value=None,
             iso_delta=True,
         )
+    if decl.endswith("^"):
+        bare = decl[:-1]
+        # Affix prefix/suffix are filled in from the ``__affix:`` preamble
+        # line; a placeholder here keeps the column flagged as affix-folded.
+        return ColumnSpec(
+            name=name,
+            type_tag=bare.rstrip("?"),
+            nullable=bare.endswith("?"),
+            has_const=False,
+            const_value=None,
+            affix=("", ""),
+        )
     scale_m = re.match(r"^(.+)%(\d+)$", decl)
     if scale_m:
         bare = scale_m.group(1)
@@ -300,21 +324,37 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     # the declaration. Only declared column names are accepted — any
     # other line ends the preamble and is processed as a row.
     var_names = {s.name for s in var_cols}
+    affix_names = {s.name for s in var_cols if s.affix is not None}
     dict_values: dict[str, list[str]] = {}
+    affixes: dict[str, tuple[str, str]] = {}
     body_start = 1
-    for line in lines[1:]:
-        if not line.startswith("__dict:") or "=" not in line:
-            break
-        name, payload = line[len("__dict:") :].split("=", 1)
-        if name not in var_names:
-            break
-        dict_values[name] = [
+
+    def _unq(seg: str) -> str:
+        return (
             _unquote_csv(seg)
             if seg.startswith('"') and seg.endswith('"') and len(seg) >= 2
             else seg
-            for seg in split_unquoted(payload)
-        ]
-        body_start += 1
+        )
+
+    for line in lines[1:]:
+        if line.startswith("__dict:") and "=" in line:
+            name, payload = line[len("__dict:") :].split("=", 1)
+            if name not in var_names:
+                break
+            dict_values[name] = [_unq(seg) for seg in split_unquoted(payload)]
+            body_start += 1
+            continue
+        if line.startswith("__affix:") and "=" in line:
+            name, payload = line[len("__affix:") :].split("=", 1)
+            if name not in affix_names:
+                break
+            segs = split_unquoted(payload)
+            if len(segs) != 2:
+                break  # malformed affix line — never invent data
+            affixes[name] = (_unq(segs[0]), _unq(segs[1]))
+            body_start += 1
+            continue
+        break
 
     rows: list[dict[str, Any]] = []
     carry_raw: list[str | None] = [None] * len(var_cols)
@@ -339,7 +379,10 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
             else:
                 resolved = raw
                 carry_raw[j] = raw
-            if spec.iso_delta:
+            if spec.affix is not None:
+                pre, suf = affixes.get(spec.name, ("", ""))
+                row[spec.name] = pre + resolved + suf
+            elif spec.iso_delta:
                 value = _decode_iso_delta_cell(resolved, iso_state, j)
                 if value is None:
                     ok = False

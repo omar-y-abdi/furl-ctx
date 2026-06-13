@@ -78,6 +78,16 @@ pub enum ColumnEncoding {
     /// the round-trip at stamp time by re-parsing and re-rendering
     /// every decoded value against the original rendering.
     DecimalScaled { scale: usize },
+    /// Cross-row affix fold. Every value in the column shares the byte
+    /// `prefix` and `suffix` (either may be empty, never both). The
+    /// CSV-schema formatter marks the declaration `name:string^`, emits
+    /// a `__affix:name=PREFIX,SUFFIX` preamble line (both CSV-escaped),
+    /// and renders each cell as only its unique middle; the decoder
+    /// rebuilds `prefix + middle + suffix`. Pure byte concatenation —
+    /// exact reconstruction by construction. Stamped only after the
+    /// compactor PROVES the round-trip at stamp time AND the affix line
+    /// plus stripped cells render strictly smaller than the plain cells.
+    Affix { prefix: String, suffix: String },
 }
 
 /// One column's metadata in a tabular compaction.
