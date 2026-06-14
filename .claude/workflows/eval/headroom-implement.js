@@ -110,7 +110,9 @@ ${CONTRACTS}
 
 OUTPUT a plan of work-units. For EACH unit: id, tier (P0/P1), title, problem, files (exact repo-relative paths it will touch), approach (concrete, citing file:line), test_plan (the failing test to write first — TDD), acceptance (objective pass condition), depends_on (unit ids that must land first).
 
-THEN partition the units into ordered BATCHES. THE CRITICAL RULE: every unit within the same batch MUST touch a DISJOINT set of files and have no unmet dependency on another unit in the same batch — so parallel builders never collide. Units that share a file, or depend on each other, go in LATER batches. Order batches so dependencies land first (P0 integrity before P1 hardening; the cross-language fuzz test LAST so it guards the finished decoder). Keep batches small enough that each builder's change is reviewable.
+UNIT GRANULARITY RULE (critical): if two pieces of work touch the SAME file, OR one depends on another's code change, put them in the SAME unit — one builder does them sequentially in its own worktree. (Concrete: the CCR eviction fix and the retrieve-hash fix BOTH touch headroom/cache/compression_store.py → ONE unit. Any Rust change that needs a matching Python decoder/mirror change → ONE unit, byte-parity included.) This guarantees each builder's commit touches a file-set no other builder touches.
+
+THEN partition units into ordered BATCHES. RULE: within a batch, every unit's file-set is STRICTLY DISJOINT from every other unit's in that batch and has no cross-dependency — so parallel builders never collide AND no builder ever needs to see another builder's uncommitted change. NEVER split dependent or same-file work across batches (bundle into one unit instead). Order batches so foundational fixes land first (P0 integrity before P1 hardening); put the cross-language round-trip fuzz/property test in the LAST batch so it guards the finished decoder. Keep each unit's change reviewable.
 
 Return units, batches (array of arrays of unit ids, in execution order), and rationale.`,
   { label: 'plan', phase: 'Plan', model: 'opus', schema: PLAN }
@@ -143,7 +145,7 @@ Approach: ${u.approach}
 Test first (TDD): ${u.test_plan}
 Acceptance: ${u.acceptance}
 
-STEPS: (1) ${SETUP} (2) Write the failing test FIRST, run it, confirm it FAILS for the right reason. (3) Implement the smallest fix that makes it pass; if the fix spans Rust, also update the Python decoder/mirror for byte-parity. (4) Rebuild; run your new test + recovery invariant (\`.venv-eval/bin/python -m pytest tests/test_ccr_recovery_invariant.py -q\`) + the full suite (\`.venv-eval/bin/python -m pytest tests/ -q --no-header -p no:cacheprovider --continue-on-collection-errors --timeout=120\`) + \`cargo test -p headroom-core\`. (5) Verify every HARD CONTRACT holds. (6) \`git add -A && git commit -m "fix(${u.id}): ${u.title}"\` IN YOUR WORKTREE, then report \`git rev-parse HEAD\` as commit_sha.
+STEPS: (1) ${SETUP} (2) Write the failing test FIRST, run it, confirm it FAILS for the right reason. (3) Implement the smallest fix that makes it pass; if the fix spans Rust, also update the Python decoder/mirror for byte-parity. (4) Rebuild; run your new test + recovery invariant (\`.venv-eval/bin/python -m pytest tests/test_ccr_recovery_invariant.py -q\`) + the full suite (\`.venv-eval/bin/python -m pytest tests/ -q --no-header -p no:cacheprovider --continue-on-collection-errors --timeout=120\`) + \`cargo test -p headroom-core\`. (5) Verify every HARD CONTRACT holds. (6) Review \`git status\`, then \`git add\` ONLY the specific source file(s) you changed AND your new test file(s), BY PATH — NEVER \`git add -A\` (it would sweep stray untracked files, caches, or build artifacts into the commit, which then rides the cherry-pick onto the real branch). Double-check your new test is included. Then \`git commit -m "fix(${u.id}): ${u.title}"\` IN YOUR WORKTREE and report \`git rev-parse HEAD\` as commit_sha.
 
 ${CONTRACTS}
 
