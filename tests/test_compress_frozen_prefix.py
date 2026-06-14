@@ -469,7 +469,13 @@ class TestCompressFrozenPrefixByteIdentity:
     """
 
     def test_frozen_prefix_messages_unchanged(self) -> None:
-        """Messages before and including the cache_control marker are byte-identical."""
+        """Messages before and including the cache_control marker are byte-identical.
+
+        Self-validating: also asserts that msg2 (AFTER marker) WAS compressed,
+        so the test can only pass when real compression ran AND the prefix
+        survived — eliminating the exception-fallback and inflation-guard
+        false-green paths.
+        """
         # Message 0: large compressible JSON (NO cache_control — this is the
         # key test: it sits *before* the marker, so the frozen-prefix count
         # must include it even though it has no cache_control itself).
@@ -496,6 +502,7 @@ class TestCompressFrozenPrefixByteIdentity:
         messages = [msg0, msg1, msg2]
         msg0_snapshot = copy.deepcopy(msg0)
         msg1_snapshot = copy.deepcopy(msg1)
+        msg2_snapshot = copy.deepcopy(msg2)
 
         result = compress(
             messages,
@@ -506,6 +513,13 @@ class TestCompressFrozenPrefixByteIdentity:
 
         out = result.messages
         assert len(out) >= 3, "no messages should be dropped"
+
+        # Self-validation: compression actually ran (msg2 was compressed).
+        # If this fails, the test proves nothing about the frozen prefix.
+        assert out[2] != msg2_snapshot or result.tokens_saved > 0, (
+            "msg2 should have been compressed (post-marker message) — "
+            "compression must have actually run for this test to be meaningful"
+        )
 
         # Index 0 must be byte-identical
         assert out[0] == msg0_snapshot, (
@@ -539,9 +553,11 @@ class TestCompressFrozenPrefixByteIdentity:
             min_tokens_to_compress=1,
             compress_user_messages=True,
         )
-        # Compression should have run (tokens saved or transforms applied)
-        # We just assert it doesn't crash and returns the right message count.
+        # Compression should have run (tokens saved > 0).
         assert len(result.messages) == 3
+        assert result.tokens_saved > 0, (
+            "Without cache_control, compression must proceed normally (tokens_saved > 0)"
+        )
 
     def test_cache_control_bytes_preserved_exactly(self) -> None:
         """The cache_control value itself must be byte-identical after compress()."""
