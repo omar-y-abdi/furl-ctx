@@ -161,6 +161,8 @@ class DiffCompressor:
         class has no Python type stub.
         """
         r, stats = self._rust.compress_with_stats(content, context)
+        if r.cache_key is not None:
+            self._persist_to_python_ccr(content, r.compressed, r.cache_key)
         result = DiffCompressionResult(
             compressed=r.compressed,
             original_line_count=r.original_line_count,
