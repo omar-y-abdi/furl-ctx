@@ -31,7 +31,7 @@ Two further clusters break the **prompt-cache contract** because the public `com
 | 3 | F | Lossless compaction silently substitutes/erases (5 branches) | `nullable-column-null-empty-string-collapse`, `colon-in-json-key-...`, `json-array-nested-cell-type-corruption-...`, `stringified-json-object-flatten-type-erasure`, `10-degenerate-stringified-nested`, `crush-object-silent-key-drop-no-ccr` | break-23: pure silent key-drop, no store write | #1 |
 | 4 | C | Public path never freezes cached prefix | `break-1-cache-prefix-intra-message`, `cached-prefix-cross-message-no-frozen-count`, `content-router-msg0-tool-result-no-index-guard`, `cross-message-dedup-sibling-block-cached-prefix-violation` | break-13: msg w/ zero cache_control compressed | #2 |
 | 5 | B | Decoder parses cells without unquoting; marker commas mis-split | `head-dict-csv-quote-unquote-mismatch`, `affix-csv-middle-unquote-defect`, `opaque-ccr-comma-split-decoder-failure` | break-38: 18/18 rows lost | #1 |
-| 6 | G | CCR FIFO eviction → unbacked sentinels | `ttl-capacity-eviction-unbacked-sentinel-v1`, `ccr-lru-eviction-contract-break` | break-9: single call 1060>1000 writes, intra-call eviction | #1 |
+| 6 | G | CCR FIFO eviction → unbacked sentinels **[REFRAMED — not silent loss]** | `ttl-capacity-eviction-unbacked-sentinel-v1`, `ccr-lru-eviction-contract-break` | break-9: single call 1060>1000 writes, intra-call eviction | #1 |
 | 7 | D | Missing cache_control guards (read_lifecycle, dedup, router) | `read-lifecycle-cache-control-missing-guard`, `read-lifecycle-sibling-block-cache-ordering`, `cache-control-read-lifecycle-openai-tool-message`, `cache-control-dedup-openai-string-message`, `break-7-cache-control-openai-tool-message` | break-31: cache-bust + unrecoverable (store=None) | #2 + #1 |
 | 8 | E | `_ensure_ccr_backed`/pinning/mirror blind to non-`<<ccr:` formats | `log-ccr-stale-result-cache-...blind-spot`, `diff-ccr-result-cache-marker-format-gap`, `nested-opaque-ref-unmirrored-ccr` | break-32: result cache serves dead pointer | #1 |
 | 9 | H | 12-char SmartCrusher hash rejected by 24-char tool validation | `break-5-huge-field-ccr-hash-mismatch` | LLM cannot retrieve 100% of public-API markers | #1 (tool path) |
@@ -46,6 +46,17 @@ Two further clusters break the **prompt-cache contract** because the public `com
 - `content_router.py:1736` (`<<ccr:` early-exit), `:2274/2640/2744` (pinning), `smart_crusher.py:705` (mirror prefilter) — Cluster E
 - `tool_injection.py:500-507` (24-char gate) vs `walker.rs:130`/`crusher.rs:1616` (12-char emit) — Cluster H
 - `in_memory.rs:87/119` (FIFO, cap=1000), `crusher.rs:1160` (persist_dropped), `:1213` (row index stores ALL rows) — Clusters G, T2
+
+> **Cluster G reframe (post-verification).** Independent probes showed the FIFO
+> eviction is real but the loss is **already loud** — every model-facing retrieve
+> (bulk, search, AND granular `#rows`) returns an explicit `success=False` error
+> via `response_handler._execute_retrieval`, never a silent `None`. The bare hash
+> the model retrieves is backed by one whole-blob entry (all rows), so granular
+> eviction is all-or-nothing, not a silent subset. **G as a silent-loss defect
+> does not reproduce.** The one real residual — a capacity eviction misreported as
+> a TTL miss — is fixed (cause-honest message). True cross-call *retention* (the
+> "free lunch") is the open follow-up. Full analysis + locking tests:
+> **`CCR-RETENTION.md`**, `tests/test_ccr_eviction_loud_miss.py`.
 
 ## Dead Ends — DO NOT RE-TRY (16)
 

@@ -94,7 +94,20 @@ def _get_env_default_ttl_seconds() -> int:
 
 
 def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
-    """Return an operator-facing miss reason for CCR retrieval failures."""
+    """Return an operator-facing miss reason for CCR retrieval failures.
+
+    The miss is always LOUD — the model receives this string as an explicit
+    error (``success=False``), never a silent empty result or ``None``. That
+    invariant is what keeps "no silent loss" true even when the store evicts.
+
+    Cause honesty: an ``expired`` status has an exact cause (TTL elapsed), so we
+    quote the TTL and age. A ``missing`` status is genuinely ambiguous without
+    per-eviction tracking — the entry may have been evicted under capacity
+    pressure, expired-then-reaped, or never stored — so we name every real cause
+    plus the durable-backend remedy instead of implying TTL alone (the old
+    "Entry not found (CCR TTL: ...)" wording misattributed capacity evictions to
+    the TTL, which is misleading for the common 1000-entry-overflow case).
+    """
     default_ttl = status.get("default_ttl_seconds", DEFAULT_CCR_TTL_SECONDS)
     ttl_seconds = status.get("ttl_seconds", default_ttl)
 
@@ -104,7 +117,14 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
             return f"Entry expired (CCR TTL: {ttl_seconds} seconds; age: {age_seconds:.0f} seconds)"
         return f"Entry expired (CCR TTL: {ttl_seconds} seconds)"
 
-    return f"Entry not found (CCR TTL: {default_ttl} seconds)"
+    max_entries = status.get("max_entries")
+    capacity_note = f" (store capacity: {max_entries} entries)" if max_entries else ""
+    return (
+        f"Entry no longer retrievable from the CCR store: it was evicted under "
+        f"capacity pressure{capacity_note}, expired (TTL {default_ttl}s), or was "
+        f"never stored. Recompute the source content, or configure a durable CCR "
+        f"backend (Sqlite/Redis) for longer retention."
+    )
 
 
 def _redact_retrieval_log_payload(payload: str) -> str:
@@ -795,6 +815,7 @@ class CompressionStore:
                     "hash": hash_key,
                     "status": "missing",
                     "default_ttl_seconds": self._default_ttl,
+                    "max_entries": self._max_entries,
                 }
 
             age_seconds = now - entry.created_at
