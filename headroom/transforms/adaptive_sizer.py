@@ -51,7 +51,7 @@ def compute_optimal_k(
 
     # Tier 1: Fast path
     if n <= 8:
-        return n
+        return min(n, effective_max)
 
     # Check for near-total redundancy
     unique_count = count_unique_simhash(items)
