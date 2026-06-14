@@ -22,8 +22,10 @@ True cross-call retention (so the data is actually still there) is the open
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import types
 
 import pytest
 
@@ -135,3 +137,28 @@ def test_capacity_evicted_granular_offload_retrieval_is_loud() -> None:
     success, payload = _model_sees(victim)
     assert success is False, "evicted granular offload must miss loudly, not silently"
     assert "error" in payload and payload["hash"] == victim
+
+
+def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
+    # The SECOND model-facing retrieval surface (MCP tool) must report a miss the
+    # same way as response_handler: an explicit `error`, cause-honest, never a
+    # silent empty result. Exercise the real method without the MCP SDK by binding
+    # a duck-typed `self` (the miss path only needs `_get_local_store` + no proxy).
+    from headroom.ccr.mcp_server import HeadroomMCPServer
+
+    store = get_compression_store(max_entries=4)
+    victim = "bbbbbbbbbbbb"
+    store.store(original=json.dumps([{"id": 0, "v": "needle"}]), compressed=f"<<ccr:{victim}>>",
+                original_item_count=1, explicit_hash=victim)
+    for i in range(8):
+        h = f"{i:012x}"
+        store.store(original=json.dumps([{"id": i + 1}]), compressed=f"<<ccr:{h}>>",
+                    original_item_count=1, explicit_hash=h)
+    assert store.retrieve(victim) is None, "precondition: victim evicted"
+
+    stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
+    result = asyncio.run(HeadroomMCPServer._retrieve_content(stub, victim, None))
+
+    assert "error" in result and result["hash"] == victim, "MCP miss must be loud"
+    err = result["error"].lower()
+    assert "evict" in err and "capacity" in err, f"MCP miss must be cause-honest: {result['error']!r}"

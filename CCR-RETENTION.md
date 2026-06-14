@@ -28,12 +28,23 @@ The "no silent loss" requirement constrains **#2 only**. It never promised
 
 ### Why the loss is already loud (measured, not assumed)
 
-Every model-facing retrieval path runs through
-`CCRResponseHandler._execute_retrieval` (`headroom/ccr/response_handler.py`),
-which calls `store.get_entry_status(...)` and, on a miss, returns
-`success=False` with an explicit `error` payload — for the bulk path, the
-search path, AND a real granular `#rows` offload. Probe (10 calls × 220 rows →
-cap overflow → retrieve the evicted call-0 sentinel through the handler):
+There are exactly **two model-facing retrieval surfaces**, and both miss loudly:
+
+- **Proxy / handler** — `CCRResponseHandler._execute_retrieval`
+  (`headroom/ccr/response_handler.py`): calls `store.get_entry_status(...)` and,
+  on a miss, returns `success=False` with an explicit `error` payload — for the
+  bulk path, the search path, AND a real granular `#rows` offload.
+- **MCP tool** — `HeadroomMCPServer._retrieve_content`
+  (`headroom/ccr/mcp_server.py:451`): on a local-store + proxy miss, returns an
+  explicit `error` dict (now routed through the same cause-honest helper).
+
+The only other `store.retrieve()` caller, `context_tracker._execute_expansions`
+(`:513`), is **proactive prefetch**, not a model request — a miss there just
+skips one speculative expansion; the model's own explicit retrieval stays loud.
+So no surface returns a silent `None`/empty to the model.
+
+Probe (10 calls × 220 rows → cap overflow → retrieve the evicted call-0 sentinel
+through the handler):
 
 ```
 evicted_after_10_calls = True        # concern #1: eviction happened
@@ -123,6 +134,7 @@ reusing code that already exists rather than building new retention machinery.
 ## Cross-references
 - `EVAL-break.md` — Cluster G original finding (row 6) + this reframe.
 - `headroom/ccr/response_handler.py` — `_execute_retrieval` (loud miss).
+- `headroom/ccr/mcp_server.py` — `_retrieve_content` (second loud surface).
 - `headroom/cache/compression_store.py` — `format_retrieval_miss_detail`,
   `get_entry_status`, `CompressionStoreBackend` (Sqlite/Redis live here).
 - `tests/test_ccr_eviction_loud_miss.py` — the locking regression tests.

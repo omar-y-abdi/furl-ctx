@@ -448,9 +448,23 @@ class HeadroomMCPServer:
             except Exception:
                 pass  # Proxy unavailable, that's fine
 
+        # Loud, cause-honest miss: local store and proxy both came up empty.
+        # Mirror response_handler so every model-facing retrieve surface reports
+        # a miss the same way (explicit error, never a silent empty result) and
+        # attributes it to its real cause (eviction/capacity/expiry) rather than
+        # vaguely to the TTL.
+        from headroom.cache.compression_store import format_retrieval_miss_detail
+
+        get_status = getattr(store, "get_entry_status", None)
+        miss_status = (
+            get_status(hash_key, clean_expired=True)
+            if callable(get_status)
+            else {"hash": hash_key, "status": "missing"}
+        )
         return {
-            "error": "Content not found. It may have expired or the hash may be incorrect.",
+            "error": format_retrieval_miss_detail(miss_status),
             "hash": hash_key,
+            "status": miss_status.get("status", "missing"),
             "hint": "Content compressed via headroom_compress is stored for the session. "
             "Content compressed by the proxy uses the configured CCR TTL.",
         }
