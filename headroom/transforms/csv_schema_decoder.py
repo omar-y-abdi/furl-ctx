@@ -170,6 +170,49 @@ class ColumnSpec:
     head_dict: bool = False
 
 
+def _split_logical_lines(text: str) -> list[str]:
+    """Split *text* into logical CSV lines respecting RFC-4180 quoting.
+
+    A ``'\\n'`` character is treated as a line break ONLY when not inside a
+    double-quoted field.  Inside a quoted field (between an opening ``"``
+    and its closing ``"``) newlines are part of the current logical line.
+
+    RFC-4180 doubled-quote escaping (``""`` inside a quoted field) is two
+    quote-character toggles in sequence — the first closes the current
+    in-quotes state and the second reopens it, producing a net no-op for
+    the ``in_quotes`` flag.  This is the correct behaviour: ``""`` does NOT
+    represent a literal ``"`` at the split level (that is ``_unquote_csv``'s
+    concern), and the flag ends up in the same state it started.
+
+    The result is byte-identical to ``text.split('\\n')`` for any input that
+    contains no double-quote characters, so existing caller behaviour is
+    fully preserved.
+
+    Examples::
+
+        >>> _split_logical_lines('a\\nb\\n')
+        ['a', 'b', '']
+        >>> _split_logical_lines('"a\\nb",c')
+        ['"a\\nb",c']
+        >>> _split_logical_lines('')
+        ['']
+    """
+    lines: list[str] = []
+    buf: list[str] = []
+    in_quotes = False
+    for ch in text:
+        if ch == '"':
+            in_quotes = not in_quotes
+            buf.append(ch)
+        elif ch == "\n" and not in_quotes:
+            lines.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    lines.append("".join(buf))
+    return lines
+
+
 def split_unquoted(s: str) -> list[str]:
     """Split on commas OUTSIDE CSV double-quoted segments."""
     parts: list[str] = []
@@ -322,7 +365,7 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     """
     if not text.startswith("["):
         return None
-    lines = text.split("\n")
+    lines = _split_logical_lines(text)
     header = _HEADER_RE.match(lines[0])
     if not header:
         return None
