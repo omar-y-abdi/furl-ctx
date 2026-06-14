@@ -21,6 +21,14 @@ from typing import Any
 # Tool name constant - used for matching tool calls
 CCR_TOOL_NAME = "headroom_retrieve"
 
+# Accepted CCR hash widths (number of hex characters):
+# - 12: SmartCrusher path — sha256(payload)[:6] → 12 hex chars
+#        (crusher.rs:1620, asserted at crusher.rs:2792)
+# - 24: Canonical compute_key — BLAKE3 → 24 lowercase hex chars
+#        (ccr/mod.rs:69), used by read_lifecycle, diff_compressor, etc.
+# Do NOT add arbitrary lengths — the exact-width check is the spoofing guard.
+CCR_HASH_WIDTHS: frozenset[int] = frozenset({12, 24})
+
 
 def create_ccr_tool_definition(
     provider: str = "anthropic",
@@ -202,9 +210,9 @@ class CCRToolInjector:
     # - Generic: any [... compressed ... hash=xxx] pattern
     _marker_patterns: list[re.Pattern] = field(
         default_factory=lambda: [
-            # All patterns require exactly 24 hex characters for hash validation
-            # CCR uses SHA256 truncated to 24 hex chars (96 bits) for collision resistance
-            # Requiring exact length prevents hash spoofing attacks with shorter hashes
+            # Bracket-form patterns require exactly 24 hex characters for hash validation.
+            # CCR canonical compute_key uses BLAKE3 → 24 lowercase hex chars (ccr/mod.rs:69).
+            # Requiring exact length prevents hash spoofing attacks with shorter hashes.
             #
             # Standard format: [N <type> compressed to M. Retrieve more: hash=xxx]
             # Matches items, lines, matches, or any other type
@@ -213,6 +221,20 @@ class CCRToolInjector:
             re.compile(r"\[(\d+) \w+ compressed\. hash=([a-f0-9]{24})\]"),
             # Generic fallback: any compression marker with hash (exactly 24 chars)
             re.compile(r"\[.*?compressed.*?hash=([a-f0-9]{24})\]", re.IGNORECASE),
+            # SmartCrusher <<ccr:HASH ...>> / <<ccr:HASH>> double-angle-bracket forms.
+            # The hash is either 12 hex chars (SmartCrusher: sha256(payload)[:6],
+            # crusher.rs:1620) or 24 hex chars (canonical BLAKE3 compute_key, mod.rs:69).
+            # Four emit shapes (crusher.rs:1160 / formatter.rs:560 / mod.rs:81):
+            #   <<ccr:HASH N_rows_offloaded>>   — row-drop sentinel (space)
+            #   <<ccr:HASH#rows N_chunks>>       — row-index sentinel (#)
+            #   <<ccr:HASH,KIND,SIZE>>           — opaque-blob sentinel (comma)
+            #   <<ccr:HASH>>                     — bare sentinel (>> immediately after hash)
+            # One capturing group (the hash) so re.findall returns strings directly.
+            # Alternation longest-first: 24 before 12 to avoid prefix-matching a 24-char
+            # hash as 12 chars when followed by more hex digits.
+            re.compile(
+                r"<<ccr:([a-f0-9]{24}|[a-f0-9]{12})(?:[ ,#>]|>>)"
+            ),
         ]
     )
 
@@ -497,10 +519,13 @@ def parse_tool_call(
     hash_key = input_data.get("hash")
     query = input_data.get("query")
 
-    # Validate hash format: must be exactly 24 hex characters
-    # This prevents hash spoofing attacks with malformed hashes
+    # Validate hash format: must be exactly 12 or 24 hex characters.
+    # Legitimate widths (CCR_HASH_WIDTHS):
+    #   12 — SmartCrusher sha256(payload)[:6] → 12 lowercase hex (crusher.rs:1620)
+    #   24 — canonical BLAKE3 compute_key (ccr/mod.rs:69), used by read_lifecycle & diff
+    # Any other length is rejected to prevent hash spoofing attacks.
     if hash_key is not None:
-        if not isinstance(hash_key, str) or len(hash_key) != 24:
+        if not isinstance(hash_key, str) or len(hash_key) not in CCR_HASH_WIDTHS:
             return None, None
         # Validate hex characters only
         if not all(c in "0123456789abcdef" for c in hash_key.lower()):
