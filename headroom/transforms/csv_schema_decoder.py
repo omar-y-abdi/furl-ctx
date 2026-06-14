@@ -466,7 +466,13 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
                 row[spec.name] = value
             elif spec.affix is not None:
                 pre, suf = affixes.get(spec.name, ("", ""))
-                row[spec.name] = pre + resolved + suf
+                # ``resolved`` is the raw CSV cell — still wrapped in quotes if
+                # the affix middle contained a newline/comma/quote (e.g. a
+                # multi-line log message under a shared prefix/suffix). Unquote
+                # it BEFORE re-applying the affix, exactly like every other
+                # branch does, otherwise the quote characters leak into the
+                # reconstructed value (silent corruption on the lossless path).
+                row[spec.name] = pre + _unq(resolved) + suf
             elif spec.iso_delta:
                 value = _decode_iso_delta_cell(resolved, iso_state, j)
                 if value is None:
