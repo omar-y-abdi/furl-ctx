@@ -15,7 +15,6 @@ Real-world data shows 75% of Read output bytes fall into these two categories:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -468,21 +467,23 @@ class ReadLifecycleManager:
         if content_bytes < self.config.min_size_bytes:
             return False, content, None
 
-        # Store original in CCR if available
-        ccr_hash = None
-        if self.store is not None:
-            ccr_hash = self.store.store(
-                original=content,
-                compressed="",
-                tool_name="Read",
-                tool_call_id=classification.tool_call_id,
-                compression_strategy=f"read_lifecycle:{classification.state.value}",
-            )
+        # When no CCR store is available, we cannot back a recovery pointer.
+        # Emitting "Retrieve original: hash=<phantom_hash>" would point to
+        # nothing and make the original content permanently unrecoverable —
+        # a Contract #1 (CCR recovery invariant) violation on the DEFAULT path.
+        # The safest option is to skip the substitution entirely: leave the
+        # content verbatim so it remains recoverable from the output alone.
+        if self.store is None:
+            return False, content, None
 
-        # Generate marker
-        if ccr_hash is None:
-            # No CCR store — generate a content hash for reference
-            ccr_hash = hashlib.sha256(content.encode()).hexdigest()[:24]
+        # Store original in CCR and obtain the backed hash.
+        ccr_hash = self.store.store(
+            original=content,
+            compressed="",
+            tool_name="Read",
+            tool_call_id=classification.tool_call_id,
+            compression_strategy=f"read_lifecycle:{classification.state.value}",
+        )
 
         file_display = classification.file_path or "unknown"
 
