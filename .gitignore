@@ -250,3 +250,11 @@ uv.lock
 # package shadows the maturin overlay on sys.path.
 /headroom/_core.*.so
 /headroom/_core.so
+
+# Eval/implementation workflow isolation artifacts: per-agent venvs, shared sccache
+# compile cache, throwaway git worktrees. Must be ignored so builder agents' `git add -A`
+# inside a worktree never captures a venv into a commit.
+.venv-eval/
+**/.venv-eval/
+.sccache/
+.claude/worktrees/
