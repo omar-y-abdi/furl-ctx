@@ -57,7 +57,7 @@ pub fn compute_optimal_k(items: &[&str], bias: f64, min_k: usize, max_k: Option<
 
     // Tier 1: fast path.
     if n <= 8 {
-        return n;
+        return n.min(effective_max);
     }
 
     // Near-total redundancy: at most 3 unique groups → keep that many.
@@ -548,8 +548,30 @@ mod tests {
 
     #[test]
     fn compute_optimal_k_n_le_8_returns_n() {
+        // n<=8, max_k=None → returns n (no cap).
         let items = ["a", "b", "c", "d", "e"];
         assert_eq!(compute_optimal_k(&items, 1.0, 3, None), 5);
+    }
+
+    #[test]
+    fn compute_optimal_k_n_le_8_max_k_none_returns_n() {
+        // Fast path, no cap: max_k=None must return n.
+        let items = ["a", "b", "c", "d", "e"];
+        assert_eq!(compute_optimal_k(&items, 1.0, 1, None), 5);
+    }
+
+    #[test]
+    fn compute_optimal_k_n_le_8_max_k_greater_than_n_returns_n() {
+        // max_k > n: cap doesn't bite, still return n.
+        let items = ["a", "b", "c", "d", "e"];
+        assert_eq!(compute_optimal_k(&items, 1.0, 1, Some(10)), 5);
+    }
+
+    #[test]
+    fn compute_optimal_k_n_le_8_respects_max_k_when_less_than_n() {
+        // Fast path MUST apply max_k cap: n=5, max_k=2 → must return 2, not 5.
+        let items = ["a", "b", "c", "d", "e"];
+        assert_eq!(compute_optimal_k(&items, 1.0, 1, Some(2)), 2);
     }
 
     #[test]
