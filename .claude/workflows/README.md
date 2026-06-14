@@ -13,7 +13,7 @@
 - **headroom-engine-map** — Map a compression engine\ — args: facets, repo
 - **headroom-fix-weaknesses** — Fix the held-out-verified weaknesses: granular per-chunk CCR retrieval, and strict/honest verification + benchmarks.
 - **headroom-fullscale-review** — Two fable agents review + fix the Rust engine and the Python layer, optimizing without breaking the green build/tests/contracts.
-- **headroom-implement** — opus plans + partitions into non-colliding batches -> parallel sonnet TDD builders (isolated worktrees, commit) -> sequential cherry-pick integrate onto main -> opus verify.
+- **headroom-implement** — opus plans INDEPENDENT disjoint-file units (dependents bundled) -> parallel sonnet TDD builders commit in isolated worktrees. Orchestrator integrates + verifies (no agent touches main git).
 - **headroom-max-compression** — Two fable agents maximize compression (lossless frontier, then lossy-recoverable frontier) within the recovery + cache-safety + parity contracts.
 - **headroom-parallel-eval** — Loop-until-dry fleet of isolated MEASURED experiment agents (optimize|break|quality) with an anti-repeat ledger; opus synthesizes a ranked action doc.
 - **headroom-recoverability-refute** — Adversarially refute "no silent loss / every dropped item is CCR-recoverable" by constructing counterexamples. — args: angles, repo
@@ -31,7 +31,7 @@
 ## eval
 
 - **headroom-codebase-map** — Read-only recon: parallel subsystem mappers -> one tight navigation map (where everything is + what it does + key file:line + build/bench) to prime downstream eval agents.
-- **headroom-implement** — opus plans + partitions into non-colliding batches -> parallel sonnet TDD builders (isolated worktrees, commit) -> sequential cherry-pick integrate onto main -> opus verify.
+- **headroom-implement** — opus plans INDEPENDENT disjoint-file units (dependents bundled) -> parallel sonnet TDD builders commit in isolated worktrees. Orchestrator integrates + verifies (no agent touches main git).
 - **headroom-parallel-eval** — Loop-until-dry fleet of isolated MEASURED experiment agents (optimize|break|quality) with an anti-repeat ledger; opus synthesizes a ranked action doc.
 
 ## review
