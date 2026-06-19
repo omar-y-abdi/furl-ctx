@@ -11,7 +11,6 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..config import (
-    CacheAlignerConfig,
     DiffArtifact,
     HeadroomConfig,
     TransformDiff,
@@ -102,19 +101,6 @@ class TransformPipeline:
         transforms: list[Transform] = []
 
         # Order matters!
-
-        # 0. Tool-result interceptors (ast-grep Read outline, etc.) run first
-        # so downstream compressors operate on the already-shrunk content.
-        # OPT-IN: enable via HeadroomConfig.intercept_tool_results, or for
-        # non-config callers (CLI / SDK / tests) the env var
-        # HEADROOM_INTERCEPT_ENABLED=1. Off by default while this ships — lets
-        # users try it and compare before we make it the default.
-        if getattr(self.config, "intercept_tool_results", False) or os.environ.get(
-            "HEADROOM_INTERCEPT_ENABLED"
-        ):
-            from headroom.proxy.interceptors import ToolResultInterceptorTransform
-
-            transforms.append(ToolResultInterceptorTransform())
 
         # 1. Cache Aligner (prefix stabilization)
         if self.config.cache_aligner.enabled:
@@ -502,23 +488,3 @@ class TransformPipeline:
         """
         # apply() already works on a copy, so this is safe
         return self.apply(messages, model, record_metrics=False, **kwargs)
-
-
-def create_pipeline(
-    cache_aligner_config: CacheAlignerConfig | None = None,
-) -> TransformPipeline:
-    """
-    Create a pipeline with specific configurations.
-
-    Args:
-        cache_aligner_config: Cache aligner configuration.
-
-    Returns:
-        Configured TransformPipeline.
-    """
-    config = HeadroomConfig()
-
-    if cache_aligner_config is not None:
-        config.cache_aligner = cache_aligner_config
-
-    return TransformPipeline(config)

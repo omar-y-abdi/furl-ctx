@@ -233,7 +233,6 @@ markers = [
 source = ["headroom"]
 branch = true
 omit = [
-    "headroom/cli.py",
     "*/tests/*",
 ]
 

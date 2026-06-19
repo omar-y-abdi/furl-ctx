@@ -95,8 +95,6 @@ __all__ = [
     "AnthropicCacheOptimizer",
     "OpenAICacheOptimizer",
     "GoogleCacheOptimizer",
-    "SemanticCache",
-    "SemanticCacheLayer",
     # Relevance scoring - BM25 always available, embeddings require sentence-transformers
     "RelevanceScore",
     "RelevanceScorer",
@@ -122,8 +120,6 @@ __all__ = [
     "PipelineEvent",
     "PipelineExtensionManager",
     "CANONICAL_PIPELINE_STAGES",
-    # Shared context for multi-agent workflows
-    "SharedContext",
 ]
 
 # Keep package-level imports lightweight so `import headroom` does not eagerly
@@ -170,8 +166,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "AnthropicCacheOptimizer": ("headroom.cache", "AnthropicCacheOptimizer"),
     "OpenAICacheOptimizer": ("headroom.cache", "OpenAICacheOptimizer"),
     "GoogleCacheOptimizer": ("headroom.cache", "GoogleCacheOptimizer"),
-    "SemanticCache": ("headroom.cache", "SemanticCache"),
-    "SemanticCacheLayer": ("headroom.cache", "SemanticCacheLayer"),
     # Relevance scoring
     "RelevanceScore": ("headroom.relevance", "RelevanceScore"),
     "RelevanceScorer": ("headroom.relevance", "RelevanceScorer"),
@@ -195,15 +189,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "PipelineEvent": ("headroom.pipeline", "PipelineEvent"),
     "PipelineExtensionManager": ("headroom.pipeline", "PipelineExtensionManager"),
     "CANONICAL_PIPELINE_STAGES": ("headroom.pipeline", "CANONICAL_PIPELINE_STAGES"),
-    # Shared context
-    "SharedContext": ("headroom.shared_context", "SharedContext"),
 }
-
-# Optional exports resolve lazily and expose `None` when their extra
-# dependencies are unavailable. Currently empty after the compression-only
-# amputation, but the resolution path in `__getattr__` is retained.
-_OPTIONAL_EXPORTS: dict[str, tuple[str, str]] = {}
-
 
 def __getattr__(name: str) -> Any:
     """Resolve package exports lazily while preserving legacy import paths."""
@@ -211,16 +197,6 @@ def __getattr__(name: str) -> Any:
     if module_attr is not None:
         module_name, attr_name = module_attr
         value = getattr(import_module(module_name), attr_name)
-        globals()[name] = value
-        return value
-
-    optional_module_attr = _OPTIONAL_EXPORTS.get(name)
-    if optional_module_attr is not None:
-        module_name, attr_name = optional_module_attr
-        try:
-            value = getattr(import_module(module_name), attr_name)
-        except ImportError:
-            value = None
         globals()[name] = value
         return value
 

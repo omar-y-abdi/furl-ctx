@@ -109,7 +109,6 @@ nav:
     - Architecture: ARCHITECTURE.md
     - Transforms Pipeline: transforms.md
     - Text Compression: text-compression.md
-    - LLMLingua: llmlingua.md
   - Benchmarks:
     - Accuracy: benchmarks.md
     - Latency: LATENCY_BENCHMARKS.md
