@@ -17,10 +17,15 @@
 - **headroom-max-compression** — Two fable agents maximize compression (lossless frontier, then lossy-recoverable frontier) within the recovery + cache-safety + parity contracts.
 - **headroom-parallel-eval** — Loop-until-dry fleet of isolated MEASURED experiment agents (optimize|break|quality) with an anti-repeat ledger; opus synthesizes a ranked action doc.
 - **headroom-recoverability-refute** — Adversarially refute "no silent loss / every dropped item is CCR-recoverable" by constructing counterexamples. — args: angles, repo
+- **simplify-audit** — Lazy-dev over-engineering audit of the Headroom codebase: per-area reachability + complexity scan, adversarially verify the big delete claims, rank biggest-safe-cut-first. Report-only.
 
 ## amputate
 
 - **headroom-amputation-map** — Map a forked repo to a keep-set: evidence-backed KEEP/DROP/TRIM verdicts + ordered delete plan. — args: groups, keepset, repo
+
+## cleanup
+
+- **simplify-audit** — Lazy-dev over-engineering audit of the Headroom codebase: per-area reachability + complexity scan, adversarially verify the big delete claims, rank biggest-safe-cut-first. Report-only.
 
 ## compression
 
