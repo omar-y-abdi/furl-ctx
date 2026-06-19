@@ -52,14 +52,7 @@ if TYPE_CHECKING:
     )
     from headroom.cache.google import GoogleCacheOptimizer  # noqa: F401
     from headroom.cache.openai import OpenAICacheOptimizer  # noqa: F401
-    from headroom.cache.prefix_tracker import (  # noqa: F401
-        FreezeStats,
-        PrefixCacheTracker,
-        PrefixFreezeConfig,
-        SessionTrackerStore,
-    )
     from headroom.cache.registry import CacheOptimizerRegistry  # noqa: F401
-    from headroom.cache.semantic import SemanticCache, SemanticCacheLayer  # noqa: F401
 
 __all__ = [
     # Base types
@@ -83,16 +76,8 @@ __all__ = [
     "AnthropicCacheOptimizer",
     "OpenAICacheOptimizer",
     "GoogleCacheOptimizer",
-    # Semantic caching
-    "SemanticCacheLayer",
-    "SemanticCache",
     # Compression cache (token headroom mode)
     "CompressionCache",
-    # Prefix cache tracking
-    "PrefixCacheTracker",
-    "PrefixFreezeConfig",
-    "FreezeStats",
-    "SessionTrackerStore",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
@@ -117,16 +102,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "AnthropicCacheOptimizer": ("headroom.cache.anthropic", "AnthropicCacheOptimizer"),
     "OpenAICacheOptimizer": ("headroom.cache.openai", "OpenAICacheOptimizer"),
     "GoogleCacheOptimizer": ("headroom.cache.google", "GoogleCacheOptimizer"),
-    # Semantic caching
-    "SemanticCacheLayer": ("headroom.cache.semantic", "SemanticCacheLayer"),
-    "SemanticCache": ("headroom.cache.semantic", "SemanticCache"),
     # Compression cache
     "CompressionCache": ("headroom.cache.compression_cache", "CompressionCache"),
-    # Prefix cache tracking
-    "PrefixCacheTracker": ("headroom.cache.prefix_tracker", "PrefixCacheTracker"),
-    "PrefixFreezeConfig": ("headroom.cache.prefix_tracker", "PrefixFreezeConfig"),
-    "FreezeStats": ("headroom.cache.prefix_tracker", "FreezeStats"),
-    "SessionTrackerStore": ("headroom.cache.prefix_tracker", "SessionTrackerStore"),
 }
 
 

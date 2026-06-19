@@ -483,10 +483,6 @@ class HeadroomConfig:
     # constructors while keeping it out of runtime state.
     content_router_enabled: InitVar[bool | None] = None
 
-    # Tool-result interceptors (ast-grep Read outline, etc.). Opt-in for now.
-    # Env var HEADROOM_INTERCEPT_ENABLED=1 also enables (for CLI `--intercept-tool-results`).
-    intercept_tool_results: bool = False
-
     # Cross-message dedup: replace later byte-identical tool outputs with a
     # recoverable <<ccr:HASH>> pointer to the first occurrence. Operates on
     # content WITHIN messages only (never drops/reorders messages, never
