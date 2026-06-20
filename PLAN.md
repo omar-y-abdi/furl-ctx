@@ -5,11 +5,12 @@ Scope = Claude Code + Codex only. Full rationale in `.claude/runtime/handoff.md`
 Findings source: `lazy-dev-AUDIT-final.md` (+ -v2.md Python detail, -rust.md Rust detail). Repo = 63,164 code LOC,
 ~17k (~27%) cuttable: Tier1 ~7,070 safe-now, Tier2 ~9,920 after-untangle.
 
-## PHASE 1 — TIER 1 (teammate running, EXCLUDES proxy)
-Sonnet teammate `tier1-cutter` (background). Method: archive→2-gate→keep/restore→report. Scope + must-keep in handoff.
-- [ ] Rust pipeline/ subtree (4,212) + safety.rs (215) — drop mod.rs re-exports, maturin rebuild, cargo+pytest gates.
-- [ ] Python conftest dead fixtures (193), commented-out code, stale JSON results (1.45MB), empty phantom dirs.
-- [ ] Teammate report: LOC removed + anything KEPT with caveats. Gates all green (519/31, recovery 21, cargo green).
+## PHASE 1 — TIER 1 ✅ COMPLETE (2026-06-20, EXCLUDED proxy)
+Sonnet teammate `tier1-cutter` (id a609285). Method: archive→5-gate→keep/restore→report. ALL 6 items cut green, 0 kept-as-live.
+- [x] Rust pipeline/ subtree (4,212, commit fdfd817f) + safety.rs (215, commit 1573cd92) — mod.rs re-exports dropped, maturin rebuilt, cargo green.
+- [x] Python conftest dead fixtures (206, dd8bf221), commented-out line compression_store.py:1097 (5ea86f3b), stale JSON (~1.2MB, e24f7f44), empty phantom dirs memory/{adapters,backends} + leftover pipeline/{offloads,reformats} rmdir'd.
+- [x] Total ~4,634 code LOC + ~1.2MB. HEAD=e24f7f44. ORCHESTRATOR INDEPENDENTLY RE-VERIFIED: pytest 519/31, cargo 0-failed all suites, surface 56, recovery 21, compress OK. Must-not-touch intact (proxy/telemetry/live_zone/recommendations/auth_mode.rs/compression_policy.rs/live compressors all present).
+- CAVEAT for Tier 2: safety.rs's `tool_pair_indices` (tool-pair atomicity) was dead (never called outside own tests). If the live_zone dispatcher ever needs tool-pair atomicity, re-implement or restore from archive/.
 
 ## PHASE 2 — TIER 2 (user gives instructions after Phase 1)
 Includes the proxy→hook+MCP REBUILD + the untangle cuts:

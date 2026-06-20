@@ -144,8 +144,16 @@ ORCHESTRATOR writes the single additive file `lazy-dev-AUDIT.md`. Nothing mutate
   3 docs: lazy-dev-AUDIT-v2.md (py/doc/disk detail), lazy-dev-AUDIT-rust.md (rust detail), lazy-dev-AUDIT-final.md (merged exec).
 - NEXT (user-gated): apply via archive+2-gate loop. Suggested order: Rust Tier1 pipeline/+safety (4.4k cleanest big win) -> Py Tier1 -> untangle tiers.
 
-## BLOAT REMOVAL — PHASE 1 RUNNING (2026-06-20)
-Sonnet teammate (background Agent, name=tier1-cutter) running Tier-1 cleanup. Method = proven archive+2-gate loop:
+## BLOAT REMOVAL — PHASE 1 ✅ COMPLETE (2026-06-20)
+DONE: teammate tier1-cutter (id a609285, sonnet) cut ALL 6 Tier-1 items green, 0 kept-as-live. ~4,634 code LOC + ~1.2MB.
+Commits: fdfd817f (pipeline/ 4,212) · 1573cd92 (safety.rs 215) · dd8bf221 (conftest 206) · 5ea86f3b (compression_store:1097) · e24f7f44 (stale JSON ~1.2MB). HEAD=e24f7f44.
+ORCHESTRATOR RE-VERIFIED INDEPENDENTLY (not just trusting report): pytest 519/31, cargo 0-failed all suites, surface 56, recovery 21/21, compress OK. Tree clean. Must-not-touch confirmed intact (proxy/telemetry/onnx/relevance/live_zone.rs/recommendations.rs/src/auth_mode.rs/src/compression_policy.rs/log+diff+search_compressor.rs all present). Empty leftover dirs (pipeline/{offloads,reformats}, memory/{adapters,backends}) rmdir'd.
+TIER-2 CAVEAT (from teammate): safety.rs `tool_pair_indices` (tool-pair atomicity) was dead — never called outside own tests. If live_zone dispatcher later needs tool-pair atomicity, re-implement or restore from archive/.
+NEXT: AWAITING USER Tier-2 instructions (proxy→hook+MCP rebuild + untangle cuts). Reuse same teammate via SendMessage to:'a609285ce32cd6df9'.
+
+--- (historical, Phase 1 while-running notes below) ---
+## BLOAT REMOVAL — PHASE 1 RAN (2026-06-20)
+Sonnet teammate (background Agent, name=tier1-cutter) ran Tier-1 cleanup. Method = proven archive+2-gate loop:
 archive (git mv → archive/) → rebuild if Rust (maturin) → gates (cargo test + pytest 519/31 + surface-walk 56 +
 recovery 21/21 + compress() round-trip) → green=keep-removed+commit / red=dig deeper (fixable small refactor? do it;
 genuinely live? restore + report caveat). Sequential, one item at a time, commit per green batch.
