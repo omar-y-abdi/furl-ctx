@@ -1094,7 +1094,6 @@ class CompressionStore:
             self._pending_feedback_events = []
 
             # Gather entry data while holding lock to avoid race conditions
-            # Tuple: (event, tool_name, sig_hash, strategy, compressed_content)
             event_data: list[
                 tuple[RetrievalEvent, str | None, str | None, str | None, str | None]
             ] = []
