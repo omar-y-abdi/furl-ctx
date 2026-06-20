@@ -149,7 +149,18 @@ DONE: teammate tier1-cutter (id a609285, sonnet) cut ALL 6 Tier-1 items green, 0
 Commits: fdfd817f (pipeline/ 4,212) · 1573cd92 (safety.rs 215) · dd8bf221 (conftest 206) · 5ea86f3b (compression_store:1097) · e24f7f44 (stale JSON ~1.2MB). HEAD=e24f7f44.
 ORCHESTRATOR RE-VERIFIED INDEPENDENTLY (not just trusting report): pytest 519/31, cargo 0-failed all suites, surface 56, recovery 21/21, compress OK. Tree clean. Must-not-touch confirmed intact (proxy/telemetry/onnx/relevance/live_zone.rs/recommendations.rs/src/auth_mode.rs/src/compression_policy.rs/log+diff+search_compressor.rs all present). Empty leftover dirs (pipeline/{offloads,reformats}, memory/{adapters,backends}) rmdir'd.
 TIER-2 CAVEAT (from teammate): safety.rs `tool_pair_indices` (tool-pair atomicity) was dead — never called outside own tests. If live_zone dispatcher later needs tool-pair atomicity, re-implement or restore from archive/.
-NEXT: AWAITING USER Tier-2 instructions (proxy→hook+MCP rebuild + untangle cuts). Reuse same teammate via SendMessage to:'a609285ce32cd6df9'.
+## BLOAT REMOVAL — PHASE 2 (TIER-2 CUTS) RUNNING (2026-06-20)
+User: "allting kapas nu" — full Tier-2 cut scope via same archive+5-gate loop (empirical > my analytical recon; gate sorts live/dead, restore-on-red). Proxy→hook+MCP REBUILD deferred to its OWN later step (user: "proxy-ombygge sen, granska mellan stegen"). Teammate a609285 resumed via SendMessage with the brief.
+★ ORCHESTRATOR RECON REFUTED v2-audit's Tier-2 Python (~6.6k "cuttable" is mostly LIVE/import-woven — v1 was right to defer):
+  - LIVE (will restore): relevance/bm25.py+base.py (compression_store:258 instantiates BM25Scorer), compression_feedback.py (CCR feedback-loop, heavy use in compression_store), cache-optimizer cluster anthropic/openai/google/registry (woven into cache/__init__ 56-surface + tokenizers/__init__→registry; likely test-pinned).
+  - VESTIGIAL CANDIDATES (0 runtime caller found, gate-verifiable): relevance/embedding.py+hybrid.py (smart_crusher uses RUST HybridScorer crate not these), ccr/batch_processor.py (BatchProcessor never instantiated, only ccr/__init__:24 re-export), models/ml_models.py + cache/dynamic_detector.py (no compress-path caller; ml_models lazy-imported inside dynamic_detector funcs).
+  - Realistic Python yield ~1-2k, NOT 6.6k. Real Tier-2 win = Rust live_zone bundle ~3.3k.
+★ TEAMMATE TIER-2 SCOPE: (A) Rust live_zone.rs 2,899 + recommendations.rs 329 + lib.rs FFI ~94 + mod.rs re-exports + co-located cargo tests (archive live_zone+recommendations together; private AuthMode≠canonical src/auth_mode.rs which is KEPT; hoist only if cargo demands). live_zone is proxy-only → cutting it makes proxy/ Python reference a removed FFI = EXPECTED/OK (proxy deleted next step, archived). (B) Python cluster attempt-all in order embedding/hybrid→batch_processor→ml_models/dynamic_detector→cache-optimizer cluster.
+★ NEW HARDENING vs Tier-1 (gate-blindness guard): for every GREEN cut, grep whole tree (excl archive/) for stray refs before commit — pytest doesn't cover every path; stray ref → restore.
+★ MUST-KEEP: ccr/mcp_server.py (MCP retrieve plane), relevance/bm25+base, compression_feedback (if red), proxy/ Python files (defer — but DO remove their Rust FFI per bundle A).
+ON TEAMMATE COMPLETE: re-verify gates myself, review KEPT(live) section, then user gives PROXY-REBUILD instructions (step 3): proxy→hook(data-plane)+2-tool fastmcp(set_compression+retrieve→CCR direct, un-couple mcp_server.py:472 _retrieve_via_proxy). Extract live SSE utils (proxy/helpers.py parse_sse_events/safe_decode → ccr/sse_parser.py) BEFORE deleting proxy.
+
+(prev) AWAITED USER Tier-2 instructions (proxy→hook+MCP rebuild + untangle cuts). Reuse same teammate via SendMessage to:'a609285ce32cd6df9'.
 
 --- (historical, Phase 1 while-running notes below) ---
 ## BLOAT REMOVAL — PHASE 1 RAN (2026-06-20)
