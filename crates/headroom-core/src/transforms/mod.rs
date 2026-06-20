@@ -29,7 +29,6 @@ pub mod log_compressor;
 // detectors instead; see `detection.rs`.
 #[cfg(feature = "magika")]
 pub mod magika_detector;
-pub mod pipeline;
 pub mod recommendations;
 pub mod safety;
 pub mod search_compressor;
@@ -56,11 +55,6 @@ pub use log_compressor::{
 };
 #[cfg(feature = "magika")]
 pub use magika_detector::{magika_detect, map_magika_label, MagikaDetectorError};
-pub use pipeline::{
-    CompressionContext, CompressionPipeline, CompressionPipelineBuilder, DiffNoise, DiffOffload,
-    JsonMinifier, JsonOffload, LogOffload, LogTemplate, OffloadOutput, OffloadTransform,
-    PipelineConfig, PipelineResult, ReformatOutput, ReformatTransform, TransformError,
-};
 pub use recommendations::{Recommendation, RecommendationStore, RECOMMENDATIONS_PATH_ENV_VAR};
 pub use safety::{tool_pair_indices, ToolPair};
 pub use search_compressor::{
