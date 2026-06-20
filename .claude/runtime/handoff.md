@@ -163,6 +163,13 @@ New order: (3) v4 audit + apply 4th-pass cuts → (4) HARDEN TESTS to best quali
 The hook+MCP build is DEFERRED; test-hardening is promoted above it. Doc-only update now (user: "enbart uppdatera docs just nu, vill bara berätta what our next steps are. MCP tool creation will have to wait until the codebase is beyond perfect for usage").
 - STEP 3 (in flight): v4 feature-reachability audit (workflow wf_c7c82ad2-c7c) → lazy-dev-AUDIT-v4.md → apply any real cuts via archive+5-gate loop.
 - STEP 4 (NEW, user-prioritized): HARDEN TESTS. Iterate suite to best QUALITY + coverage (coverage = FLOOR not goal). Use installed `test-quality-tools:test-quality` skill + scorecard: mutation-resistance, anti-fragility rules, boundary tests for every </<=/>/>=/==/!=, real-I/O fixtures over mocks, contract-named tests; iterate-to-plateau per module. REASONING (user): better tests → find+improve codebase → plausibly BETTER COMPRESSION (the eval `break` pass already surfaced silent-loss holes this way). Hit the hard-invariant surfaces first (CCR recovery, Py↔Rust parity, cache ordering, compress() route).
+  ★ SKILL LIMITATIONS (verified by reading the skill files 2026-06-21 — set expectations, do NOT expect "perfect"):
+    (1) Stops at PLATEAU, not perfection — 3 dry rounds OR zero-violations+all-boundaries-tested; the dry-rounds arm usually
+        fires first → stops when the MODEL can't improve further. "Quality" is relative (better-than-start), not absolute.
+    (2) Best axes (boundary B.2 / real-I/O B.3 / contract-naming E.3 / tautology A.3) are MODEL JUDGEMENT, not auto-counted.
+    (3) NO real mutation engine — "mutation-resistance" is a proxy (boundary + pinned literals + break-the-behavior gate). Monotonic (revert-on-no-gain, never degrades).
+    (4) ★ NO RUST PROFILE in score.py (python/js/go/kotlin/swift only). ~Half the codebase (Rust 23k) gets ZERO auto-scoring; Python is the only validated profile.
+  TWO-TRACK because of the Rust gap: Python → skill + score.py loop; Rust → apply the contract principles by hand (+ optional `cargo-mutants` for a real mutation score on the engine core).
 - STEP 5 (DEFERRED until codebase beyond-perfect): PROXY→HOOK+MCP REBUILD. proxy→DELETE; extract live SSE utils (proxy/helpers.py parse_sse_events/safe_decode → ccr/sse_parser.py) FIRST; build hook (data-plane, productized Biljakten-style) + 2-tool fastmcp (set_compression + retrieve→CCR direct, un-couple mcp_server.py:472 _retrieve_via_proxy). Engine gates BLIND to transport → needs NEW functional verification (not the archive loop). DO NOT START until Step 4 done.
 
 (historical) Phase-2 brief sent to teammate a609285 via SendMessage.

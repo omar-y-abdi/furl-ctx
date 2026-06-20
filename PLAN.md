@@ -37,6 +37,21 @@ boundary coverage for every </<=/>/>=/==/!= in source, real-I/O fixtures over mo
 a non-regression floor; iterate-to-plateau per module (scope one module/package per pass, not the whole repo at once).
 Prioritize the hard-invariant surfaces first: CCR recovery, Py↔Rust hash parity, prompt-cache ordering, the compress() route.
 
+★ SKILL LIMITATIONS (read the skill files — verified 2026-06-21, set expectations honestly):
+- It iterates to PLATEAU, NOT "perfect". Stop = (a) 3 consecutive rounds with no gated improvement, OR (b) zero contract
+  violations + every source comparison has a boundary test. Condition (a) usually fires first → it stops when the MODEL
+  can't find a further gated win, not at an objective perfection bar. "Quality" is relative (better-than-start), not absolute.
+- The best axes are MODEL JUDGEMENT, not measured: score.py auto-counts 9 regex axes; boundary coverage (B.2), real-I/O (B.3),
+  contract-naming (E.3), tautological readbacks (A.3) are judgement axes assessed by reading.
+- NO real mutation engine (no mutmut/cosmic-ray/Stryker in score.py). "Mutation-resistance" is a PROXY (boundary tests +
+  pinned literals + the gate's "does the new test fail when you break the behavior"). It's monotonic (revert-on-no-gain → never degrades).
+- ★ NO RUST PROFILE. score.py PROFILES = python/js/go/kotlin/swift only — zero rust/cargo/.rs. ~Half the codebase (Rust 23k LOC)
+  gets ZERO auto-scoring. Python is the ONLY empirically-validated profile.
+TWO-TRACK PLAN (because of the Rust gap):
+  • Python: the skill + score.py loop, hard-invariant surfaces first.
+  • Rust: apply the contract PRINCIPLES by hand (they're language-agnostic); for a REAL mutation score on the core, add
+    `cargo-mutants` (optional but it's the only way to get an objective mutation number on the Rust engine).
+
 ## PHASE 5 — PROXY→HOOK+MCP REBUILD (DEFERRED until codebase beyond-perfect — was Phase 3)
 - proxy → DELETE; extract live SSE utils (proxy/helpers.py parse_sse_events/safe_decode) to ccr/sse_parser.py first.
 - Build hook (data-plane, like the Biljakten one but productized) + 2-tool fastmcp (set_compression + retrieve→CCR direct,
