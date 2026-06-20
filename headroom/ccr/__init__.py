@@ -21,12 +21,6 @@ Batch API Support:
 - Works with all providers: Anthropic, OpenAI, Google
 """
 
-from .batch_processor import (
-    BatchResultProcessor,
-    BatchResultProcessorConfig,
-    ProcessedBatchResult,
-    process_batch_results,
-)
 from .batch_store import (
     BatchContext,
     BatchContextStore,
@@ -93,11 +87,7 @@ __all__ = [
     "BatchContext",
     "BatchContextStore",
     "BatchRequestContext",
-    "BatchResultProcessor",
-    "BatchResultProcessorConfig",
-    "ProcessedBatchResult",
     "get_batch_context_store",
-    "process_batch_results",
     "reset_batch_context_store",
     # MCP server
     "HeadroomMCPServer",
