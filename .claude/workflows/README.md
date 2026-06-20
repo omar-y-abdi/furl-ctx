@@ -17,7 +17,9 @@
 - **headroom-max-compression** — Two fable agents maximize compression (lossless frontier, then lossy-recoverable frontier) within the recovery + cache-safety + parity contracts.
 - **headroom-parallel-eval** — Loop-until-dry fleet of isolated MEASURED experiment agents (optimize|break|quality) with an anti-repeat ledger; opus synthesizes a ranked action doc.
 - **headroom-recoverability-refute** — Adversarially refute "no silent loss / every dropped item is CCR-recoverable" by constructing counterexamples. — args: angles, repo
+- **rust-fat-audit** — Hard focused dead-Rust audit of crates/: trace pyo3 reachability from the LIVE compress() path, find what only the archived proxy/live_zone path reaches, dead pub items (cargo dead_code), cross-language compressor redundancy, unused deps. Invariant-aware adversarial verify. Report-only. — args: groundTruth
 - **simplify-audit** — Lazy-dev over-engineering audit of the Headroom codebase: per-area reachability + complexity scan, adversarially verify the big delete claims, rank biggest-safe-cut-first. Report-only.
+- **simplify-audit-v2** — Exhaustive tool-grounded fat-finder for Headroom: 10 read-only lenses (dead-code, dup, dep-bloat, abstraction, dead-config, api-surface, test-bloat, archaeology, doc-cruft, rust) over real analyzer output, loop-until-dry, perspective-diverse verify, completeness critic. Report-only ranked cut-list. — args: groundTruth
 
 ## amputate
 
@@ -25,7 +27,9 @@
 
 ## cleanup
 
+- **rust-fat-audit** — Hard focused dead-Rust audit of crates/: trace pyo3 reachability from the LIVE compress() path, find what only the archived proxy/live_zone path reaches, dead pub items (cargo dead_code), cross-language compressor redundancy, unused deps. Invariant-aware adversarial verify. Report-only. — args: groundTruth
 - **simplify-audit** — Lazy-dev over-engineering audit of the Headroom codebase: per-area reachability + complexity scan, adversarially verify the big delete claims, rank biggest-safe-cut-first. Report-only.
+- **simplify-audit-v2** — Exhaustive tool-grounded fat-finder for Headroom: 10 read-only lenses (dead-code, dup, dep-bloat, abstraction, dead-config, api-surface, test-bloat, archaeology, doc-cruft, rust) over real analyzer output, loop-until-dry, perspective-diverse verify, completeness critic. Report-only ranked cut-list. — args: groundTruth
 
 ## compression
 
