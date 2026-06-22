@@ -23,7 +23,7 @@ import sys
 from dataclasses import asdict
 
 from verify.heldout import generators as gen
-from verify.heldout.measure import measure
+from verify.measure import measure
 
 
 def build_case(spec: dict) -> object:
