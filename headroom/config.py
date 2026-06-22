@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -327,11 +327,6 @@ class HeadroomConfig:
 
     cache_aligner: CacheAlignerConfig = field(default_factory=CacheAlignerConfig)
     ccr: CCRConfig = field(default_factory=CCRConfig)  # Compress-Cache-Retrieve
-
-    # Deprecated compatibility argument. ContentRouter is always present
-    # in the default pipeline; accepting this avoids breaking old config
-    # constructors while keeping it out of runtime state.
-    content_router_enabled: InitVar[bool | None] = None
 
     # Cross-message dedup: replace later byte-identical tool outputs with a
     # recoverable <<ccr:HASH>> pointer to the first occurrence. Operates on
