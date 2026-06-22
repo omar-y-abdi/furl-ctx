@@ -400,32 +400,11 @@ class CCRConfig:
 
 
 @dataclass
-class PrefixFreezeConfig:
-    """Configuration for cache-aware prefix freezing.
-
-    When enabled, tracks provider prefix cache state across turns and freezes
-    already-cached messages so the transform pipeline skips them. This prevents
-    Headroom from invalidating the provider's prefix cache (which would replace
-    a 90% read discount with a 25% write penalty on Anthropic).
-
-    The force_compress_threshold controls when compression savings are large
-    enough to justify busting the cache. For Anthropic (90% read discount),
-    compression must save >90% of tokens in the frozen prefix to be worth it.
-    """
-
-    enabled: bool = True
-    min_cached_tokens: int = 1024  # Min cached tokens to activate freeze
-    session_ttl_seconds: int = 600  # Session tracker cleanup TTL
-    force_compress_threshold: float = 0.5  # Bust cache if compression saves > this fraction
-
-
-@dataclass
 class HeadroomConfig:
     """Main configuration for HeadroomClient."""
 
     cache_aligner: CacheAlignerConfig = field(default_factory=CacheAlignerConfig)
     ccr: CCRConfig = field(default_factory=CCRConfig)  # Compress-Cache-Retrieve
-    prefix_freeze: PrefixFreezeConfig = field(default_factory=PrefixFreezeConfig)
 
     # Deprecated compatibility argument. ContentRouter is always present
     # in the default pipeline; accepting this avoids breaking old config
