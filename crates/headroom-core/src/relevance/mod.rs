@@ -29,54 +29,8 @@ mod bm25;
 mod embedding;
 mod hybrid;
 
-pub use base::{default_batch_score, RelevanceScore, RelevanceScorer};
+pub use base::{RelevanceScore, RelevanceScorer};
 pub use bm25::BM25Scorer;
 #[cfg(feature = "embeddings")]
 pub use embedding::EmbeddingScorer;
 pub use hybrid::HybridScorer;
-
-/// Factory mirroring Python's `relevance.create_scorer` (`__init__.py:72`).
-///
-/// Returns a boxed trait object so callers don't have to know which
-/// concrete scorer they got. `tier`:
-///
-/// - `"hybrid"` (default) — `HybridScorer` (BM25 + embedding fusion;
-///   gracefully falls back to BM25 + boost when embeddings stubbed).
-/// - `"bm25"` — `BM25Scorer` (pure keyword).
-/// - `"embedding"` — `EmbeddingScorer` (currently a stub; returns
-///   `Err` to mirror Python's `RuntimeError` when the underlying ONNX
-///   backend isn't ready).
-pub fn create_scorer(tier: &str) -> Result<Box<dyn RelevanceScorer + Send + Sync>, String> {
-    match tier.to_lowercase().as_str() {
-        "bm25" => Ok(Box::new(BM25Scorer::default())),
-        "hybrid" => Ok(Box::new(HybridScorer::default())),
-        "embedding" => {
-            #[cfg(feature = "embeddings")]
-            {
-                let s = EmbeddingScorer::default();
-                if s.is_available() {
-                    Ok(Box::new(s))
-                } else {
-                    Err(
-                        "EmbeddingScorer requires the ONNX backend (not yet implemented in Rust)"
-                            .to_string(),
-                    )
-                }
-            }
-            // Without the `embeddings` feature the ONNX backend isn't
-            // compiled in, so the tier is unavailable. Return the same
-            // error the available-but-unloaded path returns above.
-            #[cfg(not(feature = "embeddings"))]
-            {
-                Err(
-                    "EmbeddingScorer requires the ONNX backend (not yet implemented in Rust)"
-                        .to_string(),
-                )
-            }
-        }
-        other => Err(format!(
-            "Unknown scorer tier: {}. Valid tiers: bm25, embedding, hybrid",
-            other
-        )),
-    }
-}

@@ -1,10 +1,9 @@
 //! Base trait and types for relevance scoring.
 //!
 //! Direct port of `headroom/relevance/base.py`. The Python version uses
-//! ABC + abstractmethod; we use a Rust trait with the same two
-//! required methods. `default_batch_score` is provided as a free
-//! function so concrete scorers without an optimized batch impl can
-//! delegate to it.
+//! ABC + abstractmethod; we use a Rust trait with the same required
+//! method (`score`) plus a default `score_batch` that delegates to
+//! per-item `score`.
 
 /// Relevance score with explainability fields.
 ///
@@ -43,8 +42,8 @@ impl Default for RelevanceScore {
 /// Trait that every relevance scorer implements.
 ///
 /// Mirrors Python's `RelevanceScorer` ABC: required `score` for single
-/// items, required `score_batch` for collections (subclasses override
-/// for vectorized impls; otherwise delegate to `default_batch_score`).
+/// items, with a default `score_batch` for collections (subclasses
+/// override for vectorized impls; otherwise the per-item fallback runs).
 pub trait RelevanceScorer {
     /// Score a single item against the context.
     fn score(&self, item: &str, context: &str) -> RelevanceScore;
@@ -62,20 +61,6 @@ pub trait RelevanceScorer {
     fn is_available(&self) -> bool {
         true
     }
-}
-
-/// Default batch implementation as a free function — convenient for
-/// tests that want to verify the fall-back behavior without
-/// constructing a trait object.
-pub fn default_batch_score<S: RelevanceScorer>(
-    scorer: &S,
-    items: &[&str],
-    context: &str,
-) -> Vec<RelevanceScore> {
-    items
-        .iter()
-        .map(|item| scorer.score(item, context))
-        .collect()
 }
 
 #[cfg(test)]
@@ -110,22 +95,11 @@ mod tests {
         assert!(s.matched_terms.is_empty());
     }
 
-    // Trivial scorer to test the default batch fallback.
+    // Trivial scorer to exercise the trait's default `score_batch` fallback.
     struct StubScorer;
     impl RelevanceScorer for StubScorer {
         fn score(&self, _item: &str, _context: &str) -> RelevanceScore {
             RelevanceScore::new(0.42, "stub", Vec::new())
-        }
-    }
-
-    #[test]
-    fn default_batch_calls_score_per_item() {
-        let scorer = StubScorer;
-        let items = ["a", "b", "c"];
-        let scores = default_batch_score(&scorer, &items, "ctx");
-        assert_eq!(scores.len(), 3);
-        for s in scores {
-            assert_eq!(s.score, 0.42);
         }
     }
 

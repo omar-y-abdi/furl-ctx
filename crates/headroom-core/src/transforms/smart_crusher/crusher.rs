@@ -291,27 +291,6 @@ impl SmartCrusher {
         )
     }
 
-    /// Begin a builder chain for custom composition. The Enterprise
-    /// entry point: swap the scorer, add business-rule constraints,
-    /// attach an audit observer.
-    pub fn builder(config: SmartCrusherConfig) -> SmartCrusherBuilder {
-        SmartCrusherBuilder::new(config)
-    }
-
-    /// Construct with a custom scorer (legacy convenience). Equivalent
-    /// to `SmartCrusher::builder(config).with_scorer(scorer).with_default_oss_setup().build()`
-    /// minus the default scorer override; preserved for backward
-    /// compatibility with pre-PR1 callers.
-    pub fn with_scorer(
-        config: SmartCrusherConfig,
-        scorer: Box<dyn RelevanceScorer + Send + Sync>,
-    ) -> Self {
-        SmartCrusherBuilder::new(config)
-            .with_scorer(scorer)
-            .add_default_oss_constraints()
-            .build()
-    }
-
     /// Construct directly from owned parts. Used by
     /// [`SmartCrusherBuilder::build`] — not part of the public stable
     /// API. Prefer the builder.
@@ -1846,7 +1825,7 @@ mod tests {
         // Same near-unique no-signal shape, but NO CCR store: a drop here
         // would be UNRECOVERABLE, so the override must NOT fire — the
         // analyzer's skip stands (legacy / parity mode, zero silent loss).
-        let c = SmartCrusher::builder(SmartCrusherConfig::default())
+        let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
             .with_default_oss_setup()
             .build(); // no `.with_default_ccr_store()`
         assert!(c.ccr_store.is_none(), "this crusher must have no store");
@@ -2042,10 +2021,10 @@ mod tests {
     #[test]
     fn crusher_with_custom_scorer() {
         use crate::relevance::BM25Scorer;
-        let c = SmartCrusher::with_scorer(
-            SmartCrusherConfig::default(),
-            Box::new(BM25Scorer::default()),
-        );
+        let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
+            .with_scorer(Box::new(BM25Scorer::default()))
+            .add_default_oss_constraints()
+            .build();
         // Sanity: crushing still works with a swapped scorer.
         let items: Vec<Value> = (0..30).map(|_| json!({"status": "ok"})).collect();
         let result = c.crush_array(&items, "anything", 1.0);
@@ -3016,7 +2995,7 @@ mod tests {
                 count: Arc::clone(&counter),
             }),
         };
-        let crusher = SmartCrusher::builder(cfg)
+        let crusher = SmartCrusherBuilder::new(cfg)
             .with_default_oss_setup()
             .with_compaction(stage)
             .build();
