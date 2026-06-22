@@ -1,6 +1,6 @@
 """Centralized registry for ML model instances.
 
-Provides shared access to ML models (sentence transformers, SIGLIP, spaCy, etc.)
+Provides shared access to ML models (sentence transformers, spaCy, etc.)
 to avoid loading the same model multiple times across different components.
 
 This is different from registry.py which stores LLM metadata. This module
@@ -15,9 +15,6 @@ Usage:
     # Get shared sentence transformer (loads on first access, uses config default)
     model = MLModelRegistry.get_sentence_transformer()
     embeddings = model.encode(["hello", "world"])
-
-    # Get SIGLIP for image embeddings
-    siglip_model, processor = MLModelRegistry.get_siglip()
 
     # Check what's loaded
     print(MLModelRegistry.loaded_models())
@@ -173,55 +170,6 @@ class MLModelRegistry:
                 logger.info(f"Loaded SentenceTransformer: {model_name} on {device}")
 
             return instance._models[key]
-
-    # =========================================================================
-    # SIGLIP (Image Embeddings)
-    # =========================================================================
-
-    @classmethod
-    def get_siglip(
-        cls,
-        model_name: str | None = None,
-        device: str | None = None,
-    ) -> tuple[Any, Any]:
-        """Get shared SIGLIP model and processor.
-
-        Args:
-            model_name: Model name. If None, uses ML_MODEL_DEFAULTS.siglip.
-            device: Device to use. Auto-detected if None.
-
-        Returns:
-            Tuple of (model, processor).
-        """
-        if model_name is None:
-            model_name = ML_MODEL_DEFAULTS.siglip
-
-        instance = cls.get()
-        key = f"siglip:{model_name}"
-
-        with instance._model_lock:
-            if key not in instance._models:
-                logger.info(f"Loading SIGLIP: {model_name}")
-                from transformers import AutoModel, AutoProcessor
-
-                if device is None:
-                    device = cls._detect_device()
-
-                model = AutoModel.from_pretrained(model_name)
-                processor = AutoProcessor.from_pretrained(model_name)
-
-                # Move to device and set eval mode
-                if device != "cpu":
-                    import torch
-
-                    model = model.to(torch.device(device))
-                model.eval()
-
-                instance._models[key] = (model, processor)
-                logger.info(f"Loaded SIGLIP: {model_name} on {device}")
-
-            result: tuple[Any, Any] = instance._models[key]
-            return result
 
     # =========================================================================
     # spaCy
@@ -383,14 +331,6 @@ def get_sentence_transformer(
 ) -> Any:
     """Get a shared SentenceTransformer instance."""
     return MLModelRegistry.get_sentence_transformer(model_name, device)
-
-
-def get_siglip(
-    model_name: str | None = None,
-    device: str | None = None,
-) -> tuple[Any, Any]:
-    """Get shared SIGLIP model and processor."""
-    return MLModelRegistry.get_siglip(model_name, device)
 
 
 def get_spacy(model_name: str | None = None) -> Any:

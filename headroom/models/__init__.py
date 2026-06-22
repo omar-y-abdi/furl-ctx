@@ -6,7 +6,7 @@ amputation. This package now exposes only:
 - :data:`headroom.models.config.ML_MODEL_DEFAULTS` — shared ML defaults used by
   config and cache modules.
 - :class:`headroom.models.ml_models.MLModelRegistry` and its accessors for
-  sharing heavy model instances (sentence transformers, SIGLIP, spaCy) so the
+  sharing heavy model instances (sentence transformers, spaCy) so the
   same model is not loaded multiple times across the process.
 """
 
@@ -18,7 +18,6 @@ __all__ = [
     # ML Model Registry
     "MLModelRegistry",
     "get_sentence_transformer",
-    "get_siglip",
     "get_spacy",
 ]
 
@@ -28,7 +27,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # ML model registry
     "MLModelRegistry": ("headroom.models.ml_models", "MLModelRegistry"),
     "get_sentence_transformer": ("headroom.models.ml_models", "get_sentence_transformer"),
-    "get_siglip": ("headroom.models.ml_models", "get_siglip"),
     "get_spacy": ("headroom.models.ml_models", "get_spacy"),
 }
 
