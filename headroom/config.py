@@ -18,11 +18,6 @@ class HeadroomMode(str, Enum):
     SIMULATE = "simulate"  # Return transform plan without API call
 
 
-# Model context limits should be provided by the Provider
-# This dict allows user overrides only
-DEFAULT_MODEL_CONTEXT_LIMITS: dict[str, int] = {}
-
-
 @dataclass
 class CacheAlignerConfig:
     """Configuration for cache alignment.
@@ -462,21 +457,11 @@ class PrefixFreezeConfig:
 class HeadroomConfig:
     """Main configuration for HeadroomClient."""
 
-    store_url: str = "sqlite:///headroom.db"
     default_mode: HeadroomMode = HeadroomMode.AUDIT
-    model_context_limits: dict[str, int] = field(
-        default_factory=lambda: DEFAULT_MODEL_CONTEXT_LIMITS.copy()
-    )
-    smart_crusher: SmartCrusherConfig = field(default_factory=SmartCrusherConfig)
     cache_aligner: CacheAlignerConfig = field(default_factory=CacheAlignerConfig)
     cache_optimizer: CacheOptimizerConfig = field(default_factory=CacheOptimizerConfig)
     ccr: CCRConfig = field(default_factory=CCRConfig)  # Compress-Cache-Retrieve
     prefix_freeze: PrefixFreezeConfig = field(default_factory=PrefixFreezeConfig)
-
-    # Output buffer reserved for the model's response when sizing the
-    # incoming context. Previously lived on RollingWindowConfig; hoisted
-    # to the top-level config when PR-B1 retired the rolling-window stage.
-    output_buffer_tokens: int = 4000
 
     # Deprecated compatibility argument. ContentRouter is always present
     # in the default pipeline; accepting this avoids breaking old config
@@ -491,29 +476,6 @@ class HeadroomConfig:
 
     # Debugging - opt-in diff artifact generation
     generate_diff_artifact: bool = False  # Enable to get detailed transform diffs
-
-    # Canonical pipeline lifecycle extensions
-    pipeline_extensions: list[Any] = field(default_factory=list)
-    discover_pipeline_extensions: bool = True
-
-    def get_context_limit(self, model: str) -> int | None:
-        """
-        Get context limit for a model from user overrides.
-
-        Args:
-            model: Model name.
-
-        Returns:
-            Context limit if configured, None otherwise.
-            Provider should be consulted if None is returned.
-        """
-        if model in self.model_context_limits:
-            return self.model_context_limits[model]
-        # Try prefix matching for versioned model names
-        for known_model, limit in self.model_context_limits.items():
-            if model.startswith(known_model):
-                return limit
-        return None
 
 
 @dataclass
