@@ -68,7 +68,6 @@ __all__ = [
     "HeadroomConfig",
     "SmartCrusherConfig",
     "CacheAlignerConfig",
-    "CacheOptimizerConfig",
     "RelevanceScorerConfig",
     # Data models
     "Block",
@@ -138,7 +137,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "HeadroomConfig": ("headroom.config", "HeadroomConfig"),
     "SmartCrusherConfig": ("headroom.config", "SmartCrusherConfig"),
     "CacheAlignerConfig": ("headroom.config", "CacheAlignerConfig"),
-    "CacheOptimizerConfig": ("headroom.config", "CacheOptimizerConfig"),
     "RelevanceScorerConfig": ("headroom.config", "RelevanceScorerConfig"),
     # Data models
     "Block": ("headroom.config", "Block"),

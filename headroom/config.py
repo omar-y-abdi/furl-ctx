@@ -351,31 +351,6 @@ class SmartCrusherConfig:
 
 
 @dataclass
-class CacheOptimizerConfig:
-    """Configuration for provider-specific cache optimization.
-
-    The CacheOptimizer system provides provider-specific caching strategies:
-    - Anthropic: Explicit cache_control breakpoints for prompt caching
-    - OpenAI: Prefix stabilization for automatic prefix caching
-    - Google: CachedContent API lifecycle management
-
-    This is COMPLEMENTARY to the CacheAligner transform - CacheAligner does
-    basic prefix stabilization (date extraction, whitespace normalization),
-    while CacheOptimizer applies provider-specific optimizations.
-
-    Enable this for maximum cache hit rates when you know your provider.
-    """
-
-    enabled: bool = True  # Enable provider-specific cache optimization
-    auto_detect_provider: bool = True  # Auto-detect from HeadroomClient provider
-    min_cacheable_tokens: int = 1024  # Minimum tokens for caching (provider may override)
-    enable_semantic_cache: bool = False  # Enable query-level semantic caching
-    semantic_cache_similarity: float = 0.95  # Similarity threshold for semantic cache
-    semantic_cache_max_entries: int = 1000  # Max semantic cache entries
-    semantic_cache_ttl_seconds: int = 300  # Semantic cache TTL
-
-
-@dataclass
 class CCRConfig:
     """Configuration for Compress-Cache-Retrieve architecture.
 
@@ -449,7 +424,6 @@ class HeadroomConfig:
     """Main configuration for HeadroomClient."""
 
     cache_aligner: CacheAlignerConfig = field(default_factory=CacheAlignerConfig)
-    cache_optimizer: CacheOptimizerConfig = field(default_factory=CacheOptimizerConfig)
     ccr: CCRConfig = field(default_factory=CCRConfig)  # Compress-Cache-Retrieve
     prefix_freeze: PrefixFreezeConfig = field(default_factory=PrefixFreezeConfig)
 
