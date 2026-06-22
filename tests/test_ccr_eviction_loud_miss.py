@@ -4,10 +4,10 @@ The break-eval flagged "FIFO eviction -> unbacked sentinels" as a silent-loss
 defect (Cluster G). Independent verification showed the *eviction* is real
 (concern #1: a 1000-entry-cap overflow drops the oldest whole-blob entry) but
 the *loss is already loud* (concern #2): every model-facing retrieval path runs
-through ``CCRResponseHandler._execute_retrieval``, which calls
-``get_entry_status`` and returns an explicit ``success=False`` error to the
-model on a miss — never a silent empty/None. The "no silent loss" invariant
-therefore already held; G as a *silent*-loss defect does not reproduce.
+through ``HeadroomMCPServer._retrieve_content``, which calls ``get_entry_status``
+and returns an explicit ``error`` payload to the model on a miss — never a silent
+empty/None. The "no silent loss" invariant therefore already held; G as a
+*silent*-loss defect does not reproduce.
 
 The one genuine residual was DIAGNOSTIC: a capacity-evicted entry reported
 ``status="missing"`` with the message *"Entry not found (CCR TTL: 300 seconds)"*,
@@ -35,7 +35,7 @@ from headroom.cache.compression_store import (
     get_compression_store,
     reset_compression_store,
 )
-from headroom.ccr.response_handler import CCRResponseHandler, CCRToolCall
+from headroom.ccr.mcp_server import HeadroomMCPServer
 from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
 
 
@@ -47,11 +47,17 @@ def _isolate_store():
     reset_compression_store()
 
 
-def _model_sees(hash_key: str) -> tuple[bool, dict]:
-    """Retrieve as the model does (through the handler) and parse the payload."""
-    handler = CCRResponseHandler()
-    result = handler._execute_retrieval(CCRToolCall(tool_call_id="t", hash_key=hash_key))
-    return result.success, json.loads(result.content)
+def _model_sees(store: object, hash_key: str) -> tuple[bool, dict]:
+    """Retrieve as the model does (through the live MCP retrieve surface).
+
+    Exercise the real method without the MCP SDK by binding a duck-typed
+    ``self`` (the miss path only needs ``_get_local_store`` + no proxy). A
+    miss is signalled by an ``error`` key in the returned payload; success
+    by its absence.
+    """
+    stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
+    payload = asyncio.run(HeadroomMCPServer._retrieve_content(stub, hash_key, None))
+    return ("error" not in payload), payload
 
 
 def test_format_miss_detail_is_cause_honest_for_eviction() -> None:
@@ -101,7 +107,7 @@ def test_capacity_evicted_bulk_retrieval_is_loud_and_cause_honest() -> None:
 
     assert store.retrieve(victim) is None, "precondition: victim was evicted (concern #1)"
 
-    success, payload = _model_sees(victim)
+    success, payload = _model_sees(store, victim)
     # concern #2: the miss is LOUD — explicit error reaches the model, no silent None.
     assert success is False
     assert "error" in payload and payload["hash"] == victim
@@ -134,17 +140,16 @@ def test_capacity_evicted_granular_offload_retrieval_is_loud() -> None:
     if store.retrieve(victim) is not None:
         pytest.skip("victim survived eviction on this build; loudness is unobservable here")
 
-    success, payload = _model_sees(victim)
+    success, payload = _model_sees(store, victim)
     assert success is False, "evicted granular offload must miss loudly, not silently"
     assert "error" in payload and payload["hash"] == victim
 
 
 def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
-    # The SECOND model-facing retrieval surface (MCP tool) must report a miss the
-    # same way as response_handler: an explicit `error`, cause-honest, never a
-    # silent empty result. Exercise the real method without the MCP SDK by binding
-    # a duck-typed `self` (the miss path only needs `_get_local_store` + no proxy).
-    from headroom.ccr.mcp_server import HeadroomMCPServer
+    # The model-facing retrieval surface (MCP tool) must report a miss as an
+    # explicit `error`, cause-honest, never a silent empty result. Exercise the
+    # real method without the MCP SDK by binding a duck-typed `self` (the miss
+    # path only needs `_get_local_store` + no proxy).
 
     store = get_compression_store(max_entries=4)
     victim = "bbbbbbbbbbbb"

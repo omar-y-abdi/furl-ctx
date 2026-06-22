@@ -5,7 +5,6 @@ When tool outputs are compressed, the LLM can retrieve more data if needed.
 
 Key components:
 1. Tool Injection: Proxy injects headroom_retrieve tool into requests
-2. Response Handler: Intercepts responses, handles CCR tool calls automatically
 
 Two distribution channels for the retrieval tool:
 1. Tool Injection: Proxy injects tool into request when compression occurs
@@ -14,14 +13,6 @@ Two distribution channels for the retrieval tool:
 When MCP is configured, tool injection is skipped to avoid duplicates.
 """
 
-from .response_handler import (
-    CCRResponseHandler,
-    CCRToolCall,
-    CCRToolResult,
-    ResponseHandlerConfig,
-    StreamingCCRBuffer,
-    StreamingCCRHandler,
-)
 from .tool_injection import (
     CCR_TOOL_NAME,
     CCRToolInjector,
@@ -47,13 +38,6 @@ __all__ = [
     "create_ccr_tool_definition",
     "create_system_instructions",
     "parse_tool_call",
-    # Response handling
-    "CCRResponseHandler",
-    "CCRToolCall",
-    "CCRToolResult",
-    "ResponseHandlerConfig",
-    "StreamingCCRBuffer",
-    "StreamingCCRHandler",
     # MCP server
     "HeadroomMCPServer",
     "create_ccr_mcp_server",
