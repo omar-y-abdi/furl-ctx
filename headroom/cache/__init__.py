@@ -10,15 +10,11 @@ Provider Caching Differences:
 - Google: Separate CachedContent API, 75% savings + storage costs
 
 Usage:
-    from headroom.cache import CacheOptimizerRegistry, SemanticCacheLayer
+    from headroom.cache import CacheOptimizerRegistry
 
     # Get provider-specific optimizer
     optimizer = CacheOptimizerRegistry.get("anthropic")
     result = optimizer.optimize(messages, context)
-
-    # With semantic caching layer
-    semantic = SemanticCacheLayer(optimizer, similarity_threshold=0.95)
-    result = semantic.process(messages, context)
 
     # Register custom optimizer
     CacheOptimizerRegistry.register("my-provider", MyOptimizer)
