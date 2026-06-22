@@ -286,7 +286,7 @@ def probe_result_cache_ccr_divergence() -> dict:
     check whether the served sentinel still resolves. A FIXED engine re-mirrors
     on the cache hit so the second drop stays backed (no silent loss).
     """
-    from verify.heldout.measure import (
+    from verify.measure import (
         _emitted_drop_hashes,
         _retrieve_originals,
         _stringify,
