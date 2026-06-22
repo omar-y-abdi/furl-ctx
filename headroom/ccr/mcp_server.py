@@ -902,13 +902,11 @@ class HeadroomMCPServer:
 
 def create_ccr_mcp_server(
     proxy_url: str = DEFAULT_PROXY_URL,
-    direct_mode: bool = False,
 ) -> HeadroomMCPServer:
     """Create a Headroom MCP server instance.
 
     Args:
         proxy_url: URL of the Headroom proxy server (for retrieval fallback).
-        direct_mode: Ignored (kept for backward compatibility).
 
     Returns:
         HeadroomMCPServer instance.
