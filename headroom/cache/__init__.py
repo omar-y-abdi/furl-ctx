@@ -13,14 +13,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     # Expose concrete types to static analysis while keeping runtime imports lazy.
     from headroom.cache.base import (  # noqa: F401
-        BaseCacheOptimizer,
-        CacheBreakpoint,
         CacheConfig,
-        CacheMetrics,
-        CacheOptimizer,
-        CacheResult,
         CacheStrategy,
-        OptimizationContext,
     )
     from headroom.cache.dynamic_detector import (  # noqa: F401
         DetectorConfig,
@@ -32,14 +26,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     # Base types
-    "BaseCacheOptimizer",
-    "CacheBreakpoint",
     "CacheConfig",
-    "CacheMetrics",
-    "CacheOptimizer",
-    "CacheResult",
     "CacheStrategy",
-    "OptimizationContext",
     # Dynamic content detection
     "DetectorConfig",
     "DynamicCategory",
@@ -50,14 +38,8 @@ __all__ = [
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # Base types
-    "BaseCacheOptimizer": ("headroom.cache.base", "BaseCacheOptimizer"),
-    "CacheBreakpoint": ("headroom.cache.base", "CacheBreakpoint"),
     "CacheConfig": ("headroom.cache.base", "CacheConfig"),
-    "CacheMetrics": ("headroom.cache.base", "CacheMetrics"),
-    "CacheOptimizer": ("headroom.cache.base", "CacheOptimizer"),
-    "CacheResult": ("headroom.cache.base", "CacheResult"),
     "CacheStrategy": ("headroom.cache.base", "CacheStrategy"),
-    "OptimizationContext": ("headroom.cache.base", "OptimizationContext"),
     # Dynamic content detection
     "DetectorConfig": ("headroom.cache.dynamic_detector", "DetectorConfig"),
     "DynamicCategory": ("headroom.cache.dynamic_detector", "DynamicCategory"),

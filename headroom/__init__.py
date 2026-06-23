@@ -80,13 +80,9 @@ __all__ = [
     "SmartCrusher",
     "CacheAligner",
     "TransformPipeline",
-    # Cache optimizers
-    "BaseCacheOptimizer",
+    # Cache config types
     "CacheConfig",
-    "CacheMetrics",
-    "CacheResult",
     "CacheStrategy",
-    "OptimizationContext",
     # Relevance scoring - BM25 keyword scorer
     "RelevanceScore",
     "RelevanceScorer",
@@ -139,13 +135,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "SmartCrusher": ("headroom.transforms", "SmartCrusher"),
     "CacheAligner": ("headroom.transforms", "CacheAligner"),
     "TransformPipeline": ("headroom.transforms", "TransformPipeline"),
-    # Cache optimizers
-    "BaseCacheOptimizer": ("headroom.cache", "BaseCacheOptimizer"),
+    # Cache config types
     "CacheConfig": ("headroom.cache", "CacheConfig"),
-    "CacheMetrics": ("headroom.cache", "CacheMetrics"),
-    "CacheResult": ("headroom.cache", "CacheResult"),
     "CacheStrategy": ("headroom.cache", "CacheStrategy"),
-    "OptimizationContext": ("headroom.cache", "OptimizationContext"),
     # Relevance scoring
     "RelevanceScore": ("headroom.relevance", "RelevanceScore"),
     "RelevanceScorer": ("headroom.relevance", "RelevanceScorer"),
