@@ -53,11 +53,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# AST-based code compression (tree-sitter), complementing the bundled
-# ast-grep CLI used by the CodeCompressor.
-code = [
-    "tree-sitter-language-pack>=0.10.0",
-]
 # ML-based compression with Kompress (ModernBERT). ONNX INT8 runtime keeps
 # this torch-free; transformers supplies the tokenizer only.
 ml = [
