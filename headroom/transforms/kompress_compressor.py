@@ -802,6 +802,12 @@ class KompressCompressor(Transform):
 
             max_chunk_words = self.config.chunk_words
             kept_ids: set[int] = set()
+            # For the target_ratio path: accumulate per-word scores across ALL
+            # chunks (keyed by the global word id) so the top-k is computed once
+            # against the whole input. Per-chunk top-k under-keeps on multi-chunk
+            # inputs (#3): e.g. 12 words / chunk 5 / ratio 0.5 gives 2+2+1=5
+            # (effective 0.42), not the requested round(12*0.5)=6.
+            global_word_scores: dict[int, float] = {}
             inference_ms = 0.0
             chunk_count = 0
 
@@ -846,26 +852,30 @@ class KompressCompressor(Transform):
                     inference_ms += (time.perf_counter() - inference_started) * 1000
 
                 if target_ratio is not None:
-                    word_scores: dict[int, float] = {}
+                    # Reduce tokens -> words (max score per word), accumulating
+                    # into the global map; the top-k is taken once after the loop.
                     for idx, wid in enumerate(word_ids):
                         if wid is None:
                             continue
                         s = float(score_list[idx])
-                        if wid not in word_scores or s > word_scores[wid]:
-                            word_scores[wid] = s
-                    if word_scores:
-                        sorted_wids = sorted(
-                            word_scores, key=lambda w: word_scores[w], reverse=True
-                        )
-                        num_keep = max(1, int(len(sorted_wids) * target_ratio))
-                        for wid in sorted_wids[:num_keep]:
-                            kept_ids.add(wid + chunk_start)
+                        gid = wid + chunk_start
+                        if gid not in global_word_scores or s > global_word_scores[gid]:
+                            global_word_scores[gid] = s
                 else:
                     for idx, wid in enumerate(word_ids):
                         if wid is None:
                             continue
                         if bool(mask_list[idx]):
                             kept_ids.add(wid + chunk_start)
+
+            if target_ratio is not None and global_word_scores:
+                # Single global top-k so the kept count matches the requested
+                # ratio across the WHOLE input, independent of chunking (#3).
+                sorted_gids = sorted(
+                    global_word_scores, key=lambda g: global_word_scores[g], reverse=True
+                )
+                num_keep = max(1, round(len(sorted_gids) * target_ratio))
+                kept_ids.update(sorted_gids[:num_keep])
 
             if not kept_ids:
                 if inference_ms >= 1000.0:
@@ -1056,6 +1066,12 @@ class KompressCompressor(Transform):
         is_onnx = backend == "onnx"
         device_type = _model_device_type(model, backend)
         kept_ids_per_text: dict[int, set[int]] = {i: set() for i in range(n) if results[i] is None}
+        # For target_ratio texts: accumulate per-word scores across all chunks
+        # (keyed by global word id) and the text's ratio, so the top-k is taken
+        # ONCE per text at reconstruction — matching the requested ratio across
+        # the whole input rather than per chunk (#3, batched path).
+        global_scores_per_text: dict[int, dict[int, float]] = {}
+        ratio_per_text: dict[int, float] = {}
         inference_ms = 0.0
 
         for batch_start in range(0, len(chunk_queue), batch_size):
@@ -1104,13 +1120,15 @@ class KompressCompressor(Transform):
                         continue
 
                     if ratio is not None:
-                        # Top-k by score.
-                        sorted_wids = sorted(
-                            word_scores, key=lambda w: word_scores[w], reverse=True
-                        )
-                        num_keep = max(1, int(len(sorted_wids) * ratio))
-                        for wid in sorted_wids[:num_keep]:
-                            kept_ids_per_text[text_idx].add(wid + chunk_start)
+                        # Accumulate global scores; top-k is taken once per text
+                        # at reconstruction so the kept count matches the ratio
+                        # across the whole input, not per chunk (#3).
+                        gmap = global_scores_per_text.setdefault(text_idx, {})
+                        ratio_per_text[text_idx] = ratio
+                        for wid, score in word_scores.items():
+                            gid = wid + chunk_start
+                            if gid not in gmap or score > gmap[gid]:
+                                gmap[gid] = score
                     else:
                         # Threshold from config (default 0.5, matches ONNX get_keep_mask).
                         for wid, score in word_scores.items():
@@ -1127,6 +1145,15 @@ class KompressCompressor(Transform):
                             contents[text_idx], len(word_lists[text_idx])
                         )
                         kept_ids_per_text.pop(text_idx, None)
+
+        # Finalize the global top-k for every target_ratio text (#3).
+        for text_idx, gmap in global_scores_per_text.items():
+            if results[text_idx] is not None or not gmap:
+                continue
+            ratio = ratio_per_text[text_idx]
+            sorted_gids = sorted(gmap, key=lambda g: gmap[g], reverse=True)
+            num_keep = max(1, round(len(sorted_gids) * ratio))
+            kept_ids_per_text[text_idx].update(sorted_gids[:num_keep])
 
         # Reconstruct compressed text for each non-passthrough result.
         for text_idx, kept_ids in kept_ids_per_text.items():
