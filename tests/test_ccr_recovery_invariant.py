@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
-import os
+import random
 import re
 
 import pytest
@@ -205,8 +205,26 @@ def _opaque_rows(n: int = 50) -> list[dict]:
     # base64 blobs > 256 bytes → CellClass::Opaque → substituted on the
     # lossless:table path. A short shared `tag` keeps the table tabular so
     # lossless wins and the markers reach the output.
+    #
+    # DETERMINISM (#26): the blobs are drawn from a FIXED seed, not
+    # ``os.urandom``. With random blobs, ~2% of blob sets per config routed to
+    # the lossy row-drop path instead of the lossless:table opaque-substitution
+    # path, emitting NO ``<<ccr:HASH,KIND,SIZE>>`` markers — which made the
+    # opaque-marker assertion below ~7.5% flaky across the 3-config matrix
+    # (1-(1-0.02)^3). The data was ALWAYS fully recoverable (the row-drop path
+    # has its own recovery markers, covered by the lossy-survivor tests); only
+    # this opaque-specific fixture was flaky. Seed 0 is verified to route every
+    # blob through the opaque-substitution path across all three matrix configs
+    # AND the default config, and routing is run-to-run deterministic once the
+    # blobs are fixed (no PYTHONHASHSEED sensitivity). os.urandom also violated
+    # the determinism contract (rule 8).
+    rng = random.Random(0)
     return [
-        {"id": i, "tag": "x", "data": base64.b64encode(os.urandom(600)).decode()}
+        {
+            "id": i,
+            "tag": "x",
+            "data": base64.b64encode(bytes(rng.getrandbits(8) for _ in range(600))).decode(),
+        }
         for i in range(n)
     ]
 
