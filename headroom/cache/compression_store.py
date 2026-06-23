@@ -127,8 +127,13 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
 
 
 def _redact_retrieval_log_payload(payload: str) -> str:
-    redacted = _SECRET_KEY_VALUE_RE.sub(r"\1\2\3[REDACTED]", payload)
-    redacted = _AUTH_VALUE_RE.sub(r"\1 [REDACTED]", redacted)
+    # Redact ``Bearer``/``Basic`` scheme tokens BEFORE the secret-key rule so the
+    # scheme anchor survives. Otherwise ``_SECRET_KEY_VALUE_RE`` (which matches the
+    # ``Authorization`` key) consumes the bare ``Bearer`` scheme word as its value,
+    # leaving the actual credential after it un-redacted in a plain-text
+    # ``Authorization: Bearer <JWT>`` header (#20). Over-redaction is safe.
+    redacted = _AUTH_VALUE_RE.sub(r"\1 [REDACTED]", payload)
+    redacted = _SECRET_KEY_VALUE_RE.sub(r"\1\2\3[REDACTED]", redacted)
     return _API_KEY_VALUE_RE.sub("sk-[REDACTED]", redacted)
 
 
