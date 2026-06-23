@@ -5,7 +5,6 @@ to the optimal compressor. It handles mixed content by splitting, routing
 each section to the appropriate compressor, and reassembling.
 
 Supported Compressors:
-- CodeAwareCompressor: Source code (AST-preserving)
 - SmartCrusher: JSON arrays
 - SearchCompressor: grep/ripgrep results
 - LogCompressor: Build/test output
@@ -740,9 +739,9 @@ class ContentRouter(Transform):
     Example:
         >>> router = ContentRouter()
         >>>
-        >>> # Automatically uses CodeAwareCompressor
+        >>> # Source code routes to Kompress (ML-based)
         >>> result = router.compress(python_code)
-        >>> print(result.strategy_used)  # CompressionStrategy.CODE_AWARE
+        >>> print(result.strategy_used)  # CompressionStrategy.KOMPRESS
         >>>
         >>> # Automatically uses SmartCrusher
         >>> result = router.compress(json_array)
@@ -782,7 +781,6 @@ class ContentRouter(Transform):
         self._observer = observer
 
         # Lazy-loaded compressors
-        self._code_compressor: Any = None
         self._smart_crusher: Any = None
         self._search_compressor: Any = None
         self._log_compressor: Any = None
@@ -1303,13 +1301,8 @@ class ContentRouter(Transform):
 
         try:
             if strategy == CompressionStrategy.CODE_AWARE:
-                if self.config.enable_code_aware:
-                    compressor = self._get_code_compressor()
-                    if compressor:
-                        compressor_name = type(compressor).__name__
-                        result = compressor.compress(content, language=language, context=context)
-                        compressed, compressed_tokens = result.compressed, result.compressed_tokens
-                        decision_reason = "code_aware"
+                # The AST-based code compressor was retired; CODE_AWARE always
+                # falls through to Kompress (source code keeps routing there).
                 if compressed is None:
                     # Fallback to Kompress
                     compressed, compressed_tokens = self._try_ml_compressor(
@@ -1620,20 +1613,6 @@ class ContentRouter(Transform):
 
     # Lazy compressor getters
 
-    def _get_code_compressor(self) -> Any:
-        """Get CodeAwareCompressor (lazy load)."""
-        if self._code_compressor is None:
-            try:
-                from .code_compressor import CodeAwareCompressor, _check_tree_sitter_available
-
-                if _check_tree_sitter_available():
-                    self._code_compressor = CodeAwareCompressor()
-                else:
-                    logger.debug("tree-sitter not available")
-            except ImportError:
-                logger.debug("CodeAwareCompressor not available")
-        return self._code_compressor
-
     def _get_smart_crusher(self) -> Any:
         """Get SmartCrusher (lazy load) with CCR config."""
         if self._smart_crusher is None:
@@ -1846,44 +1825,7 @@ class ContentRouter(Transform):
             logger.debug("Magika pre-load skipped: %s", e)
             status["magika"] = "skipped"
 
-        # 3. CodeAware compressor + common tree-sitter parsers
-        if self.config.enable_code_aware:
-            code_compressor = self._get_code_compressor()
-            if code_compressor:
-                status["code_aware"] = "enabled"
-                # Pre-load tree-sitter parsers for common languages
-                # Each parser is ~50ms to load; doing it here avoids 500ms+ on first code hit
-                try:
-                    from .code_compressor import _check_tree_sitter_available, _get_parser
-
-                    if _check_tree_sitter_available():
-                        common_languages = [
-                            "python",
-                            "javascript",
-                            "typescript",
-                            "go",
-                            "rust",
-                            "java",
-                            "c",
-                            "cpp",
-                        ]
-                        loaded = []
-                        for lang in common_languages:
-                            try:
-                                _get_parser(lang)
-                                loaded.append(lang)
-                            except (ValueError, ImportError):
-                                pass  # Language not available, skip
-                        if loaded:
-                            logger.info("Tree-sitter parsers pre-loaded: %s", ", ".join(loaded))
-                            status["tree_sitter"] = f"loaded ({len(loaded)} languages)"
-                except Exception as e:
-                    logger.debug("Tree-sitter pre-load skipped: %s", e)
-                    status["tree_sitter"] = "skipped"
-            else:
-                status["code_aware"] = "not installed"
-
-        # 4. SmartCrusher (lightweight init, but ensures import + TOIN ready)
+        # 3. SmartCrusher (lightweight init, but ensures import + TOIN ready)
         smart_crusher = self._get_smart_crusher()
         if smart_crusher:
             status["smart_crusher"] = "ready"

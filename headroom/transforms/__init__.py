@@ -11,15 +11,6 @@ if TYPE_CHECKING:
     from headroom.transforms.base import Transform  # noqa: F401
     from headroom.transforms.cache_aligner import CacheAligner  # noqa: F401
     from headroom.transforms.cross_message_dedup import CrossMessageDeduper  # noqa: F401
-    from headroom.transforms.code_compressor import (  # noqa: F401
-        CodeAwareCompressor,
-        CodeCompressionResult,
-        CodeCompressorConfig,
-        CodeLanguage,
-        DocstringMode,
-        detect_language,
-        is_tree_sitter_available,
-    )
     from headroom.transforms.content_detector import (  # noqa: F401
         ContentType,
         DetectionResult,
@@ -77,14 +68,6 @@ __all__ = [
     "DiffCompressor",
     "DiffCompressorConfig",
     "DiffCompressionResult",
-    # Code-aware compression (AST-based)
-    "CodeAwareCompressor",
-    "CodeCompressorConfig",
-    "CodeCompressionResult",
-    "CodeLanguage",
-    "DocstringMode",
-    "detect_language",
-    "is_tree_sitter_available",
     # Content routing
     "ContentRouter",
     "ContentRouterConfig",
@@ -137,20 +120,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "DiffCompressionResult": (
         "headroom.transforms.diff_compressor",
         "DiffCompressionResult",
-    ),
-    # Code-aware compression (AST-based)
-    "CodeAwareCompressor": ("headroom.transforms.code_compressor", "CodeAwareCompressor"),
-    "CodeCompressorConfig": ("headroom.transforms.code_compressor", "CodeCompressorConfig"),
-    "CodeCompressionResult": (
-        "headroom.transforms.code_compressor",
-        "CodeCompressionResult",
-    ),
-    "CodeLanguage": ("headroom.transforms.code_compressor", "CodeLanguage"),
-    "DocstringMode": ("headroom.transforms.code_compressor", "DocstringMode"),
-    "detect_language": ("headroom.transforms.code_compressor", "detect_language"),
-    "is_tree_sitter_available": (
-        "headroom.transforms.code_compressor",
-        "is_tree_sitter_available",
     ),
     # Content routing
     "ContentRouter": ("headroom.transforms.content_router", "ContentRouter"),
