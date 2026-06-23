@@ -381,11 +381,30 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     arith_cols = [s for s in specs if s.arith is not None]
     var_cols = [s for s in specs if not s.has_const and s.arith is None]
 
-    if not var_cols and const_cols and not arith_cols:
-        # Degenerate fully-constant table: every row is identical and
-        # carried entirely by the declaration; [N] gives the count.
-        row = {s.name: s.const_value for s in const_cols}
-        return [dict(row) for _ in range(declared_count)]
+    if not var_cols and (const_cols or arith_cols):
+        # Degenerate fully-folded table: every column is a constant or an
+        # arithmetic fold, so there are no per-row body cells — the rows are
+        # carried entirely by the declaration and [N] gives the count. Const
+        # columns repeat their value; arith columns step by row ordinal.
+        #
+        # #25: the old guard was `const_cols and not arith_cols`, which
+        # returned [] (total silent loss) for a const+arith zero-var table
+        # like `[N]{x:int=5,seq:int=0+1}`. The all-const case is just the
+        # special case where `arith_cols` is empty.
+        #
+        # Defensive/forward-looking: the reference Rust formatter always
+        # reserves one variable "anchor" column unless EVERY column is const
+        # (the all-const case above), so it does not currently emit the
+        # const+arith zero-var shape. This makes the recovery decoder correct
+        # for any conformant producer of that shape regardless.
+        result: list[dict[str, Any]] = []
+        for ordinal in range(declared_count):
+            row = {s.name: s.const_value for s in const_cols}
+            for s in arith_cols:
+                base, step = s.arith  # type: ignore[misc]
+                row[s.name] = base + step * ordinal
+            result.append(row)
+        return result
 
     # Dictionary preamble: `__dict:name=v0,v1,...` lines directly after
     # the declaration. Only declared column names are accepted — any
