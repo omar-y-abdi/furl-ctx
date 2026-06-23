@@ -337,11 +337,9 @@ class CCRToolInjector:
         every subsequent request, otherwise the tool list bytes flip
         on/off mid-session and bust the prompt cache.
 
-        Most callers should prefer
-        :func:`headroom.proxy.helpers.apply_session_sticky_ccr_tool`
-        which threads the ``SessionCcrTracker`` directly. This method
-        is the per-request fallback used when no session_id is available
-        (e.g. Google handler, legacy code paths).
+        This method is the per-request path used when no session_id is
+        available (e.g. Google handler, legacy code paths); callers that
+        have a ``SessionCcrTracker`` thread it directly.
 
         Args:
             tools: Existing tools list (may be None or empty).

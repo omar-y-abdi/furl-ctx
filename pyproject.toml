@@ -188,9 +188,7 @@ ignore_missing_imports = true
 # Per-module overrides for modules with dynamic typing patterns
 [[tool.mypy.overrides]]
 module = [
-    "headroom.proxy.helpers",
     "headroom.ccr.mcp_server",
-    "headroom.relevance.embedding",
 ]
 disallow_untyped_defs = false
 
