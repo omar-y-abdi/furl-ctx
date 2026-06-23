@@ -1,3 +1,36 @@
+# ⭐ HANDOFF — MASS-REPAIR + STANDALONE-EXCISE (ACTIVE 2026-06-24, resume here)
+
+**Where we are:** critique workflow DONE → `codebase-CRITIQUE.md` written (untracked, never committed). User ordered MASS-REPAIR of every actionable finding + a NEW hard mandate. Baseline green, gate built, recon done, **ZERO backlog items executed yet** (was about to dispatch first agent when user called compact).
+
+**TWO MANDATES (user):**
+1. Fix every actionable critique finding. Scope LOCKED via AskUserQuestion: both large refactors fully (#5 marker-grammar, #6 ContentRouter split); change by-design items too (telemetry, retention, SmartCrusher). User words: "Båda fullt, without any regression!!!" + "Ändra dem också".
+2. ⭐ **STANDALONE REPO, not a fork.** Every loose thread to the old repo MUST be excised, not documented. "If something is pointing to the old repo, that has to go." Hard no-go.
+
+**HARD CONSTRAINT: no regression.** Gate `.claude/runtime/gate.sh [bench]` = G1 cargo · G2 pytest · G3 surface · G4 recovery-21 · G5 run_bench==floor + needle 100%. (`floor_check.py` compares fresh run_bench vs committed baseline json.) Validated PASS on baseline. run_bench overwrites baseline_results.json+BASELINE.md → gate.sh auto-restores.
+
+**FLOOR (locked):** code@7 0.0% · logs@90 92.8% · search@90 92.2% · repeated_logs@90 96.5% · disk@9 50.0% · multiturn@135 70.6% · needle 100%.
+**BASELINE HEAD = `4a412c43`.** cargo 765 green, pytest 626/14, surface 40, recovery 21.
+
+**PM loop per task:** spawn opus agent (ONE selective concern, never the whole list) → testimonial → I independently run gate → PASS+good ⇒ commit; FAIL/bad ⇒ restart agent w/ feedback. "Don't let anything slip past."
+
+**RECON DONE for R-EXCISE — old-repo surface mapped:**
+- ⭐ Upstream repo = **`chopratejas/headroom`**. Hard threads: `pyproject.toml:101-103` (Repository/Issues/Changelog URLs), `Cargo.toml:20` (repository), `CONTRIBUTING.md:90` (git clone URL), `CHANGELOG.md` (ENTIRE file = upstream issue/commit links #761..#859), `CODE_OF_CONDUCT.md:131` (mozilla, OK keep).
+- ~110 "proxy" mentions in live code (headroom/ + crates/src): paths.py (proxy_log/savings/clients — dead proxy artifacts), smart_crusher.py (8 proxy comments), content_router.py:825/1476/1831, telemetry/beacon+context+toin (proxy framing), kompress (proxy startup), ccr/mod.rs:39/67/80 ("the proxy will hold"), crusher.rs:223/429/1234, lib.rs proxy comments, ccr/backends/{sqlite,redis,mod}.rs proxy comments.
+- Fork-era tracker tags: `#21`/`#816`/`#847`/`#802`/`PR-B1`/`F2.2`/`Stage-3c.2`/`PR4` across config.py, compress.py:408, compression_store.py:62/351, diff/search/log_compressor (issue #816), smart_crusher.py (many F2.2/Stage-3c.2/PR4), pipeline.py:58/86/221 (PR-B1, issue #847), cache_aligner.py:243 (PR-F2.1).
+- wiki/: `wiki/proxy.md` (whole file = proxy) + proxy mentions in shared-context/typescript-sdk/mcp/troubleshooting/ccr/learn/cli/ARCHITECTURE/getting-started/docker-install.
+- NOTE: some "proxy" comments are legit-but-stale framing (engine is now hook/MCP). Excise = remove proxy-era language/dead proxy artifacts, reframe to current standalone reality. NOT mechanical s/proxy//g — judgment per site. `paths.py` proxy_savings/proxy_log/proxy_clients may be genuinely-dead artifacts (verify callers).
+
+**BACKLOG (risk ascending) — see PLAN.md for full detail. NOTHING DONE YET:**
+R0 root .md cleanup (PM direct) · R-EXCISE ⭐ (old-repo threads) · R1 clippy args-struct · R3 dead Python twins · R4 telemetry collapse (keep record_metrics) · R5 CCR marker-grammar ownership (keep explicit_hash) · R6 ContentRouter god-object split · R7 retention durable spill (Sqlite default, no-regression-default-off). SmartCrusher D3 = MEASURE not delete (deleting compaction regresses lossless floor).
+
+**FINISH:** full sanity gate → `rm codebase-CRITIQUE.md` (untracked, no history rewrite) → re-run EXACT same `adversarial-critique.js` unchanged → delta report. User expects "written perfectly" — I SET EXPECTATION: adversarial critic finds findings on any codebase; deliver measurable delta (fewer/lower material), not "zero".
+
+**UNCOMMITTED right now (commit before/at compact):** `.claude/runtime/gate.sh`, `.claude/runtime/floor_check.py`, `PLAN.md` (new active section prepended). `codebase-CRITIQUE.md` stays untracked (deleted at finish).
+
+**WORKFLOW re-run cmd (finish step):** `Workflow({ scriptPath:'.claude/workflows/cleanup/adversarial-critique.js', args:{ map:'/Users/k/dev/headroom/CODEBASE-MAP.md'} })` — DO NOT edit the workflow. Prior run wf_8f16e11f-22e: 203 findings → 148 material/14 by-design/30 deflated/11 nitpick.
+
+---
+
 # HANDOFF — Headroom compression engine (rebuild + max-compression + verification)
 
 cwd: /Users/k/dev/headroom · venv: .venv (x86_64, python3.13 restored) · branch: verify/phase2-audit-report

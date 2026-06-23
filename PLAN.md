@@ -1,3 +1,34 @@
+# PLAN — MASS-REPAIR + STANDALONE-EXCISE (ACTIVE, 2026-06-24)
+
+**Two mandates (user):**
+1. Fix every actionable `codebase-CRITIQUE.md` finding. Scope locked: both large refactors fully (#5 marker-grammar, #6 ContentRouter split); change the by-design items too (telemetry, retention, SmartCrusher).
+2. **STANDALONE REPO — not a fork anymore.** Every loose thread pointing to the old repo / proxy / fork-era MUST be excised, not documented. "If something is pointing to the old repo, that has to go." This is a hard no-go for the user.
+
+**HARD CONSTRAINT: no regression.** Gate every change: `.claude/runtime/gate.sh [bench]` = G1 cargo · G2 pytest · G3 surface · G4 recovery-21 · G5 run_bench==floor + needle 100%. Revert/restart on any FAIL.
+
+**Floor (locked):** code@7 0.0% · logs@90 92.8% · search@90 92.2% · repeated_logs@90 96.5% · disk@9 50.0% · multiturn@135 70.6% · needle 100%.
+**Baseline:** HEAD `4a412c43` — cargo 765 green, pytest 626 green, gate PASS (validated).
+
+**PM loop per task:** spawn opus agent (one selective concern, NOT the whole list) → agent testimonial → I independently run gate → PASS+good ⇒ commit; FAIL/bad ⇒ restart agent with feedback. Nothing slips past.
+
+## Backlog (risk ascending)
+- [ ] **R0** — root .md cleanup (#2): move `lazy-dev-AUDIT*`, `EVAL-*`, `test-hardening-PLAN.md` → `docs/audits/`. *PM direct (zero-risk moves).* Gate (no bench).
+- [ ] **R-EXCISE** ⭐ — repo-wide hunt + excise EVERY old-repo/proxy/fork-era thread. RECON DONE (surface in handoff.md): upstream = **`chopratejas/headroom`** → `pyproject.toml:101-103`, `Cargo.toml:20`, `CONTRIBUTING.md:90`, whole `CHANGELOG.md` (upstream issue links). ~110 proxy mentions in code (paths.py dead proxy artifacts, smart_crusher.py ×8, content_router, telemetry, ccr/mod.rs "the proxy will hold"). Fork-era tags (#21/#816/#847/PR-B1/F2.2/Stage-3c.2/PR4). `wiki/proxy.md` + proxy across wiki/. JUDGMENT per site (reframe to standalone reality, not s/proxy//g). Exclude archive/. Agent. Gate.
+- [ ] **R1** — clippy `too_many_arguments` (#1): `prioritize_indices` args→struct, `-D warnings` clean. Agent: rust. Gate+bench.
+- [ ] **R3** — dead Python twins (#4): delete `adaptive_sizer.py` body + `log/search _select_*`/`_parse/_score`; repoint parity+direct-call tests onto `compress()`/Rust. Agent: python. Gate+bench.
+- [ ] **R4** — telemetry collapse (D1): collapse no-op OTel ceremony in `pipeline.py`; **keep `record_metrics`** (simulate dry-run). Agent: python. Gate.
+- [ ] **R5** — CCR marker grammar ownership (#5): every Rust producer through a `marker_for_*` family; one exported spec; single Python parser. **Keep `explicit_hash`**, keep per-producer algos. Owns + revives (not proxy-era) `compute_key`/`marker_for`. Agent: rust+python. Gate+bench, recovery emphasis. HIGH risk.
+- [ ] **R6** — ContentRouter god-object split (#6): extract routing-decision / StrategyDispatcher registry / MixedContentSplitter / CompressionCache / CCR-verify. Mind thread-local `_runtime_*`. Agent: architect+builder. Gate+bench+thread-safety. HIGH risk.
+- [ ] **R7** — retention durable spill (D2): wire Sqlite (default; Redis behind config) as eviction spill. **No regression:** default behavior unchanged unless durable backend configured. Agent: database/builder. Gate+bench+new spill tests.
+- SmartCrusher size (D3): MEASURE which strategy ships → report. Do NOT delete compaction (would regress lossless floor). Fold into R-EXCISE/analysis.
+
+## Finish
+- [ ] Full sanity check (gate+bench) on final tree.
+- [ ] `rm codebase-CRITIQUE.md` (untracked — never committed; no history rewrite needed, verified).
+- [ ] Re-run EXACT same `adversarial-critique.js` (unchanged) → delta report.
+
+---
+
 # PLAN — BLOAT REMOVAL + ARCHITECTURE REBUILD (current, 2026-06-20)
 
 ARCHITECTURE LOCKED: cut ALL proxy → hook (data-plane) + 2-tool fastmcp (set_compression + retrieve→CCR direct).
