@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 from ..config import (
     DiffArtifact,
@@ -24,9 +24,6 @@ from .base import Transform
 from .cache_aligner import CacheAligner
 from .content_router import ContentRouter
 from .cross_message_dedup import CrossMessageDeduper
-
-if TYPE_CHECKING:
-    from ..providers.base import Provider
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +65,7 @@ class TransformPipeline:
         self,
         config: HeadroomConfig | None = None,
         transforms: list[Transform] | None = None,
-        provider: Provider | None = None,
+        provider: object | None = None,
     ):
         """
         Initialize pipeline.
