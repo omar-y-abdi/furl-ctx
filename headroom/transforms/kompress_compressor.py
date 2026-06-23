@@ -894,8 +894,13 @@ class KompressCompressor(Transform):
                 model_used=self.config.model_id,
             )
 
-            # CCR marker
-            if self.config.enable_ccr and ratio < 0.8:
+            # CCR marker — back EVERY compression that apply() will actually
+            # apply (apply() drops words from the output whenever ratio < 0.9,
+            # see the apply() gate below). The old ratio < 0.8 gate left the
+            # [0.8, 0.9) band applied-but-unbacked => the dropped words were
+            # unrecoverable (#2). Aligning the CCR gate to the apply gate makes
+            # them CCR-recoverable without compressing any less.
+            if self.config.enable_ccr and ratio < 0.9:
                 cache_key = self._store_in_ccr(content, compressed, n_words)
                 if cache_key:
                     result.cache_key = cache_key
@@ -1149,7 +1154,10 @@ class KompressCompressor(Transform):
                 model_used=self.config.model_id,
             )
 
-            if self.config.enable_ccr and comp_ratio < 0.8:
+            # CCR marker — align to the apply() gate (ratio < 0.9) so every
+            # applied compression is CCR-recoverable, closing the [0.8, 0.9)
+            # unrecoverable-loss band (#2). This is the production batched path.
+            if self.config.enable_ccr and comp_ratio < 0.9:
                 cache_key = self._store_in_ccr(content, compressed, n_words)
                 if cache_key:
                     result.cache_key = cache_key
