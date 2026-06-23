@@ -80,7 +80,7 @@ class _KeepFirstKModel:
     def __init__(self, k: int) -> None:
         self._k = k
 
-    def get_keep_mask(self, input_ids, attention_mask):
+    def get_keep_mask(self, input_ids, attention_mask, threshold: float = 0.5):
         seq_len = input_ids.shape[1]
         return [[i < self._k for i in range(seq_len)]]
 

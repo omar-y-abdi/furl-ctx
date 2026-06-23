@@ -323,26 +323,33 @@ def _get_model_class() -> type:
             )
 
         def get_keep_mask(
-            self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            threshold: float = 0.5,
         ) -> torch.Tensor:
-            """Get per-token keep/discard decision. True = keep."""
+            """Get per-token keep/discard decision. True = keep.
+
+            ``threshold`` is the keep-probability cutoff for the base token gate
+            (config.score_threshold; default 0.5). The span-boost rescue of the
+            borderline band below it is preserved unchanged.
+            """
             with torch.no_grad():
                 hidden = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
 
-                # Token head: binary classifier — argmax decides keep/discard
+                # Token head: keep if P(class 1) exceeds the configured threshold.
                 token_logits = self.token_head(hidden)  # [B, L, 2]
-                token_keep = (
-                    token_logits[:, :, 1] > token_logits[:, :, 0]
-                )  # True if class 1 > class 0
+                token_probs = torch.softmax(token_logits, dim=-1)[:, :, 1]
+                token_keep = token_probs > threshold
 
                 # Span head: boost tokens in important spans
                 # If a token is borderline but its span is important, keep it
                 span_scores = self.span_conv(hidden.transpose(1, 2)).squeeze(1)
                 span_boost = span_scores > 0.5  # span says this region matters
 
-                # Keep if: token head says keep, OR token is borderline and span says keep
-                token_probs = torch.softmax(token_logits, dim=-1)[:, :, 1]
-                borderline = (token_probs > 0.3) & (token_probs <= 0.5)
+                # Keep if: token head says keep, OR token is borderline (just under
+                # the threshold) and the span says this region matters.
+                borderline = (token_probs > threshold - 0.2) & (token_probs <= threshold)
                 keep = token_keep | (borderline & span_boost)
 
                 return keep  # type: ignore[no-any-return]
@@ -380,12 +387,16 @@ class _OnnxModel:
         )
         return scores[0]  # [batch, seq] numpy array
 
-    def get_keep_mask(self, input_ids: Any, attention_mask: Any) -> Any:
-        """Return [batch, seq] boolean mask (score > 0.5)."""
+    def get_keep_mask(self, input_ids: Any, attention_mask: Any, threshold: float = 0.5) -> Any:
+        """Return [batch, seq] boolean mask (score > ``threshold``).
+
+        ``threshold`` is the configured keep cutoff (config.score_threshold);
+        defaults to 0.5 to match the model's training point.
+        """
         import numpy as np
 
         scores = self.get_scores(input_ids, attention_mask)
-        return (np.array(scores) > 0.5).tolist()
+        return (np.array(scores) > threshold).tolist()
 
 
 def _onnx_filename_candidates() -> tuple[str, ...]:
@@ -860,7 +871,9 @@ class KompressCompressor(Transform):
                         else:
                             score_list = scores[0].cpu()
                     else:
-                        keep_mask = model.get_keep_mask(input_ids, attention_mask)
+                        keep_mask = model.get_keep_mask(
+                            input_ids, attention_mask, self.config.score_threshold
+                        )
                         if is_onnx:
                             mask_list = keep_mask[0]  # list of bools
                         else:

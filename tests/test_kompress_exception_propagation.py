@@ -57,7 +57,7 @@ class _Tokenizer:
 class _BuggyModel:
     """Model whose inference method raises a BUG-type exception (TypeError)."""
 
-    def get_keep_mask(self, input_ids, attention_mask):
+    def get_keep_mask(self, input_ids, attention_mask, threshold: float = 0.5):
         raise TypeError("simulated model bug: bad tensor op")
 
     def get_scores(self, input_ids, attention_mask):
