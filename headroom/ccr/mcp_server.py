@@ -4,7 +4,7 @@ Exposes Headroom's compression, retrieval, and observability as MCP tools
 that any MCP-compatible host (Claude Code, Cursor, Codex, etc.) can use.
 
 Tools:
-    headroom_compress   — Compress content on demand (no proxy needed)
+    headroom_compress   — Compress content on demand
     headroom_retrieve   — Retrieve original uncompressed content by hash
     headroom_stats      — Session compression statistics
 
@@ -15,9 +15,8 @@ Usage:
     # Add to Claude Code
     headroom mcp install
 
-When running standalone (no proxy), compression and retrieval happen locally
-in this process. When a proxy is running, retrieval can also fetch from the
-proxy's compression store.
+Compression and retrieval happen locally in this process via the shared
+CCR compression store.
 """
 
 from __future__ import annotations
@@ -57,21 +56,27 @@ except ImportError:
     Server = None  # type: ignore[assignment,misc]
     stdio_server = None  # type: ignore[assignment]
 
-# Try to import httpx for proxy communication
-try:
-    import httpx
-
-    HTTPX_AVAILABLE = True
-except ImportError:
-    HTTPX_AVAILABLE = False
-    httpx = None  # type: ignore[assignment]
-
 CCR_TOOL_NAME = "headroom_retrieve"
 COMPRESS_TOOL_NAME = "headroom_compress"
 STATS_TOOL_NAME = "headroom_stats"
 READ_TOOL_NAME = "headroom_read"
 
 logger = logging.getLogger("headroom.ccr.mcp")
+
+
+def _safe_decode_for_logging(raw: bytes) -> str:
+    """Decode bytes to a string for tool-output display.
+
+    Uses an incremental UTF-8 decoder with the replacement character (U+FFFD)
+    for invalid bytes — acceptable here because this path is for tool output
+    display, not the SSE/wire path (PR-A8 / P1-8 forbids lossy decode kwargs
+    in headroom/ccr/, so this centralizes the single legitimate lossy use).
+    """
+    import codecs as _codecs
+
+    decoder = _codecs.getincrementaldecoder("utf-8")(errors="replace")
+    return decoder.decode(bytes(raw), final=True)
+
 
 # Feature flag: enable headroom_read tool (file read caching via CCR)
 # Set HEADROOM_MCP_READ=on to enable
@@ -82,87 +87,6 @@ _READ_ENABLED = os.environ.get("HEADROOM_MCP_READ", "off").lower().strip() in (
     "yes",
     "enabled",
 )
-
-DEFAULT_PROXY_URL = os.environ.get("HEADROOM_PROXY_URL", "http://127.0.0.1:8787")
-
-
-def _format_session_summary(summary: dict[str, Any], local_stats: dict[str, Any]) -> str:
-    """Format the proxy summary + local MCP stats into clean readable text."""
-    lines: list[str] = []
-    lines.append("Headroom Session Summary")
-    lines.append("=" * 40)
-
-    mode = summary.get("mode", "token")
-    api_reqs = summary.get("api_requests", 0)
-    model = summary.get("primary_model", "unknown")
-    lines.append(f"Mode: {mode} | {api_reqs} API requests | {model}")
-    lines.append("")
-
-    # Compression section
-    comp = summary.get("compression", {})
-    n_compressed = comp.get("requests_compressed", 0)
-    if n_compressed > 0:
-        lines.append(f"Compression ({n_compressed} requests compressed):")
-        lines.append(f"  Avg compression:  {comp.get('avg_compression_pct', 0)}%")
-        best = comp.get("best_compression_pct", 0)
-        detail = comp.get("best_detail", "")
-        if best > 0:
-            lines.append(f"  Best compression: {best}% ({detail})")
-        removed = comp.get("total_tokens_removed", 0)
-        lines.append(f"  Tokens removed:   {removed:,}")
-    else:
-        lines.append("Compression: no requests compressed yet")
-    lines.append("")
-
-    # Uncompressed reasons
-    uncomp = summary.get("uncompressed_requests", {})
-    if uncomp:
-        total_uncomp = sum(uncomp.values())
-        lines.append(f"Uncompressed requests ({total_uncomp}):")
-        reason_labels = {
-            "prefix_frozen": "Prefix-frozen (cached by provider)",
-            "too_small": "Too small (< 500 tokens)",
-            "passthrough": "Passthrough (token counting)",
-            "no_compressible_content": "No compressible content (user/assistant only)",
-        }
-        for key, count in uncomp.items():
-            label = reason_labels.get(key, key)
-            lines.append(f"  {label}: {count}")
-        lines.append("")
-
-    # Cost section
-    cost = summary.get("cost", {})
-    without = cost.get("without_headroom_usd", 0)
-    with_hr = cost.get("with_headroom_usd", 0)
-    saved = cost.get("total_saved_usd", 0)
-    pct = cost.get("savings_pct", 0)
-    if without > 0:
-        lines.append("Cost Impact:")
-        lines.append(f"  Without Headroom:  ${without:.2f}")
-        lines.append(f"  With Headroom:     ${with_hr:.2f}")
-        lines.append(f"  You saved:         ${saved:.2f} ({pct}%)")
-        breakdown = cost.get("breakdown", {})
-        cache_s = breakdown.get("cache_savings_usd", 0)
-        comp_s = breakdown.get("compression_savings_usd", 0)
-        if cache_s > 0 or comp_s > 0:
-            lines.append(f"    Cache savings:       ${cache_s:.2f}")
-            lines.append(f"    Compression savings: ${comp_s:.2f}")
-        lines.append("")
-
-    # MCP-local stats (compressions done by MCP tool directly)
-    local_compressions = local_stats.get("compressions", 0)
-    local_saved = local_stats.get("total_tokens_saved", 0)
-    if local_compressions > 0:
-        lines.append(f"MCP Tool: {local_compressions} compressions, {local_saved:,} tokens saved")
-        lines.append("")
-
-    # Tip
-    tip = summary.get("tip")
-    if tip:
-        lines.append(f"Tip: {tip}")
-
-    return "\n".join(lines)
-
 
 # Session-scoped TTL: content persists for the session (1 hour), not 5 minutes.
 # The MCP server process lives as long as the coding session.
@@ -310,25 +234,16 @@ class HeadroomMCPServer:
 
     Tools:
         headroom_compress — Compress content on demand. Stores original for
-                           retrieval. Works without a proxy.
-        headroom_retrieve — Retrieve original uncompressed content by hash.
-                           Checks local store first, then proxy if configured.
+                           retrieval.
+        headroom_retrieve — Retrieve original uncompressed content by hash
+                           from the local CCR store.
         headroom_stats    — Session statistics: compressions, savings, cost.
 
-    Modes:
-        Standalone: Compression + retrieval happen locally. No proxy needed.
-        With proxy: Retrieval also checks the proxy's compression store
-                   (for content compressed by the proxy's automatic pipeline).
+    Compression and retrieval happen locally in-process via the shared CCR
+    compression store.
     """
 
-    def __init__(
-        self,
-        proxy_url: str = DEFAULT_PROXY_URL,
-        check_proxy: bool = True,
-    ):
-        self.proxy_url = proxy_url
-        self.check_proxy = check_proxy
-        self._http_client: httpx.AsyncClient | None = None  # type: ignore[assignment]
+    def __init__(self) -> None:
         self._stats = SessionStats()
         self._local_store: Any = None  # Lazy-initialized CompressionStore
         self._compressor_initialized = False
@@ -344,10 +259,10 @@ class HeadroomMCPServer:
     def _get_local_store(self) -> Any:
         """Get the shared compression store singleton (lazy init).
 
-        Returns the same instance the proxy and response_handler use so
-        retrieval can see content either side compressed in-process.
-        Called with no args to keep one shared config; the compress path
-        passes its own per-entry ``ttl`` at store time.
+        Returns the same instance the compress path uses so retrieval can
+        see content compressed in-process. Called with no args to keep one
+        shared config; the compress path passes its own per-entry ``ttl``
+        at store time.
         """
         if self._local_store is None:
             from headroom.cache.compression_store import get_compression_store
@@ -410,8 +325,7 @@ class HeadroomMCPServer:
         hash_key: str,
         query: str | None,
     ) -> dict[str, Any]:
-        """Retrieve content. Checks local store first, then proxy."""
-        # Check local store first
+        """Retrieve content from the local CCR store."""
         store = self._get_local_store()
         if query:
             results = store.search(hash_key, query)
@@ -437,18 +351,7 @@ class HeadroomMCPServer:
                     "retrieval_count": entry.retrieval_count,
                 }
 
-        # Fall back to proxy if available
-        if self.check_proxy and HTTPX_AVAILABLE:
-            try:
-                result = await self._retrieve_via_proxy(hash_key, query)
-                if "error" not in result:
-                    result["source"] = "proxy"
-                    self._stats.record_retrieval(hash_key)
-                    return result
-            except Exception:
-                pass  # Proxy unavailable, that's fine
-
-        # Loud, cause-honest miss: local store and proxy both came up empty.
+        # Loud, cause-honest miss: the local store came up empty.
         # Mirror response_handler so every model-facing retrieve surface reports
         # a miss the same way (explicit error, never a silent empty result) and
         # attributes it to its real cause (eviction/capacity/expiry) rather than
@@ -465,32 +368,9 @@ class HeadroomMCPServer:
             "error": format_retrieval_miss_detail(miss_status),
             "hash": hash_key,
             "status": miss_status.get("status", "missing"),
-            "hint": "Content compressed via headroom_compress is stored for the session. "
-            "Content compressed by the proxy uses the configured CCR TTL.",
+            "hint": "Content compressed via headroom_compress is stored for the "
+            "session using the configured CCR TTL.",
         }
-
-    async def _retrieve_via_proxy(
-        self,
-        hash_key: str,
-        query: str | None,
-    ) -> dict[str, Any]:
-        """Retrieve content via proxy's HTTP endpoint."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=15.0)
-
-        url = f"{self.proxy_url}/v1/retrieve"
-        payload: dict[str, str] = {"hash": hash_key}
-        if query:
-            payload["query"] = query
-
-        response = await self._http_client.post(url, json=payload)
-
-        if response.status_code == 404:
-            return {"error": "Not found in proxy store", "hash": hash_key}
-
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
 
     def _setup_handlers(self) -> None:
         """Register all MCP tool handlers."""
@@ -722,54 +602,7 @@ class HeadroomMCPServer:
                 "estimated_cost_saved_usd": round(all_saved * 3.0 / 1_000_000, 4),
             }
 
-        # Fetch proxy stats and format summary if proxy is reachable
-        if self.check_proxy and HTTPX_AVAILABLE:
-            proxy_data = await self._fetch_full_proxy_stats()
-            if proxy_data:
-                summary = proxy_data.get("summary")
-                if summary:
-                    # Return clean formatted summary instead of raw JSON
-                    formatted = _format_session_summary(summary, stats)
-                    return [TextContent(type="text", text=formatted)]
-                # Fallback: add proxy stats to local stats
-                proxy_stats = self._extract_proxy_stats(proxy_data)
-                if proxy_stats:
-                    stats["proxy"] = proxy_stats
-
         return [TextContent(type="text", text=json.dumps(stats, indent=2))]
-
-    async def _fetch_full_proxy_stats(self) -> dict[str, Any] | None:
-        """Fetch full stats from the proxy (includes summary)."""
-        try:
-            if self._http_client is None:
-                self._http_client = httpx.AsyncClient(timeout=15.0)
-            response = await self._http_client.get(f"{self.proxy_url}/stats")
-            if response.status_code != 200:
-                return None
-            result: dict[str, Any] = response.json()
-            return result
-        except Exception:
-            return None
-
-    @staticmethod
-    def _extract_proxy_stats(data: dict[str, Any]) -> dict[str, Any] | None:
-        """Extract key fields from full proxy stats (fallback when no summary)."""
-        result: dict[str, Any] = {}
-        if "requests_total" in data:
-            result["requests_total"] = data["requests_total"]
-        if "tokens_saved_total" in data:
-            result["tokens_saved_total"] = data["tokens_saved_total"]
-        cache = data.get("cache", data.get("caching", {}))
-        if cache:
-            result["cache"] = {
-                "hits": cache.get("hits", cache.get("cache_hits", 0)),
-                "misses": cache.get("misses", cache.get("cache_misses", 0)),
-                "hit_rate": cache.get("hit_rate", cache.get("cache_hit_rate", 0)),
-            }
-        cost = data.get("cost", {})
-        if cost:
-            result["cost_saved_usd"] = cost.get("total_saved", cost.get("saved", 0))
-        return result if result else None
 
     async def _handle_read(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle headroom_read tool call — file read with session caching."""
@@ -803,14 +636,11 @@ class HeadroomMCPServer:
             ]
 
         # Read file from disk. PR-A8 / P1-8: avoid lossy decode kwargs
-        # in headroom/ccr/ — use the centralized safe-log decoder so
-        # the project-wide grep stays clean (this path is for tool
-        # output display, not SSE/wire path, so a replacement char on
-        # invalid bytes is acceptable).
+        # in headroom/ccr/ — use the centralized safe-log decoder (this path
+        # is for tool output display, not SSE/wire path, so a replacement
+        # char on invalid bytes is acceptable).
         try:
-            from headroom.proxy.helpers import safe_decode_for_logging
-
-            content = safe_decode_for_logging(path.read_bytes())
+            content = _safe_decode_for_logging(path.read_bytes())
         except Exception as e:
             return [
                 TextContent(
@@ -887,7 +717,7 @@ class HeadroomMCPServer:
     async def run_stdio(self) -> None:
         """Run the server with stdio transport."""
         async with stdio_server() as (read_stream, write_stream):
-            logger.info(f"Headroom MCP Server starting (proxy: {self.proxy_url})")
+            logger.info("Headroom MCP Server starting (local CCR store)")
             await self.server.run(
                 read_stream,
                 write_stream,
@@ -895,39 +725,23 @@ class HeadroomMCPServer:
             )
 
     async def cleanup(self) -> None:
-        """Clean up resources."""
-        if self._http_client:
-            await self._http_client.aclose()
+        """Clean up resources (no-op; retained for lifecycle symmetry)."""
+        return None
 
 
-def create_ccr_mcp_server(
-    proxy_url: str = DEFAULT_PROXY_URL,
-) -> HeadroomMCPServer:
+def create_ccr_mcp_server() -> HeadroomMCPServer:
     """Create a Headroom MCP server instance.
-
-    Args:
-        proxy_url: URL of the Headroom proxy server (for retrieval fallback).
 
     Returns:
         HeadroomMCPServer instance.
     """
-    return HeadroomMCPServer(proxy_url=proxy_url)
+    return HeadroomMCPServer()
 
 
 async def main() -> None:
     """Run the Headroom MCP server."""
     parser = argparse.ArgumentParser(
         description="Headroom MCP Server — Context engineering toolkit"
-    )
-    parser.add_argument(
-        "--proxy-url",
-        default=DEFAULT_PROXY_URL,
-        help=f"Headroom proxy URL for retrieval fallback (default: {DEFAULT_PROXY_URL})",
-    )
-    parser.add_argument(
-        "--direct",
-        action="store_true",
-        help="(Deprecated, ignored) Use direct CompressionStore access",
     )
     parser.add_argument(
         "--debug",
@@ -942,7 +756,7 @@ async def main() -> None:
     else:
         logging.basicConfig(level=logging.WARNING)
 
-    server = HeadroomMCPServer(proxy_url=args.proxy_url)
+    server = HeadroomMCPServer()
 
     try:
         await server.run_stdio()
