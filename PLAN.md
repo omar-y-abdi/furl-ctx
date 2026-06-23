@@ -64,6 +64,9 @@ User FORKED headroom, building minimalistic hook+MCP alternative; end goal = col
 ## ✅ PROXY-ROUTE REMOVED — CODEBASE CLEANUP COMPLETE (2026-06-23, HEAD 63ad09a2)
 ~5,200 LOC retired (proxy/ + compression_policy.py + Rust auth_mode/compression_policy + parity tests + mcp un-couple). Tree 36,605 code LOC. Verified: cargo 0-failed, pytest 417/14, recovery 21, compress unchanged (compress-path diff = docstring-only). Standalone hook/MCP-only fork. Remaining = packaging only (version bump + stale-docs sweep, user-gated).
 
+## ✅ PHASE 4 TEST-HARDENING COMPLETE (2026-06-23, HEAD 0d108fca)
+25/25 audit bugs fixed-or-determined + #26 (flaky test → determinism, not a recovery hole) + #4-upstream full fix (all 7 strategies propagate real bugs loud) + 93 new mutation-sensitive tests + full per-module hardening (8 modules, cache/base 0%→covered). Suite 626/14, recovery 21 byte-exact, run_bench == FLOOR on all 6 datasets + needle-recall 100% (NO compression degradation across the whole phase — user's hard constraint held), coverage 54→59%. Orchestrator independently verified all gates. score.py axes (B1 0→5, D2 0.017→0.043, A2 166→201) are heuristic/misleading here (B1 undercounts list/int/hash pins; A2 up = legit internal-invariant coverage kept per advisor). Reports: test-hardening-PLAN.md, test-baseline.md.
+
 ## PHASE 5 — HOOK+MCP BUILD (the user's actual new system — supersedes "proxy rebuild")
 - proxy → DELETE; extract live SSE utils (proxy/helpers.py parse_sse_events/safe_decode) to ccr/sse_parser.py first.
 - Build hook (data-plane, like the Biljakten one but productized) + 2-tool fastmcp (set_compression + retrieve→CCR direct,
