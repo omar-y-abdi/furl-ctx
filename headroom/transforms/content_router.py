@@ -501,11 +501,19 @@ class ContentRouterConfig:
     )
 
     # Adaptive compression ratio: scales with context pressure.
-    # At low pressure (<30% full), use the relaxed threshold (reject marginal).
-    # At high pressure (>80% full), use the aggressive threshold (accept anything helpful).
-    # Linearly interpolates between the two.
-    min_ratio_relaxed: float = 0.85  # when context is mostly empty
-    min_ratio_aggressive: float = 0.65  # when context is nearly full
+    # A compression is ACCEPTED when its ratio is strictly below min_ratio
+    # (see the `ratio < min_ratio` gate); a higher min_ratio therefore accepts
+    # MORE compressions (including marginal ones).
+    # At low pressure (mostly-empty context), use the relaxed threshold — keep
+    # accepting only worthwhile compressions (reject marginal).
+    # At high pressure (nearly-full context), use the aggressive threshold —
+    # accept anything that helps, so the agent doesn't overflow exactly when
+    # context is tightest. Aggressive is therefore the HIGHER (more-permissive)
+    # threshold. (#12: these were inverted — aggressive was 0.65 < relaxed 0.85,
+    # which REJECTED marginal compressions at high pressure, the opposite of the
+    # documented intent.)
+    min_ratio_relaxed: float = 0.85  # when context is mostly empty (stricter)
+    min_ratio_aggressive: float = 0.95  # when context is nearly full (permissive)
 
     # CCR (Compress-Cache-Retrieve) settings for SmartCrusher
     ccr_enabled: bool = True  # Enable CCR marker injection for reversible compression
@@ -1906,6 +1914,22 @@ class ContentRouter(Transform):
 
         return mapping
 
+    def _adaptive_min_ratio(self, context_pressure: float) -> float:
+        """Compression-acceptance threshold scaled by context pressure.
+
+        A compression is accepted when ``ratio < min_ratio`` (lower ratio =
+        more aggressive). A HIGHER ``min_ratio`` accepts more compressions.
+        At low pressure use the relaxed (stricter, lower) threshold; at high
+        pressure use the aggressive (permissive, higher) threshold, so the
+        agent accepts marginal compressions exactly when context is tightest
+        (#12). Monotone non-decreasing in ``context_pressure``; clamped to
+        ``[relaxed, aggressive]``.
+        """
+        relaxed = self.config.min_ratio_relaxed
+        aggressive = self.config.min_ratio_aggressive
+        min_ratio = relaxed + (aggressive - relaxed) * context_pressure
+        return max(relaxed, min(aggressive, min_ratio))
+
     def apply(
         self,
         messages: list[dict[str, Any]],
@@ -2017,17 +2041,7 @@ class ContentRouter(Transform):
         else:
             context_pressure = 0.5  # default: moderate
 
-        # Linear interpolation between relaxed and aggressive thresholds
-        # pressure 0.0 → relaxed, pressure 1.0 → aggressive
-        min_ratio = (
-            self.config.min_ratio_relaxed
-            + (self.config.min_ratio_aggressive - self.config.min_ratio_relaxed) * context_pressure
-        )
-        # Clamp to [aggressive, relaxed] range
-        min_ratio = max(
-            self.config.min_ratio_aggressive,
-            min(self.config.min_ratio_relaxed, min_ratio),
-        )
+        min_ratio = self._adaptive_min_ratio(context_pressure)
 
         if context_pressure > 0.3:
             logger.debug(
