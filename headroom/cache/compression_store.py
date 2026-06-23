@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_CCR_TTL_SECONDS = 300
 CCR_TTL_SECONDS_ENV = "HEADROOM_CCR_TTL_SECONDS"
 
+# Minimum length for a caller-supplied ``explicit_hash``. MUST match the CCR
+# recovery regexes (``<<ccr:HASH...>>`` use ``[a-f0-9]{6,}``): the store has to
+# accept every hash a retrieval marker can carry, or an extract->404 silent loss
+# results. Real producers emit 12-char hashes; 6 rejects trivially-collidable
+# keys (e.g. a 1-char hash) without ever rejecting a recognizable marker (#21).
+_MIN_EXPLICIT_HASH_LEN = 6
+
 _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
 _SECRET_KEY_VALUE_RE = re.compile(
     r"(?i)\b([A-Z0-9_-]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[A-Z0-9_-]*)"
@@ -310,6 +317,19 @@ class CompressionStore:
         Returns:
             Hash key for retrieving this content.
         """
+        # #22: reject a non-positive TTL loudly. ttl=0 (or negative) produces an
+        # entry that is_expired() immediately (time.time()-created_at > 0), so it
+        # would be stored in the backend + heap, never retrievable, and leak until
+        # the next store() reaps it. No live caller passes ttl<=0; this is an
+        # invalid input only reachable via direct API misuse. Reject (matching the
+        # explicit_hash style) rather than silently clamp, which would mask the
+        # caller bug. ttl=None (use default) and ttl>0 are unaffected.
+        if ttl is not None and ttl <= 0:
+            raise ValueError(
+                f"ttl must be a positive number of seconds (or None for the default), "
+                f"got {ttl!r} — a non-positive ttl creates an immediately-expired entry"
+            )
+
         # Generate hash from original content. Default: SHA-256[:24] of the
         # original. When the caller provides `explicit_hash`, use it
         # verbatim — required when the hash that ends up in the prompt
@@ -327,6 +347,17 @@ class CompressionStore:
             if not explicit_hash or not all(c in "0123456789abcdefABCDEF" for c in explicit_hash):
                 raise ValueError(
                     f"explicit_hash must be a non-empty hex string, got {explicit_hash!r}"
+                )
+            # #21: reject trivially-collidable short keys (e.g. a 1-char hash).
+            # The floor matches the CCR recovery regexes (``[a-f0-9]{6,}``): the
+            # store must accept EVERY hash retrieval can recognize, or an
+            # extract->404 silent loss results. Real producers emit 12-char
+            # hashes, so 6 clears all of them with margin while rejecting the
+            # pathological sub-6 keys.
+            if len(explicit_hash) < _MIN_EXPLICIT_HASH_LEN:
+                raise ValueError(
+                    f"explicit_hash must be at least {_MIN_EXPLICIT_HASH_LEN} hex chars "
+                    f"(collidable below that), got {explicit_hash!r} ({len(explicit_hash)} chars)"
                 )
             hash_key = explicit_hash.lower()
         else:
@@ -918,8 +949,24 @@ class CompressionStore:
             if stale_ratio >= self._heap_rebuild_threshold:
                 self._rebuild_heap()
 
-        # If still at capacity, remove oldest entries using heap
-        while self._backend.count() >= self._max_entries and self._eviction_heap:
+        # If still at capacity, remove oldest entries using heap. Run this in a
+        # bounded loop: when the heap drains to stale entries while the backend
+        # is STILL over capacity (#23: the heap held only stale timestamps —
+        # ratio below the rebuild threshold so no rebuild fired — and emptied
+        # without evicting a real entry), rebuild the heap from the backend and
+        # continue oldest-first. ``_rebuild_heap`` reconstructs the heap from the
+        # live backend, so the next iteration pops a REAL entry. Capped by the
+        # number of live entries so it always terminates.
+        for _ in range(self._backend.count() + 1):
+            if self._backend.count() < self._max_entries:
+                break
+            if not self._eviction_heap:
+                # Heap exhausted but still over capacity → it was missing live
+                # entries. Rebuild from the backend and retry.
+                self._rebuild_heap()
+                if not self._eviction_heap:
+                    break  # backend genuinely empty (defensive; shouldn't happen)
+
             # Pop oldest from heap (O(log n))
             created_at, hash_key = heapq.heappop(self._eviction_heap)
 
