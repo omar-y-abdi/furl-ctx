@@ -342,9 +342,11 @@ class HeadroomMCPServer:
             # evicted — a LIVE entry with no query match must report "no match",
             # not a false "no longer retrievable" eviction error. Only fall
             # through to the cause-honest miss path when the entry is genuinely
-            # gone from the store.
-            if store.retrieve(hash_key) is not None:
-                self._stats.record_retrieval(hash_key)
+            # gone from the store. Use the side-effect-free ``exists`` check
+            # (not ``retrieve``, which logs a retrieval event + bumps access
+            # stats) so a no-match query does not inflate retrieval metrics —
+            # nothing was actually retrieved.
+            if store.exists(hash_key):
                 return {
                     "hash": hash_key,
                     "source": "local",

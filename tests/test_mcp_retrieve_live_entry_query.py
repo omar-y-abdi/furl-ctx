@@ -81,6 +81,7 @@ def test_matching_query_returns_results() -> None:
     hit = {"id": 0, "v": "needle"}
     store = types.SimpleNamespace(
         search=lambda hk, q, **kw: [hit],
+        exists=lambda hk, **kw: True,
         retrieve=lambda hk: object(),
     )
     result = _retrieve(store, h, "needle")
