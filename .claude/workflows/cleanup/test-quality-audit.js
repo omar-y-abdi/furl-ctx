@@ -138,9 +138,20 @@ const synth = await agent(
   `${READONLY}\n\nYou are writing the Phase-4 test-hardening PLAN for Headroom. Inputs below: per-module audits (JSON) + ` +
   `adversarially-confirmed bugs. Write test-hardening-PLAN.md as MARKDOWN:\n` +
   `- OPEN with the headline: total planned tests, # REAL bugs confirmed (these validate the thesis: better tests -> find bugs -> ` +
-  `better compression), and the score.py axes to move (B1 fixed-vectors 0->up, D2 parametrize, A2 private-access down).\n` +
-  `- CONFIRMED BUGS FIRST (table: bug | module | location | repro | invariant-at-risk) — these are the gold; the teammate fixes ` +
-  `the code AND adds the regression test. Mark uncertain bugs separately (needs-review).\n` +
+  `better compression), and the score.py axes to move.\n` +
+  `- ★ PRIORITIZE B1_fixed_vector (0 -> up): pinning recovered-byte / compressed-output LITERALS is the best lever AND is ` +
+  `behavior-SAFE — it directly reinforces the recovery invariant, no risk. Lead the per-module plans with B1 + boundary tests.\n` +
+  `- ★ A2_private_symbol (166) is NOT a blanket "make public": some invariants LIVE INTERNALLY on this engine (Py<->Rust hash ` +
+  `parity, the <<ccr:HASH>> sentinel format, anchor-selector internals) with NO public path — testing them via internals is a ` +
+  `LEGITIMATE KEEP, not a violation. Only reduce A2 where a genuine public path reaches the same behavior. Never delete ` +
+  `internal-invariant coverage to win the axis.\n` +
+  `- CONFIRMED BUGS FIRST (table: bug | module | location | repro | invariant-at-risk) — these are SURFACED TO THE USER as a ` +
+  `fix / defer / intended-behavior DECISION. ★ Do NOT instruct the teammate to fix them: a bug fix changes invariant-bound engine ` +
+  `behavior (recovery/parity/cache-prefix) which is NOT pre-authorized — and the eval \`break\` Cluster G looked like a silent-loss ` +
+  `bug but was BY-DESIGN. Bug-fixing and test-hardening are SEPARATE TRACKS. Mark uncertain bugs separately (needs-review).\n` +
+  `- ★ TEST-HARDENING LOCKS CURRENT BEHAVIOR and proceeds independently of the bug decisions: a mutation-sensitive test pins what ` +
+  `the engine does TODAY (so a future change is caught), it does not assert a hoped-for fix. (A test asserting "correct" behavior ` +
+  `for a real bug would fail the all-pass gate — another reason the tracks are separate.)\n` +
   `- PER-MODULE HARDENING PLAN, ranked by priority (bug value): module | current cov | top contract violations | boundary gaps | ` +
   `concrete test_plan | est new tests. The teammate works this list TOP-DOWN, iterate-to-plateau per module, coverage as floor, ` +
   `gate (full pytest green + recovery 21 + module cov >= floor + every new test mutation-sensitive).\n` +
