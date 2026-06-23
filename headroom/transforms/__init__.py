@@ -8,14 +8,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Expose concrete types to static analysis while keeping runtime imports lazy.
-    from headroom.transforms.anchor_selector import (  # noqa: F401
-        AnchorSelector,
-        AnchorStrategy,
-        AnchorWeights,
-        DataPattern,
-        calculate_information_score,
-        compute_item_hash,
-    )
     from headroom.transforms.base import Transform  # noqa: F401
     from headroom.transforms.cache_aligner import CacheAligner  # noqa: F401
     from headroom.transforms.cross_message_dedup import CrossMessageDeduper  # noqa: F401
@@ -69,13 +61,6 @@ __all__ = [
     # Base
     "Transform",
     "TransformPipeline",
-    # Anchor selection
-    "AnchorSelector",
-    "AnchorStrategy",
-    "AnchorWeights",
-    "DataPattern",
-    "calculate_information_score",
-    "compute_item_hash",
     # JSON compression
     "SmartCrusher",
     "SmartCrusherConfig",
@@ -128,15 +113,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "Transform": ("headroom.transforms.base", "Transform"),
     "TransformPipeline": ("headroom.transforms.pipeline", "TransformPipeline"),
     # Anchor selection
-    "AnchorSelector": ("headroom.transforms.anchor_selector", "AnchorSelector"),
-    "AnchorStrategy": ("headroom.transforms.anchor_selector", "AnchorStrategy"),
-    "AnchorWeights": ("headroom.transforms.anchor_selector", "AnchorWeights"),
-    "DataPattern": ("headroom.transforms.anchor_selector", "DataPattern"),
-    "calculate_information_score": (
-        "headroom.transforms.anchor_selector",
-        "calculate_information_score",
-    ),
-    "compute_item_hash": ("headroom.transforms.anchor_selector", "compute_item_hash"),
     # JSON compression
     "SmartCrusher": ("headroom.transforms.smart_crusher", "SmartCrusher"),
     "SmartCrusherConfig": ("headroom.transforms.smart_crusher", "SmartCrusherConfig"),
