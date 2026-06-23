@@ -440,8 +440,23 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     iso_state: list[tuple[int, str] | None] = [None] * len(var_cols)
     ordinal = 0  # row index for arithmetic folds — counts every row line
     for line in lines[body_start:]:
-        if not line or _is_sentinel_line(line):
+        if _is_sentinel_line(line):
             continue
+        if not line:
+            # An empty physical line is a REAL empty-string value ONLY when
+            # there is exactly one variable column (multi-col empty rows still
+            # carry their `,` separators, so they are never blank). Bug #24:
+            # the old `if not line: continue` dropped that row AND failed to
+            # advance `ordinal`, so every later arith-fold value was shifted.
+            # Bound emission by the declared row count so the trailing newline
+            # artifact (an extra `""` beyond row N) is not turned into a
+            # phantom row.
+            if len(var_cols) == 1 and len(rows) < declared_count:
+                # Fall through to the normal parse path: split_unquoted("")
+                # yields [""], which parses as the empty-string cell.
+                pass
+            else:
+                continue
         parts = split_unquoted(line)
         if len(parts) != len(var_cols):
             ordinal += 1  # malformed row still occupies its index
