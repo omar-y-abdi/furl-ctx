@@ -1,23 +1,8 @@
-"""Headroom Cache Optimization Module.
+"""Headroom Cache module.
 
-This module provides a plugin-based architecture for cache optimization
-across different LLM providers. Each provider has different caching
-mechanisms and this module abstracts those differences.
-
-Provider Caching Differences:
-- Anthropic: Explicit cache_control blocks, 90% savings, 5-min TTL
-- OpenAI: Automatic prefix caching, 50% savings, no user control
-- Google: Separate CachedContent API, 75% savings + storage costs
-
-Usage:
-    from headroom.cache import CacheOptimizerRegistry
-
-    # Get provider-specific optimizer
-    optimizer = CacheOptimizerRegistry.get("anthropic")
-    result = optimizer.optimize(messages, context)
-
-    # Register custom optimizer
-    CacheOptimizerRegistry.register("my-provider", MyOptimizer)
+Exposes the dynamic-content detection types (``DynamicContentDetector`` and
+friends) plus the shared ``CacheConfig`` / ``CacheStrategy`` types. The
+provider-specific cache optimizers were retired with the public SDK surface.
 """
 
 from __future__ import annotations
@@ -27,7 +12,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Expose concrete types to static analysis while keeping runtime imports lazy.
-    from headroom.cache.anthropic import AnthropicCacheOptimizer  # noqa: F401
     from headroom.cache.base import (  # noqa: F401
         BaseCacheOptimizer,
         CacheBreakpoint,
@@ -45,9 +29,6 @@ if TYPE_CHECKING:
         DynamicSpan,
         detect_dynamic_content,
     )
-    from headroom.cache.google import GoogleCacheOptimizer  # noqa: F401
-    from headroom.cache.openai import OpenAICacheOptimizer  # noqa: F401
-    from headroom.cache.registry import CacheOptimizerRegistry  # noqa: F401
 
 __all__ = [
     # Base types
@@ -65,12 +46,6 @@ __all__ = [
     "DynamicContentDetector",
     "DynamicSpan",
     "detect_dynamic_content",
-    # Registry
-    "CacheOptimizerRegistry",
-    # Provider implementations
-    "AnthropicCacheOptimizer",
-    "OpenAICacheOptimizer",
-    "GoogleCacheOptimizer",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
@@ -89,12 +64,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "DynamicContentDetector": ("headroom.cache.dynamic_detector", "DynamicContentDetector"),
     "DynamicSpan": ("headroom.cache.dynamic_detector", "DynamicSpan"),
     "detect_dynamic_content": ("headroom.cache.dynamic_detector", "detect_dynamic_content"),
-    # Registry
-    "CacheOptimizerRegistry": ("headroom.cache.registry", "CacheOptimizerRegistry"),
-    # Provider implementations
-    "AnthropicCacheOptimizer": ("headroom.cache.anthropic", "AnthropicCacheOptimizer"),
-    "OpenAICacheOptimizer": ("headroom.cache.openai", "OpenAICacheOptimizer"),
-    "GoogleCacheOptimizer": ("headroom.cache.google", "GoogleCacheOptimizer"),
 }
 
 

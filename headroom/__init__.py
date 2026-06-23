@@ -87,10 +87,6 @@ __all__ = [
     "CacheResult",
     "CacheStrategy",
     "OptimizationContext",
-    "CacheOptimizerRegistry",
-    "AnthropicCacheOptimizer",
-    "OpenAICacheOptimizer",
-    "GoogleCacheOptimizer",
     # Relevance scoring - BM25 keyword scorer
     "RelevanceScore",
     "RelevanceScorer",
@@ -150,10 +146,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "CacheResult": ("headroom.cache", "CacheResult"),
     "CacheStrategy": ("headroom.cache", "CacheStrategy"),
     "OptimizationContext": ("headroom.cache", "OptimizationContext"),
-    "CacheOptimizerRegistry": ("headroom.cache", "CacheOptimizerRegistry"),
-    "AnthropicCacheOptimizer": ("headroom.cache", "AnthropicCacheOptimizer"),
-    "OpenAICacheOptimizer": ("headroom.cache", "OpenAICacheOptimizer"),
-    "GoogleCacheOptimizer": ("headroom.cache", "GoogleCacheOptimizer"),
     # Relevance scoring
     "RelevanceScore": ("headroom.relevance", "RelevanceScore"),
     "RelevanceScorer": ("headroom.relevance", "RelevanceScorer"),
