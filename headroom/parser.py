@@ -18,7 +18,6 @@ HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 HTML_COMMENT_PATTERN = re.compile(r"<!--[\s\S]*?-->")
 BASE64_PATTERN = re.compile(r"[A-Za-z0-9+/]{50,}={0,2}")
 WHITESPACE_PATTERN = re.compile(r"[ \t]{4,}|\n{3,}")
-JSON_BLOCK_PATTERN = re.compile(r"\{[\s\S]{500,}\}")
 
 # Tool results below this size legitimately repeat ("ok", empty diffs,
 # exit codes) and are not evidence of a re-read.
@@ -99,8 +98,13 @@ def detect_waste_signals(text: str, tokenizer: Tokenizer) -> WasteSignals:
     if not text:
         return signals
 
-    # HTML tags and comments
-    html_matches = HTML_TAG_PATTERN.findall(text) + HTML_COMMENT_PATTERN.findall(text)
+    # HTML tags and comments. The tag pattern ``<[^>]+>`` also matches a
+    # whole comment up to its first ``>``, so counting tags + comments on the
+    # raw text double-counts every comment (#15). Strip comments first, then
+    # match tags on the remainder, so each construct is counted exactly once.
+    comment_matches = HTML_COMMENT_PATTERN.findall(text)
+    tag_matches = HTML_TAG_PATTERN.findall(HTML_COMMENT_PATTERN.sub("", text))
+    html_matches = comment_matches + tag_matches
     if html_matches:
         html_text = "".join(html_matches)
         signals.html_noise_tokens = tokenizer.count_text(html_text)
@@ -114,22 +118,54 @@ def detect_waste_signals(text: str, tokenizer: Tokenizer) -> WasteSignals:
     # Excessive whitespace
     ws_matches = WHITESPACE_PATTERN.findall(text)
     if ws_matches:
-        # Count tokens that could be saved by normalizing whitespace to single spaces
+        # Tokens saved by collapsing each whitespace RUN to a single space.
+        # The old formula joined the runs with " " (``" ".join``), which left
+        # every run intact and only added separators, so it never yielded any
+        # savings (#14). Collapse each run to one space instead.
         ws_text = "".join(ws_matches)
-        normalized_text = " ".join(ws_matches)
+        normalized_text = " " * len(ws_matches)
         signals.whitespace_tokens = max(
             0, tokenizer.count_text(ws_text) - tokenizer.count_text(normalized_text)
         )
 
-    # Large JSON blocks
-    json_matches = JSON_BLOCK_PATTERN.findall(text)
-    if json_matches:
-        for match in json_matches:
-            tokens = tokenizer.count_text(match)
-            if tokens > 500:
-                signals.json_bloat_tokens += tokens
+    # Large JSON blocks. The old ``\{[\s\S]{500,}\}`` pattern was greedy and
+    # unanchored: several small JSON objects separated by prose merged into one
+    # match spanning the first ``{`` to the last ``}``, and its char-count gate
+    # (``{500,}``) mismatched the token gate below (#16). Detect each JSON
+    # object as a real span instead, then gate each on its own token count.
+    for match in _iter_json_object_spans(text):
+        tokens = tokenizer.count_text(match)
+        if tokens > 500:
+            signals.json_bloat_tokens += tokens
 
     return signals
+
+
+def _iter_json_object_spans(text: str) -> list[str]:
+    """Yield each top-level ``{...}`` JSON object substring in ``text``.
+
+    Uses ``json.JSONDecoder.raw_decode`` to find exact valid-object spans, so
+    braces inside strings and nested objects are handled correctly and prose
+    between objects is never absorbed (best-effort: invalid ``{`` starts are
+    skipped). Only object spans (not bare arrays/scalars) are reported, matching
+    the original intent of the JSON-bloat metric.
+    """
+    decoder = json.JSONDecoder()
+    spans: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        try:
+            _value, end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        spans.append(text[i:end])
+        i = end
+    return spans
 
 
 def is_rag_content(text: str) -> bool:
