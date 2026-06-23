@@ -61,6 +61,9 @@ TWO-TRACK PLAN (because of the Rust gap):
 ## ★ DELIVERABLE-SHAPE DECISION (pending — governs Phase 5 below)
 User FORKED headroom, building minimalistic hook+MCP alternative; end goal = collaboration w/ headroom devs, both methods side-by-side. Measured ~2,850 LOC proxy-route DORMANT for the hook/MCP method (proxy/ 1,847 pure transport + ~1,010 auth-mode policy layer woven in live engine + mcp_server proxy tendril). DECISION: (a) standalone fork → DELETE proxy-route; (b) side-by-side collab → KEEP proxy/ as headroom's method, don't wire it. Decides proxy-delete + version scheme. (Version bump 0.25→0.26 DEFERRED until this is decided.)
 
+## ✅ PROXY-ROUTE REMOVED — CODEBASE CLEANUP COMPLETE (2026-06-23, HEAD 63ad09a2)
+~5,200 LOC retired (proxy/ + compression_policy.py + Rust auth_mode/compression_policy + parity tests + mcp un-couple). Tree 36,605 code LOC. Verified: cargo 0-failed, pytest 417/14, recovery 21, compress unchanged (compress-path diff = docstring-only). Standalone hook/MCP-only fork. Remaining = packaging only (version bump + stale-docs sweep, user-gated).
+
 ## PHASE 5 — HOOK+MCP BUILD (the user's actual new system — supersedes "proxy rebuild")
 - proxy → DELETE; extract live SSE utils (proxy/helpers.py parse_sse_events/safe_decode) to ccr/sse_parser.py first.
 - Build hook (data-plane, like the Biljakten one but productized) + 2-tool fastmcp (set_compression + retrieve→CCR direct,
