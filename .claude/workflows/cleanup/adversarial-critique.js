@@ -87,6 +87,7 @@ const LENSES = [
   { key: 'correctness', type: 'code-reviewer', focus: 'CORRECTNESS & ROBUSTNESS, fresh bug hunt (independent of the recent 25-bug pass — find MORE): edge cases, silent-failure/swallowed-error paths, off-by-one in size/token/threshold math, state leaking across calls, concurrency (the worker threads, semaphores, thread-locals), malformed-input handling, the recovery/eviction/parity invariant boundaries. What breaks?' },
   { key: 'simplicity', type: 'Explore', focus: 'LAZY-DEV SIMPLICITY (the ladder): what should NOT exist — single-impl abstractions, factories-of-one, delegating wrappers, speculative params/config nobody sets, hand-rolled stdlib, dead feature-gates, parallel implementations of one idea, accidental complexity. Where is this engine doing in 200 lines what 50 would do? Be ruthless: the best code is code never written.' },
   { key: 'performance', type: 'ecc:performance-optimizer', focus: 'PERFORMANCE of a COMPRESSION engine: hot-path allocations, repeated work, O(n^2) over messages/rows, tokenizer/hash recomputation, the Py<->Rust boundary crossings, the CCR store lookups, run_bench-relevant paths. Where is real measurable waste (not premature micro-opt)?' },
+  { key: 'compression-efficacy', type: 'computer-scientist-analyst', focus: 'THE COMPRESSION ITSELF — the highest-value question for THIS engine: is the approach actually GOOD, and could it be FUNDAMENTALLY better? Evaluate the achieved ratios vs what is theoretically/practically achievable on the target data (tool outputs, logs, JSON arrays). Is row-drop + CCR-offload the right architecture, or a workaround? Is the SmartCrusher routing/strategy sound? What known-better techniques (dictionary/entropy coding, structural diffing, schema-aware columnar, semantic dedup, learned compressors) are NOT used and could lift it? CHALLENGE the lossy-by-deletion design AS A CHOICE (not just "is it honest about it") — when is dropping rows the wrong call vs a recoverable transform? Read run_bench/BENCHMARKS.md + the compaction/formatter/crusher Rust. Where is the engine leaving compression on the table?' },
   { key: 'security', type: 'ecc:security-reviewer', focus: 'SECURITY & DATA-SAFETY: the log redaction (_redact_retrieval_log_payload), input validation at the compress()/hook/MCP boundaries, the CCR store keying/eviction (data confusion/overwrite), untrusted tool-output handling, the explicit_hash/ttl guards, any injection/path/credential exposure, the MCP retrieve plane. What could leak or be abused?' },
   { key: 'tests', type: 'ecc:pr-test-analyzer', focus: 'TEST-SUITE QUALITY with fresh eyes (the suite was just hardened — be skeptical of that too): are the 626 tests actually mutation-resistant, or coverage-theater? over-stubbed paths, env-gated code never really exercised, round-trip tests that are parallel-mutation-blind, missing boundary/property tests, the recovery/parity invariant coverage, flakiness. What does green NOT prove here?' },
   { key: 'docs-api', type: 'ecc:comment-analyzer', focus: 'DOCS, COMMENTS & API HONESTY: stale/misleading docstrings & comments (comment rot), the README/wiki vs reality (the honest savings claims, removed features), the public API consistency & discoverability, naming, the compression-format documentation, anything that would mislead a new contributor or a consumer of the library. Does the doc match the code?' },
@@ -139,6 +140,8 @@ const challenged = await parallel(toChallenge.map(f => () =>
 ))
 const judged = challenged.filter(Boolean)
 const material = judged.filter(f => f.verdict === 'material')
+const byDesign = judged.filter(f => f.verdict === 'by-design')
+const reallyDeflated = judged.filter(f => f.verdict === 'taste' || f.verdict === 'already-handled' || f.verdict === 'wrong')
 const nitpicks = all.filter(f => f.severity === 'nitpick')
 log(`Challenge: ${toChallenge.length} challenged; ${material.length} MATERIAL, ${judged.filter(f => f.verdict === 'taste').length} taste, ${judged.filter(f => f.verdict === 'by-design').length} by-design, ${judged.filter(f => f.verdict === 'already-handled').length} already-handled, ${judged.filter(f => f.verdict === 'wrong').length} wrong.`)
 
@@ -152,13 +155,20 @@ const synth = await agent(
   `- TOP IMPROVEMENTS table FIRST, ranked by leverage (impact/effort): rank | theme | severity | what | location | the improvement | effort.\n` +
   `- Then BY THEME (architecture, correctness, simplicity, types, performance, security, tests, docs, api): the material findings, ` +
   `each with location + concrete improvement. Group, dedupe across lenses (cite all lenses that caught it).\n` +
-  `- A short "DEFLATED" appendix: notable claims the adversarial pass ruled taste / by-design / already-handled / wrong (so the ` +
-  `owner sees the critique was filtered, not credulous) — this is what keeps the report honest.\n` +
+  `- A "DELIBERATE CHOICES WORTH RE-EXAMINING" section: the adversarial pass ruled these by-design, BUT a deliberate choice can ` +
+  `still be the blind spot the owner asked to have pierced. Surface each AIRED WITH ITS TRADEOFF (what was chosen, what it costs, ` +
+  `when it would be the wrong call) — do NOT bury these in the deflated appendix. The biggest such choice is the lossy-by-deletion / ` +
+  `row-drop+CCR architecture and the proxy-removal; treat them as open questions, not settled.\n` +
+  `- A short "DEFLATED" appendix: claims the adversarial pass ruled taste / already-handled / wrong (so the owner sees the critique ` +
+  `was filtered, not credulous) — this is what keeps the report honest.\n` +
   `- A "GENUINELY GOOD" section: what the fresh eyes agreed is well-done (from praise + confirmed-good) — brief, earned, not flattery.\n` +
+  `- This repo was just through a heavy human+AI session: proxy route DELETED (standalone hook/MCP fork), cleanup was archive-not-` +
+  `refactor, a 25-bug test-hardening pass, score.py used to grade test quality. If any finding bears on THOSE decisions, relay it at ` +
+  `FULL STRENGTH — do not soften criticism of the recent work just because it was recent.\n` +
   `- CLOSE with the 3-5 highest-leverage next moves.\n` +
   `- Note any lens that returned NOT-RUN (coverage gap, not "nothing wrong"): ${JSON.stringify([...notRun])}.\n` +
   `- REPORT-ONLY: this critiques, it changes nothing.\n\n` +
-  `MATERIAL:\n${JSON.stringify(material).slice(0, 18000)}\n\nDEFLATED:\n${JSON.stringify(judged.filter(f => f.verdict !== 'material')).slice(0, 6000)}\n\nNITPICKS:\n${JSON.stringify(nitpicks).slice(0, 2000)}\n\nPRAISE:\n${JSON.stringify(praise).slice(0, 2000)}`,
+  `MATERIAL:\n${JSON.stringify(material).slice(0, 16000)}\n\nDELIBERATE-CHOICES (by-design — air the tradeoff, don't bury):\n${JSON.stringify(byDesign).slice(0, 5000)}\n\nDEFLATED (taste/already-handled/wrong):\n${JSON.stringify(reallyDeflated).slice(0, 4000)}\n\nNITPICKS:\n${JSON.stringify(nitpicks).slice(0, 2000)}\n\nPRAISE:\n${JSON.stringify(praise).slice(0, 2000)}`,
   { label: 'verdict-synthesis', phase: 'Verdict', agentType: 'claude', model: 'opus' }
 )
 
@@ -168,7 +178,8 @@ return {
   rounds: round,
   totalFindings: all.length,
   material: material.length,
-  deflated: judged.length - material.length,
+  byDesign: byDesign.length,
+  deflated: reallyDeflated.length,
   nitpicks: nitpicks.length,
   notRun: [...notRun],
   critique: synth,
