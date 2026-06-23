@@ -432,7 +432,6 @@ class ContentRouterConfig:
     """Configuration for intelligent content routing.
 
     Attributes:
-        enable_code_aware: Enable AST-based code compression.
         enable_smart_crusher: Enable JSON array compression.
         enable_search_compressor: Enable search result compression.
         enable_log_compressor: Enable build/test log compression.
@@ -446,7 +445,6 @@ class ContentRouterConfig:
     """
 
     # Enable/disable specific compressors
-    enable_code_aware: bool = False  # Disabled: use code graph MCP tools instead
     enable_kompress: bool = True  # Kompress: ModernBERT token compressor
     enable_smart_crusher: bool = True
     enable_search_compressor: bool = True
