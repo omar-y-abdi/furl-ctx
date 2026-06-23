@@ -338,6 +338,25 @@ class HeadroomMCPServer:
                     "results": results,
                     "count": len(results),
                 }
+            # #18: search returned nothing. That does NOT mean the entry was
+            # evicted — a LIVE entry with no query match must report "no match",
+            # not a false "no longer retrievable" eviction error. Only fall
+            # through to the cause-honest miss path when the entry is genuinely
+            # gone from the store.
+            if store.retrieve(hash_key) is not None:
+                self._stats.record_retrieval(hash_key)
+                return {
+                    "hash": hash_key,
+                    "source": "local",
+                    "query": query,
+                    "results": [],
+                    "count": 0,
+                    "note": (
+                        "Entry is available but no stored item matched the query. "
+                        "Retry with a different query, or omit the query to retrieve "
+                        "the full original content."
+                    ),
+                }
         else:
             entry = store.retrieve(hash_key)
             if entry:
