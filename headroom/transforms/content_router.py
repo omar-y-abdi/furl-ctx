@@ -1567,6 +1567,7 @@ class ContentRouter(Transform):
         Returns:
             Tuple of (compressed, token_count).
         """
+        from .kompress_compressor import _MODEL_UNAVAILABLE_ERRORS
         from .tag_protector import protect_tags, restore_tags
 
         # Protect custom tags before any ML compression
@@ -1597,8 +1598,13 @@ class ContentRouter(Transform):
                     )
                     compressed = result.compressed
                     compressed_tokens = result.compressed_tokens
-                except Exception as e:
-                    logger.warning("Kompress failed: %s", e)
+                except _MODEL_UNAVAILABLE_ERRORS as e:
+                    # Model/runtime unavailable — a legitimate graceful
+                    # passthrough. Any other exception is a Kompress bug (#4)
+                    # and must propagate so it is not silently swallowed here.
+                    # The tuple is single-sourced from kompress_compressor so it
+                    # cannot drift from compress()'s own passthrough contract.
+                    logger.warning("Kompress unavailable, passthrough: %s", e)
 
         if compressed is None:
             return content, len(content.split())
