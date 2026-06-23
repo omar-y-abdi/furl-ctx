@@ -67,7 +67,10 @@ def _extract_tool_result_text(payload: dict[str, Any]) -> str:
         for item in inner:
             if isinstance(item, dict):
                 if item.get("type") == "text":
-                    pieces.append(item.get("text", ""))
+                    # #17: an explicit ``"text": None`` makes ``.get("text", "")``
+                    # return None (the default only applies to an ABSENT key),
+                    # which then raises TypeError in ``"\n".join``. Coerce to "".
+                    pieces.append(item.get("text") or "")
                 elif "type" not in item and isinstance(item.get("text"), str):
                     pieces.append(item["text"])
                 elif "type" not in item and "json" in item:
@@ -164,7 +167,8 @@ def parse_message_to_blocks(
             text_parts = []
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(part.get("text", ""))
+                    # #17: explicit ``"text": None`` must not crash join().
+                    text_parts.append(part.get("text") or "")
                 elif isinstance(part, dict) and part.get("type") == "tool_result":
                     # Anthropic Messages format nests tool output one level
                     # deeper; collect for dedicated tool_result blocks below.
@@ -441,7 +445,8 @@ def get_message_content_text(message: dict[str, Any]) -> str:
         parts = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
-                parts.append(part.get("text", ""))
+                # #17: explicit ``"text": None`` must not crash join().
+                parts.append(part.get("text") or "")
             elif isinstance(part, str):
                 parts.append(part)
         return "\n".join(parts)
