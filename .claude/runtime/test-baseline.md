@@ -37,3 +37,16 @@ LOWER PRIORITY (env-gated/optional/observability — not compress-correctness): 
 CCR recovery 100% byte-exact · Py↔Rust hash parity (compute_item_hash) · prompt-cache prefix ordering (never drop idx0 / reorder / rewrite cache_control) · default lossless decoder. The eval `break` pass already found silent-loss holes (multi-line CSV field, inter-call eviction) THIS way — harder tests find more.
 
 ## Gate per module (test-quality skill): full pytest stays green + recovery 21 + module coverage ≥ its floor + every new test mutation-sensitive (fails when behavior breaks). NEVER weaken a test to win an axis. NEVER chase coverage through privates. REPL-verify library assumptions.
+
+## ★ COMPRESSION-QUALITY FLOOR (live run_bench @ HEAD 78f8cd97, model=gpt-4o) — fixes must be ≥ this, NEVER degrade
+| dataset | items | lossless reduction | drop | retain | path |
+|---|---|---|---|---|---|
+| code@7 | 7 | 0.0% (passthrough) | 0.0% | 100% | lossless |
+| logs@90 | 90 | 92.8% | 91.1% | 100% | LOSSY |
+| search@90 | 90 | 92.2% | 85.6% | 100% | LOSSY |
+| repeated_logs@90 | 90 | 96.5% | 100% | 100% | LOSSY |
+| disk@9 | 9 | 50.0% | 0.0% | 100% | lossless |
+| multiturn@135 | 135 | 70.6% | 49.6% | 100% | LOSSY |
+| **NEEDLE-RECALL (output OR CCR)** | — | — | — | **100.0%** | — |
+
+USER CONSTRAINT (2026-06-23): "implement fixes on all 25 bugs WITHOUT tradeoffs on compression results — each fix yields BETTER or SAME compression vs before." So the COMPRESSION-QUALITY GATE per fix = run `.venv/bin/python -m benchmarks.run_bench`, confirm per-dataset lossless reduction ≥ floor above AND needle-recall (output OR CCR) == 100.0%, THEN restore (`git checkout HEAD -- benchmarks/baseline_results.json benchmarks/BASELINE.md`). Lossy-loss bugs (#2/#24/#25) → fix by making the loss CCR-RECOVERABLE (preserve savings + 100% recall), NOT by compressing less. If a fix degrades savings or drops recall <100% → REVERT, find a recoverable approach, or defer+report.
