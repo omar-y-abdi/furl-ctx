@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Literal
 
 from headroom.models.config import ML_MODEL_DEFAULTS
@@ -454,62 +453,3 @@ class DiffArtifact:
     transforms: list[TransformDiff] = field(default_factory=list)
 
 
-@dataclass
-class SimulationResult:
-    """Result of a simulation (dry-run)."""
-
-    tokens_before: int
-    tokens_after: int
-    tokens_saved: int
-    transforms: list[str]
-    estimated_savings: str  # Human-readable cost estimate
-    messages_optimized: list[dict[str, Any]]
-    block_breakdown: dict[str, int]
-    waste_signals: dict[str, int]
-    stable_prefix_hash: str
-    cache_alignment_score: float
-
-
-@dataclass
-class RequestMetrics:
-    """Comprehensive metrics for a single request."""
-
-    request_id: str
-    timestamp: datetime
-    model: str
-    stream: bool
-    mode: str  # audit | optimize | simulate
-
-    # Token breakdown
-    tokens_input_before: int
-    tokens_input_after: int
-    tokens_output: int | None = None  # None if streaming
-
-    # Block breakdown
-    block_breakdown: dict[str, int] = field(default_factory=dict)
-
-    # Waste signals
-    waste_signals: dict[str, int] = field(default_factory=dict)
-
-    # Cache metrics (basic)
-    stable_prefix_hash: str = ""
-    cache_alignment_score: float = 0.0
-    cached_tokens: int | None = None  # From API response if available
-
-    # Cache optimizer metrics (provider-specific)
-    cache_optimizer_used: str | None = None  # e.g., "anthropic-cache-optimizer"
-    cache_optimizer_strategy: str | None = None  # e.g., "explicit_breakpoints"
-    cacheable_tokens: int = 0  # Tokens eligible for caching
-    breakpoints_inserted: int = 0  # Cache breakpoints added (Anthropic)
-    estimated_cache_hit: bool = False  # Whether prefix matches previous
-    estimated_savings_percent: float = 0.0  # Estimated savings if cached
-    semantic_cache_hit: bool = False  # Whether semantic cache was hit
-
-    # Transform details
-    transforms_applied: list[str] = field(default_factory=list)
-    tool_units_dropped: int = 0
-    turns_dropped: int = 0
-
-    # For debugging
-    messages_hash: str = ""
-    error: str | None = None
