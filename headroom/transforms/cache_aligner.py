@@ -311,12 +311,22 @@ class CacheAligner(Transform):
 
         # Compute a stable hash of all system messages for observability.
         # This is just a hash of the (unchanged) bytes — no extraction.
-        system_text = "\n---\n".join(
+        #
+        # Frame each message with its byte length so the serialization is
+        # injective: a bare delimiter join lets one message containing the
+        # delimiter collide with two separate messages (#5). Length-prefixing
+        # makes the hash uniquely identify the ordered system-prompt set.
+        system_contents = [
             (m.get("content") or "")
             for m in result_messages
             if m.get("role") == "system" and isinstance(m.get("content"), str)
+        ]
+        system_text = "\n---\n".join(system_contents)
+        framed = b"".join(
+            f"{len(b := c.encode('utf-8'))}:".encode("ascii") + b
+            for c in system_contents
         )
-        stable_hash = compute_short_hash(system_text)
+        stable_hash = compute_short_hash(framed)
         prefix_bytes = len(system_text.encode("utf-8"))
         prefix_tokens_est = tokenizer.count_text(system_text)
         prefix_changed = (
