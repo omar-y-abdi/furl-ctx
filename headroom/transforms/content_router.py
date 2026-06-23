@@ -1321,7 +1321,12 @@ class ContentRouter(Transform):
                     strategy_chain.append(CompressionStrategy.KOMPRESS.value)
 
             elif strategy == CompressionStrategy.SMART_CRUSHER:
-                # SmartCrusher handles its own TOIN recording
+                # SmartCrusher handles its own TOIN recording. The no-savings
+                # Kompress (then Log) fallback is handled ONCE by the generic
+                # post-dispatch fallback below (fallback_eligible_strategy
+                # includes SMART_CRUSHER). The inner duplicate was removed so the
+                # ML compressor no longer runs twice and 'kompress' is no longer
+                # double-appended to strategy_chain (#13).
                 if self.config.enable_smart_crusher:
                     crusher = self._get_smart_crusher()
                     if crusher:
@@ -1331,21 +1336,7 @@ class ContentRouter(Transform):
                             result.compressed,
                             len(result.compressed.split()),
                         )
-                        smart_crusher_fallback = False
-                        if result.compressed == content:
-                            strategy_chain.append(CompressionStrategy.KOMPRESS.value)
-                            fallback_compressed, fallback_tokens = self._try_ml_compressor(
-                                content, context, question
-                            )
-                            if fallback_tokens < compressed_tokens:
-                                compressed = fallback_compressed
-                                compressed_tokens = fallback_tokens
-                                actual_strategy = CompressionStrategy.KOMPRESS
-                                compressor_name = "KompressCompressor"
-                                decision_reason = "smart_crusher_fallback_kompress_after_no_savings"
-                                smart_crusher_fallback = True
-                        if not smart_crusher_fallback:
-                            decision_reason = "smart_crusher"
+                        decision_reason = "smart_crusher"
 
             elif strategy == CompressionStrategy.SEARCH:
                 if self.config.enable_search_compressor:
