@@ -132,7 +132,7 @@ combination gives bounded RAM *and* genuinely-retained data (the free lunch),
 reusing code that already exists rather than building new retention machinery.
 
 ## Cross-references
-- `EVAL-break.md` — Cluster G original finding (row 6) + this reframe.
+- `docs/audits/EVAL-break.md` — Cluster G original finding (row 6) + this reframe.
 - `headroom/ccr/response_handler.py` — `_execute_retrieval` (loud miss).
 - `headroom/ccr/mcp_server.py` — `_retrieve_content` (second loud surface).
 - `headroom/cache/compression_store.py` — `format_retrieval_miss_detail`,
