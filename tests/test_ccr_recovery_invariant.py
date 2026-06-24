@@ -357,6 +357,82 @@ def test_lossy_survivor_table_recovers_100pct(
     )
 
 
+def test_row_drop_recovers_from_python_store_only() -> None:
+    # PRODUCTION-FIDELITY recovery check for the lossy row-drop path.
+    #
+    # The either-store helper ``_recover_from_output`` accepts a hit from the
+    # Rust store (``crusher.ccr_get``) OR the Python store, so the row-drop
+    # tests above pass even if the Python mirror regressed — but production
+    # retrieval (MCP ``headroom_retrieve``, ``ccr/mcp_server.py:362``;
+    # ``compression_store.py:32``) reads ONLY the Python ``CompressionStore``
+    # via ``store.retrieve(hash)``. The OPAQUE path already pins this
+    # (``test_opaque_blob_recovers_from_output_marker`` asserts
+    # ``blobs <= py_recovered``); the ROW-DROP path did not. This test closes
+    # that blind spot: it drives the same lossy drop the survivor tests use and
+    # asserts the dropped rows recover BYTE-EXACT through the Python store
+    # ALONE — the exact call production makes — never touching ``ccr_get``.
+    items = _log_shaped_rows()
+    router = ContentRouter()
+    py_store = get_compression_store()
+
+    result = router.compress(json.dumps(items, ensure_ascii=False))
+    tree = json.loads(result.compressed)
+    assert isinstance(tree, str), "survivor compaction should ship a string rendering"
+    sentinel = json.loads(tree.split("\n")[-1])
+    assert "_ccr_dropped" in sentinel, "lossy drop must surface the _ccr_dropped sentinel"
+
+    # The whole-blob pointer production resolves is the bare-hash row-drop
+    # marker (``<<ccr:HASH N_rows_offloaded>>``). The granular ``HASH#rows``
+    # index key is intentionally NOT stored in Python (its non-hex ``#rows``
+    # suffix fails the store's hex-hash validation — smart_crusher.py:830-833),
+    # so production resolves the bare hash and serves the whole offloaded blob.
+    drop_hashes = [h for h, _n in _DROP_RE.findall(sentinel["_ccr_dropped"])]
+    assert drop_hashes, "row-drop sentinel must carry a <<ccr:HASH N_rows_offloaded>> pointer"
+
+    # Recover via the Python CompressionStore ONLY — this is the production
+    # call (store.retrieve(hash).original_content). We deliberately do NOT call
+    # crusher.ccr_get: a Python-mirror regression must fail here even while the
+    # Rust store still holds the bytes.
+    recovered_rows: set[str] = set()
+    for h in drop_hashes:
+        payload = _py_payload(py_store, h)
+        assert payload is not None, (
+            f"row-drop hash {h} did NOT recover from the Python compression_store "
+            f"via store.retrieve() — the production retrieval path is broken for "
+            f"the lossy row-drop case (Rust ccr_get is NOT consulted here, by design)"
+        )
+        parsed = json.loads(payload)
+        assert isinstance(parsed, list), "offloaded row-drop blob must be a JSON array of rows"
+        recovered_rows.update(_repr(x) for x in parsed)
+
+    # The mirror must actually carry the dropped rows. A no-op mirror would
+    # make store.retrieve() a MISS (payload is None above) or yield an empty
+    # blob — either way this test fails. The recovered rows must be byte-exact
+    # input rows (subset of the distinct inputs), and they must cover every
+    # row dropped from the survivor table.
+    assert recovered_rows, "Python-store recovery yielded no rows (no-op mirror?)"
+    distinct = {_repr(x) for x in items}
+    assert recovered_rows <= distinct, (
+        "recovered rows are not byte-exact inputs — Python-store payload is "
+        "corrupted or re-encoded, not the original content"
+    )
+
+    # Compute the rows that survived in the output (present outside the
+    # sentinel) and confirm every dropped row is recoverable from the Python
+    # store alone. ``_collect`` gathers kept scalars/rows; here we decode the
+    # survivor CSV body (everything before the sentinel line) and subtract.
+    survivor_body = "\n".join(tree.split("\n")[:-1])
+    survivors: set[str] = set()
+    _decode_csv_schema(survivor_body, survivors)
+    dropped = distinct - survivors
+    assert dropped, "fixture must actually drop rows (lossy path) for this test to bite"
+    lost = dropped - recovered_rows
+    assert not lost, (
+        f"{len(lost)} of {len(dropped)} dropped rows unrecoverable from the Python "
+        f"compression_store ALONE (production path); first: {list(lost)[:3]}"
+    )
+
+
 def test_lossy_survivor_table_surfaces_sentinel_line() -> None:
     # Pin the shape itself: lossy drop + survivor compaction ships a JSON
     # string whose final line is the sentinel object carrying the pointer.

@@ -29,8 +29,8 @@ else
   echo "G3 FAIL: import/surface broke"; fail=1
 fi
 
-echo "=== G4 recovery invariant (must be 22) ==="
-if $PY -m pytest tests/test_ccr_recovery_invariant.py -q --no-header -p no:cacheprovider 2>&1 | grep -q '22 passed'; then
+echo "=== G4 recovery invariant (must be 23) ==="
+if $PY -m pytest tests/test_ccr_recovery_invariant.py -q --no-header -p no:cacheprovider 2>&1 | grep -q '23 passed'; then
   echo "G4 PASS"
 else
   echo "G4 FAIL: recovery invariant not 21-green"; fail=1
