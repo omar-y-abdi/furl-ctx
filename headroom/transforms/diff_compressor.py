@@ -128,14 +128,22 @@ class DiffCompressor:
 
     def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> None:
         """Promote a Rust-emitted cache_key into the production Python
-        CompressionStore. Failures are logged at warning level — a
-        store hiccup must not break the response, just degrade
-        retrieval. Mirrors the same helper on log_compressor.py and
+        CompressionStore. Failures are logged at ERROR level — when this
+        write fails, the marker emitted in the compressed output dangles
+        (the store production /v1/retrieve reads never gets the original),
+        so the failure is operator-visible loss, not a benign hiccup.
+
+        Logged-not-raised (LOUD FLOOR, not fail-safe): unlike the
+        SmartCrusher mirror, this helper also runs from
+        ``compress_with_stats`` (a test/sidecar API with NO fail-open
+        production caller), so raising could convert silent loss into a
+        crash on that path. Per the cure-priority (#2), surface at ERROR.
+        Mirrors the same helper on log_compressor.py and
         search_compressor.py."""
         try:
             from ..cache.compression_store import get_compression_store
         except ImportError as e:
-            logger.warning("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
+            logger.error("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
             return
         try:
             store: Any = get_compression_store()
@@ -145,8 +153,9 @@ class DiffCompressor:
             # actually finds the entry.
             store.store(original, compressed, explicit_hash=cache_key)
         except Exception as e:
-            logger.warning(
-                "CCR store write failed; cache_key %s remains in-marker only: %s",
+            logger.error(
+                "CCR store write failed; cache_key %s remains in-marker only "
+                "(marker dangles, retrieve() will miss): %s",
                 cache_key,
                 e,
             )

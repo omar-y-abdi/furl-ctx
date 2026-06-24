@@ -196,8 +196,12 @@ class SearchCompressor:
 
     def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> None:
         """Promote the Rust-emitted cache_key into the production Python
-        `CompressionStore`. Failures are surfaced via logging instead of
-        being silently swallowed (see no-silent-fallbacks rule).
+        `CompressionStore`. Failures are surfaced at ERROR level instead of
+        being silently swallowed (see no-silent-fallbacks rule): a failed
+        write means the marker in the compressed output dangles (the store
+        production /v1/retrieve reads never gets the original), so the loss
+        must be operator-visible (compression_store.py:234-244 'no SILENT
+        loss').
 
         Note: the Rust path computes the hash and embeds it in the
         emitted marker text — the Rust hash IS the canonical one
@@ -207,7 +211,7 @@ class SearchCompressor:
         try:
             from ..cache.compression_store import get_compression_store
         except ImportError as e:
-            logger.warning("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
+            logger.error("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
             return
 
         try:
@@ -218,8 +222,11 @@ class SearchCompressor:
             # actually finds the entry.
             store.store(original, compressed, explicit_hash=cache_key)
         except Exception as e:
-            logger.warning(
-                "CCR store write failed; cache_key %s remains in-marker only: %s", cache_key, e
+            logger.error(
+                "CCR store write failed; cache_key %s remains in-marker only "
+                "(marker dangles, retrieve() will miss): %s",
+                cache_key,
+                e,
             )
 
 

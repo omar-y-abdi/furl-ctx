@@ -214,11 +214,15 @@ class LogCompressor:
 
     def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> None:
         """Promote a Rust-emitted cache_key into the production Python
-        CompressionStore. Failures are logged at warning level."""
+        CompressionStore. Failures are logged at ERROR level — a failed
+        write means the marker in the compressed output dangles (the store
+        production /v1/retrieve reads never gets the original), so the loss
+        must be operator-visible, never silent (see the SmartCrusher mirror
+        and compression_store.py:234-244 'no SILENT loss')."""
         try:
             from ..cache.compression_store import get_compression_store
         except ImportError as e:
-            logger.warning("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
+            logger.error("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
             return
         try:
             store: Any = get_compression_store()
@@ -228,8 +232,9 @@ class LogCompressor:
             # actually finds the entry.
             store.store(original, compressed, explicit_hash=cache_key)
         except Exception as e:
-            logger.warning(
-                "CCR store write failed; cache_key %s remains in-marker only: %s",
+            logger.error(
+                "CCR store write failed; cache_key %s remains in-marker only "
+                "(marker dangles, retrieve() will miss): %s",
                 cache_key,
                 e,
             )

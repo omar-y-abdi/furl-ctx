@@ -71,6 +71,25 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_COMPACTION_FORMATS = ("csv-schema", "json", "markdown-kv")
 
 
+class CcrMirrorError(RuntimeError):
+    """Raised when the Rust→Python CCR mirror cannot persist a dropped
+    payload into the Python ``compression_store``.
+
+    A SmartCrusher row-drop commits the original to the ephemeral,
+    process-local Rust store and emits a ``<<ccr:HASH>>`` pointer, but the
+    store production ``/v1/retrieve`` reads is the Python
+    ``compression_store``. If the mirror into that store fails, the dropped
+    rows are UNRECOVERABLE for a consumer holding only the output — exactly
+    the silent loss the store's contract forbids (``no SILENT loss``,
+    compression_store.py:234-244).
+
+    Raising (instead of swallowing at ``logger.debug``) lets the failure
+    propagate to ``compress()``'s fail-open boundary (compress.py:386),
+    which discards the lossy output and returns the ORIGINAL uncompressed
+    messages — so the lossy drop never stands without a recovery copy.
+    """
+
+
 # ─── CCR sentinel ─────────────────────────────────────────────────────────
 #
 # When SmartCrusher's lossy path drops rows, it appends a sentinel object
@@ -853,16 +872,31 @@ class SmartCrusher(Transform):
             return
         try:
             from ..cache.compression_store import get_compression_store
-        except ImportError:
-            # Stripped build without the compression_store module.
-            # Mirror is a no-op; Rust side still serves the data.
-            logger.debug("CCR mirror: compression_store module unavailable")
-            return
+        except ImportError as e:
+            # The lossy row-drop has ALREADY happened in the Rust store
+            # (ephemeral, process-local). If we cannot reach the Python
+            # compression_store — the store production /v1/retrieve reads —
+            # the dropped rows are UNRECOVERABLE for the consumer that holds
+            # only the output. That is the silent-loss the store's contract
+            # forbids ("no SILENT loss," compression_store.py:234-244).
+            # Raise so the failure propagates to compress()'s fail-open
+            # boundary (compress.py:386), which discards the lossy output and
+            # returns the ORIGINAL messages uncompressed — nothing lost.
+            raise CcrMirrorError(
+                f"CCR mirror: compression_store module unavailable; "
+                f"hash {ccr_hash} would be unrecoverable"
+            ) from e
         try:
             store = get_compression_store()
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug("CCR mirror: cannot get compression_store (%s)", e)
-            return
+        except Exception as e:
+            # Same loss class as the ImportError branch above: the row-drop
+            # is committed in Rust but the Python store is unreachable, so a
+            # later retrieve() returns None silently. Fail-safe via the
+            # compress() boundary instead of swallowing.
+            raise CcrMirrorError(
+                f"CCR mirror: cannot get compression_store ({e}); "
+                f"hash {ccr_hash} would be unrecoverable"
+            ) from e
         # The TTL on the Python store defaults to 5 minutes — same as
         # the Rust store's `DEFAULT_TTL` (see crates/headroom-core/src/
         # ccr/mod.rs). No need to override.
@@ -887,8 +921,18 @@ class SmartCrusher(Transform):
                 "CCR mirror: invalid hash %r from rendered marker",
                 ccr_hash,
             )
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug("CCR mirror: store.store() raised (%s)", e)
+        except Exception as e:
+            # CORE silent-loss branch: the lossy row-drop is committed in the
+            # ephemeral Rust store, but the Python store write FAILED, so the
+            # dropped rows never reach the store production retrieval reads —
+            # a later retrieve() returns None and the recovery data is GONE.
+            # Raise so the failure reaches compress()'s fail-open boundary
+            # (compress.py:386), which reverts to the ORIGINAL uncompressed
+            # messages. The lossy drop never stands without a recovery copy.
+            raise CcrMirrorError(
+                f"CCR mirror: store.store() failed for hash {ccr_hash} "
+                f"({e}); dropped rows would be unrecoverable"
+            ) from e
 
     def _mirror_row_index_to_python_store(
         self,
@@ -907,12 +951,18 @@ class SmartCrusher(Transform):
         """
         index_raw = self._rust.ccr_get(index_key)
         if index_raw is None:
-            logger.debug("CCR mirror: row index %s not in Rust store", index_key)
+            # GRACEFUL DEGRADATION, not loss: the per-row index is missing,
+            # but the whole-blob entry (mirrored from `_ccr_dropped`) still
+            # recovers the data — just coarser (the full blob instead of one
+            # row). Warn for visibility; do NOT raise.
+            logger.warning("CCR mirror: row index %s not in Rust store", index_key)
             return
         try:
             row_hashes = json.loads(index_raw)
         except (json.JSONDecodeError, ValueError):
-            logger.debug("CCR mirror: row index %s is not valid JSON", index_key)
+            # Same graceful degradation: the index is unparseable but the
+            # whole-blob fallback still recovers. Warn, do NOT raise.
+            logger.warning("CCR mirror: row index %s is not valid JSON", index_key)
             return
         if not isinstance(row_hashes, list):
             return
