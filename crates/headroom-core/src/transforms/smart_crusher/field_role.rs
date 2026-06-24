@@ -132,9 +132,7 @@ fn string_is_identity(sample: &[&Value]) -> bool {
 
     let shaped = strs
         .iter()
-        .filter(|s| {
-            is_iso_datetime(s) || is_iso_date(s) || is_uuid_format(s) || is_hex_run(s)
-        })
+        .filter(|s| is_iso_datetime(s) || is_iso_date(s) || is_uuid_format(s) || is_hex_run(s))
         .count();
     if (shaped as f64 / strs.len() as f64) >= IDENTITY_SHAPE_FRACTION {
         return true;
@@ -154,8 +152,11 @@ fn string_is_identity(sample: &[&Value]) -> bool {
     if !all_tokens {
         return false;
     }
-    let avg_entropy =
-        strs.iter().map(|s| calculate_string_entropy(s)).sum::<f64>() / strs.len() as f64;
+    let avg_entropy = strs
+        .iter()
+        .map(|s| calculate_string_entropy(s))
+        .sum::<f64>()
+        / strs.len() as f64;
     avg_entropy > IDENTITY_ENTROPY_THRESHOLD
 }
 
@@ -170,7 +171,10 @@ fn numeric_is_identity(_stats: &FieldStats, sample: &[&Value]) -> bool {
 /// object ids, request ids. 8 is the shortest length that reliably indicates
 /// an opaque identifier rather than a short content token like a status code.
 fn is_hex_run(s: &str) -> bool {
-    let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let body = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     body.len() >= 8 && body.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -255,7 +259,9 @@ mod tests {
     fn low_cardinality_is_content() {
         // author column: 36/90 distinct -> ratio 0.4 -> content.
         let s = stats("string", 0.4, false);
-        let sample: Vec<Value> = (0..20).map(|i| json!(format!("Author {}", i % 4))).collect();
+        let sample: Vec<Value> = (0..20)
+            .map(|i| json!(format!("Author {}", i % 4)))
+            .collect();
         assert_eq!(classify_field(&s, &refs(&sample)), FieldRole::Content);
     }
 

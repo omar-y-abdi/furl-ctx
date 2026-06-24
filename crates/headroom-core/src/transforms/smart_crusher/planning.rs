@@ -847,7 +847,16 @@ mod tests {
             strategy: CompressionStrategy::SmartSample,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_smart_sample(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
+        let plan = p.plan_smart_sample(
+            &analysis,
+            &items,
+            plan_in,
+            "",
+            None,
+            10,
+            None,
+            &BTreeSet::new(),
+        );
         assert!(
             plan.keep_indices.contains(&30),
             "error item must survive plan_smart_sample"
@@ -874,7 +883,16 @@ mod tests {
             strategy: CompressionStrategy::SmartSample,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_smart_sample(&analysis, &items, plan_in, &query, None, 10, None, &BTreeSet::new());
+        let plan = p.plan_smart_sample(
+            &analysis,
+            &items,
+            plan_in,
+            &query,
+            None,
+            10,
+            None,
+            &BTreeSet::new(),
+        );
         assert!(
             plan.keep_indices.contains(&17),
             "item matching query UUID must be kept; got {:?}",
@@ -895,7 +913,16 @@ mod tests {
             strategy: CompressionStrategy::TopN,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_top_n(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
+        let plan = p.plan_top_n(
+            &analysis,
+            &items,
+            plan_in,
+            "",
+            None,
+            10,
+            None,
+            &BTreeSet::new(),
+        );
         // Falling through to smart_sample produces a plan without sort_field set.
         assert!(plan.sort_field.is_none());
     }
@@ -914,7 +941,16 @@ mod tests {
             strategy: CompressionStrategy::TopN,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_top_n(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
+        let plan = p.plan_top_n(
+            &analysis,
+            &items,
+            plan_in,
+            "",
+            None,
+            10,
+            None,
+            &BTreeSet::new(),
+        );
         // Top scores are at indices 0..7 (highest score = first item).
         assert!(
             plan.keep_indices.contains(&0),
@@ -942,7 +978,16 @@ mod tests {
             strategy: CompressionStrategy::ClusterSample,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_cluster_sample(&analysis, &items, plan_in, "", None, 10, None, &BTreeSet::new());
+        let plan = p.plan_cluster_sample(
+            &analysis,
+            &items,
+            plan_in,
+            "",
+            None,
+            10,
+            None,
+            &BTreeSet::new(),
+        );
         // High-cardinality field "msg" (unique_ratio = 1.0) is the
         // cluster field.
         assert_eq!(plan.cluster_field.as_deref(), Some("msg"));
@@ -967,7 +1012,16 @@ mod tests {
             strategy: CompressionStrategy::TimeSeries,
             ..CompressionPlan::default()
         };
-        let plan = p.plan_time_series(&analysis, &items, plan_in, "", None, 30, None, &BTreeSet::new());
+        let plan = p.plan_time_series(
+            &analysis,
+            &items,
+            plan_in,
+            "",
+            None,
+            30,
+            None,
+            &BTreeSet::new(),
+        );
         // Whatever change points the analyzer finds, the window ±2
         // around them should appear in keep_indices.
         assert!(!plan.keep_indices.is_empty());

@@ -1112,7 +1112,9 @@ mod tests {
             let mut obj = serde_json::Map::new();
             for (j, (name, raw)) in cols.iter().zip(line.split(',')).enumerate() {
                 let v = if raw == "=" {
-                    carry[j].clone().expect("ditto never appears before a value")
+                    carry[j]
+                        .clone()
+                        .expect("ditto never appears before a value")
                 } else {
                     let v = serde_json::from_str::<Value>(raw)
                         .unwrap_or_else(|_| Value::String(raw.to_string()));
@@ -1249,9 +1251,17 @@ mod tests {
         assert!(lines[0].contains("date:string~"), "got decl: {}", lines[0]);
         // First row carries the verbatim timestamp; later rows carry
         // second deltas (180s apart, same tz → no spelling).
-        assert!(lines[1].starts_with("2026-06-11T21:00:05+02:00,"), "got: {}", lines[1]);
+        assert!(
+            lines[1].starts_with("2026-06-11T21:00:05+02:00,"),
+            "got: {}",
+            lines[1]
+        );
         assert!(lines[2].starts_with("+180,"), "got: {}", lines[2]);
-        assert!(lines[3].starts_with("+180,") || lines[3].starts_with("=,"), "got: {}", lines[3]);
+        assert!(
+            lines[3].starts_with("+180,") || lines[3].starts_with("=,"),
+            "got: {}",
+            lines[3]
+        );
     }
 
     #[test]
@@ -1344,7 +1354,10 @@ mod tests {
             affix_line.contains("crates/core/src/mod_"),
             "shared prefix declared once: {affix_line}"
         );
-        assert!(affix_line.ends_with(".rs"), "shared suffix declared: {affix_line}");
+        assert!(
+            affix_line.ends_with(".rs"),
+            "shared suffix declared: {affix_line}"
+        );
         // The long shared root appears exactly once in the whole output.
         assert_eq!(
             out.matches("crates/core/src/mod_").count(),
@@ -1608,7 +1621,10 @@ mod tests {
             .collect();
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
-        assert!(!out.contains("__dict:"), "1-char values must not dict: {out}");
+        assert!(
+            !out.contains("__dict:"),
+            "1-char values must not dict: {out}"
+        );
     }
 
     #[test]
@@ -1634,7 +1650,10 @@ mod tests {
         let c = compact(&items, &cfg());
         let out = JsonFormatter::new().format(&c);
         assert!(!out.contains("__dict:"), "got: {out}");
-        assert!(out.matches("information").count() >= 5, "verbatim values: {out}");
+        assert!(
+            out.matches("information").count() >= 5,
+            "verbatim values: {out}"
+        );
     }
 
     #[test]

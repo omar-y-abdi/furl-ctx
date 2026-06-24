@@ -65,12 +65,7 @@ pub(crate) fn marker_for_diff(orig_lines: usize, comp_lines: usize, hash: &str) 
 /// prepends `\n` at the call site). `[{orig} {unit} compressed to
 /// {comp}. Retrieve more: hash={hash}]` where `unit` is `lines` (log) or
 /// `matches` (search).
-pub(crate) fn marker_for_retrieve_more(
-    orig: usize,
-    comp: usize,
-    hash: &str,
-    unit: &str,
-) -> String {
+pub(crate) fn marker_for_retrieve_more(orig: usize, comp: usize, hash: &str, unit: &str) -> String {
     format!("[{orig} {unit} compressed to {comp}. Retrieve more: hash={hash}]")
 }
 

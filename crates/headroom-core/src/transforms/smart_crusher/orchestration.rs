@@ -383,8 +383,10 @@ fn rarity_signal_is_informative(flagged_count: usize, n: usize) -> bool {
 fn field_value_singletons(items: &[Value], exclude: &BTreeSet<String>) -> Vec<usize> {
     // Per-field value frequency (string-rendered, like the analyzer's
     // uniqueness computation). One pass to count, one pass to flag.
-    let mut field_value_counts: std::collections::HashMap<&str, std::collections::HashMap<String, usize>> =
-        std::collections::HashMap::new();
+    let mut field_value_counts: std::collections::HashMap<
+        &str,
+        std::collections::HashMap<String, usize>,
+    > = std::collections::HashMap::new();
     for item in items {
         if let Some(obj) = item.as_object() {
             for (k, v) in obj {
@@ -437,12 +439,17 @@ fn value_signature(v: &Value) -> String {
 /// Rank `candidates` by descending NOVELTY: rarity of the row's
 /// stable-hash family across the whole array (a singleton family is
 /// maximally novel), with ascending index as a deterministic tie-break.
-fn rank_by_novelty(candidates: &[usize], items: &[Value], exclude: &BTreeSet<String>) -> Vec<usize> {
+fn rank_by_novelty(
+    candidates: &[usize],
+    items: &[Value],
+    exclude: &BTreeSet<String>,
+) -> Vec<usize> {
     // Family sizes over the whole array (rarity signal). Hashes are
     // remembered per index so the sort below never re-serializes — the
     // comparator runs O(n log n) times and an MD5-over-JSON per
     // comparison would dominate the fill cost.
-    let mut family_size: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut family_size: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let hashes: Vec<String> = items
         .iter()
         .enumerate()
@@ -704,7 +711,15 @@ mod tests {
     fn prioritize_under_budget_passthrough_after_dedup() {
         let items: Vec<Value> = (0..5).map(|i| json!({"id": i})).collect();
         let kept = idx_set(&[0, 1, 2]);
-        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            10,
+            &no_exclude(),
+            &BTreeSet::new(),
+        ));
         // 3 items < max 10 → fill kicks in; we get 5 (all items).
         assert_eq!(result.len(), 5);
     }
@@ -717,7 +732,15 @@ mod tests {
             json!({"name": "bob"}),
         ];
         let kept = idx_set(&[0, 1, 2]);
-        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            10,
+            &no_exclude(),
+            &BTreeSet::new(),
+        ));
         // Dedup collapses 0+1 to 0; fill stays put because n=3 already covered.
         assert_eq!(result, idx_set(&[0, 2]));
     }
@@ -730,7 +753,15 @@ mod tests {
             .collect();
         items.push(json!({"id": 30, "msg": "FATAL: out of memory"}));
         let kept: BTreeSet<usize> = (0..items.len()).collect();
-        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            10,
+            &no_exclude(),
+            &BTreeSet::new(),
+        ));
         assert!(
             result.contains(&30),
             "error item must survive prioritization"
@@ -742,7 +773,15 @@ mod tests {
         // No errors / outliers / anomalies → first 3 + last 2 anchors fill.
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i, "v": i})).collect();
         let kept: BTreeSet<usize> = (5..15).collect();
-        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            10,
+            &no_exclude(),
+            &BTreeSet::new(),
+        ));
         // With no critical items and budget 10, dedup is a no-op (all
         // distinct) and fill keeps us at <= 10. We should see at least
         // some of items 0..3 OR 28..30 covered through fill.
@@ -762,7 +801,10 @@ mod tests {
         // Every row has a unique `i`, so all are singletons under that
         // field — the helper flags a row if ANY field value is unique.
         // The point this test pins: the PANIC row is included.
-        assert!(singletons.contains(&9), "unique-status needle must be flagged");
+        assert!(
+            singletons.contains(&9),
+            "unique-status needle must be flagged"
+        );
     }
 
     #[test]
@@ -798,7 +840,15 @@ mod tests {
             .map(|i| json!({"msg": format!("unique subject number {} entirely", i)}))
             .collect();
         let kept: BTreeSet<usize> = (0..90).collect();
-        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 15, &no_exclude(), &BTreeSet::new()));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            15,
+            &no_exclude(),
+            &BTreeSet::new(),
+        ));
         // No errors/outliers/anomalies fire on this shape; without the
         // degenerate pinning the result is anchors + novelty fill, capped
         // at the budget.
@@ -818,7 +868,15 @@ mod tests {
             .collect();
         items.push(json!({"kind": "routine", "status": "PANIC"}));
         let kept: BTreeSet<usize> = (0..30).collect();
-        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 5, &no_exclude(), &BTreeSet::new()));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            5,
+            &no_exclude(),
+            &BTreeSet::new(),
+        ));
         assert!(
             result.contains(&29),
             "minority singleton needle must stay pinned; got {:?}",
@@ -839,8 +897,15 @@ mod tests {
             .collect();
         let kept: BTreeSet<usize> = (0..40).collect();
         let pinned: BTreeSet<usize> = [23usize].into_iter().collect();
-        let result =
-            prioritize_indices(test_params(&cfg(), &kept, &items, None, 5, &no_exclude(), &pinned));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            5,
+            &no_exclude(),
+            &pinned,
+        ));
         assert!(
             result.contains(&23),
             "query-pinned row must survive the over-budget drop; got {:?}",
@@ -887,7 +952,15 @@ mod tests {
         items[15] = json!({"kind": "routine", "payload": "UNIQUE-NEEDLE-XYZ"});
         // Force the over-budget path: keep everything, tiny budget.
         let kept: BTreeSet<usize> = (0..30).collect();
-        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 5, &no_exclude(), &BTreeSet::new()));
+        let result = prioritize_indices(test_params(
+            &cfg(),
+            &kept,
+            &items,
+            None,
+            5,
+            &no_exclude(),
+            &BTreeSet::new(),
+        ));
         assert!(
             result.contains(&15),
             "novelty fill must rescue the unique mid-array needle; got {:?}",

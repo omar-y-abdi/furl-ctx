@@ -287,9 +287,9 @@ impl Compaction {
         match self {
             Compaction::OpaqueRef { .. } => true,
             Compaction::Table { rows, .. } => rows.iter().any(row_has_opaque),
-            Compaction::Buckets { buckets, .. } => buckets
-                .iter()
-                .any(|b| b.rows.iter().any(row_has_opaque)),
+            Compaction::Buckets { buckets, .. } => {
+                buckets.iter().any(|b| b.rows.iter().any(row_has_opaque))
+            }
             Compaction::Untouched(_) => false,
         }
     }
