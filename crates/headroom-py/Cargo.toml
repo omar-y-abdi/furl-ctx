@@ -4,7 +4,6 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
 description = "PyO3 bindings exposing headroom-core to Python as headroom._core."
 # Issue #355: build.rs compiles a glibc-2.38-compat shim
 # (glibc_compat.c) on Linux/glibc only. Without `build = "build.rs"`
