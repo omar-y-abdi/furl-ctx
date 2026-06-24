@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from headroom.transforms.search_compressor import (
-    FileMatches,
     SearchCompressionResult,
     SearchCompressor,
     SearchCompressorConfig,
@@ -13,7 +12,7 @@ from headroom.transforms.search_compressor import (
 )
 
 
-def test_parse_score_select_and_format_search_results(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parse_search_results_groups_by_file() -> None:
     compressor = SearchCompressor(
         SearchCompressorConfig(
             max_matches_per_file=3,
@@ -38,35 +37,6 @@ def test_parse_score_select_and_format_search_results(monkeypatch: pytest.Monkey
     )
     assert parsed["src/auth.py"].last.line_number == 12
 
-    compressor._score_matches(parsed, "find auth error")
-    assert parsed["src/auth.py"].matches[0].score == 1.0
-    assert parsed["src/db.py"].matches[0].score > 0
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "headroom.transforms.adaptive_sizer",
-        SimpleNamespace(compute_optimal_k=lambda items, **kwargs: 4),
-    )
-    selected = compressor._select_matches(parsed, bias=1.2)
-    assert list(selected) == ["src/auth.py", "src/db.py"]
-    assert [m.line_number for m in selected["src/auth.py"].matches] == [10, 11, 12]
-
-    formatted, summaries = compressor._format_output(
-        selected,
-        {
-            **parsed,
-            "src/db.py": FileMatches(
-                file="src/db.py",
-                matches=[
-                    SearchMatch(file="src/db.py", line_number=2, content="warning token expired"),
-                    SearchMatch(file="src/db.py", line_number=3, content="another line"),
-                ],
-            ),
-        },
-    )
-    assert "src/auth.py:10:ERROR auth failed" in formatted
-    assert summaries["src/db.py"] == "[... and 1 more matches in src/db.py]"
-
 
 def test_search_compressor_compress_paths_and_ccr() -> None:
     """Phase 3e.2: `compress()` is now a single Rust call, so this test
@@ -81,7 +51,7 @@ def test_search_compressor_compress_paths_and_ccr() -> None:
     assert no_match.original_match_count == 0
     assert no_match.compressed == "plain text only"
 
-    # Build a large input so compute_optimal_k's min_k=5 floor doesn't
+    # Build a large input so the Rust adaptive sizer's min_k=5 floor doesn't
     # absorb everything and compression actually fires (must drop the
     # ratio below `min_compression_ratio_for_ccr=0.8`).
     lines = [f"src/auth.py:{i}:auth event {i}" for i in range(1, 51)]

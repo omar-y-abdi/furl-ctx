@@ -11,11 +11,10 @@ is now a thin shim that:
 2. Routes `LogCompressor.compress()` entirely through the Rust
    implementation, picking up the bug fixes (chained-exception trace
    survival, conservative warning dedupe, loud CCR failures).
-3. Implements legacy internal helpers (`_detect_format`, `_parse_lines`,
-   `_score_line`, `_select_lines`, `_select_with_first_last`,
-   `_dedupe_similar`, `_format_output`) on top of the Rust building
-   blocks where a Rust delegation makes sense; otherwise keeps Python
-   logic that mirrors Rust scoring.
+3. Implements legacy internal helpers (`_detect_format`, `_score_line`,
+   `_select_with_first_last`, `_dedupe_similar`, `_format_output`) on top
+   of the Rust building blocks where a Rust delegation makes sense;
+   otherwise keeps Python logic that mirrors Rust scoring.
 
 # Bug fixes the Rust port carries (and this shim therefore inherits)
 
@@ -249,82 +248,6 @@ class LogCompressor:
 
         return _format_from_str(detect_log_format(list(lines)))
 
-    def _parse_lines(self, lines: list[str]) -> list[LogLine]:
-        """Parse + categorize lines, mirroring Rust's classification.
-
-        Stays Python so the legacy direct-call test surface keeps
-        working without rebuilding through Rust on every test. Rust
-        unit tests pin Rust's behavior; this implementation must
-        mirror Rust's level/stack-trace/summary classification rules.
-        """
-        import re
-
-        # Mirror of Rust's level classifier: aho-corasick with
-        # word-boundary post-filter. Python's `re` is fast enough for
-        # the test path; the Rust path uses aho-corasick. Both share
-        # the same keyword set.
-        level_patterns = [
-            (
-                LogLevel.ERROR,
-                re.compile(r"\b(?:ERROR|error|Error|FATAL|fatal|Fatal|CRITICAL|critical)\b"),
-            ),
-            (LogLevel.FAIL, re.compile(r"\b(?:FAIL|FAILED|fail|failed|Fail|Failed)\b")),
-            (LogLevel.WARN, re.compile(r"\b(?:WARN|WARNING|warn|warning|Warn|Warning)\b")),
-            (LogLevel.INFO, re.compile(r"\b(?:INFO|info|Info)\b")),
-            (LogLevel.DEBUG, re.compile(r"\b(?:DEBUG|debug|Debug)\b")),
-            (LogLevel.TRACE, re.compile(r"\b(?:TRACE|trace|Trace)\b")),
-        ]
-        stack_trace_patterns = [
-            re.compile(r"^\s*Traceback \(most recent call last\)"),
-            re.compile(r'^\s*File ".+", line \d+'),
-            re.compile(r"^\s*at .+\(.+:\d+:\d+\)"),
-            re.compile(r"^\s+at [\w.$]+\("),
-            re.compile(r"^\s*--> .+:\d+:\d+"),
-            re.compile(r"^\s*\d+:\s+0x[0-9a-f]+"),
-        ]
-        summary_patterns = [
-            re.compile(r"^={3,}"),
-            re.compile(r"^-{3,}"),
-            re.compile(r"^\d+ (passed|failed|skipped|error|warning)"),
-            re.compile(r"^(?:Tests?|Suites?):?\s+\d+"),
-            re.compile(r"^(?:TOTAL|Total|Summary)"),
-            re.compile(r"^(?:Build|Compile|Test).*(?:succeeded|failed|complete)"),
-        ]
-
-        log_lines: list[LogLine] = []
-        in_stack_trace = False
-        stack_trace_lines = 0
-
-        for i, line in enumerate(lines):
-            log_line = LogLine(line_number=i, content=line)
-
-            for level, pattern in level_patterns:
-                if pattern.search(line):
-                    log_line.level = level
-                    break
-
-            for pattern in stack_trace_patterns:
-                if pattern.search(line):
-                    in_stack_trace = True
-                    stack_trace_lines = 0
-                    break
-
-            if in_stack_trace:
-                log_line.is_stack_trace = True
-                stack_trace_lines += 1
-                if stack_trace_lines > self.config.stack_trace_max_lines or not line.strip():
-                    in_stack_trace = False
-
-            for pattern in summary_patterns:
-                if pattern.search(line):
-                    log_line.is_summary = True
-                    break
-
-            log_line.score = self._score_line(log_line)
-            log_lines.append(log_line)
-
-        return log_lines
-
     def _score_line(self, log_line: LogLine) -> float:
         """Per-line importance scoring."""
         level_scores = {
@@ -342,63 +265,6 @@ class LogCompressor:
         if log_line.is_summary:
             score += 0.4
         return min(1.0, score)
-
-    def _select_lines(self, log_lines: list[LogLine], bias: float = 1.0) -> list[LogLine]:
-        """Select important lines using the same algorithm Rust uses."""
-        from headroom.transforms.adaptive_sizer import compute_optimal_k
-
-        all_strings = [line.content for line in log_lines]
-        adaptive_max = compute_optimal_k(
-            all_strings, bias=bias, min_k=10, max_k=self.config.max_total_lines
-        )
-
-        errors: list[LogLine] = []
-        fails: list[LogLine] = []
-        warnings: list[LogLine] = []
-        stack_traces: list[list[LogLine]] = []
-        summaries: list[LogLine] = []
-        current_stack: list[LogLine] = []
-
-        for log_line in log_lines:
-            if log_line.level == LogLevel.ERROR:
-                errors.append(log_line)
-            elif log_line.level == LogLevel.FAIL:
-                fails.append(log_line)
-            elif log_line.level == LogLevel.WARN:
-                warnings.append(log_line)
-            if log_line.is_stack_trace:
-                current_stack.append(log_line)
-            elif current_stack:
-                stack_traces.append(current_stack)
-                current_stack = []
-            if log_line.is_summary:
-                summaries.append(log_line)
-        if current_stack:
-            stack_traces.append(current_stack)
-
-        selected: list[LogLine] = []
-        if errors:
-            selected.extend(self._select_with_first_last(errors, self.config.max_errors))
-        if fails:
-            selected.extend(self._select_with_first_last(fails, self.config.max_errors))
-        if warnings:
-            if self.config.dedupe_warnings:
-                warnings = self._dedupe_similar(warnings)
-            selected.extend(warnings[: self.config.max_warnings])
-        for stack in stack_traces[: self.config.max_stack_traces]:
-            selected.extend(stack[: self.config.stack_trace_max_lines])
-        if self.config.keep_summary_lines:
-            selected.extend(summaries)
-
-        selected = self._add_context(log_lines, selected)
-        selected = sorted(set(selected), key=lambda x: x.line_number)
-
-        if len(selected) > adaptive_max:
-            selected = sorted(selected, key=lambda x: x.score, reverse=True)
-            selected = selected[:adaptive_max]
-            selected = sorted(selected, key=lambda x: x.line_number)
-
-        return selected
 
     def _select_with_first_last(self, lines: list[LogLine], max_count: int) -> list[LogLine]:
         if len(lines) <= max_count:
@@ -451,22 +317,6 @@ class LogCompressor:
                 seen.add(normalized)
                 deduped.append(line)
         return deduped
-
-    def _add_context(self, all_lines: list[LogLine], selected: list[LogLine]) -> list[LogLine]:
-        selected_indices = {line.line_number for line in selected}
-        context_indices: set[int] = set()
-        for idx in selected_indices:
-            for i in range(max(0, idx - self.config.error_context_lines), idx):
-                context_indices.add(i)
-            for i in range(
-                idx + 1,
-                min(len(all_lines), idx + self.config.error_context_lines + 1),
-            ):
-                context_indices.add(i)
-        for idx in context_indices:
-            if idx not in selected_indices and idx < len(all_lines):
-                selected.append(all_lines[idx])
-        return selected
 
     def _format_output(
         self, selected: list[LogLine], all_lines: list[LogLine]
