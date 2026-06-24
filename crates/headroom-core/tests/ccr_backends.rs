@@ -8,7 +8,7 @@ use std::time::Duration;
 use headroom_core::ccr::backends::{
     from_config, CcrBackendConfig, InMemoryCcrStore, SqliteCcrStore,
 };
-use headroom_core::ccr::{compute_key, CcrStore};
+use headroom_core::ccr::CcrStore;
 
 #[test]
 fn sqlite_round_trip() {
@@ -16,7 +16,10 @@ fn sqlite_round_trip() {
     let path = dir.path().join("ccr.sqlite");
     let store = SqliteCcrStore::open(&path, 300).expect("open sqlite store");
     let payload = r#"[{"id":1},{"id":2},{"id":3}]"#;
-    let hash = compute_key(payload.as_bytes());
+    // These backend tests only need *a* stable key to put/get against —
+    // the CCR key algorithm is a producer-side concern (see
+    // `ccr::markers`), not what the storage layer is verifying here.
+    let hash = "round-trip-key".to_string();
     store.put(&hash, payload);
     let fetched = store.get(&hash);
     assert_eq!(fetched.as_deref(), Some(payload));
@@ -31,7 +34,7 @@ fn sqlite_ttl_purge() {
     let path = dir.path().join("ccr.sqlite");
     // 0-second TTL forces every entry to be expired the moment we read it.
     let store = SqliteCcrStore::open(&path, 0).expect("open sqlite store");
-    let hash = compute_key(b"to be purged");
+    let hash = "purge-key".to_string();
     store.put(&hash, "to be purged");
     // Sleep long enough for `created_at + ttl_seconds <= now()` (1s clock
     // resolution on unix-seconds).
@@ -48,7 +51,7 @@ fn sqlite_persists_across_proxy_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ccr.sqlite");
     let payload = "long-lived original payload";
-    let hash = compute_key(payload.as_bytes());
+    let hash = "restart-survival-key".to_string();
 
     {
         let store = SqliteCcrStore::open(&path, 300).expect("open sqlite store (turn 1)");
@@ -75,7 +78,7 @@ fn from_config_sqlite_roundtrip() {
         ttl_seconds: 300,
     };
     let store = from_config(&cfg).expect("from_config(sqlite)");
-    let hash = compute_key(b"hello");
+    let hash = "from-config-sqlite-key".to_string();
     store.put(&hash, "hello");
     assert_eq!(store.get(&hash).as_deref(), Some("hello"));
 }
@@ -84,7 +87,7 @@ fn from_config_sqlite_roundtrip() {
 fn from_config_in_memory_roundtrip() {
     let cfg = CcrBackendConfig::in_memory_default();
     let store = from_config(&cfg).expect("from_config(in_memory)");
-    let hash = compute_key(b"bye");
+    let hash = "from-config-in-memory-key".to_string();
     store.put(&hash, "bye");
     assert_eq!(store.get(&hash).as_deref(), Some("bye"));
 }
@@ -111,12 +114,12 @@ fn from_config_redis_unsupported_when_feature_off() {
 
 #[test]
 fn backend_swap_byte_equal_keys() {
-    // Stage data through one backend, swap to another with the same
-    // payload, and assert the keys are byte-equal. This is the
+    // Stage data through one backend, mirror it into another under the
+    // SAME key, and assert both recover byte-equal values. This is the
     // load-bearing invariant: operators may migrate between backends
     // (e.g. SQLite → Redis when scaling out) and the in-flight CCR
-    // markers must keep working — the marker bytes are the hash, and
-    // the hash function is fixed in `ccr::compute_key`.
+    // markers must keep working — the marker bytes ARE the key, so a key
+    // minted once must round-trip identically through any backend.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ccr.sqlite");
 
@@ -127,22 +130,21 @@ fn backend_swap_byte_equal_keys() {
         "alpha",
         r#"[{"id":1}]"#,
         "the quick brown fox jumps over the lazy dog",
-        "<<<<>>>>", // marker-adjacent characters — sanity check on the BLAKE3 trim
+        "<<<<>>>>", // marker-adjacent characters — sanity check on key handling
     ];
 
-    for payload in &payloads {
-        let key_a = compute_key(payload.as_bytes());
-        let key_b = compute_key(payload.as_bytes());
-        // Step 1: same payload yields byte-equal keys.
-        assert_eq!(key_a, key_b, "compute_key must be deterministic");
+    for (i, payload) in payloads.iter().enumerate() {
+        // Any stable key works here — the storage layer doesn't mint
+        // keys (that's the producer's job), it only round-trips them.
+        let key = format!("swap-key-{i}");
 
-        // Step 2: store in sqlite, mirror to in-memory under the same
-        // key — both backends recover byte-equal values.
-        sqlite.put(&key_a, payload);
-        in_memory.put(&key_b, payload);
+        // Store in sqlite, mirror to in-memory under the same key — both
+        // backends must recover byte-equal values.
+        sqlite.put(&key, payload);
+        in_memory.put(&key, payload);
 
-        let v_sqlite = sqlite.get(&key_a);
-        let v_mem = in_memory.get(&key_b);
+        let v_sqlite = sqlite.get(&key);
+        let v_mem = in_memory.get(&key);
         assert_eq!(v_sqlite.as_deref(), Some(*payload));
         assert_eq!(v_mem.as_deref(), Some(*payload));
         assert_eq!(
@@ -174,7 +176,7 @@ mod redis_tests {
         };
         let store = RedisCcrStore::open(&url, 300).expect("open redis store");
         let payload = "redis payload";
-        let hash = compute_key(payload.as_bytes());
+        let hash = "redis-round-trip-key".to_string();
         store.put(&hash, payload);
         assert_eq!(store.get(&hash).as_deref(), Some(payload));
     }
@@ -192,7 +194,7 @@ mod redis_tests {
         };
         let store = from_config(&cfg).expect("from_config(redis)");
         let payload = "via factory";
-        let hash = compute_key(payload.as_bytes());
+        let hash = "redis-from-config-key".to_string();
         store.put(&hash, payload);
         assert_eq!(store.get(&hash).as_deref(), Some(payload));
     }

@@ -51,7 +51,7 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use md5::{Digest, Md5};
 use regex::Regex;
 
-use crate::ccr::CcrStore;
+use crate::ccr::{marker_for_retrieve_more, CcrStore};
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -657,11 +657,11 @@ impl LogCompressor {
             } else if let Some(store) = store {
                 let key = md5_hex_24(content);
                 store.put(&key, content);
+                // The leading `\n` stays at the call site so the marker
+                // grammar in `ccr::markers` is newline-free and composable.
                 let marker = format!(
-                    "\n[{} lines compressed to {}. Retrieve more: hash={}]",
-                    original_line_count,
-                    selected.len(),
-                    key
+                    "\n{}",
+                    marker_for_retrieve_more(original_line_count, selected.len(), &key, "lines")
                 );
                 compressed.push_str(&marker);
                 cache_key = Some(key);

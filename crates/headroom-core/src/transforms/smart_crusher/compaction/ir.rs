@@ -36,6 +36,21 @@ pub enum OpaqueKind {
     Other(String),
 }
 
+impl OpaqueKind {
+    /// The KIND token written into the `<<ccr:HASH,KIND,SIZE>>` marker.
+    /// Defined once here so every opaque producer (walker live
+    /// substitution + CSV/KV formatters) maps the enum to the same wire
+    /// string — no per-site `match` to drift out of sync.
+    pub fn wire_str(&self) -> &str {
+        match self {
+            OpaqueKind::Base64Blob => "base64",
+            OpaqueKind::LongString => "string",
+            OpaqueKind::HtmlChunk => "html",
+            OpaqueKind::Other(s) => s.as_str(),
+        }
+    }
+}
+
 /// Reversible per-column encoding, stamped by the compactor when (and
 /// only when) the encoded rendering is strictly smaller AND decodes
 /// back to the exact original values.

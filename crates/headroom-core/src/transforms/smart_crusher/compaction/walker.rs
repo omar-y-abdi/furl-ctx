@@ -37,7 +37,7 @@ use super::classifier::{classify_cell, CellClass};
 use super::compactor::{compact, CompactConfig};
 use super::formatter::{CsvSchemaFormatter, Formatter};
 use super::ir::OpaqueKind;
-use crate::ccr::CcrStore;
+use crate::ccr::{marker_for_opaque, CcrStore};
 
 use sha2::{Digest, Sha256};
 
@@ -184,24 +184,7 @@ pub fn emit_opaque_ccr_marker(
     if let Some(s) = store {
         s.put(&hash, payload);
     }
-    let kind_str = match kind {
-        OpaqueKind::Base64Blob => "base64",
-        OpaqueKind::LongString => "string",
-        OpaqueKind::HtmlChunk => "html",
-        OpaqueKind::Other(s) => s.as_str(),
-    };
-    format!("<<ccr:{},{},{}>>", hash, kind_str, humanize(payload.len()))
-}
-
-fn humanize(n: usize) -> String {
-    if n < 1024 {
-        return format!("{n}B");
-    }
-    let kb = n as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{kb:.1}KB");
-    }
-    format!("{:.1}MB", kb / 1024.0)
+    marker_for_opaque(&hash, kind.wire_str(), payload.len())
 }
 
 /// Convenience: walk and compact with default config + CSV-schema

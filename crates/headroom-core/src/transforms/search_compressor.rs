@@ -68,7 +68,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use md5::{Digest, Md5};
 
-use crate::ccr::CcrStore;
+use crate::ccr::{marker_for_retrieve_more, CcrStore};
 use crate::signals::{ImportanceContext, LineImportanceDetector};
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
@@ -298,9 +298,11 @@ impl SearchCompressor {
             } else if let Some(store) = store {
                 let key = md5_hex_24(content);
                 store.put(&key, content);
+                // The leading `\n` stays at the call site so the marker
+                // grammar in `ccr::markers` is newline-free and composable.
                 let marker = format!(
-                    "\n[{} matches compressed to {}. Retrieve more: hash={}]",
-                    original_count, compressed_count, key
+                    "\n{}",
+                    marker_for_retrieve_more(original_count, compressed_count, &key, "matches")
                 );
                 compressed.push_str(&marker);
                 cache_key = Some(key);

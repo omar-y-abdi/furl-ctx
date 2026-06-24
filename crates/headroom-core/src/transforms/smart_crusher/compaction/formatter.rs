@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 
 use super::encodings;
 use super::ir::{CellValue, ColumnEncoding, Compaction, OpaqueKind, Row, Schema};
+use crate::ccr::marker_for_opaque;
 
 /// Format a `Compaction` tree into bytes.
 pub trait Formatter: Send + Sync {
@@ -558,30 +559,7 @@ fn format_cell(c: &CellValue) -> String {
 }
 
 fn format_ccr_marker(hash: &str, byte_size: usize, kind: &OpaqueKind) -> String {
-    let kind_str = match kind {
-        OpaqueKind::Base64Blob => "base64",
-        OpaqueKind::LongString => "string",
-        OpaqueKind::HtmlChunk => "html",
-        OpaqueKind::Other(s) => s.as_str(),
-    };
-    format!(
-        "<<ccr:{},{},{}>>",
-        hash,
-        kind_str,
-        humanize_bytes(byte_size)
-    )
-}
-
-fn humanize_bytes(n: usize) -> String {
-    if n < 1024 {
-        return format!("{n}B");
-    }
-    let kb = n as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{kb:.1}KB");
-    }
-    let mb = kb / 1024.0;
-    format!("{mb:.1}MB")
+    marker_for_opaque(hash, kind.wire_str(), byte_size)
 }
 
 fn json_scalar_to_csv(v: &Value) -> String {

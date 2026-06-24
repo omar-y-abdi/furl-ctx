@@ -30,9 +30,14 @@
 //! [`CompressionStore`]: ../../../../headroom/cache/compression_store.py
 
 pub mod backends;
+mod markers;
 
 use std::time::Duration;
 
+pub(crate) use markers::{
+    marker_for_diff, marker_for_opaque, marker_for_retrieve_more, marker_for_row_index,
+    marker_for_rows_offloaded,
+};
 pub use backends::{from_config, CcrBackendConfig, CcrBackendInitError, InMemoryCcrStore};
 
 /// Pluggable CCR storage backend. `Send + Sync` so it can sit behind an
@@ -62,55 +67,9 @@ pub const DEFAULT_CAPACITY: usize = 1000;
 /// Default TTL — 5 minutes, matching Python.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 
-/// Compute the canonical CCR key for `payload`. BLAKE3 → first 24 hex
-/// chars (96 bits — collision-resistant for the bounded LRU population
-/// the engine holds). Centralized here so every call site (live-zone
-/// dispatcher, tests, future Python parity) hashes the same way.
-pub fn compute_key(payload: &[u8]) -> String {
-    let h = blake3::hash(payload);
-    let hex = h.to_hex();
-    // Stable 24-char prefix matches the Python tool-injection regex
-    // (`[a-f0-9]{24}`) — see `headroom/ccr/tool_injection.py:211`.
-    hex.as_str()[..24].to_string()
-}
-
-/// Standard `<<ccr:HASH>>` marker injected into compressed block content
-/// so the runtime can later look up the original bytes when the model
-/// calls `headroom_retrieve`. Format is intentionally fixed across
-/// all code-paths and tests.
-pub fn marker_for(hash: &str) -> String {
-    format!("<<ccr:{hash}>>")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compute_key_is_24_hex_chars() {
-        let k = compute_key(b"hello world");
-        assert_eq!(k.len(), 24);
-        assert!(k
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-    }
-
-    #[test]
-    fn compute_key_is_deterministic() {
-        let a = compute_key(b"the same payload");
-        let b = compute_key(b"the same payload");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn compute_key_diverges_for_different_payloads() {
-        let a = compute_key(b"alpha");
-        let b = compute_key(b"beta");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn marker_format_is_pinned() {
-        assert_eq!(marker_for("abc123"), "<<ccr:abc123>>");
-    }
-}
+// CCR marker construction lives in `markers.rs` — the single
+// construction point every Rust producer routes through. CCR *keys* are
+// computed at each producer's call site (the algorithm is per-producer
+// by design: BLAKE3 row hashes in the crusher, SHA-256 opaque prefixes
+// in the walker/formatter, MD5[:24] in the diff/log/search compressors).
+// Grammar and hashing are deliberately separate concerns.

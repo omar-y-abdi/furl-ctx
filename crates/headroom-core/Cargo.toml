@@ -99,14 +99,6 @@ rayon = "1"
 # stock binary needs no external file; production deployments override
 # by loading their own TOML at startup.
 toml = "0.8"
-# `blake3` powers `ccr::compute_key`. BLAKE3 is faster than SHA-256 on
-# every hot path the proxy hits (large diff/log/tool_result payloads)
-# and produces collision-resistant 24-char prefixes for the CCR
-# `<<ccr:HASH>>` marker. Pinning the algorithm + truncation length here
-# keeps Rust and Python in lockstep — Python parses the same 24-char
-# hex via `headroom/ccr/tool_injection.py` regex. Pure-Rust by default,
-# no system dep, no SIMD-feature-gated flag (the crate auto-detects).
-blake3 = "1"
 # `rusqlite` for the SQLite-backed CCR store (the production default).
 # `bundled` builds SQLite from source so deploys do not need a system
 # libsqlite3 — matters for Lambda / container builds where the host

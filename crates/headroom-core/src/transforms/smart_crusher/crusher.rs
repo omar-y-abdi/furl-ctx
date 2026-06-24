@@ -50,7 +50,7 @@ use super::crushers::{compute_k_split, crush_number_array, crush_object, crush_s
 use super::planning::SmartCrusherPlanner;
 use super::traits::{Constraint, CrushEvent, Observer};
 use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, CrushResult};
-use crate::ccr::CcrStore;
+use crate::ccr::{marker_for_row_index, marker_for_rows_offloaded, CcrStore};
 use crate::relevance::RelevanceScorer;
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 use crate::transforms::anchor_selector::AnchorSelector;
@@ -1209,7 +1209,7 @@ impl SmartCrusher {
             let index_key = format!("{hash}#rows");
             let index_payload = serde_json::to_string(&row_hashes).unwrap_or_default();
             store.put(&index_key, &index_payload);
-            row_index_marker = Some(format!("<<ccr:{index_key} {dropped_count}_chunks>>"));
+            row_index_marker = Some(marker_for_row_index(&hash, dropped_count));
         }
 
         // ── Unconditional whole-blob persist (1A) — written LAST ──
@@ -1236,7 +1236,7 @@ impl SmartCrusher {
         // the crusher. The crusher's job is to never drop a distinct
         // item without leaving a pointer to it; that pointer is now
         // emitted unconditionally on every drop.
-        let marker = format!("<<ccr:{hash} {dropped_count}_rows_offloaded>>");
+        let marker = marker_for_rows_offloaded(&hash, dropped_count);
 
         Some(DroppedPersist {
             hash,

@@ -42,7 +42,7 @@ use std::time::Instant;
 use md5::{Digest, Md5};
 use regex::Regex;
 
-use crate::ccr::CcrStore;
+use crate::ccr::{marker_for_diff, CcrStore};
 
 // ─── Score-weight constants ────────────────────────────────────────────────
 //
@@ -475,9 +475,10 @@ impl DiffCompressor {
         {
             let key = md5_hex_24(content);
             compressed_output.push('\n');
-            compressed_output.push_str(&format!(
-                "[{} lines compressed to {}. Retrieve full diff: hash={}]",
-                original_line_count, compressed_line_count, key
+            compressed_output.push_str(&marker_for_diff(
+                original_line_count,
+                compressed_line_count,
+                &key,
             ));
             // Persist the original under the same key. When `store` is
             // `Some`, the marker we just emitted resolves through it on
