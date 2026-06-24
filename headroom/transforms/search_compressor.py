@@ -12,9 +12,8 @@ is now a thin shim that:
    implementation, picking up the parser bug fixes and the
    `signals::LineImportanceDetector` trait consumer pattern.
 3. Implements legacy internals (`_parse_search_results`,
-   `_score_matches`, `_select_matches`, `_format_output`) on top of
-   the same Rust building blocks so the existing 49 unit tests keep
-   covering meaningful code paths.
+   `_format_output`) on top of the same Rust building blocks so the
+   existing unit tests keep covering meaningful code paths.
 
 # Bug fixes the Rust port carries (and this shim therefore inherits)
 
@@ -207,111 +206,6 @@ class SearchCompressor:
                 SearchMatch(file=file_path, line_number=int(line_no), content=body)
             )
         return out
-
-    def _score_matches(
-        self,
-        file_matches: dict[str, FileMatches],
-        context: str,
-    ) -> None:
-        """Score matches by relevance to context.
-
-        Stays Python so the legacy direct-call test surface keeps
-        working without rebuilding through Rust on every test. The
-        scoring constants must mirror Rust `SearchCompressor::score_matches`
-        — Rust unit tests pin Rust's behavior; the parity assertion at
-        the bottom of this module pins both sides agree.
-        """
-        from headroom.transforms.error_detection import PRIORITY_PATTERNS_SEARCH
-
-        context_lower = context.lower()
-        context_words = {w for w in context_lower.split() if len(w) > 2}
-
-        for fm in file_matches.values():
-            for match in fm.matches:
-                score = 0.0
-                content_lower = match.content.lower()
-
-                for word in context_words:
-                    if word in content_lower:
-                        score += 0.3
-
-                if self.config.boost_errors:
-                    for i, pattern in enumerate(PRIORITY_PATTERNS_SEARCH):
-                        if pattern.search(match.content):
-                            score += 0.5 - (i * 0.1)
-                            break  # only one priority boost per line, matches Rust
-
-                for keyword in self.config.context_keywords:
-                    if keyword.lower() in content_lower:
-                        score += 0.4
-
-                match.score = min(1.0, score)
-
-    def _select_matches(
-        self,
-        file_matches: dict[str, FileMatches],
-        bias: float = 1.0,
-    ) -> dict[str, FileMatches]:
-        """Select top matches per file and globally."""
-        from headroom.transforms.adaptive_sizer import compute_optimal_k
-
-        sorted_files = sorted(
-            file_matches.items(),
-            key=lambda x: sum(m.score for m in x[1].matches),
-            reverse=True,
-        )[: self.config.max_files]
-
-        all_match_strings = [
-            f"{file_path}:{m.line_number}:{m.content}"
-            for file_path, fm in sorted_files
-            for m in fm.matches
-        ]
-        adaptive_total = compute_optimal_k(
-            all_match_strings,
-            bias=bias,
-            min_k=5,
-            max_k=self.config.max_total_matches,
-        )
-
-        selected: dict[str, FileMatches] = {}
-        total_selected = 0
-        for file_path, fm in sorted_files:
-            if total_selected >= adaptive_total:
-                break
-
-            sorted_matches = sorted(fm.matches, key=lambda m: m.score, reverse=True)
-
-            file_selected: list[SearchMatch] = []
-            remaining_slots = min(
-                self.config.max_matches_per_file,
-                adaptive_total - total_selected,
-            )
-
-            if self.config.always_keep_first and fm.first:
-                file_selected.append(fm.first)
-                remaining_slots -= 1
-
-            if (
-                self.config.always_keep_last
-                and fm.last
-                and fm.last is not fm.first
-                and remaining_slots > 0
-            ):
-                file_selected.append(fm.last)
-                remaining_slots -= 1
-
-            for match in sorted_matches:
-                if remaining_slots <= 0:
-                    break
-                if match not in file_selected:
-                    file_selected.append(match)
-                    remaining_slots -= 1
-
-            file_selected.sort(key=lambda m: m.line_number)
-            selected[file_path] = FileMatches(file=file_path, matches=file_selected)
-            total_selected += len(file_selected)
-
-        return selected
 
     def _format_output(
         self,

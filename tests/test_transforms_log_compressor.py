@@ -35,12 +35,6 @@ def test_detect_parse_and_score_log_lines() -> None:
     assert compressor._detect_format(["make: *** fail", "gcc -o app app.c"]) is LogFormat.MAKE
     assert compressor._detect_format(["unclassified line"]) is LogFormat.GENERIC
 
-    parsed = compressor._parse_lines(pytest_lines)
-    assert parsed[0].is_summary is True
-    assert parsed[2].level is LogLevel.ERROR
-    assert parsed[3].is_stack_trace is True
-    assert parsed[4].is_stack_trace is True
-    assert parsed[6].is_summary is True
     assert compressor._score_line(LogLine(1, "warn", level=LogLevel.WARN)) == 0.5
     assert (
         compressor._score_line(
@@ -50,7 +44,7 @@ def test_detect_parse_and_score_log_lines() -> None:
     )
 
 
-def test_select_dedupe_add_context_and_format_output(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_select_with_first_last_and_dedupe() -> None:
     compressor = LogCompressor(
         LogCompressorConfig(
             max_errors=2,
@@ -60,26 +54,12 @@ def test_select_dedupe_add_context_and_format_output(monkeypatch: pytest.MonkeyP
             stack_trace_max_lines=2,
         )
     )
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "headroom.transforms.adaptive_sizer",
-        SimpleNamespace(compute_optimal_k=lambda items, **kwargs: 6),
-    )
-    log_lines = [
-        LogLine(0, "info line", level=LogLevel.INFO, score=0.1),
-        LogLine(1, "ERROR first", level=LogLevel.ERROR, score=1.0),
-        LogLine(2, "context after first", level=LogLevel.UNKNOWN, score=0.1),
+    warnings = [
         LogLine(3, "WARNING /tmp/a/123 issue", level=LogLevel.WARN, score=0.5),
         LogLine(4, "WARNING /tmp/b/999 issue", level=LogLevel.WARN, score=0.5),
-        LogLine(5, "FAIL final", level=LogLevel.FAIL, score=1.0),
-        LogLine(6, "Traceback (most recent call last)", is_stack_trace=True, score=0.4),
-        LogLine(7, '  File "app.py", line 2', is_stack_trace=True, score=0.4),
-        LogLine(8, "1 failed, 1 warning", is_summary=True, score=0.5),
     ]
-    selected = compressor._select_lines(log_lines)
-    assert [line.line_number for line in selected] == [1, 3, 4, 5, 6, 8]
 
-    assert compressor._select_with_first_last(log_lines[:2], max_count=5) == log_lines[:2]
+    assert compressor._select_with_first_last(warnings[:2], max_count=5) == warnings[:2]
     many_errors = [
         LogLine(10, "first", level=LogLevel.ERROR, score=0.1),
         LogLine(11, "mid", level=LogLevel.ERROR, score=0.9),
@@ -93,7 +73,7 @@ def test_select_dedupe_add_context_and_format_output(monkeypatch: pytest.MonkeyP
     # paths/numbers and no `:`, so they DON'T collapse anymore — Python's
     # pre-3e5 aggressive normalization treated them as duplicates, masking
     # distinct error categories.
-    distinct = compressor._dedupe_similar(log_lines[3:5])
+    distinct = compressor._dedupe_similar(warnings)
     assert len(distinct) == 2
     # Same dedupe IS triggered when the prefix matches (lines have a colon).
     similar = compressor._dedupe_similar(
@@ -103,17 +83,6 @@ def test_select_dedupe_add_context_and_format_output(monkeypatch: pytest.MonkeyP
         ]
     )
     assert len(similar) == 1
-
-    output, stats = compressor._format_output(selected, log_lines)
-    assert stats == {
-        "errors": 1,
-        "fails": 1,
-        "warnings": 2,
-        "info": 1,
-        "total": 9,
-        "selected": 6,
-    }
-    assert output.endswith("[3 lines omitted: 1 ERROR, 1 FAIL, 2 WARN, 1 INFO]")
 
 
 def test_log_compressor_compress_and_ccr_paths() -> None:
@@ -127,8 +96,8 @@ def test_log_compressor_compress_and_ccr_paths() -> None:
     assert short.compression_ratio == 1.0
 
     # Real npm log to exercise format detection + CCR end-to-end. Build
-    # a long enough corpus so compute_optimal_k drops below the
-    # min_compression_ratio_for_ccr=0.5 threshold.
+    # a long enough corpus so the Rust adaptive sizer drops the
+    # compression ratio below the min_compression_ratio_for_ccr=0.5 threshold.
     npm_lines = ["npm WARN deprecated x"] * 30 + ["npm ERR! something broke"] * 5
     npm_content = "\n".join(npm_lines)
     result = compressor.compress(npm_content)

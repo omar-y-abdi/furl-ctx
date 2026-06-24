@@ -168,101 +168,6 @@ a.py:6:line 6
         assert fm.last is None
 
 
-class TestMatchScoring:
-    """Tests for match relevance scoring."""
-
-    def test_score_context_word_overlap(self):
-        """Matches containing context words get higher scores."""
-        content = """src/main.py:10:def process_data():
-src/main.py:20:def calculate_result():
-src/main.py:30:def handle_error():
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="error handling")
-
-        matches = file_matches["src/main.py"].matches
-        error_match = next(m for m in matches if "error" in m.content)
-        data_match = next(m for m in matches if "data" in m.content)
-
-        # Error match should score higher with "error" context
-        assert error_match.score > data_match.score
-
-    def test_score_error_patterns_boosted(self):
-        """Error/exception patterns get boosted scores."""
-        content = """src/main.py:10:def normal_function():
-src/main.py:20:raise ValueError("error occurred")
-src/main.py:30:# TODO: fix this
-"""
-        compressor = SearchCompressor(config=SearchCompressorConfig(boost_errors=True))
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="")
-
-        matches = file_matches["src/main.py"].matches
-        error_match = next(m for m in matches if "error" in m.content.lower())
-        normal_match = next(m for m in matches if "normal" in m.content)
-
-        assert error_match.score > normal_match.score
-
-    def test_score_warning_patterns(self):
-        """Warning patterns get boosted scores."""
-        content = """src/main.py:10:def normal():
-src/main.py:20:# WARNING: deprecated
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="")
-
-        matches = file_matches["src/main.py"].matches
-        warning_match = next(m for m in matches if "WARNING" in m.content)
-        normal_match = next(m for m in matches if "normal" in m.content)
-
-        assert warning_match.score > normal_match.score
-
-    def test_score_todo_patterns(self):
-        """TODO/FIXME patterns get boosted scores."""
-        content = """src/main.py:10:def normal():
-src/main.py:20:# FIXME: this needs work
-src/main.py:30:# TODO: implement later
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="")
-
-        matches = file_matches["src/main.py"].matches
-        fixme_match = next(m for m in matches if "FIXME" in m.content)
-        normal_match = next(m for m in matches if "normal" in m.content)
-
-        assert fixme_match.score > normal_match.score
-
-    def test_score_context_keywords_config(self):
-        """context_keywords configuration boosts matching lines."""
-        content = """src/main.py:10:def auth_handler():
-src/main.py:20:def data_processor():
-"""
-        config = SearchCompressorConfig(context_keywords=["auth", "security"])
-        compressor = SearchCompressor(config=config)
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="")
-
-        matches = file_matches["src/main.py"].matches
-        auth_match = next(m for m in matches if "auth" in m.content)
-        data_match = next(m for m in matches if "data" in m.content)
-
-        assert auth_match.score > data_match.score
-
-    def test_score_capped_at_one(self):
-        """Scores are capped at 1.0."""
-        content = """src/main.py:10:ERROR FATAL exception fail warning TODO FIXME
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="error fatal exception")
-
-        match = file_matches["src/main.py"].matches[0]
-        assert match.score <= 1.0
-
-
 class TestMatchSelection:
     """Tests for selecting which matches to keep."""
 
@@ -610,19 +515,6 @@ class TestContextIntegration:
         # Auth-related matches should be included
         assert "authenticate" in result.compressed or "token" in result.compressed
 
-    def test_short_context_words_ignored(self):
-        """Context words <= 2 chars are ignored for scoring."""
-        content = """src/file.py:10:a = 1
-src/file.py:20:do something important
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="a")
-
-        # Short context word "a" shouldn't cause errors or abnormal scoring
-        matches = file_matches["src/file.py"].matches
-        assert all(m.score <= 1.0 for m in matches)
-
 
 class TestOutputFormatting:
     """Tests for output format and structure."""
@@ -733,24 +625,6 @@ class TestConfigOptions:
 
         # First line should be present
         assert "src/file.py:1:line 1" in result.compressed
-
-    def test_disable_error_boost(self):
-        """boost_errors=False doesn't prioritize error patterns."""
-        content = """src/file.py:1:ERROR critical failure
-src/file.py:2:normal code line
-"""
-        compressor = SearchCompressor(
-            config=SearchCompressorConfig(
-                boost_errors=False,
-            )
-        )
-        file_matches = compressor._parse_search_results(content)
-        compressor._score_matches(file_matches, context="")
-
-        matches = file_matches["src/file.py"].matches
-        # Without boost, both should have similar (low) scores
-        error_match = next(m for m in matches if "ERROR" in m.content)
-        assert error_match.score == 0.0  # No boost applied
 
     def test_min_matches_for_ccr(self):
         """min_matches_for_ccr threshold is respected."""
