@@ -4,7 +4,11 @@ This module implements reversible compression: when SmartCrusher compresses
 tool outputs, the original data is cached here for on-demand retrieval.
 
 Key insight from research: REVERSIBLE compression beats irreversible compression.
-If the LLM needs data that was compressed away, it can retrieve it instantly.
+If the LLM needs data that was compressed away, it can retrieve it — byte-exact,
+but only within the in-memory window (<=1000 entries, <=300s TTL). After eviction
+or expiry the entry is gone and retrieval is a loud, cause-honest miss (never a
+silent None). See CCR-RETENTION.md for the delivered guarantee vs. the open
+durable-retention epic.
 
 Features:
 - Thread-safe in-memory storage with TTL expiration
@@ -223,8 +227,21 @@ class CompressionStore:
     - Zero external dependencies (pure Python)
     - Thread-safe for concurrent access
     - TTL-based expiration (default 300 seconds, env-configurable)
-    - LRU-style eviction when capacity is reached
+    - FIFO-by-creation eviction when capacity is reached (the oldest
+      ``created_at`` is evicted first via a min-heap, NOT least-recently-used)
     - Built-in BM25 search for filtering
+
+    Recovery scope (read this before relying on retrieval):
+        Stored content is recoverable byte-exact only WITHIN the in-memory
+        window: at most ``max_entries`` live entries (default 1000) and at most
+        ``default_ttl`` seconds old (default 300s). The store is single-tier —
+        on capacity or TTL eviction the entry's payload is deleted outright
+        (there is no spill to a durable tier), so a later ``retrieve()`` of an
+        evicted/expired hash returns ``None``. That miss is never silent: the
+        retrieval callers (e.g. the MCP ``headroom_retrieve`` tool) surface it
+        as an explicit, cause-honest error via ``format_retrieval_miss_detail``.
+        The guarantee is "no SILENT loss," NOT "never evict." Retention beyond
+        this window (a durable/session-scoped backend) is not built here.
     """
 
     def __init__(
@@ -240,8 +257,14 @@ class CompressionStore:
             max_entries: Maximum number of entries to store.
             default_ttl: Default TTL in seconds.
             enable_feedback: Whether to track retrieval events.
-            backend: Storage backend to use. Defaults to InMemoryBackend.
-                     Custom backends can be passed for persistence (MongoDB, Redis).
+            backend: Storage backend to use. Defaults to InMemoryBackend, the
+                     only concrete backend that ships today. A backend
+                     implementing the ``CompressionStoreBackend`` protocol could
+                     change WHERE entries live, but on its own it does NOT widen
+                     the recovery window: eviction still removes the oldest entry
+                     at capacity (durability != retention). A persistent CCR
+                     backend (e.g. Sqlite/Redis) does not currently exist and
+                     would be a net-new build.
         """
         # Import here to avoid circular imports
         from .backends import InMemoryBackend
@@ -438,7 +461,13 @@ class CompressionStore:
             query: Optional query for feedback tracking.
 
         Returns:
-            CompressionEntry if found and not expired, None otherwise.
+            CompressionEntry if found and not expired, ``None`` otherwise.
+            ``None`` means the hash missed the in-memory window — it was never
+            stored, was evicted under capacity pressure (oldest-created-first),
+            or its TTL expired and it was deleted. Recovery is window-scoped
+            (<=``max_entries``, <=``default_ttl`` seconds), not unbounded. A
+            ``None`` here is not a silent loss: retrieval callers turn it into an
+            explicit (loud) miss via ``format_retrieval_miss_detail``.
         """
         with self._lock:
             entry = self._backend.get(hash_key)

@@ -1,9 +1,17 @@
 # CCR Retention — Cluster G reframe + the "free lunch" we want back
 
-> Status: **invariant satisfied** (no silent loss). **Open challenge:** true
-> cross-call retention so evicted data is actually still *there*, not merely
-> missed loudly. This file exists so we can return to that — the free lunch has
-> always been the goal.
+> **Delivered guarantee:** retrieval is byte-exact ONLY within the in-memory
+> window — at most 1000 live entries (`max_entries`) and at most 300s old
+> (`default_ttl`). After capacity eviction (oldest-created-first) or TTL expiry
+> the entry's payload is deleted from the single-tier store and is gone; a later
+> retrieve returns a **loud, cause-honest miss** (never a silent `None`). So the
+> invariant — **no silent loss** — holds, but it was never "never evict."
+>
+> **Open epic (un-built, owner-deferred):** true cross-call retention so evicted
+> data is actually still *there*, not merely missed loudly. There is no durable
+> CCR backend today — adding one is a net-new feature build, not a wiring task.
+> This file exists so we can return to that — the free lunch has always been the
+> goal.
 
 ## What Cluster G actually is
 
@@ -28,23 +36,28 @@ The "no silent loss" requirement constrains **#2 only**. It never promised
 
 ### Why the loss is already loud (measured, not assumed)
 
-There are exactly **two model-facing retrieval surfaces**, and both miss loudly:
+The **only live model-facing retrieval surface** today is the MCP tool, and it
+misses loudly:
 
-- **Proxy / handler** — `CCRResponseHandler._execute_retrieval`
-  (`headroom/ccr/response_handler.py`): calls `store.get_entry_status(...)` and,
-  on a miss, returns `success=False` with an explicit `error` payload — for the
-  bulk path, the search path, AND a real granular `#rows` offload.
-- **MCP tool** — `HeadroomMCPServer._retrieve_content`
-  (`headroom/ccr/mcp_server.py:451`): on a local-store + proxy miss, returns an
-  explicit `error` dict (now routed through the same cause-honest helper).
+- **MCP tool (live)** — `HeadroomMCPServer._retrieve_content`
+  (`headroom/ccr/mcp_server.py:322`): on a store miss it returns an explicit
+  `error` dict routed through the cause-honest helper
+  (`format_retrieval_miss_detail`, `mcp_server.py:388`). This is what the model
+  reaches via the `headroom_retrieve` tool.
+- **Proxy / handler (archived, NOT live)** — `CCRResponseHandler._execute_retrieval`
+  once provided a second loud surface, calling `store.get_entry_status(...)` and
+  returning `success=False` with an explicit `error` payload for the bulk path,
+  the search path, AND a real granular `#rows` offload. That module now lives at
+  `archive/headroom/ccr/response_handler.py` and is no longer wired into a live
+  retrieval path. Kept here only for the historical loud-miss measurement below.
 
-The only other `store.retrieve()` caller, `context_tracker._execute_expansions`
-(`:513`), is **proactive prefetch**, not a model request — a miss there just
-skips one speculative expansion; the model's own explicit retrieval stays loud.
-So no surface returns a silent `None`/empty to the model.
+The only other `store.retrieve()` caller, `context_tracker._execute_expansions`,
+is **proactive prefetch**, not a model request — a miss there just skips one
+speculative expansion; the model's own explicit retrieval stays loud. So no live
+surface returns a silent `None`/empty to the model.
 
-Probe (10 calls × 220 rows → cap overflow → retrieve the evicted call-0 sentinel
-through the handler):
+Probe (10 calls × 220 rows → cap overflow → retrieve the evicted call-0 sentinel;
+measured against the then-live handler, retained as historical evidence):
 
 ```
 evicted_after_10_calls = True        # concern #1: eviction happened
@@ -99,12 +112,18 @@ goal is **retention**: keep the data actually retrievable for as long as the
 sentinel can plausibly be referenced, ideally at ~zero added cost. Options, with
 trade-offs, ranked by how close they are to a free lunch:
 
-1. **Durable backend (already built, just wire it).** `Sqlite`/`Redis`
-   `CompressionStoreBackend` implementations already exist. Spilling evicted
-   entries to a durable backend converts "evicted → gone" into "evicted from
-   RAM → still on disk." Closest to free: bounded RAM, near-unbounded retention,
-   data actually present. Cost: I/O on the cold path + a config/lifecycle story
-   (when is the durable store cleared?). **Most promising.**
+1. **Durable backend (net-new build — does NOT exist yet).** Today the only
+   concrete backend is `InMemoryBackend`; `CompressionStoreBackend` is a Protocol
+   with no shipped persistent implementation (no Sqlite/Redis CCR backend, and
+   the `headroom.ccr_backend` entry point is registered nowhere). Building one
+   and spilling evicted entries to it would convert "evicted → gone" into
+   "evicted from RAM → still on disk." Closest to free in principle: bounded RAM,
+   near-unbounded retention, data actually present. But note the store is
+   currently single-tier — a durable backend alone changes WHERE entries live,
+   not the eviction window, so it would still be evicted-from unless paired with
+   a spill tier (durability != retention). Cost: the implementation itself, I/O
+   on the cold path, + a config/lifecycle story (when is the durable store
+   cleared?). **Most promising direction, but a feature build, not a wiring task.**
 
 2. **Session-scoped / conversation-lifetime retention.** Tie entry lifetime to
    the conversation that emitted the sentinel rather than a global FIFO+TTL. A
@@ -126,15 +145,21 @@ trade-offs, ranked by how close they are to a free lunch:
 5. **Raise the cap.** Trivial, buys headroom, but only *delays* eviction and
    grows RAM linearly — not a real solution, only a knob.
 
-**Recommended next step when we return:** wire the existing durable backend
-(#1) as the eviction spill target, keyed by session (#2) for cleanup — that
-combination gives bounded RAM *and* genuinely-retained data (the free lunch),
-reusing code that already exists rather than building new retention machinery.
+**Recommended next step when we return:** build a durable backend (#1) and use
+it as the eviction spill target, keyed by session (#2) for cleanup — that
+combination gives bounded RAM *and* genuinely-retained data (the free lunch).
+This is net-new retention machinery, not a wiring task: no persistent CCR
+backend exists today, and the store is single-tier, so the spill path itself
+has to be built. The owner has **deliberately deferred** this epic; the current
+delivered behavior is the window + loud-miss guarantee documented at the top.
 
 ## Cross-references
 - `docs/audits/EVAL-break.md` — Cluster G original finding (row 6) + this reframe.
-- `headroom/ccr/response_handler.py` — `_execute_retrieval` (loud miss).
-- `headroom/ccr/mcp_server.py` — `_retrieve_content` (second loud surface).
+- `headroom/ccr/mcp_server.py` — `_retrieve_content` (the live loud-miss surface).
+- `archive/headroom/ccr/response_handler.py` — `_execute_retrieval`; archived,
+  no longer a live retrieval surface (kept for the historical loud-miss probe).
 - `headroom/cache/compression_store.py` — `format_retrieval_miss_detail`,
-  `get_entry_status`, `CompressionStoreBackend` (Sqlite/Redis live here).
+  `get_entry_status`, and the `CompressionStoreBackend` protocol. Only
+  `InMemoryBackend` (`headroom/cache/backends/memory.py`) is implemented today;
+  there is no Sqlite/Redis CCR backend.
 - `tests/test_ccr_eviction_loud_miss.py` — the locking regression tests.
