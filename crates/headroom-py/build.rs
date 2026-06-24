@@ -15,10 +15,9 @@
 // Linux/glibc-only — macOS, Windows, and musl don't ship glibc and
 // don't reference any of these symbols.
 //
-// Issues:
-//   - #355 (https://github.com/chopratejas/headroom/issues/355)
-//     for the `__isoc23_*` family
-//   - PR #396 dry-run for the `__libc_single_threaded` symbol
+// Symbols shimmed:
+//   - the `__isoc23_*` family
+//   - the `__libc_single_threaded` symbol
 
 fn main() {
     println!("cargo:rerun-if-changed=glibc_compat.c");
