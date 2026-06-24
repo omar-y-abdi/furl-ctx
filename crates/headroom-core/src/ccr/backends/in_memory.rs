@@ -466,13 +466,8 @@ mod tests {
         assert_eq!(store.len(), cap, "live count must equal capacity");
 
         // Evicted keys (older than the last `cap` inserts) must be None.
-        for i in 0..(total - cap) {
-            assert_eq!(
-                store.get(&keys[i]),
-                None,
-                "evicted key '{}' must be absent",
-                keys[i]
-            );
+        for key in keys.iter().take(total - cap) {
+            assert_eq!(store.get(key), None, "evicted key '{key}' must be absent");
         }
 
         // The most-recently inserted `cap` keys must all be present.

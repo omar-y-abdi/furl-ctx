@@ -35,7 +35,7 @@ use super::config::SmartCrusherConfig;
 use super::field_detect::detect_score_field_statistically;
 use super::field_role::compute_exclude_set;
 use super::hashing::hash_field_name;
-use super::orchestration::prioritize_indices;
+use super::orchestration::{prioritize_indices, PrioritizeParams};
 use super::traits::Constraint;
 use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldStats};
 // Note: `detect_error_items_for_preservation` and `detect_structural_outliers`
@@ -237,16 +237,16 @@ impl<'a> SmartCrusherPlanner<'a> {
         // TOIN preserve_fields.
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        let final_keep = prioritize_indices(
-            self.config,
-            &keep,
+        let final_keep = prioritize_indices(PrioritizeParams {
+            config: self.config,
+            keep_indices: &keep,
             items,
             n,
-            Some(analysis),
-            max_items,
+            analysis: Some(analysis),
+            effective_max: max_items,
             exclude,
-            &query_pinned,
-        );
+            query_pinned: &query_pinned,
+        });
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -434,16 +434,16 @@ impl<'a> SmartCrusherPlanner<'a> {
         // TOIN preserve_fields.
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        let final_keep = prioritize_indices(
-            self.config,
-            &keep,
+        let final_keep = prioritize_indices(PrioritizeParams {
+            config: self.config,
+            keep_indices: &keep,
             items,
             n,
-            Some(analysis),
-            max_items,
+            analysis: Some(analysis),
+            effective_max: max_items,
             exclude,
-            &query_pinned,
-        );
+            query_pinned: &query_pinned,
+        });
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -496,16 +496,16 @@ impl<'a> SmartCrusherPlanner<'a> {
         // TOIN preserve_fields.
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        let final_keep = prioritize_indices(
-            self.config,
-            &keep,
+        let final_keep = prioritize_indices(PrioritizeParams {
+            config: self.config,
+            keep_indices: &keep,
             items,
             n,
-            Some(analysis),
-            max_items,
+            analysis: Some(analysis),
+            effective_max: max_items,
             exclude,
-            &query_pinned,
-        );
+            query_pinned: &query_pinned,
+        });
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
