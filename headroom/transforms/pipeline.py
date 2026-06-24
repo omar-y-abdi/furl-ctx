@@ -7,7 +7,6 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
 from typing import Any, TypeVar
 
 from ..config import (
@@ -19,7 +18,6 @@ from ..config import (
 )
 from ..tokenizer import Tokenizer
 from ..utils import deep_copy_messages
-from ._telemetry_noop import get_headroom_tracer, get_otel_metrics
 from .base import Transform
 from .cache_aligner import CacheAligner
 from .content_router import ContentRouter
@@ -144,16 +142,6 @@ class TransformPipeline:
 
         return Tokenizer(get_tokenizer(model), model)  # type: ignore[arg-type]
 
-    def _provider_name(self) -> str | None:
-        if self._provider is None:
-            return None
-
-        name = getattr(self._provider, "provider_name", None)
-        if isinstance(name, str) and name:
-            return name
-
-        return self._provider.__class__.__name__.removesuffix("Provider").lower()
-
     def _breaker_is_open(self) -> bool:
         """True while the circuit breaker cooldown window is active."""
         if self._breaker_threshold <= 0:
@@ -205,9 +193,12 @@ class TransformPipeline:
         Returns:
             Combined TransformResult.
         """
-        record_metrics = kwargs.pop("record_metrics", True)
+        # Consume the dry-run marker so it never reaches the transforms.
+        # simulate() calls apply(record_metrics=False); the pop keeps that flag
+        # out of **kwargs (which is forwarded to should_apply / transform.apply
+        # below), so simulate() and apply() drive the transforms identically.
+        kwargs.pop("record_metrics", True)
         tokenizer = self._get_tokenizer(model)
-        provider_name = self._provider_name()
 
         # Get model limit from kwargs (should be set by client)
         model_limit = kwargs.get("model_limit")
@@ -239,218 +230,151 @@ class TransformPipeline:
             model,
         )
 
-        tracer = get_headroom_tracer()
-        span_attributes = {
-            "headroom.model": model,
-            "headroom.provider": provider_name or "unknown",
-            "headroom.message_count": len(messages),
-            "headroom.tokens.before": tokens_before,
-        }
-        pipeline_span_context = (
-            tracer.start_as_current_span(
-                "headroom.compression.pipeline",
-                attributes=span_attributes,
+        # Track all transforms applied
+        all_transforms: list[str] = []
+        all_markers: list[str] = []
+        all_warnings: list[str] = []
+        all_timing: dict[str, float] = {}  # transform_name → ms
+
+        # Track transform diffs if enabled
+        transform_diffs: list[TransformDiff] = []
+        generate_diff = self.config.generate_diff_artifact
+
+        t_copy = time.perf_counter()
+        current_messages = deep_copy_messages(messages)
+        copy_ms = (time.perf_counter() - t_copy) * 1000
+
+        all_timing["_deep_copy"] = copy_ms
+        all_timing["_initial_token_count"] = count_ms
+
+        pipeline_start = time.perf_counter()
+
+        request_id = kwargs.get("request_id", "")
+        log_prefix = f"[{request_id}] " if request_id else ""
+
+        frozen_count = kwargs.get("frozen_message_count", 0)
+        if frozen_count > 0:
+            logger.info(
+                "%sPipeline: freezing first %d/%d messages (prefix cached by provider)",
+                log_prefix,
+                frozen_count,
+                len(messages),
             )
-            if record_metrics
-            else nullcontext()
-        )
 
-        with pipeline_span_context as pipeline_span:
-            # Track all transforms applied
-            all_transforms: list[str] = []
-            all_markers: list[str] = []
-            all_warnings: list[str] = []
-            all_timing: dict[str, float] = {}  # transform_name → ms
+        for transform in self.transforms:
+            # Check if transform should run
+            if not transform.should_apply(current_messages, tokenizer, **kwargs):
+                continue
 
-            # Track transform diffs if enabled
-            transform_diffs: list[TransformDiff] = []
-            generate_diff = self.config.generate_diff_artifact
+            # Time the transform
+            t0 = time.perf_counter()
+            try:
+                result = transform.apply(current_messages, tokenizer, **kwargs)
+            except Exception:
+                self._breaker_record_failure()
+                raise
+            duration_ms = (time.perf_counter() - t0) * 1000
 
-            t_copy = time.perf_counter()
-            current_messages = deep_copy_messages(messages)
-            copy_ms = (time.perf_counter() - t_copy) * 1000
+            # Update messages for next transform
+            current_messages = result.messages
 
-            all_timing["_deep_copy"] = copy_ms
-            all_timing["_initial_token_count"] = count_ms
+            # Use token counts reported by the transform itself — avoids
+            # redundant O(N) recount of the full message list after each step.
+            tokens_before_transform = result.tokens_before
+            tokens_after_transform = result.tokens_after
 
-            pipeline_start = time.perf_counter()
+            # Accumulate results
+            all_transforms.extend(result.transforms_applied)
+            all_markers.extend(result.markers_inserted)
+            all_warnings.extend(result.warnings)
+            all_timing[transform.name] = duration_ms
 
-            request_id = kwargs.get("request_id", "")
-            log_prefix = f"[{request_id}] " if request_id else ""
+            # Merge sub-transform timing (e.g. ContentRouter's per-compressor breakdown)
+            if result.timing:
+                all_timing.update(result.timing)
 
-            frozen_count = kwargs.get("frozen_message_count", 0)
-            if frozen_count > 0:
+            # Log transform results
+            if result.transforms_applied:
                 logger.info(
-                    "%sPipeline: freezing first %d/%d messages (prefix cached by provider)",
-                    log_prefix,
-                    frozen_count,
-                    len(messages),
-                )
-
-            for transform in self.transforms:
-                # Check if transform should run
-                if not transform.should_apply(current_messages, tokenizer, **kwargs):
-                    continue
-
-                transform_span_context = (
-                    tracer.start_as_current_span(
-                        "headroom.compression.transform",
-                        attributes={
-                            "headroom.model": model,
-                            "headroom.provider": provider_name or "unknown",
-                            "headroom.transform": transform.name,
-                        },
-                    )
-                    if record_metrics
-                    else nullcontext()
-                )
-
-                with transform_span_context as transform_span:
-                    # Time the transform
-                    t0 = time.perf_counter()
-                    try:
-                        result = transform.apply(current_messages, tokenizer, **kwargs)
-                    except Exception:
-                        self._breaker_record_failure()
-                        raise
-                    duration_ms = (time.perf_counter() - t0) * 1000
-
-                    # Update messages for next transform
-                    current_messages = result.messages
-
-                    # Use token counts reported by the transform itself — avoids
-                    # redundant O(N) recount of the full message list after each step.
-                    tokens_before_transform = result.tokens_before
-                    tokens_after_transform = result.tokens_after
-
-                    if transform_span is not None and transform_span.is_recording():
-                        transform_span.set_attribute(
-                            "headroom.tokens.before", tokens_before_transform
-                        )
-                        transform_span.set_attribute(
-                            "headroom.tokens.after", tokens_after_transform
-                        )
-                        transform_span.set_attribute(
-                            "headroom.tokens.saved",
-                            tokens_before_transform - tokens_after_transform,
-                        )
-                        transform_span.set_attribute("headroom.duration_ms", duration_ms)
-                        transform_span.set_attribute(
-                            "headroom.transforms_applied",
-                            len(result.transforms_applied),
-                        )
-
-                    # Accumulate results
-                    all_transforms.extend(result.transforms_applied)
-                    all_markers.extend(result.markers_inserted)
-                    all_warnings.extend(result.warnings)
-                    all_timing[transform.name] = duration_ms
-
-                    # Merge sub-transform timing (e.g. ContentRouter's per-compressor breakdown)
-                    if result.timing:
-                        all_timing.update(result.timing)
-
-                    # Log transform results
-                    if result.transforms_applied:
-                        logger.info(
-                            "Transform %s: %d -> %d tokens (saved %d) [%.1fms]",
-                            transform.name,
-                            tokens_before_transform,
-                            tokens_after_transform,
-                            tokens_before_transform - tokens_after_transform,
-                            duration_ms,
-                        )
-                    else:
-                        logger.debug(
-                            "Transform %s: no changes [%.1fms]", transform.name, duration_ms
-                        )
-
-                    # Record diff if enabled
-                    if generate_diff:
-                        transform_diffs.append(
-                            TransformDiff(
-                                transform_name=transform.name,
-                                tokens_before=tokens_before_transform,
-                                tokens_after=tokens_after_transform,
-                                tokens_saved=tokens_before_transform - tokens_after_transform,
-                                details=", ".join(result.transforms_applied)
-                                if result.transforms_applied
-                                else "",
-                                duration_ms=duration_ms,
-                            )
-                        )
-
-            # All transforms ran without raising — reset the breaker.
-            self._breaker_record_success()
-
-            # Single final token count — the only full recount in the pipeline.
-            # Earlier per-transform counts come from each transform's own result.
-            t_final_count = time.perf_counter()
-            tokens_after = tokenizer.count_messages(current_messages)
-            all_timing["_final_token_count"] = (time.perf_counter() - t_final_count) * 1000
-
-            pipeline_ms = (time.perf_counter() - pipeline_start) * 1000
-            all_timing["pipeline_total"] = pipeline_ms
-
-            # Log pipeline summary
-            total_saved = tokens_before - tokens_after
-            timing_parts = " ".join(f"{k}={v:.0f}ms" for k, v in all_timing.items())
-            if total_saved > 0:
-                logger.info(
-                    "%sPipeline complete: %d -> %d tokens (saved %d, %.1f%% reduction) [%s]",
-                    log_prefix,
-                    tokens_before,
-                    tokens_after,
-                    total_saved,
-                    (total_saved / tokens_before * 100) if tokens_before > 0 else 0,
-                    timing_parts,
+                    "Transform %s: %d -> %d tokens (saved %d) [%.1fms]",
+                    transform.name,
+                    tokens_before_transform,
+                    tokens_after_transform,
+                    tokens_before_transform - tokens_after_transform,
+                    duration_ms,
                 )
             else:
-                logger.debug("%sPipeline complete: no token savings [%s]", log_prefix, timing_parts)
+                logger.debug(
+                    "Transform %s: no changes [%.1fms]", transform.name, duration_ms
+                )
 
-            # Build diff artifact if enabled
-            diff_artifact = None
+            # Record diff if enabled
             if generate_diff:
-                diff_artifact = DiffArtifact(
-                    request_id=kwargs.get("request_id", ""),
-                    original_tokens=tokens_before,
-                    optimized_tokens=tokens_after,
-                    total_tokens_saved=tokens_before - tokens_after,
-                    transforms=transform_diffs,
+                transform_diffs.append(
+                    TransformDiff(
+                        transform_name=transform.name,
+                        tokens_before=tokens_before_transform,
+                        tokens_after=tokens_after_transform,
+                        tokens_saved=tokens_before_transform - tokens_after_transform,
+                        details=", ".join(result.transforms_applied)
+                        if result.transforms_applied
+                        else "",
+                        duration_ms=duration_ms,
+                    )
                 )
 
-            # Detect waste signals in original messages (only when significant compression)
-            waste_signals: WasteSignals | None = None
-            if tokens_before > tokens_after and (tokens_before - tokens_after) > 100:
-                try:
-                    from ..parser import parse_messages
+        # All transforms ran without raising — reset the breaker.
+        self._breaker_record_success()
 
-                    _, _, waste_signals = parse_messages(messages, tokenizer)
-                    if waste_signals.total() == 0:
-                        waste_signals = None
-                except Exception:
-                    # Best-effort diagnostics only — never block the pipeline,
-                    # but never swallow silently either.
-                    logger.debug("Waste-signal detection failed (non-fatal)", exc_info=True)
+        # Single final token count — the only full recount in the pipeline.
+        # Earlier per-transform counts come from each transform's own result.
+        t_final_count = time.perf_counter()
+        tokens_after = tokenizer.count_messages(current_messages)
+        all_timing["_final_token_count"] = (time.perf_counter() - t_final_count) * 1000
 
-            if pipeline_span is not None and pipeline_span.is_recording():
-                pipeline_span.set_attribute("headroom.tokens.after", tokens_after)
-                pipeline_span.set_attribute("headroom.tokens.saved", total_saved)
-                pipeline_span.set_attribute("headroom.duration_ms", pipeline_ms)
-                pipeline_span.set_attribute("headroom.transforms_applied", len(all_transforms))
-                pipeline_span.set_attribute("headroom.warnings", len(all_warnings))
+        pipeline_ms = (time.perf_counter() - pipeline_start) * 1000
+        all_timing["pipeline_total"] = pipeline_ms
 
-            if record_metrics:
-                get_otel_metrics().record_pipeline_run(
-                    model=model,
-                    provider=provider_name,
-                    tokens_before=tokens_before,
-                    tokens_after=tokens_after,
-                    duration_ms=pipeline_ms,
-                    timing=all_timing,
-                    transforms_applied=all_transforms,
-                    waste_signals=waste_signals.to_dict() if waste_signals is not None else None,
-                )
+        # Log pipeline summary
+        total_saved = tokens_before - tokens_after
+        timing_parts = " ".join(f"{k}={v:.0f}ms" for k, v in all_timing.items())
+        if total_saved > 0:
+            logger.info(
+                "%sPipeline complete: %d -> %d tokens (saved %d, %.1f%% reduction) [%s]",
+                log_prefix,
+                tokens_before,
+                tokens_after,
+                total_saved,
+                (total_saved / tokens_before * 100) if tokens_before > 0 else 0,
+                timing_parts,
+            )
+        else:
+            logger.debug("%sPipeline complete: no token savings [%s]", log_prefix, timing_parts)
+
+        # Build diff artifact if enabled
+        diff_artifact = None
+        if generate_diff:
+            diff_artifact = DiffArtifact(
+                request_id=kwargs.get("request_id", ""),
+                original_tokens=tokens_before,
+                optimized_tokens=tokens_after,
+                total_tokens_saved=tokens_before - tokens_after,
+                transforms=transform_diffs,
+            )
+
+        # Detect waste signals in original messages (only when significant compression)
+        waste_signals: WasteSignals | None = None
+        if tokens_before > tokens_after and (tokens_before - tokens_after) > 100:
+            try:
+                from ..parser import parse_messages
+
+                _, _, waste_signals = parse_messages(messages, tokenizer)
+                if waste_signals.total() == 0:
+                    waste_signals = None
+            except Exception:
+                # Best-effort diagnostics only — never block the pipeline,
+                # but never swallow silently either.
+                logger.debug("Waste-signal detection failed (non-fatal)", exc_info=True)
 
         return TransformResult(
             messages=current_messages,
