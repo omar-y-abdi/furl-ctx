@@ -865,7 +865,7 @@ impl LogCompressor {
             push(lines[0].clone(), &mut out, &mut seen);
         }
         if self.config.keep_last_error {
-            let last = lines.last().unwrap().clone();
+            let last = lines.last().expect("guarded non-empty above").clone();
             push(last, &mut out, &mut seen);
         }
         // Fill remaining with highest-scoring entries in descending score order.

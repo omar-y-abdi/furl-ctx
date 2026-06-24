@@ -6,9 +6,10 @@
 > Since the prior refresh the repo was dead-code-swept and the CCR marker grammar was made
 > single-owned: the canonical `compute_key`/`marker_for` in `ccr/mod.rs` (and the `blake3` dep) were
 > DELETED; every Rust marker now flows through `ccr/markers.rs`, every Python consumer through
-> `headroom/ccr/marker_grammar.py`. `ContentRouter` was thinned 2926→2578 LOC by extracting four
-> seams (`router_cache.py`, `router_split.py`, `router_policy.py`, plus the `CompressionStrategy`
-> enum). Function-name anchors are authoritative; line numbers may drift ±~15 from later edits — if a
+> `headroom/ccr/marker_grammar.py`. `ContentRouter` had four clean seams extracted (`router_cache.py`,
+> `router_split.py`, `router_policy.py`, plus the `CompressionStrategy` enum), but the orchestrator
+> kept its responsibilities and has since grown back to ~2597 LOC — the extraction relieved
+> line-count, not coupling. It is still a god-object: a known, deliberately-deferred large refactor. Function-name anchors are authoritative; line numbers may drift ±~15 from later edits — if a
 > line looks off, grep the `fn`/`def` name. The map orients; always trust the real code.
 
 ## 1. PIPELINE
@@ -61,7 +62,7 @@ End-to-end flow: `compress(messages,model)` (`headroom/compress.py:191`) → `Tr
 - `relevance/bm25.rs:87` — `bm25_score` / `hybrid.rs:182` — `compute_alpha` — keyword scoring + adaptive alpha.
 - `transforms/smart_crusher/config.rs:26` — `RoutingPolicy` — MinTokens (default, ties→lossless) vs LosslessFirst (legacy).
 
-**ContentRouter extracted seams (the 2926→2578 thinning)**
+**ContentRouter extracted seams (4 clean seams lifted; orchestrator core stayed coupled — still ~2597 LOC)**
 - `headroom/transforms/router_cache.py:18` — `CompressionCache` — per-content TTL+skip cache (get/put/mark_skip/invalidate) the router consults before recompressing.
 - `headroom/transforms/router_split.py:40/60` — `is_mixed_content`/`split_into_sections` — mixed-content section splitter (`ContentSection` + `_extract_json_block`).
 - `headroom/transforms/router_policy.py:26/41/71/85/101` — `CompressionStrategy` enum + `strategy_from_detection`/`strategy_from_detection_type`/`content_type_from_strategy`/`adaptive_min_ratio` — strategy mappings + the adaptive ratio, all re-exported from `content_router.py` (import at `content_router.py:63`).

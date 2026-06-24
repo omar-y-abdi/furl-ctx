@@ -306,7 +306,9 @@ impl SmartAnalyzer {
         // Greedy dedup: keep first, then any cp where `cp - last > window`.
         let mut deduped: Vec<usize> = vec![change_points[0]];
         for &cp in &change_points[1..] {
-            let last = *deduped.last().unwrap();
+            let last = *deduped
+                .last()
+                .expect("seeded with change_points[0], never empty");
             if cp - last > window {
                 deduped.push(cp);
             }

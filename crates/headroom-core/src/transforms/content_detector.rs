@@ -15,12 +15,14 @@
 //! Detection is **regex-based** — no ML, no model loading, no I/O.
 //! Magika integration lives one level up in `ContentRouter`, not here.
 //!
-//! # Parity with Python
+//! # Parity with the Python regex fallback
 //!
-//! Regex patterns, dispatch order, confidence formulas, and line-count
-//! caps are byte-equal with the Python source. Recorded fixtures in
-//! `tests/parity/fixtures/content_detector/` lock the output across
-//! the bridge.
+//! This detector is the primary path; `ContentRouter` keeps a regex
+//! detector only as a `PLAIN_TEXT` fallback. Its patterns, dispatch
+//! order, confidence formulas, and line-count caps are kept byte-equal
+//! with that fallback by construction. (The standalone build removed the
+//! recorded `tests/parity/fixtures/content_detector/` harness; no
+//! separate parity-fixture runner exists in the current tree.)
 
 use std::sync::LazyLock;
 

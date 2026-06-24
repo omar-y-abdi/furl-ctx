@@ -90,6 +90,10 @@ class DiffCompressor:
 
         cfg = config or DiffCompressorConfig()
         self.config = cfg
+        # `min_compression_ratio_for_ccr` was inlined as 0.8 in the Python
+        # original; promoted to a config field on the Rust side but left at
+        # its 0.8 Rust default here so the existing Python config surface is
+        # unchanged (matches search_compressor.py / log_compressor.py).
         self._rust = _RustDiffCompressor(
             _RustDiffCompressorConfig(
                 max_context_lines=cfg.max_context_lines,
