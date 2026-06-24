@@ -16,121 +16,8 @@ from headroom.transforms.search_compressor import (
 )
 
 
-class TestGrepOutputParsing:
-    """Tests for parsing grep/ripgrep style output."""
-
-    def test_parse_standard_grep_format(self):
-        """Standard grep -n format is parsed correctly."""
-        content = """src/main.py:42:def process_data(items):
-src/main.py:43:    \"\"\"Process items.\"\"\"
-src/utils.py:15:def validate(data):
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        assert "src/main.py" in file_matches
-        assert "src/utils.py" in file_matches
-        assert len(file_matches["src/main.py"].matches) == 2
-        assert len(file_matches["src/utils.py"].matches) == 1
-
-    def test_parse_ripgrep_context_format(self):
-        """Ripgrep with context (- separator) is parsed."""
-        content = """src/main.py-40-some context before
-src/main.py:42:def process_data(items):
-src/main.py-43-some context after
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        assert "src/main.py" in file_matches
-        # All three lines should be parsed (both : and - separators)
-        assert len(file_matches["src/main.py"].matches) == 3
-
-    def test_parse_with_colons_in_content(self):
-        """Content containing colons is parsed correctly."""
-        content = """src/config.py:10:DATABASE_URL = "postgres://user:pass@host:5432/db"
-src/config.py:20:REDIS_URL = "redis://localhost:6379"
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        assert "src/config.py" in file_matches
-        matches = file_matches["src/config.py"].matches
-
-        # Content after the second colon should be preserved
-        assert "postgres://user:pass@host:5432/db" in matches[0].content
-
-    def test_parse_windows_paths(self):
-        """Windows-style paths are handled."""
-        content = """C:\\Users\\dev\\src\\main.py:10:def main():
-C:\\Users\\dev\\src\\utils.py:20:def helper():
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        # Windows paths may not parse correctly due to : in path
-        # This tests current behavior
-        assert len(file_matches) >= 0  # Just ensure no crash
-
-    def test_parse_empty_content(self):
-        """Empty input returns empty result."""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results("")
-
-        assert file_matches == {}
-
-    def test_parse_whitespace_only(self):
-        """Whitespace-only input returns empty result."""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results("   \n\n   \n")
-
-        assert file_matches == {}
-
-    def test_parse_non_grep_content(self):
-        """Non-grep content returns empty result."""
-        content = """This is just regular text
-without any grep-style formatting
-just normal lines here"""
-
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        assert file_matches == {}
-
-    def test_parse_mixed_valid_invalid(self):
-        """Mixed valid and invalid lines parse valid ones."""
-        content = """src/main.py:10:valid line
-this is not a grep line
-src/utils.py:20:another valid line
-more random text
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        assert "src/main.py" in file_matches
-        assert "src/utils.py" in file_matches
-        assert len(file_matches) == 2
-
-
 class TestFileGrouping:
     """Tests for grouping matches by file."""
-
-    def test_matches_grouped_by_file(self):
-        """Matches are correctly grouped by filename."""
-        content = """a.py:1:line 1
-b.py:2:line 2
-a.py:3:line 3
-c.py:4:line 4
-b.py:5:line 5
-a.py:6:line 6
-"""
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        assert len(file_matches) == 3
-        assert len(file_matches["a.py"].matches) == 3
-        assert len(file_matches["b.py"].matches) == 2
-        assert len(file_matches["c.py"].matches) == 1
 
     def test_file_matches_first_property(self):
         """FileMatches.first returns first match."""
@@ -476,17 +363,6 @@ src/file (1).py:40:content
         result = compressor.compress(content)
 
         assert ":0:" in result.compressed
-
-    def test_negative_line_number_skipped(self):
-        """Negative line numbers don't match the pattern."""
-        content = "src/file.py:-1:invalid"
-
-        compressor = SearchCompressor()
-        file_matches = compressor._parse_search_results(content)
-
-        # Pattern requires \d+ which is positive integers only
-        assert len(file_matches) == 0
-
 
 class TestContextIntegration:
     """Tests for context-aware compression."""

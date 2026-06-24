@@ -10,11 +10,10 @@ is now a thin shim that:
    tests) don't change.
 2. Routes `LogCompressor.compress()` entirely through the Rust
    implementation, picking up the bug fixes (chained-exception trace
-   survival, conservative warning dedupe, loud CCR failures).
-3. Implements legacy internal helpers (`_detect_format`, `_score_line`,
-   `_select_with_first_last`, `_dedupe_similar`, `_format_output`) on top
-   of the Rust building blocks where a Rust delegation makes sense;
-   otherwise keeps Python logic that mirrors Rust scoring.
+   survival, conservative warning dedupe, loud CCR failures). The Rust
+   crate owns format detection, line classification/scoring, dedupe,
+   selection, and output formatting; their behavior is pinned by the
+   `log_compressor.rs` unit tests.
 
 # Bug fixes the Rust port carries (and this shim therefore inherits)
 
@@ -42,7 +41,6 @@ exists only for unit testing.
 from __future__ import annotations
 
 import logging
-import re as _re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, cast
@@ -147,34 +145,6 @@ def _format_from_str(name: str) -> LogFormat:
     }.get(name, LogFormat.GENERIC)
 
 
-# Leading-identity templates (DESIGN.md Imp2). Mirror Rust
-# `log_compressor::strip_leading_identity`: a leading ISO-8601 datetime,
-# UUID, or >=12-char hex run is pure per-line identity noise. Anchored to
-# the start so only the LEADING token is templated — the message body that
-# distinguishes error categories is preserved.
-_LEADING_ISO8601 = _re.compile(
-    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:[+-]\d{2}:?\d{2}|Z)?"
-)
-_LEADING_UUID = _re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?=\s|$)"
-)
-_LEADING_HEX = _re.compile(r"^[0-9a-fA-F]{12,}(?=\s|$)")
-
-
-def _strip_leading_identity(content: str) -> str:
-    """Template a single leading identity token (ISO-8601 / UUID / long
-    hex) plus following whitespace into the placeholder ``<TS> ``.
-
-    Returns the input unchanged when no leading identity token is present.
-    Mirrors Rust `strip_leading_identity`."""
-    for pat in (_LEADING_ISO8601, _LEADING_UUID, _LEADING_HEX):
-        m = pat.match(content)
-        if m:
-            rest = content[m.end():].lstrip()
-            return f"<TS> {rest}"
-    return content
-
-
 class LogCompressor:
     """Rust-backed log compressor.
 
@@ -240,136 +210,7 @@ class LogCompressor:
             stats=stats_dict,
         )
 
-    # ─── Legacy internal helpers (test surface compat) ──────────────────
-
-    def _detect_format(self, lines: list[str]) -> LogFormat:
-        """Delegate to the Rust format detector."""
-        from headroom._core import detect_log_format
-
-        return _format_from_str(detect_log_format(list(lines)))
-
-    def _score_line(self, log_line: LogLine) -> float:
-        """Per-line importance scoring."""
-        level_scores = {
-            LogLevel.ERROR: 1.0,
-            LogLevel.FAIL: 1.0,
-            LogLevel.WARN: 0.5,
-            LogLevel.INFO: 0.1,
-            LogLevel.DEBUG: 0.05,
-            LogLevel.TRACE: 0.02,
-            LogLevel.UNKNOWN: 0.1,
-        }
-        score = level_scores.get(log_line.level, 0.1)
-        if log_line.is_stack_trace:
-            score += 0.3
-        if log_line.is_summary:
-            score += 0.4
-        return min(1.0, score)
-
-    def _select_with_first_last(self, lines: list[LogLine], max_count: int) -> list[LogLine]:
-        if len(lines) <= max_count:
-            return lines
-
-        selected: list[LogLine] = []
-        if self.config.keep_first_error and lines:
-            selected.append(lines[0])
-        if self.config.keep_last_error and lines and lines[-1] not in selected:
-            selected.append(lines[-1])
-
-        remaining = max_count - len(selected)
-        if remaining > 0:
-            candidates = sorted(
-                (line for line in lines if line not in selected),
-                key=lambda x: x.score,
-                reverse=True,
-            )
-            selected.extend(candidates[:remaining])
-
-        return selected
-
-    def _dedupe_similar(self, lines: list[LogLine]) -> list[LogLine]:
-        """Conservative dedupe — preserves message prefix, only
-        normalises trailing variable region (digits, hex, paths).
-
-        DESIGN.md Imp2 broadening: also templates a LEADING identity token
-        (ISO-8601 timestamp, UUID, or long hex run) to a placeholder before
-        the prefix split, so identical messages with different leading
-        timestamps/ids collapse. Mirrors Rust `normalize_for_dedupe` +
-        `strip_leading_identity`."""
-        import re
-
-        seen: set[str] = set()
-        deduped: list[LogLine] = []
-        digit_re = re.compile(r"\d+")
-        hex_re = re.compile(r"0x[0-9a-fA-F]+")
-        path_re = re.compile(r"/[\w/]+/")
-
-        for line in lines:
-            content = _strip_leading_identity(line.content)
-            split_at = next((i for i, c in enumerate(content) if c in (":", "=")), len(content))
-            prefix = content[:split_at]
-            suffix = content[split_at:]
-            suffix = digit_re.sub("N", suffix)
-            suffix = hex_re.sub("ADDR", suffix)
-            suffix = path_re.sub("/PATH/", suffix)
-            normalized = prefix + suffix
-            if normalized not in seen:
-                seen.add(normalized)
-                deduped.append(line)
-        return deduped
-
-    def _format_output(
-        self, selected: list[LogLine], all_lines: list[LogLine]
-    ) -> tuple[str, dict[str, int]]:
-        stats: dict[str, int] = {
-            "errors": sum(1 for line in all_lines if line.level == LogLevel.ERROR),
-            "fails": sum(1 for line in all_lines if line.level == LogLevel.FAIL),
-            "warnings": sum(1 for line in all_lines if line.level == LogLevel.WARN),
-            "info": sum(1 for line in all_lines if line.level == LogLevel.INFO),
-            "total": len(all_lines),
-            "selected": len(selected),
-        }
-        output_lines = [line.content for line in selected]
-        omitted = len(all_lines) - len(selected)
-        if omitted > 0:
-            summary_parts: list[str] = []
-            for label, key in (
-                ("ERROR", "errors"),
-                ("FAIL", "fails"),
-                ("WARN", "warnings"),
-                ("INFO", "info"),
-            ):
-                count = stats[key]
-                if count > 0:
-                    summary_parts.append(f"{count} {label}")
-            if summary_parts:
-                output_lines.append(f"[{omitted} lines omitted: {', '.join(summary_parts)}]")
-        return "\n".join(output_lines), stats
-
-    def _store_in_ccr(self, original: str, compressed: str, original_count: int) -> str | None:
-        """Backwards-compat shim — the legacy callsite name. Now
-        delegates to `_persist_to_python_ccr`. Returns the stored
-        cache_key if persistence succeeded, else None.
-        """
-        # Compute the same cache key the Rust path would (MD5 of
-        # original truncated to 24 hex chars).
-        import hashlib
-
-        cache_key = hashlib.md5(original.encode()).hexdigest()[:24]
-        try:
-            from ..cache.compression_store import get_compression_store
-        except ImportError as e:
-            logger.warning("CCR store import failed; cache_key %s not persisted: %s", cache_key, e)
-            return None
-        try:
-            store: Any = get_compression_store()
-            return cast(
-                "str | None",
-                store.store(original, compressed, original_item_count=original_count),
-            )
-        except Exception as e:
-            logger.warning("CCR store write failed; cache_key %s not persisted: %s", cache_key, e)
-            return None
+    # ─── Internal CCR persistence ───────────────────────────────────────
 
     def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> None:
         """Promote a Rust-emitted cache_key into the production Python

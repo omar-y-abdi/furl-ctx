@@ -10,10 +10,10 @@ is now a thin shim that:
    change.
 2. Routes `SearchCompressor.compress()` entirely through the Rust
    implementation, picking up the parser bug fixes and the
-   `signals::LineImportanceDetector` trait consumer pattern.
-3. Implements legacy internals (`_parse_search_results`,
-   `_format_output`) on top of the same Rust building blocks so the
-   existing unit tests keep covering meaningful code paths.
+   `signals::LineImportanceDetector` trait consumer pattern. The Rust
+   crate owns parsing, scoring, selection, and output formatting; their
+   behavior (including the Windows-path and dashed-filename fixes) is
+   pinned by the `search_compressor.rs` unit tests.
 
 # Bug fixes the Rust port carries (and this shim therefore inherits)
 
@@ -191,41 +191,6 @@ class SearchCompressor:
             cache_key=cache_key,
             summaries=summaries,
         )
-
-    # ─── Legacy internal helpers (test surface compat) ──────────────────
-
-    def _parse_search_results(self, content: str) -> dict[str, FileMatches]:
-        """Parse via the Rust parser, build legacy Python dataclasses."""
-        from headroom._core import parse_search_lines
-
-        out: dict[str, FileMatches] = {}
-        for file_path, line_no, body in parse_search_lines(content):
-            if file_path not in out:
-                out[file_path] = FileMatches(file=file_path)
-            out[file_path].matches.append(
-                SearchMatch(file=file_path, line_number=int(line_no), content=body)
-            )
-        return out
-
-    def _format_output(
-        self,
-        selected: dict[str, FileMatches],
-        original: dict[str, FileMatches],
-    ) -> tuple[str, dict[str, str]]:
-        lines: list[str] = []
-        summaries: dict[str, str] = {}
-
-        for file_path, fm in sorted(selected.items()):
-            for match in fm.matches:
-                lines.append(f"{match.file}:{match.line_number}:{match.content}")
-            original_fm = original.get(file_path)
-            if original_fm and len(original_fm.matches) > len(fm.matches):
-                omitted = len(original_fm.matches) - len(fm.matches)
-                summary = f"[... and {omitted} more matches in {file_path}]"
-                lines.append(summary)
-                summaries[file_path] = summary
-
-        return "\n".join(lines), summaries
 
     # ─── Internal CCR persistence ───────────────────────────────────────
 

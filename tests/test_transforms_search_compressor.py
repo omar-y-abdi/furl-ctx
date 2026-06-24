@@ -8,34 +8,7 @@ from headroom.transforms.search_compressor import (
     SearchCompressionResult,
     SearchCompressor,
     SearchCompressorConfig,
-    SearchMatch,
 )
-
-
-def test_parse_search_results_groups_by_file() -> None:
-    compressor = SearchCompressor(
-        SearchCompressorConfig(
-            max_matches_per_file=3,
-            max_total_matches=4,
-            max_files=2,
-            context_keywords=["auth"],
-        )
-    )
-    content = "\n".join(
-        [
-            "src/auth.py:10:ERROR auth failed",
-            "src/auth.py-11-warning auth retry",
-            "src/auth.py:12:plain auth line",
-            "src/db.py:2:warning token expired",
-            "not a match",
-        ]
-    )
-    parsed = compressor._parse_search_results(content)
-    assert set(parsed) == {"src/auth.py", "src/db.py"}
-    assert parsed["src/auth.py"].first == SearchMatch(
-        file="src/auth.py", line_number=10, content="ERROR auth failed"
-    )
-    assert parsed["src/auth.py"].last.line_number == 12
 
 
 def test_search_compressor_compress_paths_and_ccr() -> None:
