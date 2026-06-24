@@ -1306,7 +1306,11 @@ mod tests {
             LogLine::new(2, "2026-06-12T10:00:09Z worker started processing batch"),
         ];
         let deduped = c.dedupe_similar(lines);
-        assert_eq!(deduped.len(), 1, "same message, varying timestamp -> one survivor");
+        assert_eq!(
+            deduped.len(),
+            1,
+            "same message, varying timestamp -> one survivor"
+        );
     }
 
     #[test]

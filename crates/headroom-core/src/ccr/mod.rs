@@ -34,11 +34,11 @@ mod markers;
 
 use std::time::Duration;
 
+pub use backends::{from_config, CcrBackendConfig, CcrBackendInitError, InMemoryCcrStore};
 pub(crate) use markers::{
     marker_for_diff, marker_for_opaque, marker_for_retrieve_more, marker_for_row_index,
     marker_for_rows_offloaded,
 };
-pub use backends::{from_config, CcrBackendConfig, CcrBackendInitError, InMemoryCcrStore};
 
 /// Pluggable CCR storage backend. `Send + Sync` so it can sit behind an
 /// `Arc` and be shared across threads in the engine.

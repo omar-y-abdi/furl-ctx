@@ -1043,8 +1043,7 @@ mod tests {
         // stable hash. This is the dedup win (DESIGN.md Imp2).
         let a = json!({"ts": "2026-06-12T10:00:00Z", "id": "aaaa", "msg": "disk full"});
         let b = json!({"ts": "2026-06-12T10:00:09Z", "id": "bbbb", "msg": "disk full"});
-        let exclude: BTreeSet<String> =
-            ["ts".to_string(), "id".to_string()].into_iter().collect();
+        let exclude: BTreeSet<String> = ["ts".to_string(), "id".to_string()].into_iter().collect();
         assert_eq!(
             stable_item_hash(&a, &exclude),
             stable_item_hash(&b, &exclude),
@@ -1060,7 +1059,10 @@ mod tests {
         let a = json!({"ts": "t0", "msg": "disk full"});
         let b = json!({"ts": "t1", "msg": "out of memory"});
         let exclude: BTreeSet<String> = ["ts".to_string()].into_iter().collect();
-        assert_ne!(stable_item_hash(&a, &exclude), stable_item_hash(&b, &exclude));
+        assert_ne!(
+            stable_item_hash(&a, &exclude),
+            stable_item_hash(&b, &exclude)
+        );
     }
 
     #[test]

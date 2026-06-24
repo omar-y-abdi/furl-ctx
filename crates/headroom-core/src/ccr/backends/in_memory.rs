@@ -431,11 +431,7 @@ mod tests {
         }
 
         // The order queue must be bounded (no unbounded tombstone growth).
-        let queue_len = store
-            .order
-            .lock()
-            .expect("mutex poisoned in test")
-            .len();
+        let queue_len = store.order.lock().expect("mutex poisoned in test").len();
         let max_allowed = cap * TOMBSTONE_K;
         assert!(
             queue_len <= max_allowed,

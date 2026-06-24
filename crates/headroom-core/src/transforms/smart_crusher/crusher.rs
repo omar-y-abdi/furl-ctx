@@ -40,13 +40,13 @@ use serde_json::Value;
 use super::analyzer::SmartAnalyzer;
 use super::builder::SmartCrusherBuilder;
 use super::classifier::{classify_array, ArrayType};
-use super::field_role::compute_exclude_set;
 use super::compaction::{
     classify_cell, emit_opaque_ccr_marker, try_parse_json_container, CellClass, ClassifyConfig,
     Compaction, CompactionStage,
 };
 use super::config::{RoutingPolicy, SmartCrusherConfig};
 use super::crushers::{compute_k_split, crush_number_array, crush_object, crush_string_array};
+use super::field_role::compute_exclude_set;
 use super::planning::SmartCrusherPlanner;
 use super::traits::{Constraint, CrushEvent, Observer};
 use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, CrushResult};
@@ -1045,10 +1045,9 @@ impl SmartCrusher {
                 let (c, rendered) = stage.run(&result);
                 if c.was_compacted() && !c.contains_opaque_ref() {
                     let sentinel = ccr_sentinel_map(&dropped_summary, row_index_marker.as_deref());
-                    let sentinel_line =
-                        crate::transforms::anchor_selector::python_safe_json_dumps(
-                            &Value::Object(sentinel.clone()),
-                        );
+                    let sentinel_line = crate::transforms::anchor_selector::python_safe_json_dumps(
+                        &Value::Object(sentinel.clone()),
+                    );
                     let mut json_form_items = result.clone();
                     json_form_items.push(Value::Object(sentinel));
                     let json_form = crate::transforms::anchor_selector::python_safe_json_dumps(
@@ -1117,7 +1116,8 @@ impl SmartCrusher {
         }
         let mut items = result.items.clone();
         if !result.dropped_summary.is_empty() {
-            let sentinel = ccr_sentinel_map(&result.dropped_summary, result.row_index_marker.as_deref());
+            let sentinel =
+                ccr_sentinel_map(&result.dropped_summary, result.row_index_marker.as_deref());
             items.push(Value::Object(sentinel));
         }
         crate::transforms::anchor_selector::python_safe_json_dumps(&Value::Array(items))
@@ -1472,7 +1472,8 @@ fn annotate_dup_counts(
     use crate::transforms::anchor_selector::stable_item_hash;
 
     // Family sizes over the WHOLE original array.
-    let mut family_size: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut family_size: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for item in all_items {
         if item.is_object() || item.is_array() {
             *family_size
@@ -2382,12 +2383,20 @@ mod tests {
             "feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci",
         ];
         const AREAS: [&str; 10] = [
-            "crusher", "proxy", "ccr", "router", "bench", "tokenizer", "store", "pipeline",
-            "compaction", "relevance",
+            "crusher",
+            "proxy",
+            "ccr",
+            "router",
+            "bench",
+            "tokenizer",
+            "store",
+            "pipeline",
+            "compaction",
+            "relevance",
         ];
         const VERBS: [&str; 10] = [
-            "add", "remove", "rework", "guard", "pin", "extend", "isolate", "deflake",
-            "speed up", "harden",
+            "add", "remove", "rework", "guard", "pin", "extend", "isolate", "deflake", "speed up",
+            "harden",
         ];
         const THINGS: [&str; 15] = [
             "the lossy budget",
@@ -2657,8 +2666,7 @@ mod tests {
                 for hv in &restored {
                     if let Value::String(row_hash) = hv {
                         if let Some(row_payload) = store.get(row_hash) {
-                            let row_arr: Vec<Value> =
-                                serde_json::from_str(&row_payload).unwrap();
+                            let row_arr: Vec<Value> = serde_json::from_str(&row_payload).unwrap();
                             for x in row_arr {
                                 recovered.insert(canonical_json_for_match(&x));
                             }
@@ -2676,8 +2684,7 @@ mod tests {
             "at least one surfaced <<ccr:..>> hash must resolve in the store"
         );
 
-        let distinct_inputs: HashSet<String> =
-            items.iter().map(canonical_json_for_match).collect();
+        let distinct_inputs: HashSet<String> = items.iter().map(canonical_json_for_match).collect();
         let lost: Vec<&String> = distinct_inputs.difference(&recovered).collect();
         assert!(
             lost.is_empty(),
@@ -2759,7 +2766,9 @@ mod tests {
             .with_ccr_store(store_dyn)
             .build();
         let _ = &c; // silence: reuse store handle from helper
-        let items: Vec<Value> = (0..200).map(|i| json!({"status": "ok", "seq": i})).collect();
+        let items: Vec<Value> = (0..200)
+            .map(|i| json!({"status": "ok", "seq": i}))
+            .collect();
         assert_no_silent_loss(&c2, &store, &items);
     }
 
@@ -2777,7 +2786,9 @@ mod tests {
         let expected = hash_canonical(&canonical_array_json(&items));
         assert_eq!(persisted.hash, expected, "hash scheme must be unchanged");
         assert_eq!(persisted.hash.len(), 12);
-        assert!(persisted.marker.contains(&format!("<<ccr:{expected} 5_rows_offloaded>>")));
+        assert!(persisted
+            .marker
+            .contains(&format!("<<ccr:{expected} 5_rows_offloaded>>")));
         // Zero dropped → None (no hash, no marker, no store write).
         assert!(c.persist_dropped(&items, 0).is_none());
     }
@@ -2844,8 +2855,11 @@ mod tests {
     /// Build a default-config crusher (MinTokens) plus a LosslessFirst
     /// twin, both sharing one in-memory CCR store, so a routing test can
     /// compare the two policies and still recover any dropped rows.
-    fn min_tokens_and_lossless_first(
-    ) -> (SmartCrusher, SmartCrusher, std::sync::Arc<crate::ccr::InMemoryCcrStore>) {
+    fn min_tokens_and_lossless_first() -> (
+        SmartCrusher,
+        SmartCrusher,
+        std::sync::Arc<crate::ccr::InMemoryCcrStore>,
+    ) {
         use crate::ccr::InMemoryCcrStore;
         use crate::transforms::smart_crusher::SmartCrusherBuilder;
         use std::sync::Arc;
@@ -2861,7 +2875,11 @@ mod tests {
             .with_ccr_store(Arc::clone(&store_dyn))
             .build()
         };
-        (mk(RoutingPolicy::MinTokens), mk(RoutingPolicy::LosslessFirst), store)
+        (
+            mk(RoutingPolicy::MinTokens),
+            mk(RoutingPolicy::LosslessFirst),
+            store,
+        )
     }
 
     #[test]
@@ -2883,7 +2901,10 @@ mod tests {
             "MinTokens must ship the lossy DROP render for logs-shaped data; got strategy {:?}",
             r_min.strategy_info
         );
-        assert!(r_min.items.len() < items.len(), "lossy must actually drop rows");
+        assert!(
+            r_min.items.len() < items.len(),
+            "lossy must actually drop rows"
+        );
 
         // The chosen lossy render is fewer tokens than the lossless one.
         let lossy_tokens = min_tokens.render_token_count(&r_min);

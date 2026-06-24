@@ -525,17 +525,17 @@ mod tests {
     #[test]
     fn strict_parse_rejects_deviations() {
         for s in [
-            "2026-06-11T21:02:05",             // no tz
-            "2026-06-11T21:02:05.123+02:00",   // fractional seconds
-            "2026-06-11 21:02:05+02:00",       // space separator
-            "2026-13-01T00:00:00Z",            // month 13
-            "2026-02-30T00:00:00Z",            // Feb 30
-            "2023-02-29T00:00:00Z",            // non-leap Feb 29
-            "2026-06-11T24:00:00Z",            // hour 24
-            "2026-06-11T23:59:60Z",            // leap second
-            "0000-01-01T00:00:00Z",            // year 0
-            "2026-06-11T21:02:05+2:00",        // short offset
-            "2026-06-11T21:02:05+02:0",        // short offset
+            "2026-06-11T21:02:05",           // no tz
+            "2026-06-11T21:02:05.123+02:00", // fractional seconds
+            "2026-06-11 21:02:05+02:00",     // space separator
+            "2026-13-01T00:00:00Z",          // month 13
+            "2026-02-30T00:00:00Z",          // Feb 30
+            "2023-02-29T00:00:00Z",          // non-leap Feb 29
+            "2026-06-11T24:00:00Z",          // hour 24
+            "2026-06-11T23:59:60Z",          // leap second
+            "0000-01-01T00:00:00Z",          // year 0
+            "2026-06-11T21:02:05+2:00",      // short offset
+            "2026-06-11T21:02:05+02:0",      // short offset
         ] {
             assert!(parse_iso_strict(s).is_none(), "must reject {s}");
         }
@@ -566,8 +566,16 @@ mod tests {
         let encoded = encode_iso_column(&values).expect("encode");
         assert_eq!(encoded[0], values[0], "first cell verbatim");
         assert!(encoded[1].starts_with('+') || encoded[1].starts_with('-'));
-        assert!(encoded[1].contains("/+02:00"), "tz change carried: {:?}", encoded[1]);
-        assert!(!encoded[2].contains('/'), "same tz omits spelling: {:?}", encoded[2]);
+        assert!(
+            encoded[1].contains("/+02:00"),
+            "tz change carried: {:?}",
+            encoded[1]
+        );
+        assert!(
+            !encoded[2].contains('/'),
+            "same tz omits spelling: {:?}",
+            encoded[2]
+        );
         assert_eq!(encoded[4], "+0", "identical consecutive is +0");
         let decoded = decode_iso_column(&encoded).expect("decode");
         assert_eq!(decoded, values, "exact reconstruction");
