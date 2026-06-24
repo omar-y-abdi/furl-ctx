@@ -95,17 +95,6 @@ all = [
     "headroom-ai[code,ml,relevance,mcp,progress,html]",
 ]
 
-[project.urls]
-Homepage = "https://headroom-docs.vercel.app"
-Documentation = "https://headroom-docs.vercel.app/docs"
-Repository = "https://github.com/chopratejas/headroom"
-Issues = "https://github.com/chopratejas/headroom/issues"
-Changelog = "https://github.com/chopratejas/headroom/blob/main/CHANGELOG.md"
-# llms.txt convention (llmstxt.org) — point AI agents / LLM crawlers
-# at the auto-generated docs index so they can resolve install paths
-# and entry points without a follow-up fetch.
-"AI / LLM Index" = "https://headroom-docs.vercel.app/llms.txt"
-
 # Maturin builds a single wheel containing both the Python source under
 # `headroom/` AND the compiled Rust extension `headroom/_core.so` (cdylib
 # from `crates/headroom-py`). One `pip install headroom-ai` ships everything
