@@ -1,4 +1,15 @@
-# ⭐ HANDOFF — MASS-REPAIR + STANDALONE-EXCISE (ACTIVE 2026-06-24, resume here)
+# ⭐⭐ CYCLE 2 — POST-RERUN REPAIR (ACTIVE, resume here)
+
+Rerun `wf_f60fec75` (204 findings, 143 material) CONFIRMED cycle-1 repairs (original top-6 gone; R5 marker-grammar now in "Genuinely Good"; R6 credited by commit name; zero fork/proxy findings) but found a DEEPER layer. New `codebase-CRITIQUE.md` written (untracked). User chose: RUN SECOND CYCLE. Backlog (order = safety-net + safe-wins before recovery-critical A1):
+- [ ] **TE1** (HIGH, do FIRST = safety net): add a row-drop **Python-store-ONLY** recovery assertion (store.retrieve, NOT ccr_get) so the production path is load-bearing in CI. test_ccr_recovery_invariant.py:151-168 `_recover_from_output` currently accepts a hit from EITHER store → row-drop path passes even if Python mirror broken. Opaque path already has a py-only test (test_opaque_blob_recovers_from_output_marker). Characterize-first like R5-step1.
+- [ ] **C1** (MEDIUM quick-win): narrow `compress()` swallow (compress.py:380-388) — catches all Exception → returns originals w/ tokens_before=0, masks bugs (incl A1 mirror failures) as no-ops, violates "never swallow errors". Catch narrow/declared set or wrap in typed CompressionError.
+- [ ] **T1** (MEDIUM, highest leverage): replace `**kwargs` bag with a frozen CompressRequest threaded end-to-end → retires T1 (untyped seam) + A3 (thread-local-on-singleton, content_router.py:510/526-551) + the 250-vs-50 min_tokens default divergence (compress.py:123 vs content_router.py:1670) in ONE fix. Mind: TransformPipeline is in __all__ (direct callers supported).
+- [ ] **A1** (HIGH, recovery-critical, ARCHITECTURE — present 2 approaches to user FIRST): CCR recovery write-of-record (Rust CcrStore, crusher.rs persist_dropped) ≠ read-of-record (Python store, mcp_server.py:362); bridged by best-effort mirror (smart_crusher.py:843-892 _mirror_*_to_python_store + diff/log/search _persist_to_python_ccr) with 3 SILENT branches (ImportError no-op, get_compression_store swallow, store.store() swallow). ccr_get has 0 prod callers outside mirror. Approaches: (a) route prod retrieve through ccr_get w/ Python fallback, OR (b) crush writes straight into Python store + delete mirror, OR (minimal) make the mirror FAIL LOUD (no swallow). Pervasive across all Rust-backed compressors. ★ NOTE: my gate's recovery-22+needle-100% has a blind spot here (TE1 + needle's own scanner) — TE1 closes part of it. I did NOT regress the mirror (R5-recon verified it kept).
+**Gate: suite 592/14, recovery 22, floor held, needle 100%. HEAD `bd3af279`.** Same PM-loop (agents edit-only, I gate+maturin-if-rust, commit on PASS, git add -u). codebase-CRITIQUE.md stays untracked (deleted at cycle-2 finish, then optional 3rd rerun).
+
+---
+
+# ⭐ HANDOFF — MASS-REPAIR + STANDALONE-EXCISE (cycle 1 — COMPLETE)
 
 **Where we are (2026-06-24, post-compact, IN PROGRESS):** MASS-REPAIR executing. PM-loop = dispatch opus agent (one concern, EDIT-ONLY no git) → I verify independently → run gate → commit on PASS. Agents must NOT commit (keeps me in verify-loop). `builder` agent type needs /tmp/subagent-instructions-<session>-builder.md filled (overwrite per task).
 **DONE so far (baseline was 885d9b61):**
