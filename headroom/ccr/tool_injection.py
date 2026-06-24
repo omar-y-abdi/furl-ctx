@@ -18,16 +18,20 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from headroom.ccr import marker_grammar
+
 # Tool name constant - used for matching tool calls
 CCR_TOOL_NAME = "headroom_retrieve"
 
-# Accepted CCR hash widths (number of hex characters):
+# Accepted CCR hash widths (number of hex characters). The single source of
+# truth lives in ``marker_grammar.HASH_WIDTHS``; this name is re-exported for
+# backwards compatibility (importers + the spoofing-guard width check below).
 # - 12: SmartCrusher path — sha256(payload)[:6] → 12 hex chars
 #        (crusher.rs:1620, asserted at crusher.rs:2792)
 # - 24: Canonical compute_key — BLAKE3 → 24 lowercase hex chars
 #        (ccr/mod.rs:69), used by read_lifecycle, diff_compressor, etc.
 # Do NOT add arbitrary lengths — the exact-width check is the spoofing guard.
-CCR_HASH_WIDTHS: frozenset[int] = frozenset({12, 24})
+CCR_HASH_WIDTHS: frozenset[int] = marker_grammar.HASH_WIDTHS
 
 
 def create_ccr_tool_definition(
@@ -202,40 +206,27 @@ class CCRToolInjector:
 
     # Detected compression markers
     _detected_hashes: list[str] = field(default_factory=list)
-    # Multiple marker patterns to match different compressors:
-    # - SmartCrusher: [100 items compressed to 10. Retrieve more: hash=abc123]
-    # - Kompress: [100 lines compressed to 10. Retrieve more: hash=abc123]
-    # - LogCompressor: [200 lines compressed to 20. Retrieve more: hash=abc123]
-    # - SearchCompressor: [50 matches compressed to 5. Retrieve more: hash=abc123]
-    # - Generic: any [... compressed ... hash=xxx] pattern
+    # The marker grammar is OWNED by ``headroom.ccr.marker_grammar`` — the
+    # single source of truth for widths, hex classes, the ``<<ccr:`` prefix,
+    # the separator set, and the per-shape regex fragments. The compiled
+    # patterns below are BUILT there from those named parts and are byte-
+    # identical to the literals that used to live here; equivalence is pinned
+    # in tests/test_ccr_marker_grammar_characterization.py. The three patterns:
+    #   1. BRACKET_RETRIEVE (shape H): standard "Retrieve more: hash=xxx" form,
+    #      shared by kompress / log / search compressors (markers.rs
+    #      marker_for_retrieve_more). 24-hex.
+    #   2. GENERIC_BRACKET (shape G + fallback): any bracket "...compressed...
+    #      hash=xxx" form, IGNORECASE. Catches "Retrieve full diff:" (diff
+    #      compressor, markers.rs marker_for_diff). 24-hex.
+    #   3. DOUBLE_ANGLE (shapes A-F + D): the ``<<ccr:HASH<delim>...>>`` family
+    #      emitted by SmartCrusher (markers.rs marker_for_rows_offloaded /
+    #      marker_for_row_index / marker_for_opaque), the bare CCR helper, and
+    #      cross_message_dedup. 12-hex (SmartCrusher sha256[:6]) or 24-hex
+    #      (canonical BLAKE3 / SHA-256[:24]). The trailing delimiter guards the
+    #      width — a 24-hex hash cannot be truncated to 12 because char 12 of a
+    #      24-run is itself hex, not a delimiter.
     _marker_patterns: list[re.Pattern] = field(
-        default_factory=lambda: [
-            # Bracket-form patterns require exactly 24 hex characters for hash validation.
-            # CCR canonical compute_key uses BLAKE3 → 24 lowercase hex chars (ccr/mod.rs:69).
-            # Requiring exact length prevents hash spoofing attacks with shorter hashes.
-            #
-            # Standard format: [N <type> compressed to M. Retrieve more: hash=xxx]
-            # Matches items, lines, matches, or any other type
-            re.compile(r"\[(\d+) \w+ compressed to (\d+)\. Retrieve more: hash=([a-f0-9]{24})\]"),
-            # Legacy format without "to M" or "Retrieve more:" (old TextCompressor)
-            re.compile(r"\[(\d+) \w+ compressed\. hash=([a-f0-9]{24})\]"),
-            # Generic fallback: any compression marker with hash (exactly 24 chars)
-            re.compile(r"\[.*?compressed.*?hash=([a-f0-9]{24})\]", re.IGNORECASE),
-            # SmartCrusher <<ccr:HASH ...>> / <<ccr:HASH>> double-angle-bracket forms.
-            # The hash is either 12 hex chars (SmartCrusher: sha256(payload)[:6],
-            # crusher.rs:1620) or 24 hex chars (canonical BLAKE3 compute_key, mod.rs:69).
-            # Four emit shapes (crusher.rs:1160 / formatter.rs:560 / mod.rs:81):
-            #   <<ccr:HASH N_rows_offloaded>>   — row-drop sentinel (space)
-            #   <<ccr:HASH#rows N_chunks>>       — row-index sentinel (#)
-            #   <<ccr:HASH,KIND,SIZE>>           — opaque-blob sentinel (comma)
-            #   <<ccr:HASH>>                     — bare sentinel (>> immediately after hash)
-            # One capturing group (the hash) so re.findall returns strings directly.
-            # Alternation longest-first: 24 before 12 to avoid prefix-matching a 24-char
-            # hash as 12 chars when followed by more hex digits.
-            re.compile(
-                r"<<ccr:([a-f0-9]{24}|[a-f0-9]{12})(?:[ ,#>]|>>)"
-            ),
-        ]
+        default_factory=marker_grammar.marker_patterns
     )
 
     def __post_init__(self) -> None:

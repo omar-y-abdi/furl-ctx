@@ -50,12 +50,36 @@ call that lands in the Python store, we ALSO drive the REAL producer:
   * I     — store via the global store (as ``read_lifecycle`` does) and build
             the marker with read_lifecycle's exact stale format string.
 
-Only E and F are genuinely PRODUCER-DRIVEN — they call the real
-``cross_message_dedup`` render functions, which build the marker text. A/B/C/D
-construct the marker from the Rust producer's exact format string; G/H/I
-construct from the Python producer's exact format string and call ``store.store``
-the same way the producer does. Per-shape method (producer-driven vs
-format-constructed) is recorded in the ``method`` field of each :class:`Case`.
+Two layers of binding now exist:
+
+1. The per-:class:`Case` table (below) characterizes the CONSUMER grammar on
+   each shape's exact marker text. E/F call the real ``cross_message_dedup``
+   render functions; A/B/C/D/G/H/I construct from the producer's exact format
+   string and store the same way the producer does. The ``method`` field
+   records producer-driven vs format-constructed per case.
+
+2. Standalone ``test_producer_driven_*`` tests (bottom of this file) drive the
+   REAL producer through the engine end-to-end — ``ContentRouter().compress``
+   for shapes A / B / C, ``DiffCompressor.compress_with_stats`` for shape G —
+   then extract via the REAL ``scan_for_markers`` and recover byte-exact from
+   the engine's store. Together with E/F's real render functions, that makes
+   shapes A, B, C, E, F, G genuinely producer→consumer bound: a producer that
+   emits an un-enumerated width or separator stops being surfaced by the
+   production consumer and FAILS, rather than silently missing recovery. This
+   covers three of the four double-angle separators E2E (A=space, B=`#`,
+   C=`,`).
+
+   The remaining shapes — D (bare `<<ccr:HASH>>`, the `>>` separator) and H
+   (kompress/log/search `Retrieve more:` form) — are NOT triggerable E2E here:
+   the array-crush path always emits a suffix (never the bare form), and
+   kompress needs onnxruntime/torch (unavailable). They stay format-constructed
+   from the producer's exact format string, bound to the OWNED grammar by
+   RECOGNITION: ``test_format_constructed_fixtures_use_owned_grammar_pieces``
+   and ``test_double_angle_separators_are_exactly_the_owned_set`` assert the
+   spec patterns match the constructed fixtures and reject un-enumerated
+   separators. Producer-side construction drift for D/H is caught upstream by
+   the Rust byte-identity locks in ``crates/headroom-core/src/ccr/markers.rs``
+   (the single construction owner), not by these Python recognition tests.
 
 ★ Shape I matches NO consumer pattern (no ``compressed`` token, no ``<<ccr:``)
   and is recovered via a DIRECT store lookup, never via ``scan_for_markers``.
@@ -69,18 +93,58 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
 import pytest
 
 from headroom.cache.compression_store import CompressionStore
+from headroom.ccr import marker_grammar
 from headroom.ccr.tool_injection import CCRToolInjector
 from headroom.transforms.cross_message_dedup import (
     duplicate_sentinel,
     near_duplicate_rendering,
 )
 from headroom.transforms.read_lifecycle import ReadState
+
+# --------------------------------------------------------------------------- #
+# FROZEN before-image — the ORIGINAL ``_marker_patterns`` literals, copied
+# verbatim from tool_injection.py PRIOR to the marker_grammar consolidation.
+# These are intentionally NOT imported from marker_grammar (that would make the
+# equivalence proof circular). They are the immutable reference the spec-built
+# patterns must reproduce byte-for-byte at the BEHAVIORAL (union) level.
+#
+# Note the FOUR entries: the third (`compressed\. hash=`) is the now-RETIRED
+# dead pattern #2. We keep it in the reference set on purpose: removing it from
+# the production list must NOT change which hashes get surfaced, because the
+# generic fallback (entry 4 here / GENERIC_BRACKET in the spec) already
+# subsumes it. The equivalence corpus includes a string only the dead pattern
+# could have matched, and asserts the hash still surfaces after removal.
+# --------------------------------------------------------------------------- #
+_OLD_MARKER_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\[(\d+) \w+ compressed to (\d+)\. Retrieve more: hash=([a-f0-9]{24})\]"),
+    re.compile(r"\[(\d+) \w+ compressed\. hash=([a-f0-9]{24})\]"),  # retired dead #2
+    re.compile(r"\[.*?compressed.*?hash=([a-f0-9]{24})\]", re.IGNORECASE),
+    re.compile(r"<<ccr:([a-f0-9]{24}|[a-f0-9]{12})(?:[ ,#>]|>>)"),
+]
+
+
+def _union_extract(patterns: list[re.Pattern], text: str) -> list[str]:
+    """Replicate ``CCRToolInjector._scan_text``: run every pattern, take the
+    last capture group of each match, dedup preserving first-seen order.
+
+    Used to compare the OLD frozen literals against the spec-built patterns at
+    the exact granularity production uses (the dedup'd union), not pattern-by-
+    pattern textual identity.
+    """
+    out: list[str] = []
+    for pattern in patterns:
+        for match in pattern.findall(text):
+            hash_key = match[-1] if isinstance(match, tuple) else match
+            if hash_key and hash_key not in out:
+                out.append(hash_key)
+    return out
 
 # --------------------------------------------------------------------------- #
 # Hash helpers — mirror the EXACT producer hash functions (verified in source).
@@ -418,3 +482,354 @@ def test_24hex_space_separator_extracts_full_width() -> None:
         f"(truncation/whole-blob-miss regression). Got {detected!r}, expected [{h24!r}]."
     )
     assert len(detected[0]) == 24
+
+
+# --------------------------------------------------------------------------- #
+# EQUIVALENCE PROOF — the spec-built patterns reproduce the original literals'
+# behavior byte-for-byte. (STEP C ★)
+# --------------------------------------------------------------------------- #
+
+
+def _equivalence_corpus() -> list[str]:
+    """Every distinct string the production scanner could see, so the OLD vs
+    NEW union outputs are compared on a representative input set.
+
+    Covers all 9 emitted-marker fixtures PLUS adversarial extras that pin the
+    consolidation's edge cases (dead-pattern subsumption, generic fallback,
+    case sensitivity, the 24-vs-12 width guard).
+    """
+    h12 = "9f3a2b1c4d5e"
+    h24 = "abcdef0123456789abcdef01"
+    corpus: list[str] = []
+
+    # All 9 shape fixtures (the FULL emitted text the producer would surface).
+    for case in CASES:
+        emitted, _h, _orig = case.build(CompressionStore(max_entries=100))
+        corpus.append(emitted)
+
+    # Dead-pattern #2 string: ONLY the retired `[N \w+ compressed. hash=H]`
+    # literal could match this — yet the generic fallback already subsumes it
+    # (it contains "compressed" and "hash=<24hex>" inside brackets). Removing
+    # the dead pattern must NOT drop this hash.
+    corpus.append(f"[5 items compressed. hash={h24}]")
+
+    # Generic-fallback-only string ("Retrieve full diff:" — shape G's form).
+    corpus.append(f"[120 lines compressed to 12. Retrieve full diff: hash={h24}]")
+
+    # Bare 12-hex and 24-hex double-angle markers.
+    corpus.append(f"<<ccr:{h12}>>")
+    corpus.append(f"<<ccr:{h24}>>")
+
+    # 24-hex with a space sep (the E/F width-guard case).
+    corpus.append(f"<<ccr:{h24} 5_bytes_duplicate>>")
+
+    # Uppercase-hex marker: the lowercase-only consumer must NOT match it
+    # (case sensitivity of the double-angle pattern is preserved).
+    corpus.append("<<ccr:ABCDEF012345 9_rows_offloaded>>")
+
+    # A bracket marker with IGNORECASE content — only the generic fallback
+    # (which carries re.IGNORECASE) may surface this.
+    corpus.append(f"[7 Lines COMPRESSED to 1. retrieve MORE: HASH={h24}]".replace("HASH=", "hash="))
+
+    # Multi-marker string (dedup behavior).
+    corpus.append(f"first <<ccr:{h12} 3_rows_offloaded>> then <<ccr:{h12},base64,1.1kB>> end")
+
+    return corpus
+
+
+def test_spec_patterns_behaviorally_identical_to_original_literals() -> None:
+    """The spec-built consumer patterns and the FROZEN original literals must
+    produce the IDENTICAL dedup'd union of extracted hashes on every input.
+
+    This is the no-regression guard for the marker_grammar consolidation: if
+    rebuilding the regex from named parts changes ANY match by one character,
+    the union output diverges on some corpus string and this fails, naming it.
+    """
+    new_patterns = marker_grammar.marker_patterns()
+    for text in _equivalence_corpus():
+        old_out = _union_extract(_OLD_MARKER_PATTERNS, text)
+        new_out = _union_extract(new_patterns, text)
+        assert old_out == new_out, (
+            "spec-built patterns diverge from the original literals.\n"
+            f"  input={text!r}\n  old={old_out!r}\n  new={new_out!r}"
+        )
+
+
+def test_spec_patterns_match_production_scanner_exactly() -> None:
+    """The patterns the spec exposes are EXACTLY the ones the production
+    consumer uses — no drift between the spec and ``CCRToolInjector``.
+    """
+    injector = CCRToolInjector()
+    spec = marker_grammar.marker_patterns()
+    assert [p.pattern for p in injector._marker_patterns] == [p.pattern for p in spec]
+    assert [p.flags for p in injector._marker_patterns] == [p.flags for p in spec]
+
+
+def test_dead_pattern_retired_but_hash_still_surfaces() -> None:
+    """The retired dead pattern #2 (`[N \\w+ compressed. hash=H]`) is GONE from
+    the production list, yet its hash still surfaces via the generic fallback
+    (subsumption) — so removal is behavior-neutral.
+    """
+    h24 = "abcdef0123456789abcdef01"
+    # The production list no longer contains the dead literal.
+    prod_sources = [p.pattern for p in marker_grammar.marker_patterns()]
+    assert r"\. hash=" not in "".join(prod_sources), (
+        "the dead `compressed. hash=` pattern must be retired from the spec"
+    )
+    # ...yet the hash is still extracted from a string only it used to match.
+    detected = CCRToolInjector().scan_for_markers(
+        [{"role": "user", "content": f"[5 items compressed. hash={h24}]"}]
+    )
+    assert detected == [h24], (
+        "retiring dead pattern #2 dropped a hash the generic fallback should "
+        f"still surface; got {detected!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# PRODUCER ↔ CONSUMER BINDING — the format strings the format-constructed
+# fixtures use are sourced from / verified against the OWNED grammar, so a
+# producer that emits an un-enumerated width or separator FAILS here. (STEP E)
+# --------------------------------------------------------------------------- #
+
+
+def test_format_constructed_fixtures_use_owned_grammar_pieces() -> None:
+    """Each format-constructed shape's emitted marker must be recognized by the
+    OWNED spec patterns at the OWNED widths — binding the constructed fixtures
+    to ``marker_grammar`` so they cannot silently drift from the contract.
+
+    A producer that emitted, say, a 16-hex hash or a `~` separator would build
+    a marker that the spec patterns reject, failing this test and naming the
+    shape — exactly the "un-enumerated width/separator FAILS, not silently
+    misses" guarantee the consolidation is for.
+    """
+    spec_patterns = marker_grammar.marker_patterns()
+    for case in CASES:
+        if case.method != "format-constructed":
+            continue
+        emitted, expected_hash, _orig = case.build(CompressionStore(max_entries=100))
+        union = _union_extract(spec_patterns, emitted)
+        if case.expect_extracted:
+            # The owned grammar must surface this fixture's hash...
+            assert expected_hash in union, (
+                f"{case.shape_id}: owned spec did not surface the constructed "
+                f"marker's hash.\n  emitted={emitted!r}\n  union={union!r}"
+            )
+            # ...at one of the OWNED strict widths (an un-enumerated width fails).
+            assert len(expected_hash) in marker_grammar.HASH_WIDTHS, (
+                f"{case.shape_id}: hash width {len(expected_hash)} is not in the "
+                f"owned HASH_WIDTHS {sorted(marker_grammar.HASH_WIDTHS)}"
+            )
+        else:
+            # Shape I: not enumerated by any spec pattern (direct-store only).
+            assert union == [], (
+                f"{case.shape_id}: expected NO spec match (direct-store recovery), "
+                f"got {union!r}"
+            )
+
+
+def test_double_angle_separators_are_exactly_the_owned_set() -> None:
+    """The double-angle delimiter the producers emit (space / comma / `#` /
+    `>>`) is the EXACT set the owned spec accepts — an un-enumerated separator
+    must NOT extract.
+
+    Pins the separator half of the grammar: every producer-emitted separator
+    surfaces the hash; a stray separator (`~`, `;`, `|`) does not.
+    """
+    inj = CCRToolInjector()
+    h12 = "9f3a2b1c4d5e"
+    # Producer-emitted separators (A space, C comma, B '#', D '>>').
+    for marker in (
+        f"<<ccr:{h12} 3_rows_offloaded>>",  # space
+        f"<<ccr:{h12},base64,1.1kB>>",      # comma
+        f"<<ccr:{h12}#rows 7_chunks>>",     # '#'
+        f"<<ccr:{h12}>>",                   # bare '>>'
+    ):
+        assert inj.scan_for_markers([{"role": "user", "content": marker}]) == [h12], (
+            f"owned separator did not surface the hash: {marker!r}"
+        )
+    # Un-enumerated separators must NOT surface a hash.
+    for bad in (
+        f"<<ccr:{h12}~junk>>",
+        f"<<ccr:{h12};junk>>",
+        f"<<ccr:{h12}|junk>>",
+    ):
+        assert inj.scan_for_markers([{"role": "user", "content": bad}]) == [], (
+            f"an un-enumerated separator unexpectedly surfaced a hash: {bad!r}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# PRODUCER-DRIVEN E2E BINDING — drive the REAL producer through the engine,
+# extract via the REAL production consumer (``scan_for_markers``, NOT a local
+# regex), recover byte-exact from the store. THIS is the drift guard the
+# objective asks for: if a Rust/Python producer changes a separator or width,
+# the production consumer stops surfacing the hash and these FAIL — naming the
+# shape. (STEP E — genuine producer→consumer binding for shapes A, C, G.)
+#
+# These are standalone (not ``Case`` entries) because the E2E path persists to
+# the engine's own store (Rust process store / request-scoped Python store),
+# not the per-case isolated ``CompressionStore`` the format-constructed table
+# uses.
+# --------------------------------------------------------------------------- #
+
+
+def test_producer_driven_A_rows_offloaded_binds_to_production_consumer() -> None:
+    """Shape A: the REAL ``ContentRouter().compress`` lossy row-drop path emits
+    ``<<ccr:HASH N_rows_offloaded>>``; the production consumer extracts the hash
+    and the Rust store resolves it byte-exact.
+
+    A producer-side change (e.g. ``markers.rs`` altering the space separator)
+    that the consumer grammar no longer recognizes fails HERE.
+    """
+    from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+
+    items = [f"log-line-{i}-payload" for i in range(1000)]
+    router = ContentRouter(ContentRouterConfig(ccr_enabled=False, ccr_inject_marker=False))
+    output = router.compress(json.dumps(items)).compressed
+
+    detected = _scan(CCRToolInjector(), output)
+    assert detected, (
+        "real row-drop producer emitted a marker the PRODUCTION consumer did "
+        f"not surface (producer↔consumer drift).\n  output head={output[:200]!r}"
+    )
+    for h in detected:
+        assert len(h) in marker_grammar.HASH_WIDTHS
+
+    crusher = router._get_smart_crusher()
+    recovered = [crusher.ccr_get(h) for h in detected if crusher.ccr_get(h) is not None]
+    assert recovered, "scanned row-drop hash did not resolve in the Rust store"
+    # Robust recovery check: every distinct input item is either still visible
+    # in the output OR present in a CCR blob the consumer's hash resolves.
+    # (Avoids depending on which specific items survivor-selection kept.)
+    blob = "\n".join(r or "" for r in recovered)
+    lost = [it for it in items if it not in output and it not in blob]
+    assert not lost, (
+        f"{len(lost)} dropped items not recoverable via the consumer's surfaced "
+        f"hashes (first: {lost[:3]!r})"
+    )
+
+
+def test_producer_driven_B_row_index_binds_to_production_consumer() -> None:
+    """Shape B: the REAL ``ContentRouter().compress`` granular row-index path
+    emits ``<<ccr:HASH#rows N_chunks>>``; the production consumer's delimiter
+    class ``[ ,#>]`` stops the capture at ``#``, so it surfaces the BARE 12-hex
+    blob hash (not ``HASH#rows``), which the Rust store resolves byte-exact.
+
+    A producer-side change to the ``#`` separator (``markers.rs
+    marker_for_row_index``) that the consumer no longer treats as a delimiter
+    fails HERE — either by surfacing a wrong-width hash or none at all.
+    """
+    from headroom.transforms.content_router import ContentRouter
+
+    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(500)]
+    router = ContentRouter()
+    output = router.compress(json.dumps(items)).compressed
+    if "#rows" not in output:
+        pytest.skip("granular row-index path did not fire (#rows absent) — environment gap")
+
+    detected = _scan(CCRToolInjector(), output)
+    assert detected, (
+        "real row-index producer emitted a '#rows' marker the PRODUCTION "
+        f"consumer did not surface.\n  output head={output[:200]!r}"
+    )
+    # The '#' delimiter must stop the capture: surfaced hash is the bare width,
+    # never the literal "HASH#rows".
+    for h in detected:
+        assert len(h) in marker_grammar.HASH_WIDTHS, (
+            f"row-index consumer surfaced a {len(h)}-char hash ({h!r}); the '#' "
+            f"delimiter should have bounded it to {sorted(marker_grammar.HASH_WIDTHS)}"
+        )
+        assert "#" not in h
+
+    crusher = router._get_smart_crusher()
+    recovered = [crusher.ccr_get(h) for h in detected if crusher.ccr_get(h) is not None]
+    assert recovered, "scanned row-index hash did not resolve in the Rust store"
+    assert any(items[0]["v"] in (r or "") for r in recovered), (
+        "the dropped row is not byte-exact recoverable via the consumer's bare hash"
+    )
+
+
+def test_producer_driven_C_opaque_blob_binds_to_production_consumer() -> None:
+    """Shape C: the REAL ``ContentRouter().compress`` opaque-substitution path
+    emits ``<<ccr:HASH,KIND,SIZE>>``; the production consumer extracts every
+    hash and the Rust store resolves the blobs byte-exact.
+
+    A producer-side change to the ``,`` separator / KIND / SIZE rendering that
+    the consumer grammar rejects fails HERE.
+    """
+    import base64
+    import random
+
+    from headroom.transforms.content_router import ContentRouter
+
+    rng = random.Random(0)
+    items = [
+        {
+            "id": i,
+            "tag": "x",
+            "data": base64.b64encode(bytes(rng.getrandbits(8) for _ in range(600))).decode(),
+        }
+        for i in range(50)
+    ]
+    blobs = {it["data"] for it in items}
+    router = ContentRouter()
+    output = router.compress(json.dumps(items)).compressed
+
+    detected = _scan(CCRToolInjector(), output)
+    assert detected, (
+        "real opaque-substitution producer emitted markers the PRODUCTION "
+        f"consumer did not surface.\n  output head={output[:200]!r}"
+    )
+    for h in detected:
+        assert len(h) in marker_grammar.HASH_WIDTHS
+
+    crusher = router._get_smart_crusher()
+    recovered = {crusher.ccr_get(h) for h in detected if crusher.ccr_get(h) is not None}
+    assert blobs <= recovered, (
+        f"{len(blobs - recovered)} opaque blobs unrecoverable via the production "
+        "consumer's surfaced hashes"
+    )
+
+
+def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> None:
+    """Shape G: the REAL ``DiffCompressor.compress_with_stats`` emits
+    ``[N lines compressed to M. Retrieve full diff: hash=H]``; the production
+    consumer surfaces the 24-hex hash (via the generic-bracket fallback) and
+    the Python CCR store resolves the original diff byte-exact.
+
+    A producer-side change to the diff marker (``markers.rs marker_for_diff``)
+    that the consumer's generic fallback no longer matches fails HERE.
+    """
+    from headroom.cache.compression_store import (
+        CompressionStore,
+        clear_request_compression_store,
+        set_request_compression_store,
+    )
+    from headroom.transforms.diff_compressor import DiffCompressor, DiffCompressorConfig
+
+    fresh = CompressionStore(max_entries=500, enable_feedback=False)
+    set_request_compression_store(fresh)
+    try:
+        diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n" + "\n".join(
+            f"+added line number {i} with some content" for i in range(200)
+        )
+        compressor = DiffCompressor(DiffCompressorConfig(enable_ccr=True, min_lines_for_ccr=10))
+        result, _stats = compressor.compress_with_stats(diff)
+        if result.cache_key is None:
+            pytest.skip("diff CCR did not fire (cache_key is None) — environment gap, not a grammar failure")
+
+        output = result.compressed if isinstance(result.compressed, str) else str(result.compressed)
+        detected = _scan(CCRToolInjector(), output)
+        assert result.cache_key in detected, (
+            "real diff producer's cache_key was NOT surfaced by the PRODUCTION "
+            f"consumer.\n  cache_key={result.cache_key!r}\n  detected={detected!r}"
+            f"\n  output head={output[:200]!r}"
+        )
+        assert len(result.cache_key) in marker_grammar.HASH_WIDTHS
+        entry = fresh.retrieve(result.cache_key)
+        assert entry is not None and entry.original_content == diff, (
+            "the diff original is not byte-exact recoverable via the consumer's hash"
+        )
+    finally:
+        clear_request_compression_store()

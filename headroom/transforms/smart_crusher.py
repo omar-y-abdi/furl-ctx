@@ -56,6 +56,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from ..ccr import marker_grammar
 from ..config import CCRConfig, TransformResult
 from ..tokenizer import Tokenizer
 from ..utils import compute_short_hash, create_tool_digest_marker, deep_copy_messages
@@ -783,8 +784,13 @@ class SmartCrusher(Transform):
         tell an index from a row/blob hash and expand it to per-row
         chunks.
         """
+        # Prefix + hex alphabet come from the owned grammar spec
+        # (marker_grammar). This walker intentionally enforces NO width — it
+        # keeps any hex run, unlike the strict-width regex consumer — and keeps
+        # the ``#rows`` suffix below. Behavior is unchanged; only the literals
+        # are now sourced from the single owner.
         idx = 0
-        prefix = "<<ccr:"
+        prefix = marker_grammar.CCR_PREFIX
         n = len(s)
         while True:
             start = s.find(prefix, idx)
@@ -792,7 +798,7 @@ class SmartCrusher(Transform):
                 return
             cursor = start + len(prefix)
             end = cursor
-            while end < n and s[end] in "0123456789abcdefABCDEF":
+            while end < n and s[end] in marker_grammar.HEX_ALPHABET:
                 end += 1
             if end == cursor:
                 # No hex chars after `<<ccr:` — not a real marker.

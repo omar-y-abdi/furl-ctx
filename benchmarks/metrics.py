@@ -29,6 +29,7 @@ from typing import Any
 
 from headroom import compress
 from headroom.cache.compression_store import get_compression_store
+from headroom.ccr import marker_grammar
 from headroom.tokenizer import Tokenizer
 from headroom.tokenizers import get_tokenizer
 from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
@@ -39,7 +40,11 @@ from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
 # JSON-array crush path; gpt-4o is chosen purely to get exact BPE counts.
 BENCH_MODEL = "gpt-4o"
 
-CCR_PREFIX = "<<ccr:"
+# The marker prefix is owned by ``marker_grammar`` (single source of truth);
+# the substring walker below scans for it then a hex run from the same spec's
+# alphabet. Behavior (width-free hex run, like the engine's own walker) is
+# unchanged — only the literals are sourced from the owner.
+CCR_PREFIX = marker_grammar.CCR_PREFIX
 CCR_SENTINEL_KEY = "_ccr_dropped"
 
 
@@ -89,7 +94,7 @@ def collect_ccr_hashes(text: str) -> set[str]:
             return hashes
         cursor = start + len(CCR_PREFIX)
         end = cursor
-        while end < n and text[end] in "0123456789abcdefABCDEF":
+        while end < n and text[end] in marker_grammar.HEX_ALPHABET:
             end += 1
         if end > cursor:
             hashes.add(text[cursor:end].lower())
