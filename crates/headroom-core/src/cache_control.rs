@@ -11,10 +11,9 @@
 //!
 //! Headroom's compressor must **never** modify any byte that's part
 //! of that prefix — doing so changes the cache key, drops the hit
-//! rate to 0, and silently torches the customer's bill. Phase A
-//! lockdown PR-A1 made `/v1/messages` a passthrough so we couldn't
-//! cause this damage; PR-A4 (this module) computes the floor below
-//! which Phase B's live-zone dispatcher must not touch.
+//! rate to 0, and silently torches the customer's bill. This module
+//! computes the floor below which the live-zone dispatcher must not
+//! touch.
 //!
 //! # Contract
 //!
@@ -61,7 +60,7 @@
 //! `HEADROOM_PROXY_CACHE_CONTROL_AUTO_FROZEN`). When `disabled`, the
 //! caller bypasses [`compute_frozen_count`] entirely and treats every
 //! message as live-zone. The function itself is config-agnostic; the
-//! gate lives in the caller (the live-zone dispatcher in Phase B).
+//! gate lives in the caller (the live-zone dispatcher).
 
 use serde_json::Value;
 

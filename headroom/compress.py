@@ -304,8 +304,8 @@ def compress(
         compressed_messages = result.messages
 
         # Guard: if "optimization" inflated tokens, revert to originals.
-        # Mirrors the inflation guards in the proxy handlers
-        # (anthropic/openai/gemini/batch) — the library path had none.
+        # The inflation guard the compression path always applies before
+        # returning a result.
         if tokens_after > tokens_before:
             logger.warning(
                 "Optimization inflated tokens (%d -> %d); reverting to original messages",
@@ -405,7 +405,7 @@ def _get_pipeline() -> Any:
         # CacheAligner: stabilizes prefix for provider KV cache hits
         # ContentRouter: routes to the right compressor per content type
         #   (SmartCrusher for JSON, CodeCompressor for code, Kompress for text)
-        # Phase B PR-B1 retired the trailing context-management stage —
+        # There is no trailing context-management stage —
         # live-zone-only compression never drops messages.
         _pipeline = TransformPipeline()
         logger.debug("Headroom compression pipeline initialized")

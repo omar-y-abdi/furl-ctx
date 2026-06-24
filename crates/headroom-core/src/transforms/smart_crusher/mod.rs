@@ -1,16 +1,15 @@
 //! Smart statistical tool output compression — Rust port of
 //! `headroom/transforms/smart_crusher.py`.
 //!
-//! # Stage 3c.1: like-for-like parity port
+//! # Like-for-like parity port
 //!
 //! This module is a literal Rust port of the Python `SmartCrusher`
-//! implementation. The goal of Stage 3c.1 is **byte-equal output parity** for
+//! implementation. The goal is **byte-equal output parity** for
 //! every fixture in `tests/parity/fixtures/smart_crusher/`. Architectural
 //! improvements (lossless-first, unified saliency score, structured CCR
-//! markers, token budget) are deferred to Stage 3c.2 and tracked in
-//! `~/Desktop/SmartCrusher-Architecture-Improvements.md`.
+//! markers, token budget) build on top of this parity port.
 //!
-//! # Bugs fixed in BOTH Python and Rust during 3c.1
+//! # Bugs fixed in BOTH Python and Rust during the port
 //!
 //! Four defects in the Python source (`headroom/transforms/smart_crusher.py`)
 //! were caught during port review. They're fixed in both languages

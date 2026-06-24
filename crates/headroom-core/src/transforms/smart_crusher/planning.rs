@@ -55,7 +55,7 @@ pub struct SmartCrusherPlanner<'a> {
     /// User-configured must-keep predicates. The plan methods union
     /// the output of every constraint into the kept set; OSS default
     /// composition includes `KeepErrorsConstraint` and
-    /// `KeepStructuralOutliersConstraint`, reproducing the pre-PR1
+    /// `KeepStructuralOutliersConstraint`, reproducing the original
     /// hardcoded behavior byte-for-byte.
     pub constraints: &'a [Box<dyn Constraint>],
 }
@@ -82,7 +82,7 @@ impl<'a> SmartCrusherPlanner<'a> {
     /// `detect_error_items_for_preservation` +
     /// `detect_structural_outliers` calls that lived in each plan
     /// method. With the OSS default constraint stack the output is
-    /// byte-identical to pre-PR1 behavior.
+    /// byte-identical to the original behavior.
     fn apply_constraints(
         &self,
         items: &[Value],

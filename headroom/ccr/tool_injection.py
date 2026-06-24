@@ -329,7 +329,7 @@ class CCRToolInjector:
     ) -> tuple[list[dict[str, Any]], bool]:
         """Inject CCR retrieval tool into tools list.
 
-        PR-B7 (`REALIGNMENT/04-phase-B-live-zone.md`): callers may pass
+        Callers may pass
         ``session_has_done_ccr=True`` so the tool is injected even when
         THIS request has no fresh compression markers. That is the
         sticky-on path: once a session has done CCR, the
@@ -354,7 +354,7 @@ class CCRToolInjector:
         """
         if not self.inject_tool:
             return tools or [], False
-        # PR-B7: sticky-on takes precedence. If the session has
+        # Sticky-on takes precedence. If the session has
         # previously done CCR, register the tool even when this turn
         # has no fresh markers. Otherwise fall back to the per-request
         # check for backwards compat.
@@ -446,7 +446,7 @@ class CCRToolInjector:
         2. Inject tool definition if enabled (skipped if already present from MCP)
         3. Inject system instructions if enabled
 
-        PR-B7: when ``session_has_done_ccr`` is True the tool gets
+        When ``session_has_done_ccr`` is True the tool gets
         injected even when the current message stream has no fresh
         markers. System-instruction injection still keys off
         per-request markers (the system prompt is the cache hot zone —
@@ -455,7 +455,7 @@ class CCRToolInjector:
         Args:
             messages: Request messages.
             tools: Request tools (may be None).
-            session_has_done_ccr: PR-B7 sticky-on flag — when True,
+            session_has_done_ccr: sticky-on flag — when True,
                 register the tool regardless of this turn's marker scan.
 
         Returns:

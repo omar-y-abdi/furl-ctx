@@ -1,6 +1,6 @@
 """Cache alignment detector for Headroom SDK.
 
-PR-A2 / P2-23 fix: This module is now a **detector-only** transform.
+This module is a **detector-only** transform.
 
 The previous rewrite path (which strips dynamic content from the system
 prompt and re-inserts it as a context block) violated invariant I2 — the
@@ -214,11 +214,10 @@ def detect_volatile_content(content: str) -> list[VolatileFinding]:
 class CacheAligner(Transform):
     """Detect volatile content in the system prompt and warn — never rewrite.
 
-    P2-23 fix: this is now a **detector-only** transform. It NEVER mutates
+    This is a **detector-only** transform. It NEVER mutates
     messages, never moves content, never normalizes whitespace. Callers
-    that previously relied on the rewrite behavior must instead route
-    memory / dynamic context to the live zone (latest user turn) per
-    PR-A2.
+    that need to relocate memory / dynamic context must instead route
+    it to the live zone (latest user turn).
     """
 
     name = "cache_aligner"
@@ -240,7 +239,7 @@ class CacheAligner(Transform):
         Detection is cheap; we run it whenever ``enabled`` is set so the
         warning log line is emitted on every relevant turn.
 
-        Phase F PR-F2.1 c4/5: when a request supplies a compression
+        When a request supplies a compression
         policy object via ``kwargs["compression_policy"]`` whose
         ``cache_aligner_enabled`` is ``False`` (Subscription auth mode
         under the enforcement flag), this method returns ``False`` so the

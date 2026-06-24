@@ -8,13 +8,11 @@
 //!
 //! # Why this exists
 //! Counting tokens currently round-trips into Python's `tiktoken` (itself a
-//! Rust extension under the hood). For Rust transforms running on the proxy
+//! Rust extension under the hood). For Rust transforms running on the
 //! hot path, counting natively avoids the Python-Rust FFI cost and keeps the
 //! Rust binary self-contained.
 //!
 //! # What this is NOT
-//! - Not used by `headroom-proxy` yet (Stage 2 is library-only; no production
-//!   wiring).
 //! - Not a real Anthropic Claude tokenizer (Anthropic doesn't publish theirs;
 //!   estimation matches what the Python implementation does).
 //! - SentencePiece — Gemini's tokenizer is SP-based but Google doesn't

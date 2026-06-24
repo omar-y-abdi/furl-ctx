@@ -2,13 +2,13 @@
 
 Derives two orthogonal identity fields the beacon reports:
 
-* ``install_mode`` — how the proxy process is deployed
+* ``install_mode`` — how the process is deployed
   (``persistent`` / ``on_demand`` / ``wrapped`` / ``unknown``).
 * ``headroom_stack`` — how Headroom is being invoked
   (``proxy``, ``wrap_claude``, ``adapter_ts_openai``, ...).
 
 Both helpers are best-effort and never raise: telemetry is fire-and-forget and
-must not break the proxy.
+must not break the engine.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def _slug_from_agent_type(agent_type: str) -> str:
 
 
 def detect_install_mode(port: int) -> str:
-    """Classify how the proxy is deployed.
+    """Classify how the process is deployed.
 
     Resolution order:
 

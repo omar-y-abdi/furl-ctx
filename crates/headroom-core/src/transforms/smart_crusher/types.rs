@@ -139,13 +139,10 @@ impl CrushabilityAnalysis {
 /// debug output, picking a "first" field, or computing strategy
 /// strings that include field names).
 ///
-/// During the analyzer port (Stage 3c.1 commit 2), we'll either:
-///   1. Switch this to `IndexMap` if any code path observes order, OR
-///   2. Document that Python's order-sensitive paths get rewritten to
-///      iterate sorted, then mirror that in Rust.
-///
-/// Tracked in the design doc at
-/// `~/Desktop/SmartCrusher-Architecture-Improvements.md`.
+/// If any code path observes iteration order, the options are to either
+///   1. Switch this to `IndexMap`, OR
+///   2. Rewrite Python's order-sensitive paths to iterate sorted, then
+///      mirror that in Rust.
 #[derive(Debug, Clone)]
 pub struct ArrayAnalysis {
     pub item_count: usize,

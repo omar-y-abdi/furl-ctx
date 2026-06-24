@@ -21,7 +21,7 @@
 //! `get_connection` returns a fresh blocking connection per call; this
 //! is the recommended pattern for short-lived puts/gets and avoids the
 //! `MultiplexedConnection`'s tokio-runtime requirement (CCR is called
-//! both from sync and tokio contexts in the proxy crate).
+//! both from sync and tokio contexts in the engine).
 
 #![cfg(feature = "redis")]
 

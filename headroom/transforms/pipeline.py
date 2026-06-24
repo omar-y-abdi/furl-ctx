@@ -34,7 +34,7 @@ def _breaker_env(name: str, default: _N, cast: Callable[[str], _N]) -> _N:
     """Parse a circuit-breaker env var, falling back on bad input.
 
     The breaker is a safety net — a typo'd value must degrade to the
-    default with a warning, not crash proxy startup.
+    default with a warning, not crash startup.
     """
     raw = os.environ.get(name)
     if raw is None:
@@ -55,9 +55,9 @@ class TransformPipeline:
     2. Content Router - intelligent content-aware compression (routes to appropriate
        compressor: Kompress for text, SmartCrusher for JSON, CodeCompressor for code, etc.)
 
-    Phase B PR-B1 retired the IntelligentContextManager / RollingWindow
+    There is no IntelligentContextManager / RollingWindow
     "drop messages from history" stage. Live-zone-only compression is the
-    sole strategy going forward — message-list mutation no longer happens
+    sole strategy — message-list mutation never happens
     in the pipeline.
     """
 
@@ -83,7 +83,7 @@ class TransformPipeline:
         else:
             self.transforms = self._build_default_transforms()
 
-        # Circuit breaker (issue #847): after N consecutive pipeline
+        # Circuit breaker: after N consecutive pipeline
         # failures, pass messages through untouched for a cooldown window
         # instead of re-running (and re-failing) transforms on every
         # request. Threshold <= 0 disables the breaker.
@@ -218,7 +218,7 @@ class TransformPipeline:
             )
 
         # Start with original tokens
-        # Circuit breaker open — pass through untouched (issue #847).
+        # Circuit breaker open — pass through untouched.
         if self._breaker_is_open():
             passthrough_tokens = tokenizer.count_messages(messages)
             return TransformResult(

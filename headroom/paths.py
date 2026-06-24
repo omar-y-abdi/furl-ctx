@@ -8,7 +8,7 @@ writes files. It introduces two canonical roots:
   configuration that users or admins edit.
 * ``HEADROOM_WORKSPACE_DIR`` -- read-write state (defaults to ``~/.headroom``).
   Holds runtime caches, telemetry outputs, logs, savings history, memory
-  databases, and anything else that the running proxy/CLI writes to.
+  databases, and anything else that the hook and CLI write to.
 
 Precedence for every per-resource helper is::
 
@@ -46,7 +46,6 @@ HEADROOM_WORKSPACE_DIR_ENV = "HEADROOM_WORKSPACE_DIR"
 # Legacy per-resource env vars (kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
-HEADROOM_SAVINGS_PATH_ENV = "HEADROOM_SAVINGS_PATH"
 HEADROOM_TOIN_PATH_ENV = "HEADROOM_TOIN_PATH"
 HEADROOM_SUBSCRIPTION_STATE_PATH_ENV = "HEADROOM_SUBSCRIPTION_STATE_PATH"
 
@@ -58,7 +57,6 @@ _WORKSPACE_DIR_DEFAULT = ".headroom"
 _CONFIG_DIR_DEFAULT_SUFFIX = "config"
 
 # Resource file/sub-dir names (kept here so nothing else has to hardcode them)
-_SAVINGS_FILE = "proxy_savings.json"
 _TOIN_FILE = "toin.json"
 _MODELS_FILE = "models.json"
 _SUBSCRIPTION_FILE = "subscription_state.json"
@@ -69,11 +67,9 @@ _SESSION_STATS_FILE = "session_stats.jsonl"
 _SYNC_STATE_FILE = "sync_state.json"
 _BRIDGE_STATE_FILE = "bridge_state.json"
 _LOGS_DIR = "logs"
-_PROXY_LOG_FILE = "proxy.log"
 _DEBUG_400_DIR = "debug_400"
 _CODEX_WIRE_DEBUG_DIR = "codex_wire"
 _BIN_DIR = "bin"
-_PROXY_CLIENTS_DIR = "clients"
 _RTK_UNIX = "rtk"
 _RTK_WIN = "rtk.exe"
 _LEAN_CTX_UNIX = "lean-ctx"
@@ -169,21 +165,11 @@ def ensure_config_dir() -> Path:
 # ---------------------------------------------------------------------------
 
 
-def savings_path(explicit: str | os.PathLike[str] | None = None) -> Path:
-    """Return the path for the proxy savings JSON ledger."""
-
-    return _resolve(
-        explicit,
-        HEADROOM_SAVINGS_PATH_ENV,
-        workspace_dir() / _SAVINGS_FILE,
-    )
-
-
 def toin_path(explicit: str | os.PathLike[str] | None = None) -> Path:
     """Return the path for the TOIN telemetry JSON file.
 
     TOIN is classified as workspace state because it is actively written by
-    the running proxy (it's a compression feedback loop). The default stays
+    the running engine (it's a compression feedback loop). The default stays
     ``~/.headroom/toin.json`` to preserve byte-for-byte backward compat.
     """
 
@@ -246,12 +232,6 @@ def log_dir() -> Path:
     return workspace_dir() / _LOGS_DIR
 
 
-def proxy_log_path() -> Path:
-    """Return the path for the proxy log file."""
-
-    return log_dir() / _PROXY_LOG_FILE
-
-
 def debug_400_dir() -> Path:
     """Return the directory used to stash HTTP 400 debug payloads."""
 
@@ -268,12 +248,6 @@ def bin_dir() -> Path:
     """Return the directory where Headroom ships vendored binaries."""
 
     return workspace_dir() / _BIN_DIR
-
-
-def proxy_clients_dir(port: int) -> Path:
-    """Per-port dir of live wrap-client markers (one file per client PID)."""
-
-    return workspace_dir() / _PROXY_CLIENTS_DIR / str(port)
 
 
 def rtk_path() -> Path:
@@ -297,7 +271,7 @@ def deploy_root() -> Path:
 
 
 def beacon_lock_path(port: int) -> Path:
-    """Return the per-port proxy beacon lock file path."""
+    """Return the per-port beacon lock file path."""
 
     return workspace_dir() / f".beacon_lock_{int(port)}"
 
@@ -343,14 +317,12 @@ def plugin_workspace_dir(plugin_name: str) -> Path:
 __all__ = [
     "HEADROOM_CONFIG_DIR_ENV",
     "HEADROOM_WORKSPACE_DIR_ENV",
-    "HEADROOM_SAVINGS_PATH_ENV",
     "HEADROOM_TOIN_PATH_ENV",
     "HEADROOM_SUBSCRIPTION_STATE_PATH_ENV",
     "config_dir",
     "workspace_dir",
     "ensure_config_dir",
     "ensure_workspace_dir",
-    "savings_path",
     "toin_path",
     "subscription_state_path",
     "memory_db_path",
@@ -360,11 +332,9 @@ __all__ = [
     "sync_state_path",
     "bridge_state_path",
     "log_dir",
-    "proxy_log_path",
     "debug_400_dir",
     "codex_wire_debug_dir",
     "bin_dir",
-    "proxy_clients_dir",
     "rtk_path",
     "lean_ctx_path",
     "deploy_root",

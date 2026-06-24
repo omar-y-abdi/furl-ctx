@@ -7,8 +7,8 @@ Three hooks at well-defined pipeline stages:
 3. post_compress: observe results after compression (learning, analytics, logging)
 
 The canonical pipeline also emits lifecycle events through ``on_pipeline_event``.
-That gives extensions one stable contract across SDK, ``compress()``, and proxy
-request flow without replacing the existing compression hooks.
+That gives extensions one stable contract across SDK, ``compress()``, and the
+hook request flow without replacing the existing compression hooks.
 
 Default implementation is no-op — OSS behavior unchanged. Override these
 in a subclass to customize (e.g., Headroom SaaS implements position-aware
@@ -42,7 +42,7 @@ class CompressContext:
     """Context passed to pre_compress and compute_biases hooks.
 
     Provides enough information for hooks to make decisions without
-    needing to understand the proxy's internals.
+    needing to understand the engine's internals.
     """
 
     model: str = ""

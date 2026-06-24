@@ -128,7 +128,7 @@ pub fn clear_hf_registrations() {
 /// Hub and register it under `prefix`. One-line glue around
 /// [`HfTokenizer::from_pretrained`] + [`register_hf`].
 ///
-/// Useful for proxy startup code that wants real tokenizers for the major
+/// Useful for startup code that wants real tokenizers for the major
 /// non-OpenAI families. Each call is independent — failure for one model
 /// (e.g. a gated Llama repo without `HF_TOKEN`) does not affect others.
 ///

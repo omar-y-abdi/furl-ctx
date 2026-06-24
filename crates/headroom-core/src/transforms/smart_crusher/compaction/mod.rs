@@ -1,4 +1,4 @@
-//! Compaction subsystem — Stage 3c.2 PR2.
+//! Compaction subsystem.
 //!
 //! Lossless-first compaction of JSON arrays. Pipeline:
 //!

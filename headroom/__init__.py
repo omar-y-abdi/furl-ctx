@@ -107,7 +107,7 @@ __all__ = [
 ]
 
 # Keep package-level imports lightweight so `import headroom` does not eagerly
-# load provider SDKs, ML stacks, or optional proxy/runtime integrations.
+# load provider SDKs, ML stacks, or optional runtime integrations.
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # Exceptions
     "HeadroomError": ("headroom.exceptions", "HeadroomError"),

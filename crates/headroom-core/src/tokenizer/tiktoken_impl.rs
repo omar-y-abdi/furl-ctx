@@ -94,7 +94,7 @@ impl Tokenizer for TiktokenCounter {
         // Divergence (rare in practice): if `text` contains a literal
         // `<|endoftext|>` (or any other special-token string), Python's default
         // `encode` raises (because `disallowed_special="all"`) while we treat
-        // it as ordinary text. We chose tolerance over panic since proxy users
+        // it as ordinary text. We chose tolerance over panic since users
         // can legitimately send those substrings; document for future readers.
         self.bpe.encode_ordinary(text).len()
     }

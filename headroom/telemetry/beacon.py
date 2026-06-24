@@ -111,7 +111,7 @@ class TelemetryBeacon:
         self._backend = backend
         self._task: asyncio.Task[None] | None = None
         self._start_time = time.time()
-        # Unique per proxy run — used as upsert key so each session produces 1 row
+        # Unique per run — used as upsert key so each session produces 1 row
         self._session_id = uuid.uuid4().hex
         # Stable across restarts — anonymous machine fingerprint (SHA256 of hostname)
         self._instance_id = hashlib.sha256(platform.node().encode()).hexdigest()[:16]
@@ -119,7 +119,7 @@ class TelemetryBeacon:
         self._install_mode = detect_install_mode(port)
 
     async def start(self) -> None:
-        """Start the periodic beacon. Call from proxy startup."""
+        """Start the periodic beacon. Call from engine startup."""
         if not is_telemetry_enabled():
             logger.debug("Telemetry disabled (HEADROOM_TELEMETRY=off)")
             return
@@ -129,11 +129,11 @@ class TelemetryBeacon:
         )
 
     async def stop(self) -> None:
-        """Stop and send one final report. Call from proxy shutdown."""
+        """Stop and send one final report. Call from engine shutdown."""
         if self._task:
             self._task.cancel()
             self._task = None
-        # Final report — but only if the proxy ran for more than 2 minutes.
+        # Final report — but only if the engine ran for more than 2 minutes.
         # Short-lived restarts (e.g. crash loops, orchestration churn) would
         # otherwise spam the telemetry table with duplicate cumulative stats.
         uptime_seconds = time.time() - self._start_time
@@ -148,7 +148,7 @@ class TelemetryBeacon:
             try:
                 await self._report()
             except Exception:
-                pass  # Never crash the proxy for telemetry
+                pass  # Never crash the engine for telemetry
             await asyncio.sleep(_INTERVAL_SECONDS)
 
     async def _report(self) -> None:
@@ -160,14 +160,14 @@ class TelemetryBeacon:
         3. Extraction of any stats section is independent — one bad key
            never blocks the others.
         4. A failed Supabase POST silently skips (fire-and-forget).
-        The proxy NEVER crashes or slows down because of telemetry.
+        The engine NEVER crashes or slows down because of telemetry.
         """
         try:
             import httpx
         except ImportError:
             return
 
-        # ---- Fetch stats from our own proxy ----
+        # ---- Fetch stats from the local /stats endpoint ----
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"http://127.0.0.1:{self._port}/stats")

@@ -1,7 +1,7 @@
-//! Unidiff-based diff detection (Stage 3d Tier 2).
+//! Unidiff-based diff detection (Tier 2).
 //!
 //! Sits behind `magika_detector` (Tier 1, compiled only with the
-//! `magika` feature) in the Stage-3d detection pipeline. When magika is
+//! `magika` feature) in the detection pipeline. When magika is
 //! present it is fast and right most of the time, but
 //! it's a probabilistic ML classifier — short, prose-prefixed, or
 //! "looks like code because the lines are code" diffs can slip past it
@@ -15,10 +15,8 @@
 //! [`crate::transforms::content_detector`] use a hand-rolled
 //! `DIFF_HEADER_PATTERN` regex. That works for the canonical shapes
 //! but is brittle around the edges (combined-merge headers, naked
-//! hunks, truncated outputs). The locked Stage-3d arch (memory
-//! `project_rust_content_detection_arch.md`) explicitly retires the
-//! regex tier on the Rust side — we use a real grammar oracle (the
-//! [`unidiff::PatchSet`] parser) instead.
+//! hunks, truncated outputs). The Rust side has no regex tier — we use
+//! a real grammar oracle (the [`unidiff::PatchSet`] parser) instead.
 //!
 //! # Scope
 //!
@@ -30,14 +28,14 @@
 //!
 //! - `detect_diff(content)` is the [`ContentType`]-typed wrapper:
 //!   returns `Some(ContentType::GitDiff)` on hit, `None` otherwise.
-//!   The router (PR5) chains this after Magika.
+//!   The router chains this after Magika.
 //!
 //! # Known gaps (deliberately punted)
 //!
 //! - **Combined-merge diffs** (`@@@ ... @@@`) — `unidiff`'s hunk-header
 //!   regex is for plain `@@`, not `@@@`. The router could fall back
 //!   to the regex content_detector for these specifically, but in
-//!   practice they're rare in proxy traffic. PR5 decides.
+//!   practice they're rare.
 //! - **Multi-byte line ending shapes** — the parser walks
 //!   `input.lines()`, which strips `\r` only when paired with `\n`.
 //!   Pathological CRLF-stripped inputs could miss; we accept the gap.
@@ -75,7 +73,7 @@ pub fn is_diff(content: &str) -> bool {
 }
 
 /// [`ContentType`]-typed wrapper. Returns `Some(ContentType::GitDiff)`
-/// when [`is_diff`] is true, `None` otherwise. The router (PR5)
+/// when [`is_diff`] is true, `None` otherwise. The router
 /// chains this after Magika and uses the `Option` to cleanly fall
 /// through to Tier 3 (`PlainText`) when both tiers say "not a diff".
 pub fn detect_diff(content: &str) -> Option<ContentType> {

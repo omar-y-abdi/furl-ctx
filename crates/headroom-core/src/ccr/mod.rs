@@ -36,7 +36,7 @@ use std::time::Duration;
 pub use backends::{from_config, CcrBackendConfig, CcrBackendInitError, InMemoryCcrStore};
 
 /// Pluggable CCR storage backend. `Send + Sync` so it can sit behind an
-/// `Arc` and be shared across threads in the proxy.
+/// `Arc` and be shared across threads in the engine.
 pub trait CcrStore: Send + Sync {
     /// Stash `payload` under `hash`. If the hash already exists, the
     /// new payload overwrites — same hash should mean same content, so
@@ -64,7 +64,7 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 
 /// Compute the canonical CCR key for `payload`. BLAKE3 → first 24 hex
 /// chars (96 bits — collision-resistant for the bounded LRU population
-/// the proxy will hold). Centralized here so every call site (live-zone
+/// the engine holds). Centralized here so every call site (live-zone
 /// dispatcher, tests, future Python parity) hashes the same way.
 pub fn compute_key(payload: &[u8]) -> String {
     let h = blake3::hash(payload);
@@ -77,7 +77,7 @@ pub fn compute_key(payload: &[u8]) -> String {
 /// Standard `<<ccr:HASH>>` marker injected into compressed block content
 /// so the runtime can later look up the original bytes when the model
 /// calls `headroom_retrieve`. Format is intentionally fixed across
-/// proxy code-paths and tests.
+/// all code-paths and tests.
 pub fn marker_for(hash: &str) -> String {
     format!("<<ccr:{hash}>>")
 }

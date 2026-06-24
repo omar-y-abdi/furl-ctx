@@ -1,6 +1,6 @@
 """Smart JSON array crusher — Rust-backed via PyO3.
 
-The Python implementation has been retired (Stage 3c.1b, 2026-04-27).
+The Python implementation has been retired.
 All array compression now goes through `headroom._core.SmartCrusher`
 (built from `crates/headroom-py`). Byte-equality of the two
 implementations was verified against 17 recorded fixtures
@@ -32,18 +32,18 @@ fallback. Build it locally with `scripts/build_rust_extension.sh`
   pointer is the retrieval key — a drop without it is silent loss, which
   the recovery invariant forbids (Defect 1). `enabled` /
   `inject_retrieval_marker` flip the Rust `enable_ccr_marker` field,
-  which the proxy/router reads back to decide whether to inject the
+  which the router reads back to decide whether to inject the
   heavier `headroom_retrieve` TOOL into the request; they no longer gate
   the pointer or the store write. The Python store mirror keys off the
   `<<ccr:` pointer (now always present on a drop), so
-  `compression_store.retrieve(hash)` resolves it. Stage-3c.2
-  opaque-string CCR substitutions likewise always emit their pointer.
+  `compression_store.retrieve(hash)` resolves it. Opaque-string CCR
+  substitutions likewise always emit their pointer.
 - **Custom relevance scorer / scorer override** — fails loud.
   `relevance_config` and `scorer` constructor args remain in the
   signature for source compat, but the shim raises
   `NotImplementedError` when either is non-None. Silently dropping a
   user-supplied scorer is a silent-fallback bug we explicitly refuse
-  to ship; full plumbing lands with Stage-3c.2's relevance-crate
+  to ship; full plumbing would land with the relevance-crate
   Python bridge.
 """
 
@@ -244,17 +244,17 @@ class SmartCrusher(Transform):
         cfg = config or SmartCrusherConfig()
         self.config = cfg
         self._with_compaction = with_compaction
-        # `observer`: see `headroom.transforms.observability`. The
-        # legacy proxy pipeline uses SmartCrusher.apply() directly
-        # (no ContentRouter); without an observer here, those
-        # compressions would be invisible to per-strategy metrics —
-        # exactly the silent-regression class we're guarding against.
+        # `observer`: see `headroom.transforms.observability`. Callers
+        # that use SmartCrusher.apply() directly (no ContentRouter)
+        # would, without an observer here, make those compressions
+        # invisible to per-strategy metrics — exactly the
+        # silent-regression class we're guarding against.
         self._observer = observer
 
         # CCR config is preserved on `self` for callers that read it
-        # back (the retired proxy server did; external embedders still
-        # can). Both `enabled=False` and `inject_retrieval_marker=False`
-        # collapse to the Rust crusher's `enable_ccr_marker=False` field.
+        # back (external embedders rely on this). Both `enabled=False`
+        # and `inject_retrieval_marker=False` collapse to the Rust
+        # crusher's `enable_ccr_marker=False` field.
         #
         # That field does NOT skip the marker or the CCR store write
         # (Defect 1 corrected the prior comment, which claimed it did).
@@ -263,17 +263,17 @@ class SmartCrusher(Transform):
         # item is dropped, regardless of this flag — a drop without a
         # recovery pointer is silent loss, which the recovery invariant
         # forbids on the public `compress()` path. The flag is consumed
-        # by the proxy/router layer to decide whether to inject the
+        # by the router layer to decide whether to inject the
         # heavier `headroom_retrieve` TOOL into the request; it is the
         # retrieval-tool preference, not a data-loss switch.
         #
         # Default falls through to `CCRConfig()` so direct callers
-        # (the proxy and tests that don't pass an explicit config) get
+        # (the engine and tests that don't pass an explicit config) get
         # the documented dataclass defaults (`enabled=True,
         # inject_retrieval_marker=True`).
         #
-        # Stage-3c.2 opaque-string CCR substitutions likewise always
-        # emit their pointer — they have no Python equivalent.
+        # Opaque-string CCR substitutions likewise always emit their
+        # pointer — they have no Python equivalent.
         if ccr_config is None:
             self._ccr_config = CCRConfig()
         else:
@@ -283,7 +283,7 @@ class SmartCrusher(Transform):
         # source compatibility, but the Rust port doesn't support
         # overrides yet (it always uses `HybridScorer` from the
         # relevance crate; the Python-bridged constructor surface
-        # arrives in Stage 3c.2). Silently dropping a user-supplied
+        # is not yet wired). Silently dropping a user-supplied
         # scorer would be a textbook silent fallback — if a caller
         # depends on a custom scoring function and we ignore it, the
         # compression they get back is wrong in a way they cannot see.
@@ -303,14 +303,13 @@ class SmartCrusher(Transform):
         self._toin: Any = None
         self._toin_load_failed = False
 
-        # F2.2: per-request CompressionPolicy, set from
+        # Per-request CompressionPolicy, set from
         # ``kwargs["compression_policy"]`` at the start of ``apply()``
         # and read by ``_record_to_toin`` to gate TOIN writes when
         # ``policy.toin_read_only`` is true (Subscription mode).
         # Defaults to ``None`` so the direct ``crush()`` / ``crush_array_json()``
         # / ``compact_document_json()`` entry points (which don't go
-        # through ``apply()``) keep their pre-F2.2 behaviour: TOIN
-        # writes are not gated.
+        # through ``apply()``) leave TOIN writes ungated.
         #
         # Backed by ``threading.local`` because the pipeline reuses ONE
         # SmartCrusher across every ``compress()`` call: a plain instance
@@ -347,11 +346,11 @@ class SmartCrusher(Transform):
             ),
             routing_policy=cfg.routing_policy,
         )
-        # Default: lossless-first compaction (PR4). Lossless wins for
+        # Default: lossless-first compaction. Lossless wins for
         # cleanly tabular input where it saves ≥ 30% bytes; otherwise
         # falls through to the lossy path with CCR-Dropped retrieval
         # markers. Pass `with_compaction=False` to opt into the
-        # pre-PR4 lossy-only path (used by retention-property tests
+        # lossy-only path (used by retention-property tests
         # that depend on row-level item preservation).
         #
         # `compaction_format` picks the lossless renderer:
@@ -453,7 +452,7 @@ class SmartCrusher(Transform):
         `strategy_info`, `compacted` (rendered bytes when lossless won),
         and `compaction_kind`.
 
-        Used by tests and by the proxy's CCR retrieval flow when it needs
+        Used by tests and by the CCR retrieval flow when it needs
         the hash directly rather than parsing it out of a prompt marker.
         """
         result: dict[str, Any] = self._rust.crush_array_json(items_json, query, bias)
@@ -520,7 +519,7 @@ class SmartCrusher(Transform):
         emitting `<<ccr:HASH ...>>`. Returns ``None`` if the hash is
         unknown, expired, or no store is configured.
 
-        Used by the proxy's CCR retrieval tool to serve the dropped
+        Used by the CCR retrieval tool to serve the dropped
         rows back to the LLM on demand.
         """
         result: str | None = self._rust.ccr_get(hash_key)
@@ -588,19 +587,19 @@ class SmartCrusher(Transform):
         this far, and re-tokenizing here would dominate the recording
         cost. Rough estimates are fine for learning aggregates.
 
-        F2.2: when the active ``CompressionPolicy`` (set by
+        When the active ``CompressionPolicy`` (set by
         ``apply()`` from ``kwargs["compression_policy"]``) has
         ``toin_read_only=True``, the write is skipped — Subscription
         users keep prompt-cache stability AND don't mutate the global
         TOIN learning pool from cache-sensitive traffic. Direct
         ``crush()`` / ``crush_array_json()`` callers don't set the
-        policy, so they keep their pre-F2.2 write-enabled behaviour.
+        policy, so they keep write-enabled behaviour.
         """
         if self._toin_load_failed:
             return
-        # F2.2 gate. Read the per-request policy set by ``apply()``;
+        # Read-only gate. Read the per-request policy set by ``apply()``;
         # ``None`` means we are not running under the Transform
-        # protocol (direct caller via ``crush()``) and the legacy
+        # protocol (direct caller via ``crush()``) and the
         # write-enabled behaviour applies.
         policy = self._runtime_compression_policy
         if policy is not None and policy.toin_read_only:
@@ -669,7 +668,7 @@ class SmartCrusher(Transform):
 
     # ─── CCR Rust → Python store bridge ───────────────────────────────────
     #
-    # Issue #389: SmartCrusher's row-drop and opaque-blob paths emit
+    # SmartCrusher's row-drop and opaque-blob paths emit
     # `<<ccr:HASH ...>>` markers and stash the original payload in the
     # Rust process-local CCR store. /v1/retrieve queries the Python
     # `compression_store` via `get_compression_store()` — which is a
@@ -999,13 +998,13 @@ class SmartCrusher(Transform):
         markers_inserted: list[str] = []
         warnings: list[str] = []
 
-        # F2.2: capture the per-request CompressionPolicy so
+        # Capture the per-request CompressionPolicy so
         # ``_record_to_toin`` can gate TOIN writes on
         # ``policy.toin_read_only``. Same one-liner pattern the
         # ContentRouter uses for ``_runtime_target_ratio``. ``None``
-        # when the caller didn't pass a policy (e.g. legacy direct-
+        # when the caller didn't pass a policy (e.g. direct-
         # apply callers in tests) — ``_record_to_toin`` treats that
-        # as "no gate", matching pre-F2.2 behaviour.
+        # as "no gate".
         self._runtime_compression_policy = kwargs.get("compression_policy")
 
         query_context = self._extract_context_from_messages(result_messages)
@@ -1101,8 +1100,8 @@ def smart_crush_tool_output(
     """Compress a single tool output. Returns `(crushed, was_modified, info)`.
 
     Convenience wrapper that builds a one-shot `SmartCrusher` per call.
-    Defaults to the PR4 lossless-first behavior; pass
-    `with_compaction=False` to exercise the legacy lossy-only path
+    Defaults to the lossless-first behavior; pass
+    `with_compaction=False` to exercise the lossy-only path
     (still useful for retention-property tests).
     """
     crusher = SmartCrusher(config=config, ccr_config=ccr_config, with_compaction=with_compaction)

@@ -100,7 +100,7 @@ pub struct SmartCrusherConfig {
     /// Use feedback hints to adjust compression aggressiveness. Default true.
     pub use_feedback_hints: bool,
     /// Minimum confidence required to apply TOIN recommendations.
-    /// Default 0.5. (Python LOW FIX #21.)
+    /// Default 0.5.
     pub toin_confidence_threshold: f64,
     /// Drop content-identical items before sampling. Default true.
     pub dedup_identical_items: bool,
@@ -127,7 +127,7 @@ pub struct SmartCrusherConfig {
     pub lossless_min_savings_ratio: f64,
     /// Retrieval-tool advertisement preference, mirrored from the
     /// Python `CCRConfig` (`enabled and inject_retrieval_marker`). Read
-    /// back by the proxy/router layer to decide whether to inject the
+    /// back by the router layer to decide whether to inject the
     /// `headroom_retrieve` TOOL into the request (the heavier behavior
     /// this flag legitimately owns).
     ///
@@ -141,7 +141,7 @@ pub struct SmartCrusherConfig {
     /// retrieval key, not a UX nicety. A flag must never turn a drop
     /// into a silent loss.
     ///
-    /// Default `true`. Stage-3c.2 opaque-string CCR substitutions (in
+    /// Default `true`. Opaque-string CCR substitutions (in
     /// `walker::process_value`) likewise always emit their pointer.
     pub enable_ccr_marker: bool,
     /// How `crush_array` chooses between a lossless render and a
@@ -183,7 +183,7 @@ pub struct SmartCrusherConfig {
 impl Default for SmartCrusherConfig {
     fn default() -> Self {
         // These defaults must match smart_crusher.py:934-957 byte-for-byte.
-        // The PR4 additions (`lossless_min_savings_ratio`) have no
+        // The lossless additions (`lossless_min_savings_ratio`) have no
         // Python counterpart — they govern Rust-side dispatch only.
         SmartCrusherConfig {
             enabled: true,

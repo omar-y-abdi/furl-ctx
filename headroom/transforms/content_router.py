@@ -111,9 +111,9 @@ def _section_debug(section: ContentSection, index: int) -> dict[str, Any]:
 def _detect_content(content: str) -> DetectionResult:
     """Detect content type via the Rust detection chain.
 
-    Stage-3d (PR5) wired this through `headroom._core.detect_content_type`,
-    which runs the magika→unidiff→PlainText chain. The Python-side
-    Magika+regex fallback path was retired here — single detection
+    This runs through `headroom._core.detect_content_type`,
+    which runs the magika→unidiff→PlainText chain. There is no Python-side
+    Magika+regex fallback path — single detection
     surface, no parallel paths. The Rust extension is a hard dep
     (no Python fallback) per `feedback_no_silent_fallbacks.md`.
 
@@ -464,7 +464,7 @@ class ContentRouterConfig:
     protect_recent_code: int = 4  # Don't compress CODE in last N messages (0 = disabled)
     protect_analysis_context: bool = True  # Detect "analyze/review" intent, protect code
 
-    # Protection: failed tool calls / error outputs stay verbatim (issue #847).
+    # Protection: failed tool calls / error outputs stay verbatim.
     # The model needs exact tracebacks and error text to recover; compressing
     # them measurably hurts agent recovery. Outputs above the size cap still
     # compress — LogCompressor preserves error lines in big logs, so the two
@@ -479,7 +479,7 @@ class ContentRouterConfig:
     # Compressing it changes the bytes that must match for a cache
     # hit on the next turn. The hash-keyed result cache makes the
     # compressed output deterministic *within* a process, but cache
-    # eviction or proxy restart can re-compress with a different
+    # eviction or process restart can re-compress with a different
     # output for stochastic compressors — and that miss costs the
     # whole prefix discount. Enable only for deployments routed to
     # backends that don't honor cache_control AND whose compressors
@@ -509,9 +509,8 @@ class ContentRouterConfig:
     # At high pressure (nearly-full context), use the aggressive threshold —
     # accept anything that helps, so the agent doesn't overflow exactly when
     # context is tightest. Aggressive is therefore the HIGHER (more-permissive)
-    # threshold. (#12: these were inverted — aggressive was 0.65 < relaxed 0.85,
-    # which REJECTED marginal compressions at high pressure, the opposite of the
-    # documented intent.)
+    # threshold — an aggressive value below the relaxed one would REJECT
+    # marginal compressions at high pressure, the opposite of the intent.
     min_ratio_relaxed: float = 0.85  # when context is mostly empty (stricter)
     min_ratio_aggressive: float = 0.95  # when context is nearly full (permissive)
 
@@ -776,8 +775,8 @@ class ContentRouter(Transform):
             config: Router configuration. Uses defaults if None.
             observer: Optional `CompressionObserver` (see
                 `headroom.transforms.observability`) called once per
-                routing decision after `compress()` finishes. The
-                proxy's `PrometheusMetrics` is the production
+                routing decision after `compress()` finishes.
+                `PrometheusMetrics` is the production
                 implementation — it increments per-strategy counters
                 so silent regressions become visible. `None` disables
                 observation; pick one explicitly per the no-fallback
@@ -817,13 +816,13 @@ class ContentRouter(Transform):
     # ------------------------------------------------------------------
     # Per-request runtime options (thread-local backed).
     #
-    # F2.2: ``_runtime_compression_policy`` carries the per-request
+    # ``_runtime_compression_policy`` carries the per-request
     # CompressionPolicy, set from ``kwargs["compression_policy"]`` at
     # the start of ``apply()`` and read by ``_record_to_toin`` to gate
     # TOIN writes when ``policy.toin_read_only`` is true (Subscription
     # mode). Defaults to ``None`` so direct ``compress()`` callers (e.g.
-    # tests, hand-written pipelines that don't go through the proxy)
-    # keep pre-F2.2 behaviour: TOIN writes are not gated.
+    # tests, hand-written pipelines that don't set a policy)
+    # leave TOIN writes ungated.
     # ------------------------------------------------------------------
     @property
     def _runtime_target_ratio(self) -> float | None:
@@ -890,12 +889,12 @@ class ContentRouter(Transform):
         if original_tokens <= compressed_tokens:
             return
 
-        # F2.2 gate: when the active CompressionPolicy says
+        # Read-only gate: when the active CompressionPolicy says
         # ``toin_read_only=True`` (Subscription auth mode), don't
         # mutate the TOIN learning pool from this request. Direct
         # ``compress()`` callers don't go through ``apply()`` and
         # have ``self._runtime_compression_policy is None`` — those
-        # keep their pre-F2.2 write-enabled behaviour.
+        # keep write-enabled behaviour.
         policy = self._runtime_compression_policy
         if policy is not None and policy.toin_read_only:
             logger.debug(
@@ -957,7 +956,7 @@ class ContentRouter(Transform):
         Per-request runtime options live in ``self._tls`` (thread-local), which
         is set on the MAIN thread. Worker threads have their own empty
         thread-local, so they would read the DEFAULTS and silently drop the
-        per-request options (#10). The main thread snapshots the options and
+        per-request options. The main thread snapshots the options and
         passes them in here; we replay them into the worker's thread-local
         before compressing so ``force_kompress`` / ``target_ratio`` /
         ``kompress_model`` / ``compression_policy`` reach every worker.
@@ -1069,7 +1068,7 @@ class ContentRouter(Transform):
                 getattr(result.strategy_used, "value", result.strategy_used),
             )
             result.compressed = content
-            # #11: this is now a PASSTHROUGH — the output is the full original.
+            # This is a PASSTHROUGH — the output is the full original.
             # The metrics (tokens_saved / compression_ratio / savings_percentage)
             # are computed by summing routing_log[].compressed_tokens, so leaving
             # the empty-output decisions in place reported phantom savings
@@ -1354,9 +1353,9 @@ class ContentRouter(Transform):
                 # SmartCrusher handles its own TOIN recording. The no-savings
                 # Kompress (then Log) fallback is handled ONCE by the generic
                 # post-dispatch fallback below (fallback_eligible_strategy
-                # includes SMART_CRUSHER). The inner duplicate was removed so the
-                # ML compressor no longer runs twice and 'kompress' is no longer
-                # double-appended to strategy_chain (#13).
+                # includes SMART_CRUSHER). There is no inner duplicate, so the
+                # ML compressor never runs twice and 'kompress' is never
+                # double-appended to strategy_chain.
                 if self.config.enable_smart_crusher:
                     crusher = self._get_smart_crusher()
                     if crusher:
@@ -1473,8 +1472,8 @@ class ContentRouter(Transform):
                     compressor_name = "KompressCompressor"
                     decision_reason = f"{decision_reason}_fallback_kompress_after_no_savings"
                 else:
-                    # Last-ditch: line-structured compressors (the proxy's
-                    # own log dumps land here — repetitive JSONL that
+                    # Last-ditch: line-structured compressors (log dumps
+                    # land here — repetitive JSONL that
                     # Kompress can't shrink but the log compressor can).
                     # Only attempted when the strategy was SMART_CRUSHER so
                     # we don't reroute genuine code/diff content.
@@ -1816,7 +1815,7 @@ class ContentRouter(Transform):
     def eager_load_compressors(self) -> dict[str, str]:
         """Pre-load compressors at startup to avoid first-request latency.
 
-        Call this during proxy startup to load models and parsers
+        Call this during startup to load models and parsers
         before any requests arrive. Eliminates cold-start latency spikes.
 
         Returns:
@@ -1828,11 +1827,11 @@ class ContentRouter(Transform):
         #
         # Eager preload is cache-only (allow_download=False): on a cold cache we
         # must NOT trigger a network download here, because this runs on the
-        # blocking startup/lifespan path before the proxy binds its port. A slow
-        # download stalls the bind, and a hard crash in the native download/ML
-        # stack (uncatchable SIGABRT) kills the interpreter before it ever
-        # listens — the proxy then "never opens its port" and the supervisor
-        # gives up. When the model isn't cached we defer to first use instead.
+        # blocking startup path. A slow download stalls startup, and a hard
+        # crash in the native download/ML stack (uncatchable SIGABRT) kills the
+        # interpreter before it finishes initializing — so the host process
+        # never becomes ready. When the model isn't cached we defer to first
+        # use instead.
         if self.config.enable_kompress:
             from .kompress_compressor import KompressModelNotCached
 
@@ -1961,8 +1960,8 @@ class ContentRouter(Transform):
         more aggressive). A HIGHER ``min_ratio`` accepts more compressions.
         At low pressure use the relaxed (stricter, lower) threshold; at high
         pressure use the aggressive (permissive, higher) threshold, so the
-        agent accepts marginal compressions exactly when context is tightest
-        (#12). Monotone non-decreasing in ``context_pressure``; clamped to
+        agent accepts marginal compressions exactly when context is tightest.
+        Monotone non-decreasing in ``context_pressure``; clamped to
         ``[relaxed, aggressive]``.
         """
         relaxed = self.config.min_ratio_relaxed
@@ -2033,11 +2032,11 @@ class ContentRouter(Transform):
         self._runtime_target_ratio = kwargs.get("target_ratio")
         self._runtime_force_kompress = bool(kwargs.get("force_kompress", False))
         self._runtime_kompress_model = kwargs.get("kompress_model")
-        # F2.2: capture the per-request CompressionPolicy so
+        # Capture the per-request CompressionPolicy so
         # ``_record_to_toin`` can gate TOIN writes on
         # ``policy.toin_read_only``. ``None`` when the caller didn't
         # pass a policy — ``_record_to_toin`` treats that as "no gate"
-        # to preserve pre-F2.2 behaviour for non-proxy callers.
+        # for callers that don't set a policy.
         self._runtime_compression_policy = kwargs.get("compression_policy")
 
         tokens_before = sum(tokenizer.count_text(str(m.get("content", ""))) for m in messages)
@@ -2224,8 +2223,8 @@ class ContentRouter(Transform):
                 route_counts["small"] += 1
                 continue
 
-            # Protection: failed tool calls / error outputs stay verbatim
-            # (issue #847). The model needs exact tracebacks to recover.
+            # Protection: failed tool calls / error outputs stay verbatim.
+            # The model needs exact tracebacks to recover.
             # Strong (>=2 distinct indicators) match only — a single
             # keyword false-positives on benign outputs that mention
             # errors. Above the size cap, fall through — LogCompressor
@@ -2355,7 +2354,7 @@ class ContentRouter(Transform):
             else:
                 # Parallel compression via thread pool. Snapshot the per-request
                 # runtime options on THIS (main) thread — worker threads have an
-                # empty thread-local and would otherwise read the defaults (#10).
+                # empty thread-local and would otherwise read the defaults.
                 runtime_options = {
                     "target_ratio": self._runtime_target_ratio,
                     "force_kompress": self._runtime_force_kompress,
@@ -2459,7 +2458,7 @@ class ContentRouter(Transform):
             )
 
         # Forward route_counts to the observer so `/stats` can surface a
-        # session-level protection breakdown (issue #454). The observer
+        # session-level protection breakdown. The observer
         # may not implement this method on older versions; ignore
         # AttributeError so a non-conforming observer doesn't poison
         # routing.
@@ -2618,8 +2617,8 @@ class ContentRouter(Transform):
 
                 tool_content = block.get("content", "")
 
-                # Protection: failed tool calls / error outputs stay verbatim
-                # (issue #847). `is_error` is Anthropic's explicit failure
+                # Protection: failed tool calls / error outputs stay verbatim.
+                # `is_error` is Anthropic's explicit failure
                 # flag and suffices alone; the indicator scan catches error
                 # text without the flag but requires >=2 distinct keywords
                 # so benign outputs mentioning errors don't skip compression.

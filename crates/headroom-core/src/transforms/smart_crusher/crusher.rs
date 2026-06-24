@@ -3,7 +3,7 @@
 //! Owns the `config`, `anchor_selector`, `scorer`, and `analyzer`
 //! singletons that every per-message call needs. Constructed once
 //! per process; the struct is `Send + Sync` so it can sit behind an
-//! `Arc` in a multi-threaded proxy.
+//! `Arc` in a multi-threaded engine.
 //!
 //! This module ports three Python entry points:
 //!
@@ -29,9 +29,9 @@
 //!   unchanged) since text compression has its own port pipeline.
 //! - **`summarize_dropped_items`**: empty string.
 //!
-//! Parity fixtures will be recorded with all four disabled on the
+//! Parity fixtures are recorded with all four disabled on the
 //! Python side, locking byte-equal output. The TOIN/CCR/feedback
-//! integration ports happen later (Stage 3c.2 follow-ups).
+//! integration ports are handled separately.
 
 use std::sync::Arc;
 
@@ -70,7 +70,7 @@ use crate::transforms::anchor_selector::AnchorSelector;
 ///   "lossy" here means "compressed view inline; full payload cached
 ///   for tool retrieval," matching Python's CCR-Dropped semantics.
 ///
-/// The runtime (PyO3 bridge / proxy server) owns the cache; this crate
+/// The runtime (PyO3 bridge) owns the cache; this crate
 /// computes the hash and emits a marker so the prompt knows where to
 /// look.
 pub struct CrushArrayResult {
@@ -192,7 +192,7 @@ enum LossyOutcome {
 
 /// Top-level SmartCrusher.
 ///
-/// Three pluggable extensions (Stage 3c.2 PR1):
+/// Three pluggable extensions:
 /// - `scorer` — relevance scoring (`HybridScorer` by default).
 /// - `constraints` — must-keep predicates (`KeepErrorsConstraint` +
 ///   `KeepStructuralOutliersConstraint` by default).
@@ -208,10 +208,10 @@ pub struct SmartCrusher {
     pub analyzer: SmartAnalyzer,
     pub constraints: Vec<Box<dyn Constraint>>,
     pub observers: Vec<Box<dyn Observer>>,
-    /// Optional lossless-first compaction stage (Stage 3c.2 PR2). When
+    /// Optional lossless-first compaction stage. When
     /// set, `crush_array` runs compaction up front and short-circuits
     /// the lossy path on success. When `None` (default OSS), parity
-    /// with the pre-PR2 lossy-only pipeline is preserved exactly.
+    /// with the lossy-only pipeline is preserved exactly.
     pub compaction: Option<CompactionStage>,
     /// Optional CCR store. When set, the lossy path stashes the **full
     /// original** array into the store keyed by `ccr_hash` before
@@ -220,7 +220,7 @@ pub struct SmartCrusher {
     /// nothing is stored (legacy / parity mode).
     ///
     /// `Arc` so callers can keep their own handle to the same store
-    /// (e.g. the proxy server holds it for retrieval lookups while
+    /// (e.g. the runtime holds it for retrieval lookups while
     /// SmartCrusher writes through it).
     pub ccr_store: Option<Arc<dyn CcrStore>>,
     /// Tokenizer used by the `MinTokens` routing policy to size the two
@@ -258,10 +258,10 @@ impl SmartCrusher {
             .build()
     }
 
-    /// Construct WITHOUT the compaction stage. Pre-PR4 behavior:
+    /// Construct WITHOUT the compaction stage:
     /// `crush_array` skips the lossless attempt and runs the lossy
-    /// path directly (still with CCR-Dropped retrieval markers from
-    /// PR4). Used by:
+    /// path directly (still with CCR-Dropped retrieval markers).
+    /// Used by:
     ///
     /// - The 17 legacy parity fixtures (recorded against the
     ///   lossy-only path; using this constructor preserves byte-equal
@@ -321,7 +321,7 @@ impl SmartCrusher {
     }
 
     /// Handle to the CCR store, if configured. Used by the runtime
-    /// (proxy server, PyO3 bridge) to look up originals when retrieval
+    /// (PyO3 bridge) to look up originals when retrieval
     /// tool calls fire.
     pub fn ccr_store(&self) -> Option<&Arc<dyn CcrStore>> {
         self.ccr_store.as_ref()
@@ -426,7 +426,7 @@ impl SmartCrusher {
         // Re-serialize with Python `safe_json_dumps` formatting:
         // compact `(",", ":")` separators + `ensure_ascii=False`,
         // preserving object-key insertion order. Matches the Python
-        // SmartCrusher output bytes the proxy writes.
+        // SmartCrusher output bytes exactly.
         let result = crate::transforms::anchor_selector::python_safe_json_dumps(&crushed);
         let was_modified = result != content.trim();
         (result, was_modified, info)
@@ -660,7 +660,7 @@ impl SmartCrusher {
         }
 
         // 2. Opaque blob: substitute with CCR marker AND stash the
-        // original in the store (PR8) so retrieval works. Hash + format
+        // original in the store so retrieval works. Hash + format
         // identical to walker.rs via the shared helper — zero drift.
         let cfg = ClassifyConfig::default();
         if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.to_string()), &cfg) {
@@ -1231,7 +1231,7 @@ impl SmartCrusher {
         // `enable_ccr_marker` historically gated this text; that
         // conflated the *data-loss recovery pointer* with the heavier
         // *retrieval-tool injection* (advertising `headroom_retrieve`
-        // into the request), which is owned by the proxy/router layer
+        // into the request), which is owned by the router layer
         // (`CCRConfig.inject_tool` / `inject_retrieval_marker`), NOT by
         // the crusher. The crusher's job is to never drop a distinct
         // item without leaving a pointer to it; that pointer is now
@@ -1621,10 +1621,10 @@ fn hash_canonical(canonical: &str) -> String {
 // the one-liner; production callsites inline both steps so the canonical
 // bytes can be reused for the store payload.
 
-// ─── PR5 walker-integration helpers (string handling) ──────────────────────
+// ─── Walker-integration helpers (string handling) ──────────────────────
 //
 // Parse-as-JSON-container, marker formatting, and humanize-bytes used to
-// live here as locals. PR8 extracted them into `compaction::walker` so
+// live here as locals. They now live in `compaction::walker` so
 // `walker.rs` and `process_value` share one canonical implementation —
 // killing the drift risk where the two paths could format markers
 // differently. `process_string` now calls `try_parse_json_container` and
@@ -2031,11 +2031,11 @@ mod tests {
         assert!(result.items.len() <= 30);
     }
 
-    // ---------- Stage 3c.2 PR4: lossless-first default with threshold + CCR-Dropped ----------
+    // ---------- lossless-first default with threshold + CCR-Dropped ----------
 
     #[test]
     fn without_compaction_yields_none_compacted_field() {
-        // The opt-out constructor preserves pre-PR4 lossy-only path.
+        // The opt-out constructor preserves the lossy-only path.
         // No lossless attempt → compacted/compaction_kind always None.
         let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
         let items: Vec<Value> = (0..30).map(|_| json!({"status": "ok"})).collect();
@@ -2183,7 +2183,7 @@ mod tests {
         assert!(result.compaction_kind.is_none());
     }
 
-    // ---------- Stage 3c.2 PR5: walker-integration in process_value ----------
+    // ---------- walker-integration in process_value ----------
 
     #[test]
     fn process_string_short_string_passthrough() {

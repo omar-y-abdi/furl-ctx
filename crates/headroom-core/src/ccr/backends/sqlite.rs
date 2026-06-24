@@ -24,7 +24,7 @@
 //! # Concurrency
 //!
 //! `rusqlite::Connection` is `!Sync`, so we wrap it in a `Mutex`. CCR
-//! reads/writes are short and rare relative to the proxy hot path, so
+//! reads/writes are short and rare relative to the hot path, so
 //! a single mutex on the connection is fine. Operators who measure
 //! contention can shard by spinning up N stores backed by N DB files
 //! (e.g. one per worker) — multi-worker safety is provided by SQLite's
@@ -34,7 +34,7 @@
 //!
 //! We open the connection in WAL mode so reads do not block writes
 //! (and vice versa), and the on-disk journal does not grow unbounded.
-//! Critical for proxy workloads where many concurrent retrievals can
+//! Critical for workloads where many concurrent retrievals can
 //! land while a compression flushes a fresh row.
 
 use std::path::{Path, PathBuf};
@@ -52,7 +52,7 @@ pub struct SqliteCcrStore {
     /// `compression_store` 5-minute window.
     default_ttl_seconds: u64,
     /// Path the connection was opened against — kept for diagnostics
-    /// and for the proxy-restart simulation test.
+    /// and for the restart-simulation test.
     path: PathBuf,
 }
 
@@ -147,7 +147,7 @@ impl CcrStore for SqliteCcrStore {
         // path because the marker has already been embedded in the
         // compressed block — a missed put degrades gracefully to "model
         // can't retrieve original bytes for this hash". We log, we
-        // don't panic, so the proxy keeps serving traffic.
+        // don't panic, so the engine keeps serving traffic.
         if let Err(err) = res {
             tracing::warn!(
                 target = "ccr.sqlite",

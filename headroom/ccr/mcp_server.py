@@ -69,7 +69,7 @@ def _safe_decode_for_logging(raw: bytes) -> str:
 
     Uses an incremental UTF-8 decoder with the replacement character (U+FFFD)
     for invalid bytes — acceptable here because this path is for tool output
-    display, not the SSE/wire path (PR-A8 / P1-8 forbids lossy decode kwargs
+    display, not the SSE/wire path (lossy decode kwargs are forbidden
     in headroom/ccr/, so this centralizes the single legitimate lossy use).
     """
     import codecs as _codecs
@@ -337,7 +337,7 @@ class HeadroomMCPServer:
                     "results": results,
                     "count": len(results),
                 }
-            # #18: search returned nothing. That does NOT mean the entry was
+            # Search returned nothing. That does NOT mean the entry was
             # evicted — a LIVE entry with no query match must report "no match",
             # not a false "no longer retrievable" eviction error. Only fall
             # through to the cause-honest miss path when the entry is genuinely
@@ -655,7 +655,7 @@ class HeadroomMCPServer:
                 )
             ]
 
-        # Read file from disk. PR-A8 / P1-8: avoid lossy decode kwargs
+        # Read file from disk. Avoid lossy decode kwargs
         # in headroom/ccr/ — use the centralized safe-log decoder (this path
         # is for tool output display, not SSE/wire path, so a replacement
         # char on invalid bytes is acceptable).

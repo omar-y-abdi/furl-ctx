@@ -12,8 +12,8 @@ from headroom.models.config import ML_MODEL_DEFAULTS
 class CacheAlignerConfig:
     """Configuration for cache alignment.
 
-    Post detector-only refactor (PR-A2/P2-23) the CacheAligner transform reads
-    only ``.enabled``; all detector/whitespace tuning moved to the live
+    The CacheAligner transform is detector-only: it reads
+    only ``.enabled``; all detector/whitespace tuning lives on the
     ``DynamicContentDetector`` / ``CacheConfig`` path.
 
     SAFE: Only applied to SYSTEM messages, not user/assistant/tool content.
@@ -261,7 +261,7 @@ class SmartCrusherConfig:
     # Feedback loop integration (TOIN - Tool Output Intelligence Network)
     use_feedback_hints: bool = True  # Use learned patterns to adjust compression
 
-    # LOW FIX #21: Make TOIN confidence threshold configurable
+    # TOIN confidence threshold (configurable).
     # Minimum confidence required to apply TOIN recommendations
     toin_confidence_threshold: float = 0.3
 

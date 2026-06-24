@@ -56,8 +56,7 @@ use super::error_keywords::ERROR_KEYWORDS;
 /// 1. **Rare-field outliers**: items containing a field that appears
 ///    in <20% of the array.
 /// 2. **Rare-status outliers**: forwarded to `detect_rare_status_values`,
-///    which finds items with statistically rare categorical values
-///    (with bug #3 fixed).
+///    which finds items with statistically rare categorical values.
 pub fn detect_structural_outliers(items: &[Value]) -> Vec<usize> {
     if items.len() < 5 {
         return Vec::new();
@@ -405,8 +404,8 @@ mod tests {
         // is unreachable when the cardinality gate fails first.
         //
         // If we ever want null to count as a distinct categorical value
-        // (so missing-status items get flagged), that's a behavior
-        // change beyond bug #3 and lives in Stage 3c.2.
+        // (so missing-status items get flagged), that's a separate
+        // behavior change.
         let mut items: Vec<Value> = (0..95).map(|_| json!({"s": "ok"})).collect();
         for _ in 0..5 {
             items.push(json!({"s": null}));

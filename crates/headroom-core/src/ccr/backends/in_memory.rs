@@ -24,8 +24,8 @@
 //!   entry — silently destroying a still-referenced blob.
 //!
 //! - *Tombstone / stale-order accumulation*: the order queue retained keys
-//!   already removed by TTL or overwrite without bounding its growth. On a
-//!   long-running proxy the queue could grow to O(total_puts) while the live
+//!   already removed by TTL or overwrite without bounding its growth. In a
+//!   long-running process the queue could grow to O(total_puts) while the live
 //!   map stayed bounded — a memory leak independent of capacity.
 //!
 //! - *Unbacked sentinel*: with `DEFAULT_CAPACITY = 1000`, a call that
@@ -252,7 +252,7 @@ impl CcrStore for InMemoryCcrStore {
         // then `remove`) had a TOCTOU race: between dropping the read
         // lock and calling `remove`, a concurrent `put()` of the same
         // hash with a fresh timestamp could land — and our `remove`
-        // would then wipe that fresh entry. Under multi-worker proxy
+        // would then wipe that fresh entry. Under multi-worker
         // load this manifested as "I just stored it; why is it gone?"
         // `remove_if` closes the window because the shard write lock
         // is held across both the predicate evaluation and the removal.

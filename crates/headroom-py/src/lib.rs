@@ -9,7 +9,7 @@
 //! which mirrors the Python `DiffCompressor` API one-for-one (so callers
 //! don't notice the swap).
 //!
-//! Why in-process: ContentRouter compresses on the proxy's hot path. Any
+//! Why in-process: ContentRouter compresses on the engine's hot path. Any
 //! IPC / subprocess / RPC bridge would dominate the cost we're trying to
 //! save. PyO3 calls cost ~microseconds; staying in-process is ~free.
 
@@ -674,7 +674,7 @@ impl PyCrushResult {
 ///
 /// Constructor accepts only `config` — Python's `relevance_config`,
 /// `scorer`, and `ccr_config` parameters are handled in the Python
-/// shim (Stage 3c.1 keeps the optional subsystems disabled in Rust;
+/// shim (the optional subsystems are disabled in Rust;
 /// the shim drops those args to preserve call-site compatibility).
 #[pyclass(name = "SmartCrusher", module = "headroom._core")]
 struct PySmartCrusher {
@@ -695,8 +695,8 @@ impl PySmartCrusher {
     /// Construct WITHOUT the lossless-first compaction stage. The
     /// public `crush()` API runs the lossy path directly (still with
     /// CCR-Dropped retrieval markers populated when rows are dropped).
-    /// Used by the legacy parity fixture harness — those fixtures
-    /// were recorded against the pre-PR4 lossy-only behavior.
+    /// Used by the parity fixture harness — those fixtures
+    /// were recorded against the lossy-only behavior.
     #[staticmethod]
     #[pyo3(signature = (config = None))]
     fn without_compaction(config: Option<&PySmartCrusherConfig>) -> Self {
@@ -730,7 +730,7 @@ impl PySmartCrusher {
     /// order and keyword names mirror the Python implementation.
     ///
     /// Releases the GIL across the Rust crush call. Concurrent Python
-    /// threads in the proxy keep running during the JSON parse +
+    /// threads in the engine keep running during the JSON parse +
     /// recursive process_value + per-array compression work. `&str`
     /// inputs are copied to owned `String`s up-front since PyO3 ties
     /// their lifetime to the GIL hold.
@@ -773,13 +773,13 @@ impl PySmartCrusher {
     /// - `compacted`: rendered bytes when the lossless path won, else `None`
     /// - `compaction_kind`: `"table" | "buckets" | "ccr" | None`
     ///
-    /// This surfaces `CrushArrayResult` to Python so tests and the proxy
+    /// This surfaces `CrushArrayResult` to Python so tests and the
     /// runtime can reach the CCR hash directly (rather than parsing it
     /// out of the prompt marker).
     /// Raises `ValueError` when `items_json` is not valid JSON or not a
     /// JSON array — boundary validation, not a panic: PyO3 panics map to
     /// `pyo3_runtime.PanicException`, a `BaseException` that escapes the
-    /// proxy's `except Exception` handlers.
+    /// caller's `except Exception` handlers.
     #[pyo3(signature = (items_json, query = "", bias = 1.0))]
     fn crush_array_json<'py>(
         &self,
@@ -865,8 +865,8 @@ impl PySmartCrusher {
     ///
     /// When the lossy path drops rows, it stashes the **full original**
     /// array into the in-memory CCR store keyed by the 12-char hash
-    /// embedded in the prompt's `<<ccr:HASH ...>>` marker. The runtime
-    /// (proxy server / MCP retrieval tool) calls this to serve the
+    /// embedded in the prompt's `<<ccr:HASH ...>>` marker. The
+    /// MCP retrieval tool calls this to serve the
     /// dropped rows back to the LLM on demand.
     ///
     /// Returns the canonical-JSON serialization of the original
@@ -962,7 +962,7 @@ impl PyDetectionResult {
 /// Detect the type of `content`. Returns a `DetectionResult` with the
 /// same field surface as Python's dataclass.
 ///
-/// Stage-3d (PR5) wired this through the magika→unidiff→PlainText
+/// This runs through the magika→unidiff→PlainText
 /// detection chain — the regex `content_detector` is no longer on
 /// the production path. The chain returns a `ContentType` only;
 /// we synthesize the legacy `DetectionResult` shape here with
@@ -1094,7 +1094,7 @@ fn keyword_registry_snapshot(py: Python<'_>) -> Py<PyDict> {
 // the regex registry the Python original used) and fixes the Windows-path
 // + dashes-in-filename parser bugs.
 //
-// CCR persistence is exposed via a callback hook because the proxy's
+// CCR persistence is exposed via a callback hook because the Python
 // `CompressionStore` already lives Python-side. The Rust crate holds no
 // long-lived store reference; instead the caller passes the dict back
 // through the result and the Python shim writes it to the existing

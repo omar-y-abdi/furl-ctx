@@ -66,7 +66,7 @@ def _extract_tool_result_text(payload: dict[str, Any]) -> str:
         for item in inner:
             if isinstance(item, dict):
                 if item.get("type") == "text":
-                    # #17: an explicit ``"text": None`` makes ``.get("text", "")``
+                    # An explicit ``"text": None`` makes ``.get("text", "")``
                     # return None (the default only applies to an ABSENT key),
                     # which then raises TypeError in ``"\n".join``. Coerce to "".
                     pieces.append(item.get("text") or "")
@@ -100,7 +100,7 @@ def detect_waste_signals(text: str, tokenizer: Tokenizer) -> WasteSignals:
 
     # HTML tags and comments. The tag pattern ``<[^>]+>`` also matches a
     # whole comment up to its first ``>``, so counting tags + comments on the
-    # raw text double-counts every comment (#15). Strip comments first, then
+    # raw text double-counts every comment. Strip comments first, then
     # match tags on the remainder, so each construct is counted exactly once.
     comment_matches = HTML_COMMENT_PATTERN.findall(text)
     tag_matches = HTML_TAG_PATTERN.findall(HTML_COMMENT_PATTERN.sub("", text))
@@ -121,7 +121,7 @@ def detect_waste_signals(text: str, tokenizer: Tokenizer) -> WasteSignals:
         # Tokens saved by collapsing each whitespace RUN to a single space.
         # The old formula joined the runs with " " (``" ".join``), which left
         # every run intact and only added separators, so it never yielded any
-        # savings (#14). Collapse each run to one space instead.
+        # savings. Collapse each run to one space instead.
         ws_text = "".join(ws_matches)
         normalized_text = " " * len(ws_matches)
         signals.whitespace_tokens = max(
@@ -131,7 +131,7 @@ def detect_waste_signals(text: str, tokenizer: Tokenizer) -> WasteSignals:
     # Large JSON blocks. The old ``\{[\s\S]{500,}\}`` pattern was greedy and
     # unanchored: several small JSON objects separated by prose merged into one
     # match spanning the first ``{`` to the last ``}``, and its char-count gate
-    # (``{500,}``) mismatched the token gate below (#16). Detect each JSON
+    # (``{500,}``) mismatched the token gate below. Detect each JSON
     # object as a real span instead, then gate each on its own token count.
     for match in _iter_json_object_spans(text):
         tokens = tokenizer.count_text(match)
@@ -203,7 +203,7 @@ def parse_message_to_blocks(
             text_parts = []
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
-                    # #17: explicit ``"text": None`` must not crash join().
+                    # An explicit ``"text": None`` must not crash join().
                     text_parts.append(part.get("text") or "")
                 elif isinstance(part, dict) and part.get("type") == "tool_result":
                     # Anthropic Messages format nests tool output one level
@@ -353,7 +353,7 @@ def parse_messages(
 
     # Cross-message re-read detection: identical tool_result content served
     # at more than one position means the agent re-fetched something already
-    # in context — an over-compression signal (#853). The first serve is
+    # in context — an over-compression signal. The first serve is
     # free; every repeat is counted as waste.
     reread_groups: dict[str, list[Block]] = {}
     for block in all_blocks:
@@ -481,7 +481,7 @@ def get_message_content_text(message: dict[str, Any]) -> str:
         parts = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
-                # #17: explicit ``"text": None`` must not crash join().
+                # An explicit ``"text": None`` must not crash join().
                 parts.append(part.get("text") or "")
             elif isinstance(part, str):
                 parts.append(part)

@@ -49,7 +49,7 @@ def create_cpu_session_options(
 ) -> Any:
     """Create CPU-oriented ONNX Runtime session options.
 
-    Headroom runs as a long-lived proxy process, so we bias toward predictable
+    Headroom runs as a long-lived process, so we bias toward predictable
     memory usage over peak ONNX throughput. Disabling ORT's CPU arena and memory
     pattern caches reduces retained anonymous RSS after variable-size inference
     workloads, which is especially important on small VMs.

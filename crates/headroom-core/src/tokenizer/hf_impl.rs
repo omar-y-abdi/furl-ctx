@@ -153,7 +153,7 @@ impl Tokenizer for HfTokenizer {
             // `encode` only fails for malformed inputs that pass UTF-8 but
             // violate the tokenizer's constraints (e.g. a normalizer that
             // rejects certain code points). We degrade to "0 known tokens"
-            // rather than panic — the proxy must keep flowing requests.
+            // rather than panic — the engine must keep flowing requests.
             Err(_) => 0,
         }
     }

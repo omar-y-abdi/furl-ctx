@@ -680,7 +680,7 @@ pub fn restore_tags(text: &str, blocks: &[(String, String)]) -> String {
 /// Variant of [`restore_tags`] that threads an optional `request_id`
 /// into the structured ERROR log emitted on placeholder loss. The
 /// PyO3 binding currently calls [`restore_tags`] (no request id);
-/// this entry point exists so the proxy layer can wire request
+/// this entry point exists so the caller can wire request
 /// context through once it has one available end-to-end.
 pub fn restore_tags_with_request_id(
     text: &str,

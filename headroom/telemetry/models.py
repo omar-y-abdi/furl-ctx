@@ -89,7 +89,7 @@ class ToolSignature:
     """
 
     # Structural hash (based on field types and names)
-    # MEDIUM FIX #15: Uses SHA256[:24] (96 bits) for better collision resistance
+    # Uses SHA256[:24] (96 bits) for better collision resistance
     structure_hash: str  # SHA256[:24] of sorted field names + types
 
     # Schema characteristics
@@ -138,7 +138,7 @@ class ToolSignature:
     def _calculate_depth(value: Any, current_depth: int = 1, max_depth_limit: int = 10) -> int:
         """Recursively calculate the depth of a nested structure.
 
-        MEDIUM FIX #12: Actually calculate max_depth instead of hardcoding 1.
+        Calculates max_depth from the structure rather than hardcoding 1.
         """
         if current_depth >= max_depth_limit:
             return current_depth  # Prevent infinite recursion
@@ -168,7 +168,7 @@ class ToolSignature:
     ) -> bool:
         """Check if key matches patterns using word boundary matching.
 
-        MEDIUM FIX #14: Prevent false positives like "hidden" matching "id".
+        Prevents false positives like "hidden" matching "id".
         Uses word boundary logic: pattern must be at start/end or surrounded by
         non-alphanumeric characters (underscore, hyphen, or boundary).
 
@@ -219,7 +219,7 @@ class ToolSignature:
             # Use a random component to ensure uniqueness across tool types.
             import uuid
 
-            # MEDIUM FIX #15: Use 24 chars (96 bits) instead of 16 (64 bits) to reduce collision risk
+            # Use 24 chars (96 bits) instead of 16 (64 bits) to reduce collision risk
             empty_hash = hashlib.sha256(f"empty:{uuid.uuid4()}".encode()).hexdigest()[:24]
             return cls(
                 structure_hash=empty_hash,
@@ -229,7 +229,7 @@ class ToolSignature:
                 max_depth=0,
             )
 
-        # MEDIUM FIX #13: Analyze multiple items (up to 5) to get representative structure
+        # Analyze multiple items (up to 5) to get representative structure.
         # This catches cases where items have varying schemas
         sample_items = items[:5] if len(items) >= 5 else items
 
@@ -265,7 +265,7 @@ class ToolSignature:
         has_nested = False
         has_arrays = False
 
-        # MEDIUM FIX #12: Calculate actual max_depth from sampled items
+        # Calculate actual max_depth from sampled items
         max_depth = 1
         for item in sample_items:
             if isinstance(item, dict):
@@ -317,7 +317,7 @@ class ToolSignature:
 
             field_info.append((key, field_type))
 
-            # MEDIUM FIX #14: Pattern detection with word boundary matching
+            # Pattern detection with word boundary matching.
             # Prevents false positives like "hidden" matching "id"
             # Pass original key for camelCase detection
             if cls._matches_pattern(key_lower, ["id", "uuid", "guid"], key) or key_lower.endswith(
@@ -348,7 +348,7 @@ class ToolSignature:
                 has_message = True
 
         # Create structure hash
-        # MEDIUM FIX #15: Use 24 chars (96 bits) instead of 16 (64 bits) for collision resistance
+        # Use 24 chars (96 bits) instead of 16 (64 bits) for collision resistance
         sorted_fields = sorted(field_info)
         hash_input = json.dumps(sorted_fields, sort_keys=True)
         structure_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:24]

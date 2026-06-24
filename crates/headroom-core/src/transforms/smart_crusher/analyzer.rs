@@ -29,9 +29,7 @@
 //!
 //! Rust uses `BTreeMap<String, FieldStats>` here, which iterates in
 //! ASCII-sorted key order. To match, the Python implementation needs a
-//! `sorted(all_keys)` call before building `field_stats`. Tracked as bug
-//! #5 in the architecture doc; the Python fix lands in Stage 3c.1
-//! commit 7 alongside fixture regeneration.
+//! `sorted(all_keys)` call before building `field_stats`.
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -744,7 +742,6 @@ impl SmartAnalyzer {
 ///   `repr` for str). We approximate via JSON for parity-locked counts;
 ///   the only case this can drift is if a field carries nested dicts
 ///   with mixed types in its values, which is rare for crushable arrays.
-///   Tracked as a Stage-3c.2 follow-up.
 fn python_repr(v: &Value) -> String {
     match v {
         Value::Null => "None".to_string(),

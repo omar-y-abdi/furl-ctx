@@ -32,7 +32,7 @@ Usage:
     # Export for aggregation
     stats = collector.export_stats()
 
-TOIN (Tool Output Intelligence Network) — observation-only since PR-B5:
+TOIN (Tool Output Intelligence Network) — observation-only:
     from headroom.telemetry import get_toin
 
     toin = get_toin()
@@ -46,7 +46,7 @@ TOIN (Tool Output Intelligence Network) — observation-only since PR-B5:
     # Aggregated recommendations are emitted offline by an external
     # aggregator (the in-repo toin_publish CLI was removed in the
     # compression-only amputation).
-    # The Rust proxy loads that TOML at startup; there is no
+    # The Rust core loads that TOML at startup; there is no
     # request-time hint API.
 """
 
@@ -95,7 +95,7 @@ __all__ = [
     "FieldDistribution",
     "RetrievalStats",
     "ToolSignature",
-    # TOIN (observation-only since PR-B5)
+    # TOIN (observation-only)
     "DEFAULT_AUTH_MODE",
     "DEFAULT_MIN_OBSERVATIONS_TO_PUBLISH",
     "DEFAULT_MODEL_FAMILY",

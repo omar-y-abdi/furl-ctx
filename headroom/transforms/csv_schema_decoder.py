@@ -387,7 +387,7 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
         # carried entirely by the declaration and [N] gives the count. Const
         # columns repeat their value; arith columns step by row ordinal.
         #
-        # #25: the old guard was `const_cols and not arith_cols`, which
+        # An earlier guard of `const_cols and not arith_cols`
         # returned [] (total silent loss) for a const+arith zero-var table
         # like `[N]{x:int=5,seq:int=0+1}`. The all-const case is just the
         # special case where `arith_cols` is empty.
@@ -464,9 +464,9 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
         if not line:
             # An empty physical line is a REAL empty-string value ONLY when
             # there is exactly one variable column (multi-col empty rows still
-            # carry their `,` separators, so they are never blank). Bug #24:
-            # the old `if not line: continue` dropped that row AND failed to
-            # advance `ordinal`, so every later arith-fold value was shifted.
+            # carry their `,` separators, so they are never blank).
+            # A bare `if not line: continue` would drop that row AND fail to
+            # advance `ordinal`, so every later arith-fold value would shift.
             # Bound emission by the declared row count so the trailing newline
             # artifact (an extra `""` beyond row N) is not turned into a
             # phantom row.

@@ -1,19 +1,17 @@
 """Tool Output Intelligence Network (TOIN) — observation-only contract.
 
-# Observation-only contract (PR-B5)
-
 TOIN observes; it never mutates request-time compression decisions. The
 request path is deterministic: SmartCrusher and the live-zone dispatcher
 read their static configuration only. TOIN's role is to record what
 happened so an offline aggregator (the retired `toin_publish` CLI; removed in
 the compression-only amputation) can emit
-a `recommendations.toml` file the deploy pipeline ships to the proxy at
+a `recommendations.toml` file the deploy pipeline ships to the engine at
 the next restart.
 
 Why this shape:
 - Per-request mutation tied compression bytes to TOIN's mutable state,
-  which made the same input produce different outputs across runs (P2-27,
-  P5-56). That broke prompt caching and made bugs irreproducible.
+  which made the same input produce different outputs across runs.
+  That broke prompt caching and made bugs irreproducible.
 - The request-time hint API (`get_recommendation()`) is retired. It now
   emits a `DeprecationWarning` and returns `None`. New code must not call
   it.
@@ -25,8 +23,8 @@ Why this shape:
 Patterns are keyed by `(auth_mode, model_family, structure_hash)` —
 each tenant slice (PAYG vs OAuth vs subscription) and each model family
 (claude-3-5, gpt-4o, …) learns independently. Defaults `"unknown"` when
-either is not yet plumbed through (PR-F3 lights up real auth-mode
-detection).
+either is not yet plumbed through (real auth-mode detection lights up
+that slice).
 
 # Privacy
 - No actual data values are stored.
@@ -57,7 +55,7 @@ detection).
     # Aggregated recommendations are produced offline by an external
     # aggregator (the in-repo toin_publish CLI was removed in the
     # compression-only amputation):
-    # The Rust proxy loads that file at startup; no per-request hint API.
+    # The Rust core loads that file at startup; no per-request hint API.
 """
 
 from __future__ import annotations
@@ -85,8 +83,8 @@ DEFAULT_TOIN_DIR = ".headroom"
 DEFAULT_TOIN_FILE = "toin.json"
 
 # ── Aggregation-key defaults ────────────────────────────────────────────
-# Used when callers haven't plumbed auth-mode / model-family detection
-# (PR-F3 wires the real detectors). Shipping a real `"unknown"` slice is
+# Used when callers haven't plumbed auth-mode / model-family detection.
+# Shipping a real `"unknown"` slice is
 # explicit — better than a magic empty string and lets the publish CLI
 # filter on it deliberately.
 DEFAULT_AUTH_MODE: Final[str] = "unknown"
@@ -96,7 +94,7 @@ DEFAULT_MODEL_FAMILY: Final[str] = "unknown"
 # Minimum observations a pattern must have before the `toin publish` CLI
 # emits a recommendation row for it. Below this, the recommendation
 # would be noise. The CLI exposes `--min-observations` to override per
-# environment; this is the production default the Rust proxy expects.
+# environment; this is the production default the Rust core expects.
 DEFAULT_MIN_OBSERVATIONS_TO_PUBLISH: Final[int] = 50
 
 # Aggregation-key serialization separator. Used to encode the
@@ -120,8 +118,8 @@ def _make_pattern_key(
     """Build the canonical `(auth_mode, model_family, sig_hash)` key.
 
     Defaults populate to `DEFAULT_AUTH_MODE` / `DEFAULT_MODEL_FAMILY`
-    when callers haven't supplied a value — keeps callers terse during
-    the Phase B realignment while PR-F3 wires real detectors.
+    when callers haven't supplied a value — keeps callers terse until
+    real detectors are wired.
     """
     return (
         auth_mode or DEFAULT_AUTH_MODE,
@@ -174,7 +172,7 @@ def get_default_toin_storage_path() -> str:
     return str(_paths.toin_path())
 
 
-# LOW FIX #22: Define callback types for metrics/monitoring hooks
+# Callback types for metrics/monitoring hooks.
 # These allow users to plug in their own metrics collection (Prometheus, StatsD, etc.)
 MetricsCallback = Callable[[str, dict[str, Any]], None]  # (event_name, event_data) -> None
 
@@ -189,7 +187,7 @@ class ToolPattern:
 
     tool_signature_hash: str
 
-    # === Aggregation Key (PR-B5) ===
+    # === Aggregation Key ===
     # Per-tenant aggregation key extension. The Pattern is keyed inside
     # the TOIN store by `(auth_mode, model_family, tool_signature_hash)` —
     # these two fields carry the same values onto the dataclass so dumps,
@@ -231,7 +229,7 @@ class ToolPattern:
 
     # Query patterns that trigger retrieval
     common_query_patterns: list[str] = field(default_factory=list)
-    # MEDIUM FIX #10: Track query pattern frequency to keep most common, not just recent
+    # Track query pattern frequency to keep most common, not just recent
     query_pattern_frequency: dict[str, int] = field(default_factory=dict)
 
     # Best compression strategy for this tool type
@@ -249,7 +247,7 @@ class ToolPattern:
     field_semantics: dict[str, FieldSemantics] = field(default_factory=dict)
 
     # === Observation Counter ===
-    # PR-B5: legacy counter from the retired `get_recommendation()` API.
+    # Legacy counter from the retired `get_recommendation()` API.
     # Held for serialization compatibility with v1.0 dumps; new
     # increments only happen via record_compression / record_retrieval.
     observations: int = 0
@@ -406,7 +404,7 @@ class TOINConfig:
     anonymize_queries: bool = True
     max_query_patterns: int = 10
 
-    # LOW FIX #22: Metrics/monitoring hooks
+    # Metrics/monitoring hooks
     # Callback for emitting metrics events. Signature: (event_name, event_data) -> None
     # Event names: "toin.compression", "toin.retrieval", "toin.recommendation", "toin.save"
     # This allows integration with Prometheus, StatsD, OpenTelemetry, etc.
@@ -426,7 +424,7 @@ class ToolIntelligenceNetwork:
     Thread-safe for concurrent access.
     """
 
-    # ── Deprecation warning de-dupe (PR-B5) ───────────────────────────────
+    # ── Deprecation warning de-dupe ───────────────────────────────
     # `get_recommendation` is retired as a per-request mutator. We emit
     # `DeprecationWarning` once per process; if every call warned, busy
     # call sites would flood logs and obscure other warnings. Class-level
@@ -460,8 +458,8 @@ class ToolIntelligenceNetwork:
             self._backend = None
 
         # Pattern database: (auth_mode, model_family, structure_hash) -> ToolPattern
-        # PR-B5 extended the key from a bare structure_hash to the per-tenant
-        # tuple. The serialized form on disk encodes the tuple as
+        # The key is a per-tenant tuple, not a bare structure_hash.
+        # The serialized form on disk encodes the tuple as
         # "auth|model|hash"; see `_serialize_pattern_key`.
         self._patterns: dict[PatternKey, ToolPattern] = {}
 
@@ -508,7 +506,7 @@ class ToolIntelligenceNetwork:
     def _emit_metric(self, event_name: str, event_data: dict[str, Any]) -> None:
         """Emit a metrics event via the configured callback.
 
-        LOW FIX #22: Provides monitoring integration for external metrics systems.
+        Provides monitoring integration for external metrics systems.
 
         Args:
             event_name: Name of the event (e.g., "toin.compression").
@@ -565,7 +563,7 @@ class ToolIntelligenceNetwork:
         sig_hash = tool_signature.structure_hash
         key = _make_pattern_key(auth_mode, model_family, sig_hash)
 
-        # LOW FIX #22: Emit compression metric
+        # Emit compression metric
         self._emit_metric(
             "toin.compression",
             {
@@ -663,7 +661,7 @@ class ToolIntelligenceNetwork:
                 # Normalize and anonymize: extract keywords, remove values
                 query_pattern = self._anonymize_query_pattern(query_context)
                 if query_pattern:
-                    # MEDIUM FIX #10: Track frequency to keep most common patterns
+                    # Track frequency to keep most common patterns
                     pattern.query_pattern_frequency[query_pattern] = (
                         pattern.query_pattern_frequency.get(query_pattern, 0) + 1
                     )
@@ -812,7 +810,7 @@ class ToolIntelligenceNetwork:
 
         key = _make_pattern_key(auth_mode, model_family, tool_signature_hash)
 
-        # LOW FIX #22: Emit retrieval metric
+        # Emit retrieval metric
         self._emit_metric(
             "toin.retrieval",
             {
@@ -890,7 +888,7 @@ class ToolIntelligenceNetwork:
             if query and self._config.anonymize_queries:
                 query_pattern = self._anonymize_query_pattern(query)
                 if query_pattern:
-                    # MEDIUM FIX #10: Track frequency to keep most common patterns
+                    # Track frequency to keep most common patterns
                     pattern.query_pattern_frequency[query_pattern] = (
                         pattern.query_pattern_frequency.get(query_pattern, 0) + 1
                     )
@@ -960,11 +958,11 @@ class ToolIntelligenceNetwork:
         tool_signature: ToolSignature,  # noqa: ARG002 — kept for source compat
         query_context: str | None = None,  # noqa: ARG002
     ) -> None:
-        """**Deprecated.** Returns `None`. PR-B5 retired the request-time hint API.
+        """**Deprecated.** Returns `None`. There is no request-time hint API.
 
         TOIN is observation-only; recommendations are emitted by the
         offline aggregator (the retired `toin_publish` CLI) into `recommendations.toml`
-        and loaded by the Rust proxy at startup. New code must not call
+        and loaded by the Rust core at startup. New code must not call
         this method. Existing call sites should migrate to reading the
         TOML file directly.
 
@@ -1187,7 +1185,7 @@ class ToolIntelligenceNetwork:
         """
         with self._lock:
             return {
-                "version": "2.0",  # PR-B5: tuple aggregation key
+                "version": "2.0",  # tuple aggregation key
                 "export_timestamp": time.time(),
                 "instance_id": self._instance_id,
                 "patterns": {
@@ -1304,7 +1302,7 @@ class ToolIntelligenceNetwork:
                 existing.commonly_retrieved_fields = existing.commonly_retrieved_fields[:20]
 
         # Merge query patterns (for federated learning)
-        # MEDIUM FIX #10: Also merge query_pattern_frequency for proper ranking
+        # Also merge query_pattern_frequency for proper ranking
         for query_pattern, freq in imported.query_pattern_frequency.items():
             existing.query_pattern_frequency[query_pattern] = (
                 existing.query_pattern_frequency.get(query_pattern, 0) + freq
@@ -1549,9 +1547,9 @@ def _create_default_toin_backend() -> Any:
         fn = ep.load()
         # `tenant_prefix` is retained for storage-backend namespacing
         # (Redis key prefix, Postgres schema name, etc.) so multi-tenant
-        # SaaS deployments can carve up shared infrastructure. PR-B5 made
-        # the in-memory aggregation key per-tenant via `auth_mode` /
-        # `model_family`, so `tenant_prefix` is now functionally redundant
+        # SaaS deployments can carve up shared infrastructure. The
+        # in-memory aggregation key is per-tenant via `auth_mode` /
+        # `model_family`, so `tenant_prefix` is functionally redundant
         # for *learning* — it only matters for storage layout. Keep it.
         kwargs = {
             "url": os.environ.get("HEADROOM_TOIN_URL", ""),

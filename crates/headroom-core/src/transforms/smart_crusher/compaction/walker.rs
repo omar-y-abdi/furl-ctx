@@ -43,7 +43,7 @@ use sha2::{Digest, Sha256};
 
 /// Walks any JSON value and applies lossless compaction in place.
 ///
-/// Reuses the PR2 primitives:
+/// Reuses the compaction primitives:
 /// - [`compact`](super::compactor::compact) — array → IR
 /// - [`Formatter`] — IR → bytes
 /// - [`classify_cell`] + opaque-blob detection

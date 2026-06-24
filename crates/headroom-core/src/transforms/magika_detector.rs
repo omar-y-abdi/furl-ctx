@@ -1,9 +1,9 @@
-//! Magika-based content detection (Stage 3d Tier 1).
+//! Magika-based content detection (Tier 1).
 //!
 //! Wraps Google's [`magika`] crate — an ONNX-backed content classifier —
 //! and maps its 200+ labels onto Headroom's existing
 //! [`crate::transforms::content_detector::ContentType`] enum so the
-//! ContentRouter dispatch (PR5) can stay enum-stable.
+//! ContentRouter dispatch can stay enum-stable.
 //!
 //! # Design
 //!
@@ -14,7 +14,7 @@
 //!   our throughput; if benchmarks show contention later we'll pool.
 //!
 //! - **Loud failures.** If the model fails to load or inference fails,
-//!   `magika_detect` returns `Err`. The ContentRouter (PR5) decides
+//!   `magika_detect` returns `Err`. The ContentRouter decides
 //!   whether to fall back to Tier 2 (`unidiff-rs`) or surface to the
 //!   caller. We deliberately do **not** silently return `PlainText` on
 //!   error — that's the kind of silent fallback the audit doc forbids.
@@ -25,9 +25,9 @@
 //!   decision, not a regex — adding a new mapping is one line, and
 //!   readers can audit the dispatch in one screen.
 //!
-//! - **No router rewiring here.** PR3 lands the detector + tests
-//!   only. PR5 flips the ContentRouter to call us instead of the
-//!   regex-based [`crate::transforms::content_detector`].
+//! - **No router rewiring here.** This module is the detector + tests
+//!   only; the ContentRouter owns the decision to call us instead of
+//!   the regex-based [`crate::transforms::content_detector`].
 
 use std::sync::{Mutex, OnceLock};
 
@@ -108,15 +108,15 @@ pub fn magika_detect(content: &str) -> Result<ContentType, MagikaDetectorError> 
 ///
 /// **Unmapped labels return [`ContentType::PlainText`]**, the safest
 /// default — passthrough at the router level rather than misroute to
-/// a wrong compressor. PR5 will refine this for `SearchResults` /
-/// `BuildOutput` (which magika has no equivalent for).
+/// a wrong compressor. `SearchResults` / `BuildOutput` (which magika
+/// has no equivalent for) are left for the router to refine.
 pub fn map_magika_label(label: &str) -> ContentType {
     match label {
         // ── JSON ───────────────────────────────────────────────────
-        // PR5 will refine this with the existing `is_json_array_of_dicts`
-        // check — magika says "this is JSON" but doesn't tell us if it's
-        // an array of records vs. a single object. For PR3 the mapping
-        // exists; the refinement is a router concern.
+        // The existing `is_json_array_of_dicts` check is left to the
+        // router to refine this — magika says "this is JSON" but doesn't
+        // tell us if it's an array of records vs. a single object. The
+        // mapping exists here; the refinement is a router concern.
         "json" | "jsonl" => ContentType::JsonArray,
 
         // ── Diffs ──────────────────────────────────────────────────
@@ -127,8 +127,8 @@ pub fn map_magika_label(label: &str) -> ContentType {
 
         // ── Source code ────────────────────────────────────────────
         // The big "code" group from magika. We list the labels we
-        // actually expect to see in tool outputs / pasted code in
-        // proxy traffic. Anything else in the code group falls
+        // actually expect to see in tool outputs / pasted code.
+        // Anything else in the code group falls
         // through to PlainText — better passthrough than misroute.
         "rust" | "python" | "javascript" | "typescript" | "go" | "java" | "c" | "cpp" | "cs"
         | "php" | "ruby" | "swift" | "kotlin" | "scala" | "haskell" | "lua" | "dart" | "perl"

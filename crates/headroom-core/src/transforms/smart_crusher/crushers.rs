@@ -26,9 +26,8 @@
 //! unaffected.
 //!
 //! We port the bug **as-is** so parity fixtures still byte-match.
-//! Stage 3c.1 commit 7 fixes BOTH languages in lockstep — at that point
-//! the bug-doc test below flips to pin the corrected behavior and the
-//! fixtures are regenerated.
+//! When both languages are fixed in lockstep, the bug-doc test below
+//! flips to pin the corrected behavior and the fixtures are regenerated.
 
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashSet};
@@ -607,9 +606,9 @@ mod tests {
 
     #[test]
     fn bug4_k_split_no_overshoot_when_k_total_is_two() {
-        // For k_total=2: pre-fix Python: k_first=1, k_last=1 — sum=2 = k_total ✓
+        // For k_total=2: k_first=1, k_last=1 — sum=2 = k_total ✓
         // (this case wasn't actually buggy). We pin it anyway to lock the
-        // boundary that the bug #4 fix preserves untouched.
+        // boundary that the k-split overshoot fix preserves untouched.
         let items: [&str; 2] = ["a", "b"];
         let (kt, kf, kl, _) = compute_k_split(&items, &cfg(), 1.0);
         assert_eq!(kt, 2);

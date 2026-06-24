@@ -532,9 +532,9 @@ class LogCompressor:
         try:
             store: Any = get_compression_store()
             # The Rust-emitted marker embeds MD5(original)[:24], but
-            # store() has defaulted to SHA-256(original)[:24] since
-            # PR #395. Pass the marker's key explicitly so retrieving
-            # the marker hash actually finds the entry (issue #816).
+            # store() defaults to SHA-256(original)[:24]. Pass the
+            # marker's key explicitly so retrieving the marker hash
+            # actually finds the entry.
             store.store(original, compressed, explicit_hash=cache_key)
         except Exception as e:
             logger.warning(

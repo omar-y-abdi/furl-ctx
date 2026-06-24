@@ -484,7 +484,7 @@ pub fn python_json_dumps(value: &Value) -> String {
 /// Python `safe_json_dumps(value)` — compact separators `(",", ":")` +
 /// `ensure_ascii=False`, preserving object-key insertion order. This is
 /// the format `SmartCrusher._smart_crush_content` uses to re-serialize
-/// crushed output, so the proxy's wire bytes match Python's exactly.
+/// crushed output, so the Rust output bytes match Python's exactly.
 pub fn python_safe_json_dumps(value: &Value) -> String {
     let mut out = String::new();
     write_python_json_inner(

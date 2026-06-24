@@ -1,4 +1,4 @@
-//! Public extension surface for `SmartCrusher` (Stage 3c.2 PR 1).
+//! Public extension surface for `SmartCrusher`.
 //!
 //! Three traits — `Scorer`, `Constraint`, `Observer` — capture every
 //! decision a `SmartCrusher` makes that downstream consumers might
@@ -32,7 +32,7 @@
 //! Use [`SmartCrusherBuilder`](super::builder::SmartCrusherBuilder) to
 //! compose a custom `SmartCrusher`. The default OSS composition is
 //! reachable via `SmartCrusher::new(config)` and stays byte-equivalent
-//! to pre-PR1 behavior — all 17 parity fixtures pass.
+//! to the original behavior — all 17 parity fixtures pass.
 
 use serde_json::Value;
 

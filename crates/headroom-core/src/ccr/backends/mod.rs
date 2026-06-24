@@ -23,7 +23,7 @@ pub use in_memory::InMemoryCcrStore;
 pub use sqlite::SqliteCcrStore;
 
 /// Operator-visible configuration for the CCR backend. Mirrors the
-/// shape the proxy will pass in once Phase C wires the runtime config
+/// shape the runtime passes in from the runtime config
 /// (`CcrConfig.backend = "sqlite" | "redis" | "in_memory"`).
 #[derive(Debug, Clone)]
 pub enum CcrBackendConfig {
@@ -60,7 +60,7 @@ impl CcrBackendConfig {
 }
 
 /// Reasons `from_config` may fail. Each variant is loud and recoverable
-/// at the proxy startup boundary — the operator is told exactly what
+/// at the startup boundary — the operator is told exactly what
 /// went wrong rather than silently degrading to in-memory.
 #[derive(Debug, Error)]
 pub enum CcrBackendInitError {

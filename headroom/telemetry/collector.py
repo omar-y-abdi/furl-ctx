@@ -746,9 +746,9 @@ def get_telemetry_collector(
             if _telemetry_collector is None:
                 # Honour HEADROOM_TELEMETRY (the documented opt-out var,
                 # also used by the Supabase beacon at telemetry/beacon.py).
-                # Pre-#390 this only checked HEADROOM_TELEMETRY_DISABLED,
-                # so users who set HEADROOM_TELEMETRY=off (the value in
-                # the docs) still saw /v1/telemetry report enabled=true.
+                # This honours HEADROOM_TELEMETRY=off (the value in the docs),
+                # not just HEADROOM_TELEMETRY_DISABLED, so the opt-out the docs
+                # describe actually takes effect.
                 # HEADROOM_TELEMETRY_DISABLED stays accepted for back-compat.
                 from headroom.telemetry.beacon import is_telemetry_enabled
 

@@ -2,7 +2,7 @@
 //!
 //! `SmartCrusher::new(config)` returns the OSS default composition
 //! (HybridScorer + KeepErrorsConstraint + KeepStructuralOutliersConstraint
-//! + TracingObserver) — drop-in compatible with pre-PR1 callers.
+//! + TracingObserver) — drop-in compatible with the original callers.
 //!
 //! Builder is for callers who want to customize the composition:
 //!

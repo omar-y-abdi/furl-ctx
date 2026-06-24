@@ -9,7 +9,7 @@
 //!   rare categorical values. Wraps the existing
 //!   [`detect_structural_outliers`] function.
 //!
-//! Both are byte-equivalent to the pre-PR1 hardcoded behavior — the
+//! Both are byte-equivalent to the original hardcoded behavior — the
 //! detection logic is unchanged; the constraints are thin trait
 //! adapters so that custom Enterprise constraints can be stacked
 //! alongside or in place of these defaults.
@@ -60,7 +60,7 @@ impl Constraint for KeepErrorsConstraint {
 ///   high-cardinality field appears infrequently (the "rare-status"
 ///   path that fires on enums like `level: "ERROR"` among many `INFO`).
 ///
-/// Implementation is unchanged from pre-PR1; this is a thin wrapper.
+/// Implementation wraps the original detection logic; this is a thin wrapper.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KeepStructuralOutliersConstraint;
 

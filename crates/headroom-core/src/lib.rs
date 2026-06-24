@@ -7,8 +7,8 @@ pub mod signals;
 pub mod tokenizer;
 pub mod transforms;
 
-// Re-exports for the live-zone dispatcher (Phase B PR-B2 consumes this).
-// Hoisted to the crate root so the proxy crate gets one stable import
+// Re-exports for the live-zone dispatcher.
+// Hoisted to the crate root so consumers get one stable import
 // path: `use headroom_core::compute_frozen_count;`. Keeping the
 // `cache_control` module public too means downstream code can reach
 // the helper types directly when needed.

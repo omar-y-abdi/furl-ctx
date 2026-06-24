@@ -1,4 +1,4 @@
-//! Stage-3d ContentRouter detection chain.
+//! ContentRouter detection chain.
 //!
 //! Wires the per-tier detectors (`magika_detector`, `unidiff_detector`)
 //! into the single function the ContentRouter calls. The locked design
@@ -70,7 +70,7 @@ pub fn detect(content: &str) -> ContentType {
         Ok(content_type) => return content_type,
         Err(e) => {
             // Init or inference failure. Log it (so an ops-side
-            // health check can spot magika trouble in the proxy
+            // health check can spot magika trouble in the engine
             // logs) and fall through to Tier 2 — the chain itself
             // must not break on a single tier's outage.
             tracing::warn!(
@@ -163,7 +163,7 @@ mod tests {
         // Locked design (2026-04-25): no regex tier on Rust side, so
         // grep-style `file:line:content` output now goes through
         // PlainText. This is a deliberate behavior change vs. the
-        // retired regex detector. If proxy benchmarks later show
+        // retired regex detector. If benchmarks later show
         // real compression loss on grep output, we add a focused
         // detector then — not preemptively.
         let grep = "src/foo.py:42:def process():\n\

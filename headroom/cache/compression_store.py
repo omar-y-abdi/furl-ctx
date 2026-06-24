@@ -59,7 +59,7 @@ CCR_TTL_SECONDS_ENV = "HEADROOM_CCR_TTL_SECONDS"
 # recovery regexes (``<<ccr:HASH...>>`` use ``[a-f0-9]{6,}``): the store has to
 # accept every hash a retrieval marker can carry, or an extract->404 silent loss
 # results. Real producers emit 12-char hashes; 6 rejects trivially-collidable
-# keys (e.g. a 1-char hash) without ever rejecting a recognizable marker (#21).
+# keys (e.g. a 1-char hash) without ever rejecting a recognizable marker.
 _MIN_EXPLICIT_HASH_LEN = 6
 
 _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
@@ -138,7 +138,7 @@ def _redact_retrieval_log_payload(payload: str) -> str:
     # scheme anchor survives. Otherwise ``_SECRET_KEY_VALUE_RE`` (which matches the
     # ``Authorization`` key) consumes the bare ``Bearer`` scheme word as its value,
     # leaving the actual credential after it un-redacted in a plain-text
-    # ``Authorization: Bearer <JWT>`` header (#20). Over-redaction is safe.
+    # ``Authorization: Bearer <JWT>`` header. Over-redaction is safe.
     redacted = _AUTH_VALUE_RE.sub(r"\1 [REDACTED]", payload)
     redacted = _SECRET_KEY_VALUE_RE.sub(r"\1\2\3[REDACTED]", redacted)
     return _API_KEY_VALUE_RE.sub("sk-[REDACTED]", redacted)
@@ -257,7 +257,7 @@ class CompressionStore:
         self._max_events = 1000  # Keep last 1000 events
         self._pending_feedback_events: list[RetrievalEvent] = []
 
-        # MEDIUM FIX #16: Use a min-heap for O(log n) eviction instead of O(n)
+        # Use a min-heap for O(log n) eviction instead of O(n).
         # Heap entries are (created_at, hash_key) tuples
         self._eviction_heap: list[tuple[float, str]] = []
         # CRITICAL FIX: Track stale entries count to know when heap cleanup is needed
@@ -317,7 +317,7 @@ class CompressionStore:
         Returns:
             Hash key for retrieving this content.
         """
-        # #22: reject a non-positive TTL loudly. ttl=0 (or negative) produces an
+        # Reject a non-positive TTL loudly. ttl=0 (or negative) produces an
         # entry that is_expired() immediately (time.time()-created_at > 0), so it
         # would be stored in the backend + heap, never retrievable, and leak until
         # the next store() reaps it. No live caller passes ttl<=0; this is an
@@ -348,7 +348,7 @@ class CompressionStore:
                 raise ValueError(
                     f"explicit_hash must be a non-empty hex string, got {explicit_hash!r}"
                 )
-            # #21: reject trivially-collidable short keys (e.g. a 1-char hash).
+            # Reject trivially-collidable short keys (e.g. a 1-char hash).
             # The floor matches the CCR recovery regexes (``[a-f0-9]{6,}``): the
             # store must accept EVERY hash retrieval can recognize, or an
             # extract->404 silent loss results. Real producers emit 12-char
@@ -362,8 +362,8 @@ class CompressionStore:
             hash_key = explicit_hash.lower()
         else:
             # SHA-256 truncated to 24 hex chars (96 bits) — same collision
-            # space as the MD5[:24] this replaced. Switched from MD5 in
-            # PR #395 to silence CodeQL's `py/weak-sensitive-data-hashing`
+            # space as the MD5[:24] this replaced. Switched from MD5
+            # to silence CodeQL's `py/weak-sensitive-data-hashing`
             # rule (the `usedforsecurity=False` parameter and the `lgtm`
             # comment marker both failed to suppress it). The cache is
             # in-memory, so changing the hash function on upgrade has no
@@ -421,7 +421,7 @@ class CompressionStore:
                 self._stale_heap_entries += 1
 
             self._backend.set(hash_key, entry)
-            # MEDIUM FIX #16: Add to eviction heap for O(log n) eviction
+            # Add to eviction heap for O(log n) eviction
             heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
 
         return hash_key
@@ -816,7 +816,7 @@ class CompressionStore:
         Args:
             hash_key: The hash key to check.
             clean_expired: If True, delete the entry if expired.
-                          LOW FIX #20: Default False to make this a pure check.
+                          Defaults to False to make this a pure check.
 
         Returns:
             True if the entry exists and is not expired.
@@ -826,7 +826,7 @@ class CompressionStore:
             if entry is None:
                 return False
             if entry.is_expired():
-                # LOW FIX #20: Only delete if explicitly requested
+                # Only delete if explicitly requested.
                 # This makes exists() a pure check by default
                 if clean_expired:
                     self._backend.delete(hash_key)
@@ -913,7 +913,7 @@ class CompressionStore:
             List of recent retrieval events (copies to prevent mutation).
         """
         with self._lock:
-            # MEDIUM FIX #17: Take a slice copy immediately to avoid race conditions
+            # Take a slice copy immediately to avoid race conditions
             # if another thread modifies _retrieval_events after we release the lock
             events_copy = list(self._retrieval_events)
 
@@ -929,13 +929,13 @@ class CompressionStore:
             self._backend.clear()
             self._retrieval_events.clear()
             self._pending_feedback_events.clear()
-            self._eviction_heap.clear()  # MEDIUM FIX #16: Clear heap too
+            self._eviction_heap.clear()  # Clear heap too
             self._stale_heap_entries = 0  # CRITICAL FIX: Reset stale counter
 
     def _evict_if_needed(self) -> None:
         """Evict old entries if at capacity. Must be called with lock held.
 
-        MEDIUM FIX #16: Use heap for O(log n) eviction instead of O(n) scan.
+        Uses a heap for O(log n) eviction instead of O(n) scan.
         CRITICAL FIX: Track and clean stale heap entries to prevent memory leak.
         """
         # First, remove expired entries
@@ -951,7 +951,7 @@ class CompressionStore:
 
         # If still at capacity, remove oldest entries using the heap.
         #
-        # #23: the eviction loop must GUARANTEE ``count() <= max_entries`` on
+        # The eviction loop must GUARANTEE ``count() <= max_entries`` on
         # exit. The old loop ran ``while heap`` and could exit over capacity if
         # the heap held only stale references (deleted/replaced keys, or stale
         # timestamps) — popping those evicts nothing real, so the heap could

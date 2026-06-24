@@ -84,7 +84,7 @@ class KompressModelNotCached(RuntimeError):
     """Raised when a cache-only load is requested but the model is not cached.
 
     Used by startup eager-preload (``allow_download=False``) so the caller can
-    defer the download to first use instead of blocking the proxy startup path
+    defer the download to first use instead of blocking the startup path
     on a network fetch.
     """
 
@@ -773,8 +773,8 @@ class KompressCompressor(Transform):
         When ``allow_download`` is ``False`` the model is loaded from the local
         cache only; if it is not cached, :class:`KompressModelNotCached` is
         raised so the caller can defer the download to first use. Startup eager
-        preload uses this so a cold cache cannot block the proxy from binding
-        its port.
+        preload uses this so a cold cache cannot block startup on a network
+        fetch.
         """
 
         _model, _tokenizer, backend = _load_kompress(
@@ -799,7 +799,7 @@ class KompressCompressor(Transform):
             question: Ignored — reserved for future QA-aware compression.
             target_ratio: If None (default), model decides how much to keep using
                 score threshold. If set (e.g. 0.3), forces that keep ratio.
-                The proxy never sets this — only user-facing API does.
+                The internal pipeline never sets this — only the user-facing API does.
 
         Returns:
             KompressResult with compressed text.
