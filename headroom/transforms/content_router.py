@@ -43,7 +43,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ..config import DEFAULT_EXCLUDE_TOOLS, ReadLifecycleConfig, TransformResult
+from ..config import (
+    DEFAULT_EXCLUDE_TOOLS,
+    CompressRequest,
+    ReadLifecycleConfig,
+    TransformResult,
+)
 from ..tokenizer import Tokenizer
 from .base import Transform
 from .content_detector import ContentType, DetectionResult
@@ -1667,7 +1672,21 @@ class ContentRouter(Transform):
         protect_analysis = kwargs.get(
             "protect_analysis_context", self.config.protect_analysis_context
         )
-        min_tokens = kwargs.get("min_tokens_to_compress", 50)
+        # Read the per-request min-token floor from the typed CompressRequest
+        # built once at the TransformPipeline boundary. That boundary unifies
+        # the two PUBLIC entry paths — compress() and
+        # TransformPipeline.apply(**kwargs) — to one default (250), fixing the
+        # divergence where direct-pipeline callers silently got 50.
+        compress_request = kwargs.get("compress_request")
+        if isinstance(compress_request, CompressRequest):
+            min_tokens = compress_request.min_tokens_to_compress
+        else:
+            # Raw ContentRouter.apply() (no pipeline boundary, e.g. low-level
+            # tests): preserve the historical direct-caller floor of 50. This
+            # path is behavior-identical to before — the worker-options pinning
+            # test compresses 122-token fixtures through it and depends on the
+            # 50 floor letting compression happen.
+            min_tokens = kwargs.get("min_tokens_to_compress", 50)
         # Cache-safety knobs for content-block (Anthropic-format) handling:
         compress_assistant_text_blocks = kwargs.get(
             "compress_assistant_text_blocks",

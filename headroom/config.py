@@ -401,6 +401,60 @@ class CachePrefixMetrics:
     previous_hash: str | None = None  # Previous hash for comparison (None = first request)
 
 
+#: The minimum token count for a message to be compressed, used as the single
+#: default for ``CompressRequest.min_tokens_to_compress``. Defined here so that
+#: BOTH entry paths agree: ``compress()`` (which forwards
+#: ``CompressConfig.min_tokens_to_compress``, itself defaulting to this value)
+#: and direct ``TransformPipeline.apply(**kwargs)`` callers (who omit it).
+#: Before this constant, the two paths disagreed — ``compress()`` callers got
+#: 250 while direct callers silently got 50 inside ``ContentRouter.apply``.
+DEFAULT_MIN_TOKENS_TO_COMPRESS = 250
+
+
+@dataclass(frozen=True)
+class CompressRequest:
+    """Typed, immutable per-request compression options.
+
+    Built ONCE at the pipeline boundary (``TransformPipeline.apply``) from the
+    loosely-typed ``**kwargs`` bag and then threaded explicitly through the
+    transforms, replacing untyped ``kwargs.get(...)`` reads for the options it
+    owns. The public ``**kwargs`` entry surface is preserved for back-compat
+    (``TransformPipeline`` is in ``__all__`` and direct callers pass kwargs);
+    this object is constructed FROM those kwargs at the single boundary, so the
+    default lives in exactly one place.
+
+    Scope: currently owns ``min_tokens_to_compress`` — the one per-request
+    option whose default genuinely diverged between entry paths. The four
+    thread-local-backed runtime options on ``ContentRouter``
+    (``target_ratio`` / ``force_kompress`` / ``kompress_model`` /
+    ``compression_policy``) intentionally remain on their ``threading.local``
+    seam: their cross-request isolation is pinned by a mechanism-coupled test
+    (``test_runtime_options_thread_safety``) that asserts thread-local
+    semantics directly, so moving them here cannot keep that test green while
+    still biting.
+    """
+
+    min_tokens_to_compress: int = DEFAULT_MIN_TOKENS_TO_COMPRESS
+    """Minimum token count for a message to be compressed. Messages shorter
+    than this are left unchanged. Defaults to
+    ``DEFAULT_MIN_TOKENS_TO_COMPRESS`` (250)."""
+
+    @classmethod
+    def from_kwargs(cls, kwargs: dict[str, Any]) -> CompressRequest:
+        """Build the typed request from a loose kwargs bag (boundary smart
+        constructor).
+
+        Reads only the keys this request owns, applying the single unified
+        default for any that are absent. Unknown keys are ignored here — the
+        kwargs bag still flows through for options not yet migrated.
+        """
+        return cls(
+            min_tokens_to_compress=kwargs.get(
+                "min_tokens_to_compress", DEFAULT_MIN_TOKENS_TO_COMPRESS
+            ),
+        )
+
+
 @dataclass
 class TransformResult:
     """Output of a transform operation."""

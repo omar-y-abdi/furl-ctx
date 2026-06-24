@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from ..config import (
+    CompressRequest,
     DiffArtifact,
     HeadroomConfig,
     TransformDiff,
@@ -198,6 +199,19 @@ class TransformPipeline:
         # out of **kwargs (which is forwarded to should_apply / transform.apply
         # below), so simulate() and apply() drive the transforms identically.
         kwargs.pop("record_metrics", True)
+
+        # Build the typed per-request seam ONCE, here at the single boundary
+        # every caller crosses — both compress() (which forwards
+        # CompressConfig.min_tokens_to_compress) and direct
+        # TransformPipeline.apply(**kwargs) callers (who omit it). Built from the
+        # loose kwargs bag with ONE unified default (250), so direct callers and
+        # compress() callers agree; previously direct callers silently got 50.
+        # Placed back into kwargs under "compress_request" so the existing
+        # should_apply / transform.apply forwarding threads it explicitly to
+        # transforms (ContentRouter reads min_tokens from it), while the public
+        # **kwargs entry surface stays unchanged.
+        kwargs["compress_request"] = CompressRequest.from_kwargs(kwargs)
+
         tokenizer = self._get_tokenizer(model)
 
         # Get model limit from kwargs (should be set by client)

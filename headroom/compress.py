@@ -61,6 +61,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .config import DEFAULT_MIN_TOKENS_TO_COMPRESS
 from .pipeline import PipelineExtensionManager, PipelineStage, summarize_routing_markers
 from .utils import extract_user_query as _extract_user_query
 
@@ -120,7 +121,7 @@ class CompressConfig:
     Only affects Kompress (text compression). SmartCrusher (JSON) has its
     own logic based on array dedup."""
 
-    min_tokens_to_compress: int = 250
+    min_tokens_to_compress: int = DEFAULT_MIN_TOKENS_TO_COMPRESS
     """Minimum token count for a message to be compressed.
     Messages shorter than this are left unchanged. Default 250.
     Set lower for voice agents where turns are short."""
