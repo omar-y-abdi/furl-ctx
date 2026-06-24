@@ -141,6 +141,33 @@ pub fn fill_remaining_slots(
     result
 }
 
+/// Borrowed parameter bundle for [`prioritize_indices`].
+///
+/// Groups the eight related inputs the prioritizer needs so the public
+/// signature stays one argument wide (the loose-arg form tripped
+/// `clippy::too_many_arguments`). Every field is a borrow or `Copy`
+/// scalar — the struct is a cheap, immutable view over caller-owned data,
+/// so passing it by value is a no-op move. `'a` ties all the borrows to
+/// the caller's data for the duration of the call.
+pub struct PrioritizeParams<'a> {
+    /// SmartCrusher config (dedup toggle, variance threshold).
+    pub config: &'a SmartCrusherConfig,
+    /// Candidate indices to prioritize down to (or up to) the budget.
+    pub keep_indices: &'a BTreeSet<usize>,
+    /// The full item array these indices point into.
+    pub items: &'a [Value],
+    /// Item count (`items.len()` at the call site).
+    pub n: usize,
+    /// Optional per-field stats used for numeric-anomaly detection.
+    pub analysis: Option<&'a ArrayAnalysis>,
+    /// Target survivor budget.
+    pub effective_max: usize,
+    /// Identity columns to exclude from the content/stable hash.
+    pub exclude: &'a BTreeSet<String>,
+    /// Query-relevant indices the planner pinned (anchor + relevance hits).
+    pub query_pinned: &'a BTreeSet<usize>,
+}
+
 /// Top-level prioritizer. Python: `_prioritize_indices`.
 ///
 /// Pipeline:
@@ -155,16 +182,20 @@ pub fn fill_remaining_slots(
 /// May return MORE than `effective_max` items when critical items
 /// alone exceed the budget — Python's documented behavior, mirrored
 /// here.
-pub fn prioritize_indices(
-    config: &SmartCrusherConfig,
-    keep_indices: &BTreeSet<usize>,
-    items: &[Value],
-    n: usize,
-    analysis: Option<&ArrayAnalysis>,
-    effective_max: usize,
-    exclude: &BTreeSet<String>,
-    query_pinned: &BTreeSet<usize>,
-) -> BTreeSet<usize> {
+pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
+    // Unpack the borrowed bundle once; the body below is byte-for-byte
+    // the loose-argument form (every field is a borrow / `Copy` scalar).
+    let PrioritizeParams {
+        config,
+        keep_indices,
+        items,
+        n,
+        analysis,
+        effective_max,
+        exclude,
+        query_pinned,
+    } = params;
+
     // Dedup pass. Uses the field-aware stable hash (`exclude` lists
     // identity columns); empty `exclude` => byte-equal to the prior
     // whole-item dedup.
@@ -541,6 +572,29 @@ mod tests {
         BTreeSet::new()
     }
 
+    /// Build a [`PrioritizeParams`] for tests. `n` is always `items.len()`
+    /// at the call sites, so it's derived here to keep the call sites terse.
+    fn test_params<'a>(
+        config: &'a SmartCrusherConfig,
+        keep_indices: &'a BTreeSet<usize>,
+        items: &'a [Value],
+        analysis: Option<&'a ArrayAnalysis>,
+        effective_max: usize,
+        exclude: &'a BTreeSet<String>,
+        query_pinned: &'a BTreeSet<usize>,
+    ) -> PrioritizeParams<'a> {
+        PrioritizeParams {
+            config,
+            keep_indices,
+            items,
+            n: items.len(),
+            analysis,
+            effective_max,
+            exclude,
+            query_pinned,
+        }
+    }
+
     // ---------- deduplicate_indices_by_content ----------
 
     #[test]
@@ -650,7 +704,7 @@ mod tests {
     fn prioritize_under_budget_passthrough_after_dedup() {
         let items: Vec<Value> = (0..5).map(|i| json!({"id": i})).collect();
         let kept = idx_set(&[0, 1, 2]);
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude(), &BTreeSet::new());
+        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
         // 3 items < max 10 → fill kicks in; we get 5 (all items).
         assert_eq!(result.len(), 5);
     }
@@ -663,7 +717,7 @@ mod tests {
             json!({"name": "bob"}),
         ];
         let kept = idx_set(&[0, 1, 2]);
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude(), &BTreeSet::new());
+        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
         // Dedup collapses 0+1 to 0; fill stays put because n=3 already covered.
         assert_eq!(result, idx_set(&[0, 2]));
     }
@@ -676,7 +730,7 @@ mod tests {
             .collect();
         items.push(json!({"id": 30, "msg": "FATAL: out of memory"}));
         let kept: BTreeSet<usize> = (0..items.len()).collect();
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude(), &BTreeSet::new());
+        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
         assert!(
             result.contains(&30),
             "error item must survive prioritization"
@@ -688,7 +742,7 @@ mod tests {
         // No errors / outliers / anomalies → first 3 + last 2 anchors fill.
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i, "v": i})).collect();
         let kept: BTreeSet<usize> = (5..15).collect();
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 10, &no_exclude(), &BTreeSet::new());
+        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 10, &no_exclude(), &BTreeSet::new()));
         // With no critical items and budget 10, dedup is a no-op (all
         // distinct) and fill keeps us at <= 10. We should see at least
         // some of items 0..3 OR 28..30 covered through fill.
@@ -744,7 +798,7 @@ mod tests {
             .map(|i| json!({"msg": format!("unique subject number {} entirely", i)}))
             .collect();
         let kept: BTreeSet<usize> = (0..90).collect();
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 15, &no_exclude(), &BTreeSet::new());
+        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 15, &no_exclude(), &BTreeSet::new()));
         // No errors/outliers/anomalies fire on this shape; without the
         // degenerate pinning the result is anchors + novelty fill, capped
         // at the budget.
@@ -764,7 +818,7 @@ mod tests {
             .collect();
         items.push(json!({"kind": "routine", "status": "PANIC"}));
         let kept: BTreeSet<usize> = (0..30).collect();
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 5, &no_exclude(), &BTreeSet::new());
+        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 5, &no_exclude(), &BTreeSet::new()));
         assert!(
             result.contains(&29),
             "minority singleton needle must stay pinned; got {:?}",
@@ -786,23 +840,22 @@ mod tests {
         let kept: BTreeSet<usize> = (0..40).collect();
         let pinned: BTreeSet<usize> = [23usize].into_iter().collect();
         let result =
-            prioritize_indices(&cfg(), &kept, &items, items.len(), None, 5, &no_exclude(), &pinned);
+            prioritize_indices(test_params(&cfg(), &kept, &items, None, 5, &no_exclude(), &pinned));
         assert!(
             result.contains(&23),
             "query-pinned row must survive the over-budget drop; got {:?}",
             result
         );
         // And the empty-pin call must not regress the budget behavior.
-        let no_pins = prioritize_indices(
+        let no_pins = prioritize_indices(test_params(
             &cfg(),
             &kept,
             &items,
-            items.len(),
             None,
             5,
             &no_exclude(),
             &BTreeSet::new(),
-        );
+        ));
         assert!(no_pins.len() <= 5 + 1, "unpinned result stays near budget");
     }
 
@@ -834,7 +887,7 @@ mod tests {
         items[15] = json!({"kind": "routine", "payload": "UNIQUE-NEEDLE-XYZ"});
         // Force the over-budget path: keep everything, tiny budget.
         let kept: BTreeSet<usize> = (0..30).collect();
-        let result = prioritize_indices(&cfg(), &kept, &items, items.len(), None, 5, &no_exclude(), &BTreeSet::new());
+        let result = prioritize_indices(test_params(&cfg(), &kept, &items, None, 5, &no_exclude(), &BTreeSet::new()));
         assert!(
             result.contains(&15),
             "novelty fill must rescue the unique mid-array needle; got {:?}",

@@ -68,7 +68,9 @@ pub use field_detect::{detect_id_field_statistically, detect_score_field_statist
 pub use field_role::{classify_field, compute_exclude_set, FieldRole};
 pub use hashing::hash_field_name;
 pub use observer::TracingObserver;
-pub use orchestration::{deduplicate_indices_by_content, fill_remaining_slots, prioritize_indices};
+pub use orchestration::{
+    deduplicate_indices_by_content, fill_remaining_slots, prioritize_indices, PrioritizeParams,
+};
 pub use outliers::{
     detect_error_items_for_preservation, detect_rare_status_values, detect_structural_outliers,
 };
