@@ -661,12 +661,35 @@ impl PyCrushResult {
         &self.inner.strategy
     }
 
+    /// Row-drop CCR hashes produced anywhere in this crush. The Python
+    /// shim mirrors EACH directly into the compression_store (typed
+    /// recovery) instead of scraping `<<ccr:HASH>>` out of `compressed`.
+    /// Plural because `crush()` recurses and can drop rows from many
+    /// sub-arrays — see `RustCrushResult::ccr_hashes`. Empty when nothing
+    /// was dropped. Returned as a fresh `list[str]` per call.
+    #[getter]
+    fn ccr_hashes(&self) -> Vec<String> {
+        self.inner.ccr_hashes.clone()
+    }
+
+    /// Granular per-blob row-index markers (`<<ccr:HASH#rows N_chunks>>`)
+    /// paired with `ccr_hashes`, for proportional retrieval. May be
+    /// shorter than `ccr_hashes` (a drop with no store configured has no
+    /// row index); never longer. Returned as a fresh `list[str]` per call.
+    #[getter]
+    fn row_index_markers(&self) -> Vec<String> {
+        self.inner.row_index_markers.clone()
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "CrushResult(compressed=<{} chars>, was_modified={}, strategy={:?})",
+            "CrushResult(compressed=<{} chars>, was_modified={}, strategy={:?}, \
+             ccr_hashes={}, row_index_markers={})",
             self.inner.compressed.len(),
             self.inner.was_modified,
             self.inner.strategy,
+            self.inner.ccr_hashes.len(),
+            self.inner.row_index_markers.len(),
         )
     }
 }

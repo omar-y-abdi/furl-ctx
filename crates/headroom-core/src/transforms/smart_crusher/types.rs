@@ -199,6 +199,27 @@ pub struct CrushResult {
     pub original: String,
     pub was_modified: bool,
     pub strategy: String,
+    /// Row-drop CCR hashes produced anywhere in this crush. Unlike
+    /// `CrushArrayResult::ccr_hash` (a single hash for one top-level
+    /// array), `crush()` recurses via `process_value` and can drop rows
+    /// from MANY sub-arrays at any depth — dict arrays via `crush_array`,
+    /// plus string/number/mixed arrays via `ccr_dropped_sentinel`. Each
+    /// drop contributes one hash here. The Python shim mirrors each
+    /// DIRECTLY into the compression_store (typed recovery) instead of
+    /// substring-scraping `<<ccr:HASH>>` out of `compressed`. These are
+    /// the SAME hashes the embedded `<<ccr:HASH N_rows_offloaded>>`
+    /// markers carry — pure plumbing of the values `persist_dropped`
+    /// already computed, NOT a re-hash, so `compressed` is byte-identical
+    /// to before this field existed. Empty when nothing was dropped.
+    pub ccr_hashes: Vec<String>,
+    /// Granular per-blob row-index markers (`<<ccr:HASH#rows N_chunks>>`)
+    /// paired with `ccr_hashes`, one per drop that had a store configured
+    /// to chunk into. Mirrored DIRECTLY for proportional retrieval (a
+    /// single needed row resolves to exactly that row). Same values the
+    /// embedded `_ccr_rows` sentinel field carries. May be shorter than
+    /// `ccr_hashes` (a drop with no store configured produces a hash but
+    /// no row index); never longer.
+    pub row_index_markers: Vec<String>,
 }
 
 impl CrushResult {
@@ -212,6 +233,9 @@ impl CrushResult {
             original: s,
             was_modified: false,
             strategy: "passthrough".to_string(),
+            // Passthrough drops nothing → no recovery hashes.
+            ccr_hashes: Vec::new(),
+            row_index_markers: Vec::new(),
         }
     }
 }

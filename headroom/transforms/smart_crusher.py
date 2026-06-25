@@ -443,11 +443,53 @@ class SmartCrusher(Transform):
                 query_context=query,
                 tool_name=None,
             )
-        # Bridge any CCR markers emitted by the Rust crusher into the
-        # Python compression_store so /v1/retrieve resolves them.
-        # See `_mirror_ccr_to_python_store` for full rationale.
-        self._mirror_ccr_to_python_store(
-            rendered=r.compressed,
+        # ── Row-drop recovery: TYPED, not scraped (parity with the sibling) ──
+        #
+        # `crush()` now receives the dropped-row CCR hashes (and the granular
+        # `#rows` index markers) as TYPED Rust fields, exactly as
+        # `crush_array_json` reads `result["ccr_hash"]` (`:483`). Unlike the
+        # sibling — which crushes ONE top-level array and so surfaces ONE hash
+        # — `crush()` recurses via `process_value` and can drop rows from MANY
+        # sub-arrays, so the fields are PLURAL. Mirror each DIRECTLY into the
+        # Python compression_store via the same `_mirror_single_hash...` /
+        # `_mirror_row_index...` helpers the sibling uses.
+        #
+        # This retires the row-drop half of the scrape: row-drop recovery no
+        # longer DEPENDS on substring-scanning `<<ccr:HASH>>` out of
+        # `r.compressed`. The A1 fail-safe is preserved — these are the very
+        # methods that raise `CcrMirrorError` on a store failure, propagating
+        # up through this `crush()` call to ContentRouter's fail-open boundary
+        # (the `crush()` call site is `content_router.py:1043`, caught by the
+        # `except` at `:1118`), which reverts to the ORIGINAL uncompressed
+        # content so the lossy drop never stands without a recovery copy.
+        for ccr_hash in r.ccr_hashes:
+            self._mirror_single_hash_to_python_store(
+                ccr_hash,
+                strategy="smart_crusher_row_drop",
+                query_context=query,
+                tool_name=None,
+            )
+        # Granular per-blob row index → per-row chunks, for proportional
+        # retrieval. Each typed marker carries one `HASH#rows` key; expand it.
+        for index_key in self._row_index_keys(r.row_index_markers):
+            self._mirror_row_index_to_python_store(
+                index_key,
+                strategy="smart_crusher_row_drop",
+                query_context=query,
+                tool_name=None,
+            )
+        # ── OPAQUE-blob markers stay on the scrape (both paths; 1b) ──
+        #
+        # Opaque substitutions (`<<ccr:HASH,KIND,SIZE>>`, comma shape) are NOT
+        # yet typed — the sibling keeps them on the scrape too (`:494-508`).
+        # Scope crush()'s scrape to the OPAQUE shape ONLY, so the row-drop
+        # marker that is ALSO present in `r.compressed` is not re-handled as a
+        # recovery path here (row-drop comes typed, above). De-dup mechanism:
+        # SHAPE-scoped scrape — the opaque walker matches the comma delimiter
+        # (`<<ccr:HASH,`) and deliberately ignores the space-delimited
+        # row-drop and `#rows` shapes.
+        self._mirror_opaque_ccr_markers_in_text(
+            r.compressed,
             strategy=r.strategy,
             query_context=query,
             tool_name=None,
@@ -458,6 +500,24 @@ class SmartCrusher(Transform):
             was_modified=r.was_modified,
             strategy=r.strategy,
         )
+
+    @staticmethod
+    def _row_index_keys(row_index_markers: list[str]) -> list[str]:
+        """Extract the ``HASH#rows`` index keys from the typed
+        ``row_index_markers`` (each a full ``<<ccr:HASH#rows N_chunks>>``
+        marker). Uses the owned grammar scan so the key form is single-sourced
+        with the producer. Returns de-duplicated keys preserving first-seen
+        order."""
+        keys: list[str] = []
+        seen: set[str] = set()
+        for marker in row_index_markers:
+            sink: set[str] = set()
+            SmartCrusher._collect_ccr_hashes_from_string(marker, sink)
+            for h in sink:
+                if h.endswith("#rows") and h not in seen:
+                    seen.add(h)
+                    keys.append(h)
+        return keys
 
     def crush_array_json(
         self,
@@ -831,6 +891,100 @@ class SmartCrusher(Transform):
                 hash_str = f"{hash_str}#rows"
                 end += len("#rows")
             sink.add(hash_str)
+            idx = end
+
+    # ── OPAQUE-only scrape (crush() de-dup, pass 1a) ──────────────────────
+    #
+    # `crush()` recovers ROW-DROP + row-index from TYPED Rust fields now.
+    # The rendered `r.compressed` still contains those row-drop markers, so a
+    # full scrape would re-handle them as a recovery path — coupling row-drop
+    # recovery back to the scrape, which 1a exists to retire. These two
+    # helpers scope crush()'s scrape to the OPAQUE marker shape ONLY
+    # (`<<ccr:HASH,KIND,SIZE>>`, comma delimiter — grammar shape C), so:
+    #   * row-drop (`<<ccr:HASH N_rows_offloaded>>`, space)   → skipped here,
+    #     comes typed;
+    #   * row-index (`<<ccr:HASH#rows N_chunks>>`, `#` then space) → skipped,
+    #     comes typed;
+    #   * opaque (`<<ccr:HASH,...>>`, comma)                  → handled here.
+    # Opaque markers are NOT typed yet (pass 1b); the sibling `crush_array_json`
+    # keeps them on its own scrape too (`:494-508`). These helpers are
+    # crush()-private; the shared `_mirror_ccr_markers_in_text` /
+    # `_collect_ccr_hashes_from_string` are UNCHANGED for every other caller
+    # (`crush_array_json`, `compact_document_json`, `apply`).
+
+    def _mirror_opaque_ccr_markers_in_text(
+        self,
+        rendered: str,
+        strategy: str,
+        query_context: str,
+        tool_name: str | None,
+    ) -> None:
+        """Mirror only OPAQUE-blob (`<<ccr:HASH,...>>`) markers from
+        `rendered`. Structured JSON walk first, string-token fallback —
+        same two-pass shape as `_mirror_ccr_markers_in_text`, but the
+        collector keeps the comma shape only. Each opaque hash is a bare
+        12-hex key resolved through the same `_mirror_single_hash...` path
+        (which retains its A1 fail-safe)."""
+        if "<<ccr:" not in rendered:
+            return
+        hashes: set[str] = set()
+        try:
+            parsed = json.loads(rendered)
+            self._collect_opaque_ccr_hashes(parsed, hashes)
+        except (json.JSONDecodeError, ValueError):
+            self._collect_opaque_ccr_hashes_from_string(rendered, hashes)
+        for h in hashes:
+            self._mirror_single_hash_to_python_store(
+                h,
+                strategy=strategy,
+                query_context=query_context,
+                tool_name=tool_name,
+            )
+
+    @staticmethod
+    def _collect_opaque_ccr_hashes(value: Any, sink: set[str]) -> None:
+        """Recursively walk a parsed-JSON value, collecting only OPAQUE
+        marker hashes from string leaves. Never raises."""
+        if isinstance(value, str):
+            SmartCrusher._collect_opaque_ccr_hashes_from_string(value, sink)
+            return
+        if isinstance(value, dict):
+            for v in value.values():
+                SmartCrusher._collect_opaque_ccr_hashes(v, sink)
+            return
+        if isinstance(value, list):
+            for v in value:
+                SmartCrusher._collect_opaque_ccr_hashes(v, sink)
+            return
+
+    @staticmethod
+    def _collect_opaque_ccr_hashes_from_string(s: str, sink: set[str]) -> None:
+        """Extract OPAQUE-blob hashes (`<<ccr:HASH,KIND,SIZE>>`) from `s` by
+        substring scan — the comma delimiter is what distinguishes shape C
+        from the space-delimited row-drop (A) and the `#rows` index (B).
+
+        Same no-regex walk + hex alphabet as
+        `_collect_ccr_hashes_from_string`, but a hash is collected ONLY when
+        the character immediately after the hex run is a comma. Row-drop and
+        `#rows` markers are therefore ignored here (they come typed)."""
+        idx = 0
+        prefix = marker_grammar.CCR_PREFIX
+        n = len(s)
+        while True:
+            start = s.find(prefix, idx)
+            if start == -1:
+                return
+            cursor = start + len(prefix)
+            end = cursor
+            while end < n and s[end] in marker_grammar.HEX_ALPHABET:
+                end += 1
+            if end == cursor:
+                # No hex after `<<ccr:` — not a real marker.
+                idx = cursor
+                continue
+            # OPAQUE shape iff the delimiter after the hash is a comma.
+            if end < n and s[end] == ",":
+                sink.add(s[cursor:end].lower())
             idx = end
 
     def _mirror_single_hash_to_python_store(
