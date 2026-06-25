@@ -51,6 +51,7 @@ from ..config import (
 )
 from ..tokenizer import Tokenizer
 from .base import Transform
+from .compressor_registry import CompressorRegistry
 from .content_detector import ContentType, DetectionResult
 from .content_detector import detect_content_type as _regex_detect_content_type
 from .error_detection import content_has_strong_error_indicators
@@ -488,12 +489,15 @@ class ContentRouter(Transform):
         self.config = config or ContentRouterConfig()
         self._observer = observer
 
-        # Lazy-loaded compressors
-        self._smart_crusher: Any = None
-        self._search_compressor: Any = None
-        self._log_compressor: Any = None
-        self._diff_compressor: Any = None
-        self._html_extractor: Any = None
+        # Lazy-loaded compressors.
+        #
+        # The five SELF-CONTAINED factories (SmartCrusher, Search, Log, Diff,
+        # HTML) read only ``self.config`` and cache their instance — they live
+        # in ``CompressorRegistry`` now. The ``_get_*`` methods below delegate
+        # to it. ``_kompress`` STAYS here: ``_get_kompress`` reads the
+        # thread-local ``_runtime_kompress_model`` (#10 surface), so it is not
+        # self-contained and must not move into the registry.
+        self._registry = CompressorRegistry(self.config)
         self._kompress: Any = None
 
         # TOIN integration for cross-strategy learning
@@ -1325,31 +1329,11 @@ class ContentRouter(Transform):
     # Lazy compressor getters
 
     def _get_smart_crusher(self) -> Any:
-        """Get SmartCrusher (lazy load) with CCR config."""
-        if self._smart_crusher is None:
-            try:
-                from ..config import CCRConfig
-                from .smart_crusher import SmartCrusher, SmartCrusherConfig
+        """Get SmartCrusher (lazy load) with CCR config.
 
-                # Pass CCR config for marker injection
-                ccr_config = CCRConfig(
-                    enabled=self.config.ccr_enabled,
-                    inject_retrieval_marker=self.config.ccr_inject_marker,
-                )
-                crusher_config = SmartCrusherConfig()
-                if self.config.smart_crusher_max_items_after_crush is not None:
-                    crusher_config.max_items_after_crush = (
-                        self.config.smart_crusher_max_items_after_crush
-                    )
-                crusher_config.routing_policy = self.config.smart_crusher_routing_policy
-                self._smart_crusher = SmartCrusher(
-                    config=crusher_config,
-                    ccr_config=ccr_config,
-                    with_compaction=self.config.smart_crusher_with_compaction,
-                )
-            except ImportError:
-                logger.debug("SmartCrusher not available")
-        return self._smart_crusher
+        Thin delegator to :meth:`CompressorRegistry.get_smart_crusher`.
+        """
+        return self._registry.get_smart_crusher()
 
     def _ensure_ccr_backed(self, cached_compressed: str, context: str) -> bool:
         """Ensure every ``<<ccr:HASH>>`` pointer in *cached_compressed* resolves
@@ -1436,47 +1420,32 @@ class ContentRouter(Transform):
         return hashes
 
     def _get_search_compressor(self) -> Any:
-        """Get SearchCompressor (lazy load)."""
-        if self._search_compressor is None:
-            try:
-                from .search_compressor import SearchCompressor
+        """Get SearchCompressor (lazy load).
 
-                self._search_compressor = SearchCompressor()
-            except ImportError:
-                logger.debug("SearchCompressor not available")
-        return self._search_compressor
+        Thin delegator to :meth:`CompressorRegistry.get_search_compressor`.
+        """
+        return self._registry.get_search_compressor()
 
     def _get_log_compressor(self) -> Any:
-        """Get LogCompressor (lazy load)."""
-        if self._log_compressor is None:
-            try:
-                from .log_compressor import LogCompressor
+        """Get LogCompressor (lazy load).
 
-                self._log_compressor = LogCompressor()
-            except ImportError:
-                logger.debug("LogCompressor not available")
-        return self._log_compressor
+        Thin delegator to :meth:`CompressorRegistry.get_log_compressor`.
+        """
+        return self._registry.get_log_compressor()
 
     def _get_diff_compressor(self) -> Any:
-        """Get DiffCompressor (lazy load). Rust-only — Python implementation
-        retired in Stage 3b. The wheel (`headroom._core`) is a hard import.
-        """
-        if self._diff_compressor is None:
-            from .diff_compressor import DiffCompressor
+        """Get DiffCompressor (lazy load).
 
-            self._diff_compressor = DiffCompressor()
-        return self._diff_compressor
+        Thin delegator to :meth:`CompressorRegistry.get_diff_compressor`.
+        """
+        return self._registry.get_diff_compressor()
 
     def _get_html_extractor(self) -> Any:
-        """Get HTMLExtractor (lazy load)."""
-        if self._html_extractor is None:
-            try:
-                from .html_extractor import HTMLExtractor
+        """Get HTMLExtractor (lazy load).
 
-                self._html_extractor = HTMLExtractor()
-            except ImportError:
-                logger.debug("HTMLExtractor not available (install trafilatura)")
-        return self._html_extractor
+        Thin delegator to :meth:`CompressorRegistry.get_html_extractor`.
+        """
+        return self._registry.get_html_extractor()
 
     def eager_load_compressors(self) -> dict[str, str]:
         """Pre-load compressors at startup to avoid first-request latency.
