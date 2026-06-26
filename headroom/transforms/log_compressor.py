@@ -195,8 +195,13 @@ class LogCompressor:
         del context
         rust_result = self._rust.compress(content, bias)
         cache_key: str | None = rust_result.cache_key
-        if cache_key is not None:
-            self._persist_to_python_ccr(content, rust_result.compressed, cache_key)
+        if cache_key is not None and not self._persist_to_python_ccr(
+            content, rust_result.compressed, cache_key
+        ):
+            # Store write failed → marker would dangle, dropped lines
+            # unrecoverable. Serve the original uncompressed log instead
+            # (mirrors cross_message_dedup's veto).
+            return self._passthrough_result(content, rust_result)
 
         stats_dict = {k: int(v) for k, v in cast("dict[str, int]", rust_result.stats).items()}
         return LogCompressionResult(
@@ -212,18 +217,19 @@ class LogCompressor:
 
     # ─── Internal CCR persistence ───────────────────────────────────────
 
-    def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> None:
+    def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> bool:
         """Promote a Rust-emitted cache_key into the production Python
-        CompressionStore. Failures are logged at ERROR level — a failed
-        write means the marker in the compressed output dangles (the store
-        production /v1/retrieve reads never gets the original), so the loss
-        must be operator-visible, never silent (see the SmartCrusher mirror
-        and compression_store.py:234-244 'no SILENT loss')."""
+        CompressionStore. Returns ``True`` on success, ``False`` on any
+        failure (store import or store write). On ``False`` the caller serves
+        the ORIGINAL uncompressed content so the CCR marker never ships
+        dangling — the recoverability invariant SmartCrusher (raise) and
+        cross_message_dedup (veto) already enforce. Mirrors diff_compressor.py
+        / search_compressor.py."""
         try:
             from ..cache.compression_store import get_compression_store
         except ImportError as e:
             logger.error("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
-            return
+            return False
         try:
             store: Any = get_compression_store()
             # The Rust-emitted marker embeds MD5(original)[:24], but
@@ -231,13 +237,30 @@ class LogCompressor:
             # marker's key explicitly so retrieving the marker hash
             # actually finds the entry.
             store.store(original, compressed, explicit_hash=cache_key)
+            return True
         except Exception as e:
             logger.error(
-                "CCR store write failed; cache_key %s remains in-marker only "
-                "(marker dangles, retrieve() will miss): %s",
+                "CCR store write failed; cache_key %s — serving original "
+                "uncompressed (no dangling marker): %s",
                 cache_key,
                 e,
             )
+            return False
+
+    @staticmethod
+    def _passthrough_result(content: str, r: Any) -> LogCompressionResult:
+        """No-compression result: serve the original log verbatim with no CCR
+        marker, used when the store write vetoes (no dangling marker)."""
+        return LogCompressionResult(
+            compressed=content,
+            original=content,
+            original_line_count=r.original_line_count,
+            compressed_line_count=r.original_line_count,
+            format_detected=_format_from_str(r.format_detected),
+            compression_ratio=1.0,
+            cache_key=None,
+            stats={},
+        )
 
 
 __all__ = [
