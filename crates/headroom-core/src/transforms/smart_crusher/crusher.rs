@@ -2961,7 +2961,10 @@ mod tests {
         // pins together are the Py↔Rust parity lock for the CCR recovery key:
         //   python3 -c "import hashlib; print(hashlib.sha256(C.encode()).hexdigest()[:12])"
         assert_eq!(hash_canonical("[]"), "4f53cda18c2b");
-        assert_eq!(hash_canonical(r#"["alpha","beta","gamma"]"#), "a3e185260009");
+        assert_eq!(
+            hash_canonical(r#"["alpha","beta","gamma"]"#),
+            "a3e185260009"
+        );
         assert_eq!(hash_canonical("[1,2,3,4,5]"), "f5baf0e4336f");
         assert_eq!(
             hash_canonical(r#"[{"id":1},{"id":2},{"id":3}]"#),
@@ -3448,9 +3451,7 @@ mod tests {
         // is empirical: the floor bench (retain=1.000 on every dataset +
         // needle 100%) and grammar-characterization (marker text frozen).
         let (c, _store) = lossy_crusher_with_store();
-        let arr_a: Vec<Value> = (0..300)
-            .map(|i| json!({"id": i, "status": "ok"}))
-            .collect();
+        let arr_a: Vec<Value> = (0..300).map(|i| json!({"id": i, "status": "ok"})).collect();
         let arr_b: Vec<Value> = (0..300).map(|i| json!(format!("log-line-{i}"))).collect();
         let doc = json!({"alpha": arr_a, "beta": arr_b, "n": 7});
         let content = serde_json::to_string(&doc).unwrap();

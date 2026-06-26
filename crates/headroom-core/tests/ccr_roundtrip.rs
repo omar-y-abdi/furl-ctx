@@ -252,7 +252,10 @@ fn dropped_count_ties_out_kept_plus_advertised() {
     let result = crusher.crush_array(&items, "", 1.0);
 
     let kept = result.items.len();
-    assert!(kept < n, "a lossy crush must actually drop rows (kept {kept} of {n})");
+    assert!(
+        kept < n,
+        "a lossy crush must actually drop rows (kept {kept} of {n})"
+    );
     let dropped = n - kept;
     // The marker the model sees must advertise EXACTLY the rows that left.
     // `<<ccr:{hash} {dropped}_rows_offloaded>>` — a `dropped+1` / `dropped-1`
