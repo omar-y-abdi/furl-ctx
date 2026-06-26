@@ -1,3 +1,85 @@
+# ⭐⭐⭐ CYCLE 3 — IN PROGRESS (full arch ✅ → test-hardening NEXT)
+
+User chose FULL cycle 3 (items 1+2+3) + test-hardening loop + fix-bugs + validate every
+testimonial + verify critique dealt-with → delete → rerun EXACT workflow. "EVERY line to
+perfection, nothing less." PM-loop throughout; never regress.
+
+**Phase A — cycle-3 architecture: COMPLETE.**
+- item 3 `790cb21a` — asdict SmartCrusherConfig single-source + named CSV-codec constants.
+- item 1a `8253fd00` — crush() row-drop recovery TYPED (plural ccr_hashes/row_index_markers via
+  additive DroppedRef sink; scrape scoped to opaque-only). New test_crush_typed_hash_parity.py (41,
+  bites RED→GREEN 2 ways; caught a real missed drop-arm during dev). A1 fail-safe intact.
+- item 1b — BLOCKED → accepted as DOCUMENTED RESIDUAL. `_ensure_ccr_backed` (content_router.py:1354)
+  re-mirrors on every result-cache HIT from the cached COMPRESSED STRING only (cache stores
+  (string,ratio,strategy), hit short-circuits crush → no typed result), so the scrape is load-bearing
+  there. Full deletion needs a result-cache schema change (cache typed refs) = separate hot-path
+  refactor w/ regression risk → DECLINED on never-regress + lazy-dev (scrape is necessary, fail-safe
+  via A1, grammar-drift-guarded). FLAGGED to user as optional separate task. For Phase D: item 1's
+  "delete the scrape (~300 LOC)" premise was factually wrong — the cache-hit path genuinely needs it.
+- item 2 `4c6c493f` — extracted CompressorRegistry (compressor_registry.py, 5 self-contained factories;
+  _get_kompress STAYS, reads thread-local). Factories-only seam (dispatch coupled to fallback+TOIN+#10
+  → left, same ceiling as R6). content_router 2597→2566. #10 worker-options surface byte-unchanged;
+  the 2 thread-safety tests green AND biting.
+
+**Gate at Phase-A end (HEAD `4c6c493f`):** cargo 729 · pytest 639 · recovery 23 · worker-options 8 ·
+floor held + needle 100% · clippy/fmt clean · maturin builds. Env: venv now py3.14 (abi3 .so OK),
+maturin reinstalled. `uv` ops truncate uv.lock 6942→2837 → I restore before every commit.
+
+**Phase B — 2nd test-hardening loop: IN PROGRESS.** Audit (general-purpose agent) → worklist; baseline
+60% line / 86% branch, 639 tests. Done + committed:
+- `1b4cd7c0` — Python: C-1..C-4 fragility repair (dropped match= prose-couplings, pinned hash-floor
+  literals, parametrized readback-tautologies, fail-loud the vacuous TOIN skip) + B-1 mcp_server handlers
+  28→76% (importorskip mcp; CI must install the extra) + B-3 parser 53→86% + A-4 ISO-boundary 88%.
+- `a26fe310` — A-1/A-2: pinned `hash_canonical` CCR recovery key with FIXED literals BOTH sides (was
+  recompute-tested both sides = the audit's biggest mutation-survivor; the OTHER 2 hashes were already
+  pinned). Rust crusher.rs test + new tests/test_ccr_hash_parity_vectors.py (cross-impl hashlib≠sha2 +
+  a live-crush() cross-language lock). PM wrote these directly — the builder agent stream-idle-timed 3×
+  (slow silent cargo compile); pre-warmed the build, pre-computed+verified the literals, wrote them myself.
+- `cb308cdb` — A-5: pinned CCR drop-count arithmetic (kept + advertised == N) in ccr_roundtrip.rs.
+- `55917ada` — A-3 (evidence-based via cargo-mutants): analyzer.rs had 95 surviving mutants/231; the
+  largest + highest-value cluster = every `&&` junction in is_iso_datetime/is_iso_date (`&&`→`||`) + is_digit.
+  Two positional-corruption tests killed it — confirmed `cargo mutants --re is_iso` = 44/44 caught. D-2 =
+  accepted residual (lowest audit value; grammar pinned via A-1 + markers.rs).
+cargo-mutants now INSTALLED (the only objective Rust mutation number; score.py has no Rust profile).
+
+**Phase B DONE (high-value subset).** Documented residual: ~71 analyzer mutants survive in lower-value
+helpers (estimate_reduction telemetry ratio, python_repr Number-arm = likely EQUIVALENT mutation, internal
+stat counters) — integration-tested via the crusher path + floor bench, not correctness defects; a full
+analyzer mutation-kill is a scoped follow-up. Lower-priority module coverage left: kompress 47% (mostly
+ONNX/torch env-gated), toin 49%, compression_feedback 39%.
+**Phase C: EMPTY — no production bug surfaced.** Every hardening step closed a TEST gap; the code was
+verified correct (mutants survived for want of tests, not wrong logic; all gates green throughout).
+
+**Recovery WRITE-path mutation audit (post-Phase-B, advisor-prompted).** `cargo mutants --file crusher.rs
+--re 'persist_dropped|hash_canonical|canonical_array_json|ccr_dropped_sentinel'` → **0 missed / 8 caught /
+1 unviable**. The load-bearing recovery functions (the hash key + the drop sentinel + the canonical
+encoder) are mutation-clean, not just covered. Objective number behind "recovery is safe."
+
+**Phase D — close-out finding→status map (HONEST, not over-claimed):**
+| critique # | finding | status | evidence / residual |
+|---|---|---|---|
+| 1 | crush() text-scrape recovery → typed return | **SUBSTANTIAL** | `8253fd00` typed `ccr_hashes`/`row_index_markers`; `f23e64e4` fail-loud; 41-test parity. **Residual 1b:** `_ensure_ccr_backed` cache-HIT re-mirrors from cached string (no typed refs on hit) — DECLINED (result-cache schema change = hot-path regression); the critique's "delete ~300 LOC" premise is factually wrong for the cache-hit arm. |
+| 2 | ContentRouter god-object split | **PARTIAL** | `4c6c493f` CompressorRegistry extracted (the critique's own "do first" lowest-risk seam); 2597→2566. Full split DECLINED (dispatch coupled to fallback+TOIN+#10, same ceiling as R6). Map made honest. |
+| 3 | FFI hand-synced contracts | **DONE(config)/PARTIAL(CSV)** | `790cb21a` `**asdict` config forwarding (kills 3-site edit); CSV grammar constants NAMED both sides but not generated-from-one-spec (2 files, pinned by 200-case fuzz). |
+| 4 | empty memory/ + providers/ husk | **DONE** | `74a6f348` deleted memory/; `3c422b98` de-ceremonied providers/ (dead `_LAZY_EXPORTS` for 1 zero-dep Protocol; only consumer hits providers.base directly). |
+| 5 | diff CCR knob missing comment | **DONE** | diff_compressor.py:93-95 explanatory comment. |
+| 6 | two `.last().unwrap()` guard-distance | **DONE** | grep confirms zero `.last().unwrap()` in log_compressor.rs/analyzer.rs. |
+| docs a | content_detector stale parity-harness docstring | **DONE** | content_detector.rs:24 now states the harness was removed. |
+| docs b | map "2926→2578 thinning" overstated | **DONE** | CODEBASE-MAP.md:11/65 honest ("grown back to ~2597, core stayed coupled"). |
+| tests | 59% cov, ~41% unpinned | **HARDENED** | Phase B: MCP 28→76%, parser 53→86%, csv 88%, CCR hash literals pinned both sides, is_iso cluster killed, recovery write-path 0/8 survivors. Residuals: kompress 47%/toin 49%/compression_feedback 39% (env-gated/low-value). |
+| deliberate 1-4 | lossy-core / two-store / archive-not-refactor / Rust-only CCR knobs | **BY-DESIGN, aired** | The critique itself rules these "by-design, open questions, not settled" — architectural choices for re-examination, NOT defects. Acknowledged, not "fixed". |
+| lens gaps | security / perf / eviction-fuzz | **DISCLAIMED** | The critique flags these "coverage gaps, not clean bills" (lenses not run), not findings. |
+
+**Disposition:** every material defect (1-6, docs a/b) is DONE or addressed-with-documented-residual; the
+3 residuals (1b cache-hit scrape, full router split, CSV codegen) are each DECLINED on the never-regress
+constraint with a written reason, not skipped. Deliberate choices are by-design. → critique "dealt with"
+in the honest sense (explicit disposition per finding). Cleared to snapshot → rm → rerun.
+
+**NEXT — Phase D execute:** snapshot critique → /tmp → `rm codebase-CRITIQUE.md` → rerun
+adversarial-critique.js UNCHANGED (args.map=CODEBASE-MAP.md) → delta report vs this map.
+
+---
+
 # ⭐⭐ CYCLE 2 — COMPLETE (finish sequence: sanity ✅ → rerun NEXT)
 
 All 4 cycle-2 findings fixed + gated + committed (PM-loop: agent edit-only → I gate independently → commit on PASS, `git add -u`, critique never staged):

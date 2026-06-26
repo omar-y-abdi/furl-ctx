@@ -115,7 +115,6 @@ pytest tests/                                         # full suite
 pytest tests/test_ccr_recovery_invariant.py           # recovery invariant
 pytest tests/test_ccr_proportional_retrieval.py       # proportional retrieval
 pytest -m "not real_llm and not live"                 # fast unit only
-make test-parity                                       # maturin develop + parity fixtures
 
 # Benchmark + restore baseline
 .venv/bin/python -m benchmarks.run_bench              # baseline on committed snapshots -> baseline_results.json + BASELINE.md
@@ -123,4 +122,9 @@ make test-parity                                       # maturin develop + parit
 .venv/bin/python -m benchmarks.run_bench --refresh    # RE-CAPTURE live snapshots (overwrites benchmarks/data/*.raw.json)
 # Restore baseline: re-run WITHOUT --refresh (uses committed snapshots), or `git checkout HEAD -- benchmarks/data/` to revert refreshed snapshots
 ```
+
+## 6. DELIBERATE DECISIONS (by-design; the trigger that would reopen each)
+
+- **Two CCR stores, not one.** Rust `CcrStore` (`ccr/mod.rs:45`, InMemory default) is the COMPUTE-side write buffer: `crusher.rs::persist_dropped` writes here and `ccr_get` reads typed bytes back over the FFI. Python `CompressionStore` (`compression_store.py`) is the MODEL-FACING retrieval surface the MCP `headroom_retrieve` reads (`mcp_server.py:330/362`) — it adds built-in BM25 `search(hash, query)` + retrieval-feedback tracking that the bare Rust KV `ccr_get` lacks, so routing retrieve straight at Rust would regress search/feedback. Both are in-memory single-tier (default 1000 entries / 300s TTL, no durable spill — recovery is request-window-scoped, and an evicted miss is loud via `format_retrieval_miss_detail`, never silent). REOPEN IF: a non-MCP reader needs recovery, or the Python store stops offering anything the Rust store can't — then the split no longer earns its keep.
+- **CCR-emission knobs live in Rust config, pinned on the Python surface.** `min_compression_ratio_for_ccr` (default 0.8) and siblings are Rust config fields; the Python compressors pass the Rust default through and do NOT re-expose them as tunables (`diff_compressor.py:93`, the "Rust-only knob" comment; uniform across diff/search/log). Capability ceiling by intent — no consumer needs per-call CCR-aggressiveness tuning and the default matches the value the retired Python original inlined. REOPEN IF: a real caller needs per-call control over the CCR-emission threshold — then promote the knob to the Python surface.
 Notes: `cargo test` cannot run the `headroom-py` cdylib (`test=false` in Cargo.toml) — Python-side tests only. Feature flags: `magika` (Tier-1 ML detect), `embeddings` (EmbeddingScorer, else BM25-only), `redis` (else UnsupportedBackend). Default model gpt-4o (real tiktoken); benchmarks use RoutingPolicy.MinTokens with CompressConfig defaults.
