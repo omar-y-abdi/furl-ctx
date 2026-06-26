@@ -238,6 +238,36 @@ fn dropped_summary_marker_points_at_stored_hash() {
 }
 
 #[test]
+fn dropped_count_ties_out_kept_plus_advertised() {
+    // A crusher that drops the WRONG number of rows still roundtrips the
+    // stored blob (the payload is the full original), so the recovery
+    // pointer is silently meaningless unless the arithmetic ties out:
+    // kept + advertised-dropped == original N. The existing roundtrip tests
+    // assert the payload recovers but NEVER pin this count, so a drop that
+    // mis-reports its size survives them. Pin it.
+    let crusher = SmartCrusher::new(force_lossy_config());
+    let n = 50usize;
+    let items = lossy_friendly_items(n);
+
+    let result = crusher.crush_array(&items, "", 1.0);
+
+    let kept = result.items.len();
+    assert!(kept < n, "a lossy crush must actually drop rows (kept {kept} of {n})");
+    let dropped = n - kept;
+    // The marker the model sees must advertise EXACTLY the rows that left.
+    // `<<ccr:{hash} {dropped}_rows_offloaded>>` — a `dropped+1` / `dropped-1`
+    // miscount (or kept/dropped swap) flips this.
+    assert!(
+        result
+            .dropped_summary
+            .contains(&format!("{dropped}_rows_offloaded")),
+        "marker must advertise the actual dropped count {dropped} \
+         (kept {kept} + dropped {dropped} = {n}), got: {}",
+        result.dropped_summary
+    );
+}
+
+#[test]
 fn full_crush_pipeline_roundtrips_through_store() {
     // End-to-end through the public `crush()` API (the entry point
     // that ContentRouter calls). The result string contains the marker;
