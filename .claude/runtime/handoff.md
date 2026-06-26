@@ -1,3 +1,17 @@
+# ⭐⭐⭐⭐⭐⭐ CYCLE-4 CRITIQUE FULLY RESOLVED → delete + rerun workflow (5th pass)
+
+Every material cycle-4 critique item now resolved (verified this session):
+item1 replay-guard `dd07cd40` (→ replaced by RouterRuntime field-guard in G) · item2 dead getattr `b10dcb71` ·
+item3 MCP hash guard `02dd91d0` · item4 11-stage lifecycle `5bf0a303` + orphaned compute_frozen_count `95fd63a6` ·
+item5 god-object split E `f0b7db1d`/F `7b47568d`/D(no-op) **+ typo-rejection `9107e749`** (the last open piece —
+apply() now rejects unknown kwargs via `_APPLY_ALLOWED_KWARGS`, 0% bench/recovery 23, delivered WITHOUT the
+net-negative full typed-request) · item6 TLS→RouterRuntime `142cde0c` · proxy-debt (A+B) done · map refreshed
+`580a0bd0`. Deliberate-choice-1 (lossy-by-deletion reachability) = by-design open Q, documented map §6, not a defect.
+**Nothing material left.** → advisor sanity → rm codebase-CRITIQUE.md → rerun adversarial-critique.js UNCHANGED
+(args.map=CODEBASE-MAP.md). Snapshot prior at /tmp/critique-cycle4-prev.md.
+
+---
+
 # ⭐⭐⭐⭐⭐ GOD-OBJECT SPLIT + LIFECYCLE EXCISE — DONE (user chose "take the large refactors")
 
 User decision: take the large refactors now, subagent per PART (sequential, not all at once), verify
