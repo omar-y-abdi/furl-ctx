@@ -513,9 +513,9 @@ class ContentRouter(Transform):
         # Thread-local storage isolates each in-flight request: the
         # property getters fall back to the documented defaults
         # (``None`` / ``False``) when the current thread hasn't set a
-        # value, preserving single-threaded behaviour exactly and
-        # keeping every ``getattr(self, "_runtime_*", default)`` read
-        # site below working unchanged.
+        # value, preserving single-threaded behaviour exactly. Because the
+        # getters always exist and never raise, read sites use the property
+        # directly (``self._runtime_*``), not a ``getattr(..., default)`` probe.
         self._tls = threading.local()
 
         self._cache = CompressionCache()
@@ -731,7 +731,7 @@ class ContentRouter(Transform):
             # Determine strategy from content analysis
             mixed = is_mixed_content(content)
             detection = _detect_content(content)
-            force_kompress = bool(getattr(self, "_runtime_force_kompress", False))
+            force_kompress = bool(self._runtime_force_kompress)
             strategy = (
                 CompressionStrategy.KOMPRESS
                 if force_kompress
@@ -1290,7 +1290,7 @@ class ContentRouter(Transform):
                         text_to_compress,
                         context=context,
                         question=question,
-                        target_ratio=getattr(self, "_runtime_target_ratio", None),
+                        target_ratio=self._runtime_target_ratio,
                     )
                     compressed = result.compressed
                     compressed_tokens = result.compressed_tokens
@@ -1522,7 +1522,7 @@ class ContentRouter(Transform):
           (model weights are cached at module level in kompress_compressor.py,
           so repeated calls with the same model_id are cheap)
         """
-        model_id = getattr(self, "_runtime_kompress_model", None)
+        model_id = self._runtime_kompress_model
 
         # Explicitly disabled — no ML compression
         if model_id == "disabled":
