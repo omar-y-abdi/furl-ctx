@@ -59,11 +59,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_CCR_TTL_SECONDS = 300
 CCR_TTL_SECONDS_ENV = "HEADROOM_CCR_TTL_SECONDS"
 
-# Minimum length for a caller-supplied ``explicit_hash``. MUST match the CCR
-# recovery regexes (``<<ccr:HASH...>>`` use ``[a-f0-9]{6,}``): the store has to
-# accept every hash a retrieval marker can carry, or an extract->404 silent loss
-# results. Real producers emit 12-char hashes; 6 rejects trivially-collidable
-# keys (e.g. a 1-char hash) without ever rejecting a recognizable marker.
+# Minimum length for a caller-supplied ``explicit_hash``. This is the LOOSE
+# recovery-floor contract, intentionally distinct from the STRICT consumer set
+# ``marker_grammar.HASH_WIDTHS`` ({12, 24}) that the anti-spoofing ingress
+# (``tool_injection.parse_tool_call`` + the MCP retrieve handler) enforces — see
+# the "Two DISTINCT width contracts" note in ``ccr/marker_grammar.py``. The store
+# must accept any hex key a DIRECT lookup can recover (shape I, the read-lifecycle
+# marker, is recovered by direct store lookup and never by the strict scanner), so
+# its floor is deliberately looser than the spoofing guard. The floor only rejects
+# trivially-collidable sub-6 keys; every real producer emits exactly 12- or 24-char
+# hashes, well clear of it.
 _MIN_EXPLICIT_HASH_LEN = 6
 
 _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
@@ -363,20 +368,19 @@ class CompressionStore:
         # birthday bound: 50% collision probability at ~280 trillion entries
         # (2^48), versus ~4 billion (2^32) for the previous 16-char default.
         if explicit_hash is not None:
-            # Validate as hex. Bail loudly per `feedback_no_silent_fallbacks`
-            # — silently falling back to the default hash when the caller
-            # asked for a specific key would defeat the marker/store
-            # consistency we're trying to preserve.
+            # Validate as hex and bail LOUDLY on a bad key: silently falling back
+            # to the computed default when the caller asked for a specific key
+            # would break the marker<->store consistency the recovery plane needs.
             if not explicit_hash or not all(c in "0123456789abcdefABCDEF" for c in explicit_hash):
                 raise ValueError(
                     f"explicit_hash must be a non-empty hex string, got {explicit_hash!r}"
                 )
-            # Reject trivially-collidable short keys (e.g. a 1-char hash).
-            # The floor matches the CCR recovery regexes (``[a-f0-9]{6,}``): the
-            # store must accept EVERY hash retrieval can recognize, or an
-            # extract->404 silent loss results. Real producers emit 12-char
-            # hashes, so 6 clears all of them with margin while rejecting the
-            # pathological sub-6 keys.
+            # Reject trivially-collidable short keys (e.g. a 1-char hash). This is
+            # the loose recovery floor (``_MIN_EXPLICIT_HASH_LEN``), intentionally
+            # looser than the strict {12, 24} anti-spoofing ingress — the store
+            # must accept every hex key a DIRECT lookup can recover, not only the
+            # strict scanner's widths. Real producers emit 12- or 24-char hashes,
+            # well clear of the floor.
             if len(explicit_hash) < _MIN_EXPLICIT_HASH_LEN:
                 raise ValueError(
                     f"explicit_hash must be at least {_MIN_EXPLICIT_HASH_LEN} hex chars "
