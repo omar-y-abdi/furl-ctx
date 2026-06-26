@@ -10,29 +10,10 @@ protocol the compression library depends on:
 
 from __future__ import annotations
 
-from importlib import import_module
+# lazy dev: direct re-export, not the `_LAZY_EXPORTS`/`__getattr__` ceremony the
+# multi-symbol packages (`transforms`, `cache`, …) use to defer heavy imports —
+# this package exposes one zero-dependency `typing.Protocol`, so deferral buys
+# nothing. Upgrade path: restore lazy machinery only if a heavy export lands here.
+from headroom.providers.base import TokenCounter
 
 __all__ = ["TokenCounter"]
-
-_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    "TokenCounter": ("headroom.providers.base", "TokenCounter"),
-}
-
-
-def __getattr__(name: str) -> object:
-    if name == "__path__":
-        raise AttributeError(name)
-
-    try:
-        module_name, attr_name = _LAZY_EXPORTS[name]
-    except KeyError as exc:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
-
-    module = import_module(module_name)
-    value = getattr(module, attr_name)
-    globals()[name] = value
-    return value
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__))
