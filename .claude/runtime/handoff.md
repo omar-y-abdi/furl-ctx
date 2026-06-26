@@ -1,3 +1,20 @@
+# 🔻 NEXT SESSION — process the cycle-5 rerun result (I ran out of context at launch)
+
+Rerun LAUNCHED (runId recorded below). It runs in background. To process when it completes:
+1. Output file: `tasks/<runId>.output` under the session task dir (the task-notification gives the path).
+2. Extract: `python -c "import json; d=json.load(open('<output>')); print(d['result']['critique'])"` → it has a
+   leading agent-preamble + a trailing `result:` line; strip both → write `codebase-CRITIQUE.md`.
+3. DELTA vs `/tmp/critique-cycle4-prev.md` (the cycle-4 critique I just resolved).
+4. **"Felfri" calibration (advisor):** a 12-lens loop-until-dry all-opus critique finds a NEXT layer BY
+   CONSTRUCTION — "flawless" = ONLY nitpicks + by-design left, ZERO material defects, NOT zero findings.
+   EXPECT the rerun to re-flag **ContentRouter still-large (~2344 LOC)** and possibly re-air **lossy-by-deletion
+   reachability** — those PERSIST BY DECISION (never-regress + critique's own by-design ruling), NOT oversight.
+   A re-surfaced by-design item is NOT "unresolved" — do not trigger another fix cycle for it.
+5. **RERUN LAUNCHED: task `wmf8x4ufn`, runId `wf_d705ee60-a48`. Output: `tasks/wmf8x4ufn.output`.**
+   Workflow = adversarial-critique.js UNCHANGED, args.map=CODEBASE-MAP.md (byte-identical to cycle-4 run).
+
+---
+
 # ⭐⭐⭐⭐⭐⭐ CYCLE-4 CRITIQUE FULLY RESOLVED → delete + rerun workflow (5th pass)
 
 Every material cycle-4 critique item now resolved (verified this session):
