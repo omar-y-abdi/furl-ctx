@@ -192,14 +192,13 @@ Platform support note: macOS auth reuse via Copilot CLI Keychain storage has bee
 <details>
 <summary><b>Pipeline internals</b></summary>
 
-Headroom exposes one stable request lifecycle across `compress()`, the SDK, and the proxy:
+`compress()` emits three compression lifecycle stages:
 
-`Setup` → `Pre-Start` → `Post-Start` → `Input Received` → `Input Cached` → `Input Routed` → `Input Compressed` → `Input Remembered` → `Pre-Send` → `Post-Send` → `Response Received`
+`Input Received` → `Input Routed` → `Input Compressed`
 
 - **Transforms** do the work: CacheAligner, ContentRouter, SmartCrusher, CodeCompressor, Kompress-base, IntelligentContext / RollingWindow.
-- **Pipeline extensions** observe or customize lifecycle stages via `on_pipeline_event(...)`.
-- **Compression hooks** sit alongside the canonical lifecycle as an additional extension seam.
-- **Proxy extensions** remain the server/app integration seam for ASGI middleware, routes, and startup policy.
+- **Pipeline extensions** observe or customize these stages via `on_pipeline_event(...)`; `compress()` passes your `hooks` object as the extension.
+- **Compression hooks** sit alongside the lifecycle as an additional extension seam.
 
 Provider and tool-specific behavior lives under `headroom/providers/` so core orchestration stays focused on lifecycle, sequencing, and policy.
 
