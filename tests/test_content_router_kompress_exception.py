@@ -41,7 +41,7 @@ def _router_with_kompress(raising_exc: BaseException | None) -> ContentRouter:
             return SimpleNamespace(compressed=content, compressed_tokens=len(content.split()))
 
     router = ContentRouter()
-    router._get_kompress = lambda: _StubKompress()  # type: ignore[method-assign]
+    router._get_kompress = lambda *a, **kw: _StubKompress()  # type: ignore[method-assign]
     return router
 
 
@@ -76,7 +76,9 @@ def _router_with_failing_strategy(strategy: CompressionStrategy, exc: BaseExcept
 
     if strategy in (CompressionStrategy.KOMPRESS, CompressionStrategy.TEXT, CompressionStrategy.CODE_AWARE):
         # Stub _try_ml_compressor — the lowest-level ML path
-        def _failing_ml(content: str, context: str, question: object = None) -> tuple[str, int]:
+        def _failing_ml(
+            content: str, context: str, question: object = None, **kwargs: object
+        ) -> tuple[str, int]:
             raise exc
 
         router._try_ml_compressor = _failing_ml  # type: ignore[method-assign]
