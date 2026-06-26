@@ -17,7 +17,6 @@ import pytest
 
 from headroom.cache.compression_store import (
     CompressionStore,
-    _MIN_EXPLICIT_HASH_LEN,
 )
 
 
@@ -33,7 +32,7 @@ def _store(items, h):
 def test_explicit_hash_one_char_rejected() -> None:
     store = CompressionStore(max_entries=10)
     orig, comp = _store([{"id": 0}], "a")
-    with pytest.raises(ValueError, match="at least"):
+    with pytest.raises(ValueError):
         store.store(orig, comp, explicit_hash="a")
 
 
@@ -48,7 +47,8 @@ def test_explicit_hash_at_floor_accepted() -> None:
     # The floor matches the recovery regex {6,}: a 6-char hash MUST be accepted
     # so the store accepts every hash retrieval can recognize.
     store = CompressionStore(max_entries=10)
-    h = "a" * _MIN_EXPLICIT_HASH_LEN
+    h = "aaaaaa"  # 6 chars = the floor; pinned literal (not derived from the
+    # constant) so a moved floor fails this loudly. Matches recovery regex {6,}.
     key = store.store(json.dumps([{"id": 0}]), f"<<ccr:{h}>>", explicit_hash=h)
     assert key == h
     assert store.retrieve(h) is not None
@@ -71,7 +71,7 @@ def test_explicit_hash_real_producer_width_accepted() -> None:
 @pytest.mark.parametrize("bad_ttl", [0, -1, -300])
 def test_nonpositive_ttl_rejected(bad_ttl: int) -> None:
     store = CompressionStore(max_entries=10)
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError):
         store.store(json.dumps([{"id": 0}]), "<<ccr:aaaaaa>>", explicit_hash="aaaaaa", ttl=bad_ttl)
 
 

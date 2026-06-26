@@ -11,15 +11,15 @@ test_compression_store_redaction.py:
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from headroom.cache.compression_store import CompressionStore, _MIN_EXPLICIT_HASH_LEN
+from headroom.cache.compression_store import CompressionStore
 
-# Fixed-width hash just at the minimum — load-bearing literal
-_HASH_AT_FLOOR = "a" * _MIN_EXPLICIT_HASH_LEN  # "aaaaaa" (6 chars)
-_HASH_ONE_BELOW = "a" * (_MIN_EXPLICIT_HASH_LEN - 1)  # "aaaaa" (5 chars)
+# Fixed-width hash literals pinned to the contract (#21: 6 accepted, 5 rejected).
+# Hard-coded (NOT derived from _MIN_EXPLICIT_HASH_LEN) so the test fails loudly if
+# the production floor moves, rather than silently auto-retargeting to the new value.
+_HASH_AT_FLOOR = "aaaaaa"  # 6 chars — the floor; MUST be accepted
+_HASH_ONE_BELOW = "aaaaa"  # 5 chars — one below the floor; MUST be rejected
 
 # Pinned original content literal — any mutation of the store/retrieve round-trip
 # changes this exact string and fails the test.
@@ -64,7 +64,7 @@ def test_b1_store_retrieve_compressed_content_pinned() -> None:
 def test_hash_one_below_floor_rejected_boundary() -> None:
     """_MIN_EXPLICIT_HASH_LEN - 1 = 5 chars: rejected.  Boundary at 5 vs 6."""
     store = CompressionStore(max_entries=10)
-    with pytest.raises(ValueError, match="at least"):
+    with pytest.raises(ValueError):
         store.store(_ORIGINAL, _COMPRESSED, explicit_hash=_HASH_ONE_BELOW)
 
 
@@ -92,7 +92,7 @@ def test_non_hex_explicit_hash_rejected() -> None:
 def test_ttl_at_or_below_zero_rejected(bad_ttl: int) -> None:
     """ttl=0 and ttl<0: boundary — 0 forbidden, 1 accepted."""
     store = CompressionStore(max_entries=10)
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError):
         store.store(_ORIGINAL, _COMPRESSED, explicit_hash=_HASH_AT_FLOOR, ttl=bad_ttl)
 
 

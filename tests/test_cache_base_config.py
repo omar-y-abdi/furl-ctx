@@ -13,61 +13,43 @@ import pytest
 
 from headroom.cache.base import CacheConfig, CacheStrategy
 
-
 # ---------------------------------------------------------------------------
 # CB-B1a  Pin all default field values
+#
+# Defaults carry mutation value — a changed default flips exactly one pin here.
+# Parametrized (one case per field) rather than unrolled into ~14 near-identical
+# functions; reading CacheConfig() exercises every default + both default_factory
+# lambdas, holding cache/base coverage.
 # ---------------------------------------------------------------------------
 
 
-def test_b1a_default_enabled() -> None:
-    assert CacheConfig().enabled is True
-
-
-def test_b1a_default_strategy_is_none() -> None:
-    assert CacheConfig().strategy is None
-
-
-def test_b1a_default_min_cacheable_tokens() -> None:
-    assert CacheConfig().min_cacheable_tokens == 1024
-
-
-def test_b1a_default_max_breakpoints() -> None:
-    assert CacheConfig().max_breakpoints == 4
-
-
-def test_b1a_default_normalize_whitespace() -> None:
-    assert CacheConfig().normalize_whitespace is True
-
-
-def test_b1a_default_collapse_blank_lines() -> None:
-    assert CacheConfig().collapse_blank_lines is True
-
-
-def test_b1a_default_dynamic_separator() -> None:
-    assert CacheConfig().dynamic_separator == "\n\n---\n\n"
-
-
-def test_b1a_default_dynamic_detection_tiers() -> None:
-    assert CacheConfig().dynamic_detection_tiers == ["regex"]
-
-
-def test_b1a_default_semantic_cache_enabled() -> None:
-    assert CacheConfig().semantic_cache_enabled is False
-
-
-def test_b1a_default_semantic_similarity_threshold() -> None:
-    assert CacheConfig().semantic_similarity_threshold == 0.95
-
-
-def test_b1a_default_semantic_cache_ttl_seconds() -> None:
-    assert CacheConfig().semantic_cache_ttl_seconds == 300
-
-
-def test_b1a_default_date_patterns_nonempty() -> None:
-    # date_patterns is a non-empty list (default_factory); pin count and first entry.
-    patterns = CacheConfig().date_patterns
-    assert len(patterns) == 3
-    assert patterns[0] == r"Today is \w+ \d{1,2},? \d{4}\.?"
+@pytest.mark.parametrize(
+    "field_name,expected",
+    [
+        ("enabled", True),
+        ("strategy", None),
+        ("min_cacheable_tokens", 1024),
+        ("max_breakpoints", 4),
+        ("normalize_whitespace", True),
+        ("collapse_blank_lines", True),
+        ("dynamic_separator", "\n\n---\n\n"),
+        ("dynamic_detection_tiers", ["regex"]),
+        ("semantic_cache_enabled", False),
+        ("semantic_similarity_threshold", 0.95),
+        ("semantic_cache_ttl_seconds", 300),
+        (
+            "date_patterns",
+            [
+                r"Today is \w+ \d{1,2},? \d{4}\.?",
+                r"Current date: \d{4}-\d{2}-\d{2}",
+                r"The current time is .+\.",
+            ],
+        ),
+    ],
+)
+def test_b1a_default_field_value(field_name: str, expected: object) -> None:
+    """Pin each default — a changed production default flips exactly one case."""
+    assert getattr(CacheConfig(), field_name) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -94,36 +76,15 @@ def test_cache_strategy_has_four_members() -> None:
 
 
 # ---------------------------------------------------------------------------
-# CB-bnd  Field override changes observable value
+# CB-bnd  Mutable-default isolation (behavioral — not a constructor readback)
+#
+# The five constructor-readback overrides (CacheConfig(field=X); assert
+# cfg.field == X) were removed: they survive every production mutation, so they
+# have no mutation-detection value. The default pins above already exercise the
+# fields. This behavioral test survives only if default_factory builds a fresh
+# list per instance, which a real regression (e.g. a shared class-level list)
+# would break.
 # ---------------------------------------------------------------------------
-
-
-def test_field_override_enabled_false() -> None:
-    cfg = CacheConfig(enabled=False)
-    assert cfg.enabled is False
-
-
-def test_field_override_min_cacheable_tokens() -> None:
-    cfg = CacheConfig(min_cacheable_tokens=512)
-    assert cfg.min_cacheable_tokens == 512
-    # Different from default
-    assert cfg.min_cacheable_tokens != CacheConfig().min_cacheable_tokens
-
-
-def test_field_override_max_breakpoints() -> None:
-    cfg = CacheConfig(max_breakpoints=2)
-    assert cfg.max_breakpoints == 2
-
-
-def test_field_override_strategy() -> None:
-    cfg = CacheConfig(strategy=CacheStrategy.EXPLICIT_BREAKPOINTS)
-    assert cfg.strategy is CacheStrategy.EXPLICIT_BREAKPOINTS
-
-
-def test_field_override_detection_tiers() -> None:
-    cfg = CacheConfig(dynamic_detection_tiers=["regex", "ner"])
-    assert cfg.dynamic_detection_tiers == ["regex", "ner"]
-    assert len(cfg.dynamic_detection_tiers) == 2
 
 
 def test_fresh_instances_are_independent() -> None:
