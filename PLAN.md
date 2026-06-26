@@ -1,3 +1,8 @@
+> ✅ STATUS: refactor + cycle-4 close-out COMPLETE (HEAD 94b714a4). All 7 parts done (C not shipped =
+> net-negative). Typo-rejection `9107e749` closed the last critique item. Cycle-5 critique rerun LAUNCHED
+> (runId wf_d705ee60-a48) — see handoff.md TOP for the next-session result-processing recipe. This PLAN is
+> the historical record of the refactor; the live thread is the rerun.
+
 # PLAN — God-object split + lifecycle excise (user-authorized large refactor, 2026-06-26)
 
 User: "Ta de stora refaktoreringarna nu, använd subagent för DELAR. Sequential with

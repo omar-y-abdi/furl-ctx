@@ -12,6 +12,13 @@ Rerun LAUNCHED (runId recorded below). It runs in background. To process when it
    A re-surfaced by-design item is NOT "unresolved" — do not trigger another fix cycle for it.
 5. **RERUN LAUNCHED: task `wmf8x4ufn`, runId `wf_d705ee60-a48`. Output: `tasks/wmf8x4ufn.output`.**
    Workflow = adversarial-critique.js UNCHANGED, args.map=CODEBASE-MAP.md (byte-identical to cycle-4 run).
+6. **State at launch:** git HEAD = `94b714a4`, branch verify/phase2-audit-report, tree clean (only untracked
+   `.claude/*`, `verify/raw_results.json`). All work committed. If a NEW fix cycle is needed after the delta:
+   gate = `.claude/runtime/gate.sh [bench]`; per-part 3%-regression tool = `bash /tmp/regcheck.sh` (vs
+   `/tmp/bench_ref.json`, determinism-confirmed); PM-loop = subagent edit-only → I gate → commit `git add -u`
+   (ALWAYS `git checkout HEAD -- uv.lock` first + guard `grep -iE 'uv.lock|critique'`). uv.lock truncates on
+   any agent `uv` op. NOTE: /tmp tooling is ephemeral — regenerate bench_ref via `python -m benchmarks.run_bench`
+   + capture if gone.
 
 ---
 
