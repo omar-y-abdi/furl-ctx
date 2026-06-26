@@ -99,3 +99,40 @@ def test_default_options_unchanged_in_workers(monkeypatch, _force_workers) -> No
 
     assert seen_force, "compress() was never called"
     assert not any(seen_force), "default force_kompress must remain False in workers"
+
+
+def test_runtime_options_replay_covers_every_runtime_property() -> None:
+    """Structural guard for the main->worker TLS replay (issue #10).
+
+    The two behavioural tests above prove the FOUR options that exist today
+    propagate. This one covers the forward-looking trap the router's own
+    docstring names: a NEW ``_runtime_*`` property added without wiring it into
+    BOTH the main-thread snapshot AND the worker replay makes workers silently
+    read its default, and no other test would fail. It parses the live
+    ``ContentRouter`` source and asserts the three sets — declared properties,
+    snapshot keys, replay keys — are identical, so that drift fails HERE the
+    moment it is introduced, not in production.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(ContentRouter)
+    # Property getters: ``def _runtime_<name>(self) -> ...`` (setters take a
+    # second ``value`` arg, so ``(self)`` matches getters only).
+    properties = set(re.findall(r"def _runtime_(\w+)\(self\)\s*->", src))
+    # Worker replay (``_timed_compress``): ``... = runtime_options["<name>"]``.
+    replayed = set(re.findall(r'runtime_options\["(\w+)"\]', src))
+    # Main-thread snapshot (parallel path): ``"<name>": self._runtime_<name>``.
+    snapshot = set(re.findall(r'"(\w+)":\s*self\._runtime_\w+', src))
+
+    assert properties, "no _runtime_* getters found — the regex drifted from the source"
+    assert properties == replayed, (
+        f"_runtime_* properties {sorted(properties)} != worker-replay keys "
+        f"{sorted(replayed)} in _timed_compress: an option is not replayed into "
+        f"worker threads, so workers read its default silently."
+    )
+    assert properties == snapshot, (
+        f"_runtime_* properties {sorted(properties)} != snapshot keys "
+        f"{sorted(snapshot)} in the parallel runtime_options dict: an option is "
+        f"not snapshotted on the main thread before fan-out."
+    )
