@@ -163,18 +163,18 @@ class CompressResult:
 def _compute_frozen_message_count(messages: list[dict[str, Any]]) -> int:
     """Return the frozen-prefix message count for a list of Anthropic messages.
 
-    Mirrors ``compute_frozen_count`` in ``crates/headroom-core/src/cache_control.rs``:
+    The authoritative frozen-count implementation (the former Rust
+    ``cache_control::compute_frozen_count`` was orphaned — no PyO3 binding, no
+    caller — and was removed in the standalone excise):
 
     - Walk ``messages[i].content[*]``; for each block (dict) that has a
       top-level ``cache_control`` key, record ``i`` as the highest marker index.
     - Return ``highest_index + 1`` (exclusive floor: the marked message is part
       of the cached prefix and must itself be frozen), or ``0`` if no marker.
     - String-content messages are skipped (no block list → no markers possible).
-    - The caller is responsible for the ``messages`` field only; ``system`` and
-      ``tools`` fields are never passed here and never bump the floor (parity
-      with Rust ``walk_messages``-only path).
-    - ``cache_control: null`` counts as present (key-presence, not truthiness),
-      matching ``block.get("cache_control")`` → ``Some(Null)`` in Rust.
+    - Only the ``messages`` field is inspected; ``system`` and ``tools`` markers
+      are never passed here and never bump the floor.
+    - ``cache_control: null`` counts as present (key-presence, not truthiness).
 
     Args:
         messages: List of message dicts in Anthropic format.
