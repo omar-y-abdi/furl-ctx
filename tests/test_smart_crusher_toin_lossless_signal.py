@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from headroom.transforms.smart_crusher import SmartCrusher, SmartCrusherConfig
 
 
@@ -61,8 +59,14 @@ def test_lossless_crush_token_axis_carries_real_reduction(monkeypatch) -> None:
     payload = _lossless_array(60)
     result = crusher.crush(payload, query="", bias=1.0)
 
-    if not result.was_modified or not captured:
-        pytest.skip("payload did not take the lossless recording path")
+    # Fail loud, never skip: the fixture is hand-crafted to ALWAYS take the
+    # lossless csv-schema recording path, so a missing modification or empty
+    # capture means the lossless path drifted — the #8 TOIN-signal lock must
+    # surface that as a failure, not evaporate by skipping.
+    assert result.was_modified and captured, (
+        "lossless csv-schema path not taken — the #8 TOIN-signal lock would "
+        "otherwise silently skip; fixture or production path has drifted"
+    )
 
     # Count axis: lossless keeps every row -> counts equal. This is correct,
     # not a bug; it must NOT be falsified to manufacture a reduction.
