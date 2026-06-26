@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from headroom import paths as _paths
+from headroom.ccr.marker_grammar import is_valid_ccr_hash
 
 # fcntl is Unix-only; on Windows we skip file locking (stats are best-effort).
 # Keep the module typed as Any so Windows mypy runs don't try to resolve Unix-only attrs.
@@ -565,6 +566,19 @@ class HeadroomMCPServer:
                 TextContent(
                     type="text",
                     text=json.dumps({"error": "hash parameter is required"}),
+                )
+            ]
+
+        # Same width+charset spoofing guard the tool-call parse path applies
+        # (marker_grammar.is_valid_ccr_hash) — keep both ccr-hash ingress points
+        # consistent. A malformed key is a loud 400 here, never reaches the store.
+        if not is_valid_ccr_hash(hash_key):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"error": "invalid hash format (expected 12 or 24 lowercase-hex chars)"}
+                    ),
                 )
             ]
 

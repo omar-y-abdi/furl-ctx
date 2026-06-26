@@ -508,16 +508,12 @@ def parse_tool_call(
     hash_key = input_data.get("hash")
     query = input_data.get("query")
 
-    # Validate hash format: must be exactly 12 or 24 hex characters.
-    # Legitimate widths (CCR_HASH_WIDTHS):
-    #   12 — SmartCrusher sha256(payload)[:6] → 12 lowercase hex (crusher.rs:1620)
-    #   24 — canonical BLAKE3 compute_key (ccr/mod.rs:69), used by read_lifecycle & diff
-    # Any other length is rejected to prevent hash spoofing attacks.
-    if hash_key is not None:
-        if not isinstance(hash_key, str) or len(hash_key) not in CCR_HASH_WIDTHS:
-            return None, None
-        # Validate hex characters only
-        if not all(c in "0123456789abcdef" for c in hash_key.lower()):
-            return None, None
+    # Validate hash format via the shared spoofing guard (single source of
+    # truth: marker_grammar.is_valid_ccr_hash — exactly 12 or 24 lowercase-hex
+    # chars; 12 = SmartCrusher sha256[:6], 24 = canonical compute_key). Any
+    # other shape is rejected to prevent hash spoofing. A None hash means "no
+    # hash supplied" and passes through unchanged.
+    if hash_key is not None and not marker_grammar.is_valid_ccr_hash(hash_key):
+        return None, None
 
     return hash_key, query

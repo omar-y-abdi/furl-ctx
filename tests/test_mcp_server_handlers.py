@@ -105,6 +105,27 @@ async def test_retrieve_missing_hash_returns_error_envelope(server) -> None:
     assert env == {"error": "hash parameter is required"}
 
 
+@pytest.mark.parametrize(
+    "bad_hash",
+    [
+        "abc",  # too short for any width
+        "a" * 13,  # off-by-one over width 12
+        "a" * 23,  # off-by-one under width 24
+        "g" * 12,  # right width, non-hex char
+        "<<ccr:" + "a" * 6,  # marker text, not a bare key
+    ],
+)
+async def test_retrieve_malformed_hash_rejected_before_store(server, bad_hash) -> None:
+    # The width+charset spoofing guard (is_valid_ccr_hash) rejects a present but
+    # malformed key with a loud 400, matching the tool-call parse path — the key
+    # never reaches the store. Distinct from the missing-hash and the
+    # valid-but-unknown ("0"*24 → loud miss) envelopes.
+    env = _envelope(await server._handle_retrieve({"hash": bad_hash}))
+    assert env == {
+        "error": "invalid hash format (expected 12 or 24 lowercase-hex chars)"
+    }
+
+
 # ─── _handle_read missing / not-found / not-a-file envelopes ────────────────
 
 

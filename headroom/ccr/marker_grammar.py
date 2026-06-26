@@ -84,6 +84,22 @@ HEX_CLASS: str = "[a-f0-9]"
 # after capture). The walkers enforce no width — they keep any hex run.
 HEX_ALPHABET: str = "0123456789abcdefABCDEF"
 
+
+def is_valid_ccr_hash(value: object) -> bool:
+    """True iff ``value`` is a syntactically valid CCR hash key: a ``str`` of
+    exactly ``HASH_WIDTHS`` (12 or 24) lowercase-hex characters.
+
+    The single width+charset spoofing guard, shared by BOTH ccr-hash ingress
+    points — ``tool_injection.parse_tool_call`` (model-emitted tool calls) and
+    the MCP ``headroom_retrieve`` handler — so the two cannot drift. Rejects
+    ``None``, non-``str``, wrong width, and any non-hex character.
+    """
+    return (
+        isinstance(value, str)
+        and len(value) in HASH_WIDTHS
+        and all(c in "0123456789abcdef" for c in value.lower())
+    )
+
 # --------------------------------------------------------------------------- #
 # Literal grammar pieces.
 # --------------------------------------------------------------------------- #
