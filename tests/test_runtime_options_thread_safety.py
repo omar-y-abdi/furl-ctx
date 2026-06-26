@@ -1,29 +1,48 @@
-"""Regression tests for the singleton per-request-options race.
+"""Per-request runtime-options isolation on a SHARED ContentRouter.
 
 The proxy reuses ONE ``ContentRouter`` / ``SmartCrusher`` (and one module
-level ``compress()`` pipeline) across every request. Per-request runtime
-options used to be stored as plain instance attributes on those shared
-singletons, so two concurrent ``compress()`` calls with different configs
-clobbered each other — one call's ``target_ratio`` / ``force_kompress`` /
-``kompress_model`` / ``compression_policy`` bled into another's.
+level ``compress()`` pipeline) across every concurrent request. Per-request
+options — ``target_ratio`` / ``force_kompress`` / ``kompress_model`` /
+``compression_policy`` — are NOT router state. They are carried as a frozen
+``RouterRuntime`` value passed by argument down the call chain
+(``compress(..., runtime=...)``), so two concurrent calls hold distinct
+instances and neither can observe the other's options.
 
-The fix backs those ``_runtime_*`` fields with ``threading.local`` so each
-in-flight request is isolated. These tests pin that contract:
+These tests pin that isolation contract THROUGH THE PUBLIC PATH (no
+``_runtime_*`` poke exists any more):
 
-* mechanism level — a SHARED instance, concurrent threads writing DIFFERENT
-  values, each thread must read back its OWN value (not a neighbour's).
-* end-to-end — concurrent ``compress()`` calls with different runtime
-  options on the shared pipeline produce per-config-deterministic results
+* mechanism level — a SHARED router, N concurrent ``compress()`` calls each
+  with a DISTINCT ``RouterRuntime``, spied AT THE CONSUMER read site
+  (``_get_kompress`` / the Kompress ``compress(target_ratio=...)`` call). A
+  barrier inside the spy parks every thread at the read simultaneously, so a
+  reintroduced shared per-request field would deterministically yield
+  last-writer-wins and the per-thread assertions would fail.
+* end-to-end — concurrent ``compress()`` calls with different runtime options
+  on the shared pipeline produce per-config-deterministic results
   (concurrent == serial), never a crash or cross-contaminated output.
+
+BITE NOTE (why the consumer-spy, not output-equality): Kompress ML is not
+loadable in CI, so output-equality is vacuous (prose routes to KOMPRESS then
+passes through unchanged regardless of contamination). The mechanism bite
+therefore lives in the consumer spy, which stubs the ML boundary and observes
+the EXACT ``target_ratio`` / ``model_id`` each thread's runtime delivers to the
+compressor. Spying the value the consumer USES (not the arg we passed in) is
+what makes a reintroduced ``self._runtime_*`` read actually fail here.
 """
 
 from __future__ import annotations
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 from headroom import compress
-from headroom.transforms.content_router import ContentRouter
+from headroom.transforms.content_router import (
+    ContentRouter,
+    ContentRouterConfig,
+    RouterRuntime,
+)
 from headroom.transforms.smart_crusher import SmartCrusher
 
 N_THREADS = 16
@@ -35,94 +54,120 @@ def _make_messages(seed: int) -> list[dict[str, str]]:
     return [{"role": "user", "content": body}]
 
 
-class TestContentRouterRuntimeOptionsIsolation:
-    """A shared ContentRouter must not leak per-request options across threads."""
+def _compressible_text(seed: int) -> str:
+    """Long, non-code prose so KOMPRESS is a live strategy for this content."""
+    return f"item-{seed} " + ("the quick brown fox jumps over the lazy dog. " * 40)
 
-    def test_concurrent_writes_do_not_cross_contaminate(self) -> None:
-        router = ContentRouter()  # ONE shared instance, as the pipeline uses
+
+class TestContentRouterRuntimeOptionsIsolation:
+    """A shared ContentRouter must not leak per-request options across threads.
+
+    Driven through the PUBLIC ``compress(runtime=...)`` path. The spy sits at
+    the CONSUMER read site so a shared mutable per-request field (the old TLS
+    bug, or any future ``self.``-stashed option) is caught: under the barrier,
+    every thread reads at the same instant, so last-writer-wins corrupts every
+    thread but the one that wrote last.
+    """
+
+    def test_concurrent_runtimes_do_not_cross_contaminate(self) -> None:
+        router = ContentRouter(ContentRouterConfig())  # ONE shared instance.
         barrier = threading.Barrier(N_THREADS)
-        observed: dict[int, tuple[float, bool, str, object]] = {}
-        lock = threading.Lock()
+        # Keyed by the content SEED (``item-{i}``), recording the
+        # ``(target_ratio, model_id)`` the ML CONSUMER saw for that call.
+        # Distinct seeds per thread → dict writes are race-free without a lock.
+        observed: dict[int, tuple[float | None, str | None]] = {}
+
+        # Patch the ML boundary ONCE (not per worker — that would be a write
+        # race on the shared router). ``model_id`` is THIS call's binding (a
+        # call-local in ``_try_ml_compressor``), and ``target_ratio`` arrives at
+        # the SAME ``.compress`` call — so the pair is per-call with no shared
+        # bridge. The barrier lives in the EARLIEST consumer (``_get_kompress``)
+        # so that, under a hypothetical shared-field regression, every thread's
+        # write has completed before any thread performs the downstream read —
+        # making last-writer-wins deterministic (no flaky GREEN).
+        def fake_get_kompress(model_id: str | None = None) -> object:
+            def _record(
+                text: str,
+                context: str = "",
+                question: object = None,
+                target_ratio: float | None = None,
+            ) -> SimpleNamespace:
+                seed = int(re.search(r"item-(\d+)", text).group(1))  # type: ignore[union-attr]
+                observed[seed] = (target_ratio, model_id)
+                return SimpleNamespace(compressed=text, compressed_tokens=len(text.split()))
+
+            barrier.wait(timeout=30)
+            return SimpleNamespace(compress=_record)
+
+        router._get_kompress = fake_get_kompress  # type: ignore[method-assign]
 
         def worker(i: int) -> None:
-            # Each thread sets a DISTINCT set of runtime options.
-            router._runtime_target_ratio = 0.1 * (i + 1)
-            router._runtime_force_kompress = bool(i % 2)
-            router._runtime_kompress_model = f"model-{i}"
-            policy = object()
-            router._runtime_compression_policy = policy
-
-            # Release only once every thread has written — this is the
-            # window where a plain-attribute implementation interleaves
-            # writes and the "last writer wins" for everyone.
-            barrier.wait()
-
-            with lock:
-                observed[i] = (
-                    router._runtime_target_ratio,
-                    router._runtime_force_kompress,
-                    router._runtime_kompress_model,
-                    router._runtime_compression_policy,
-                )
-            # Hold the policy reference so identity comparison is valid.
-            assert router._runtime_compression_policy is policy
+            router.compress(
+                _compressible_text(i),
+                runtime=RouterRuntime(
+                    force_kompress=True,
+                    target_ratio=0.1 * (i + 1),
+                    kompress_model=f"model-{i}",
+                ),
+            )
 
         with ThreadPoolExecutor(max_workers=N_THREADS) as pool:
             list(pool.map(worker, range(N_THREADS)))
 
-        # Every thread must have read back exactly its own values.
+        # Every call must have reached the ML consumer (no silent skip).
+        assert len(observed) == N_THREADS, (
+            f"only {len(observed)}/{N_THREADS} calls reached the ML consumer"
+        )
+
+        # Each thread's ML consumer must have seen exactly its OWN runtime. Under
+        # the barrier, a reintroduced shared per-request field (the old TLS bug,
+        # or any future ``self.``-stashed option) yields last-writer-wins, so
+        # all-but-one thread would observe a foreign value and these would fail.
         for i in range(N_THREADS):
-            ratio, force, model, _policy = observed[i]
-            assert ratio == 0.1 * (i + 1), f"thread {i} saw a foreign target_ratio"
-            assert force == bool(i % 2), f"thread {i} saw a foreign force_kompress"
-            assert model == f"model-{i}", f"thread {i} saw a foreign kompress_model"
+            got_ratio, got_model = observed[i]
+            assert got_ratio == 0.1 * (i + 1), (
+                f"thread {i} consumed a foreign target_ratio: "
+                f"{got_ratio!r} != {0.1 * (i + 1)!r} — per-request options leaked"
+            )
+            assert got_model == f"model-{i}", (
+                f"thread {i} consumed a foreign kompress_model: "
+                f"{got_model!r} != 'model-{i}' — per-request options leaked"
+            )
 
-    def test_runtime_defaults_when_unset(self) -> None:
-        """A freshly used thread sees the documented defaults, not another's."""
-        router = ContentRouter()
-        # Main thread sets values...
-        router._runtime_target_ratio = 0.9
-        router._runtime_force_kompress = True
-        router._runtime_kompress_model = "main-model"
-
+    def test_default_runtime_when_omitted(self) -> None:
+        """A direct ``compress()`` with no runtime consumes the documented
+        defaults (``target_ratio=None`` / ``kompress_model=None``), regardless
+        of what any other call passed."""
+        router = ContentRouter(ContentRouterConfig())
         seen: dict[str, object] = {}
 
-        def worker() -> None:
-            seen["ratio"] = router._runtime_target_ratio
-            seen["force"] = router._runtime_force_kompress
-            seen["model"] = router._runtime_kompress_model
-            seen["policy"] = router._runtime_compression_policy
+        def fake_get_kompress(model_id: str | None = None) -> object:
+            seen["model_id"] = model_id
 
-        t = threading.Thread(target=worker)
-        t.start()
-        t.join()
+            def fake_compress(
+                text: str,
+                context: str = "",
+                question: object = None,
+                target_ratio: float | None = None,
+            ) -> SimpleNamespace:
+                seen["target_ratio"] = target_ratio
+                return SimpleNamespace(compressed=text, compressed_tokens=len(text.split()))
 
-        # The worker thread never set anything → documented defaults.
-        assert seen["ratio"] is None
-        assert seen["force"] is False
-        assert seen["model"] is None
-        assert seen["policy"] is None
-        # Main thread's values are untouched.
-        assert router._runtime_target_ratio == 0.9
-        assert router._runtime_force_kompress is True
-        assert router._runtime_kompress_model == "main-model"
+            return SimpleNamespace(compress=fake_compress)
 
-    def test_getattr_read_sites_still_work(self) -> None:
-        """The ``getattr(self, "_runtime_*", default)`` read sites must resolve.
+        router._get_kompress = fake_get_kompress  # type: ignore[method-assign]
+        router.compress(_compressible_text(0), runtime=RouterRuntime(force_kompress=True))
 
-        The properties always exist, so getattr returns the property value
-        (with the property's own default) rather than the getattr default.
-        """
-        router = ContentRouter()
-        assert getattr(router, "_runtime_force_kompress", False) is False
-        assert getattr(router, "_runtime_target_ratio", None) is None
-        assert getattr(router, "_runtime_kompress_model", None) is None
-        router._runtime_force_kompress = True
-        assert getattr(router, "_runtime_force_kompress", False) is True
+        assert seen["target_ratio"] is None
+        assert seen["model_id"] is None
 
 
 class TestSmartCrusherRuntimeOptionsIsolation:
-    """A shared SmartCrusher must not leak its per-request policy across threads."""
+    """A shared SmartCrusher must not leak its per-request policy across threads.
+
+    SmartCrusher keeps its own thread-local mechanism (out of scope for the
+    RouterRuntime migration); this class still pins that contract.
+    """
 
     def test_concurrent_policy_writes_do_not_cross_contaminate(self) -> None:
         crusher = SmartCrusher()

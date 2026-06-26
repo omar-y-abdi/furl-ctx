@@ -47,7 +47,7 @@ def _empty_output_result(content: str) -> RouterCompressionResult:
 def test_empty_guard_restores_content_and_reports_passthrough_metrics() -> None:
     router = ContentRouter(ContentRouterConfig())
 
-    def fake_pure(self, c, strategy, context, question, bias=None):
+    def fake_pure(self, c, strategy, context, question, bias=None, **kwargs):
         return _empty_output_result(c)
 
     with patch.object(ContentRouter, "_compress_pure", fake_pure):
@@ -68,7 +68,7 @@ def test_real_compression_metrics_unaffected() -> None:
     # Guard must not touch a genuine non-empty compression's metrics.
     router = ContentRouter(ContentRouterConfig())
 
-    def fake_pure(self, c, strategy, context, question, bias=None):
+    def fake_pure(self, c, strategy, context, question, bias=None, **kwargs):
         n = len(c.split())
         return RouterCompressionResult(
             compressed="shrunk",

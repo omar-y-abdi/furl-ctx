@@ -425,13 +425,13 @@ class CompressRequest:
 
     Scope: currently owns ``min_tokens_to_compress`` — the one per-request
     option whose default genuinely diverged between entry paths. The four
-    thread-local-backed runtime options on ``ContentRouter``
-    (``target_ratio`` / ``force_kompress`` / ``kompress_model`` /
-    ``compression_policy``) intentionally remain on their ``threading.local``
-    seam: their cross-request isolation is pinned by a mechanism-coupled test
-    (``test_runtime_options_thread_safety``) that asserts thread-local
-    semantics directly, so moving them here cannot keep that test green while
-    still biting.
+    per-request runtime options on ``ContentRouter`` (``target_ratio`` /
+    ``force_kompress`` / ``kompress_model`` / ``compression_policy``) live in
+    their own frozen ``RouterRuntime`` value, threaded by argument down the
+    compress() call chain: that value-by-argument isolation is pinned by
+    ``test_runtime_options_thread_safety`` (concurrent compress() calls with
+    distinct runtimes, spied at the ML consumer) and they stay there rather
+    than here.
     """
 
     min_tokens_to_compress: int = DEFAULT_MIN_TOKENS_TO_COMPRESS

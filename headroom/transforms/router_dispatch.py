@@ -20,9 +20,10 @@ explicitly:
   construction-time capture would have been stale.
 
 The ML text path (``try_ml_compressor``) and TOIN recording
-(``record_to_toin``) deliberately stay on the router: they read the
-thread-local ``_runtime_*`` per-request options, so they are NOT self-contained.
-The dispatcher only ever calls them as opaque callables.
+(``record_to_toin``) deliberately stay on the router: the per-request
+``RouterRuntime`` (target_ratio / kompress_model / compression_policy) is bound
+into them as closures by ``_apply_strategy_to_content``, so they are NOT
+self-contained. The dispatcher only ever calls them as opaque callables.
 """
 
 from __future__ import annotations

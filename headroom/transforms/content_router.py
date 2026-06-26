@@ -37,7 +37,6 @@ import hashlib
 import json
 import logging
 import os
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -86,6 +85,55 @@ from .router_split import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RouterRuntime:
+    """Frozen per-request routing options threaded by argument.
+
+    The pipeline reuses ONE :class:`ContentRouter` across every concurrent
+    ``compress()`` call (the MCP server runs ``compress()`` on a
+    ``ThreadPoolExecutor``). These four options are per-request, not
+    per-router. Carrying them as an immutable value passed down the call
+    chain — rather than mutable thread-local state — isolates each request
+    *structurally*: two concurrent calls hold distinct ``RouterRuntime``
+    instances, so neither can observe the other's options. Worker threads
+    receive the same frozen instance by value (no thread-local to replay).
+
+    Fields:
+        target_ratio: Per-request ML target ratio (``None`` = compressor default).
+        force_kompress: Force the KOMPRESS strategy regardless of detection.
+        kompress_model: Override Kompress model id (``"disabled"`` skips ML).
+        compression_policy: Per-request CompressionPolicy; ``_record_to_toin``
+            gates TOIN writes on ``policy.toin_read_only`` (Subscription mode).
+            ``None`` = no gate (direct ``compress()`` callers).
+    """
+
+    target_ratio: float | None = None
+    force_kompress: bool = False
+    kompress_model: str | None = None
+    compression_policy: Any = None
+
+    @classmethod
+    def from_kwargs(cls, kwargs: dict[str, Any]) -> RouterRuntime:
+        """Build a RouterRuntime from ``apply()`` kwargs.
+
+        Mirrors the historical defaults exactly: ``target_ratio`` /
+        ``kompress_model`` / ``compression_policy`` default to ``None`` and
+        ``force_kompress`` coerces to ``bool`` (``False`` when absent).
+        """
+        return cls(
+            target_ratio=kwargs.get("target_ratio"),
+            force_kompress=bool(kwargs.get("force_kompress", False)),
+            kompress_model=kwargs.get("kompress_model"),
+            compression_policy=kwargs.get("compression_policy"),
+        )
+
+
+# Shared default for the no-options path. Frozen + immutable, so it is safe to
+# share as a module-level singleton across every call that omits ``runtime``
+# (direct ``compress()`` callers, tests, hand-written pipelines).
+_DEFAULT_RUNTIME = RouterRuntime()
 
 
 def _router_debug_dumps(value: Any) -> str:
@@ -496,9 +544,9 @@ class ContentRouter(Transform):
         # The five SELF-CONTAINED factories (SmartCrusher, Search, Log, Diff,
         # HTML) read only ``self.config`` and cache their instance — they live
         # in ``CompressorRegistry`` now. The ``_get_*`` methods below delegate
-        # to it. ``_kompress`` STAYS here: ``_get_kompress`` reads the
-        # thread-local ``_runtime_kompress_model`` (#10 surface), so it is not
-        # self-contained and must not move into the registry.
+        # to it. ``_kompress`` STAYS here: ``_get_kompress`` takes the
+        # per-request ``model_id`` (from ``runtime.kompress_model``), so it is
+        # not self-contained and must not move into the registry.
         self._registry = CompressorRegistry(self.config)
         # Per-strategy dispatch + no-savings fallback chain. Holds no router
         # reference: the compressor getters and the two router-bound callables
@@ -523,65 +571,14 @@ class ContentRouter(Transform):
         # TOIN integration for cross-strategy learning
         self._toin: Any = None
 
-        # Per-request runtime options (``_runtime_target_ratio``,
-        # ``_runtime_force_kompress``, ``_runtime_kompress_model``,
-        # ``_runtime_compression_policy``) are exposed as properties
-        # backed by this ``threading.local``. The pipeline reuses ONE
-        # ContentRouter across every ``compress()`` call, so storing
-        # per-request state as plain instance attributes let two
-        # concurrent calls with different configs clobber each other.
-        # Thread-local storage isolates each in-flight request: the
-        # property getters fall back to the documented defaults
-        # (``None`` / ``False``) when the current thread hasn't set a
-        # value, preserving single-threaded behaviour exactly. Because the
-        # getters always exist and never raise, read sites use the property
-        # directly (``self._runtime_*``), not a ``getattr(..., default)`` probe.
-        self._tls = threading.local()
-
+        # Per-request runtime options (target_ratio / force_kompress /
+        # kompress_model / compression_policy) are NOT router state. They are
+        # carried per call as a frozen ``RouterRuntime`` value passed down the
+        # call chain (``compress(..., runtime=...)``), so concurrent requests
+        # on this shared instance are isolated structurally — no thread-local,
+        # no main->worker replay. Worker threads receive the same frozen
+        # instance by value.
         self._cache = CompressionCache()
-
-    # ------------------------------------------------------------------
-    # Per-request runtime options (thread-local backed).
-    #
-    # ``_runtime_compression_policy`` carries the per-request
-    # CompressionPolicy, set from ``kwargs["compression_policy"]`` at
-    # the start of ``apply()`` and read by ``_record_to_toin`` to gate
-    # TOIN writes when ``policy.toin_read_only`` is true (Subscription
-    # mode). Defaults to ``None`` so direct ``compress()`` callers (e.g.
-    # tests, hand-written pipelines that don't set a policy)
-    # leave TOIN writes ungated.
-    # ------------------------------------------------------------------
-    @property
-    def _runtime_target_ratio(self) -> float | None:
-        return getattr(self._tls, "target_ratio", None)
-
-    @_runtime_target_ratio.setter
-    def _runtime_target_ratio(self, value: float | None) -> None:
-        self._tls.target_ratio = value
-
-    @property
-    def _runtime_force_kompress(self) -> bool:
-        return getattr(self._tls, "force_kompress", False)
-
-    @_runtime_force_kompress.setter
-    def _runtime_force_kompress(self, value: bool) -> None:
-        self._tls.force_kompress = value
-
-    @property
-    def _runtime_kompress_model(self) -> str | None:
-        return getattr(self._tls, "kompress_model", None)
-
-    @_runtime_kompress_model.setter
-    def _runtime_kompress_model(self, value: str | None) -> None:
-        self._tls.kompress_model = value
-
-    @property
-    def _runtime_compression_policy(self) -> Any:
-        return getattr(self._tls, "compression_policy", None)
-
-    @_runtime_compression_policy.setter
-    def _runtime_compression_policy(self, value: Any) -> None:
-        self._tls.compression_policy = value
 
     def _record_to_toin(
         self,
@@ -592,6 +589,8 @@ class ContentRouter(Transform):
         compressed_tokens: int,
         language: str | None = None,
         context: str = "",
+        *,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> None:
         """Record compression to TOIN for cross-user learning.
 
@@ -620,9 +619,9 @@ class ContentRouter(Transform):
         # ``toin_read_only=True`` (Subscription auth mode), don't
         # mutate the TOIN learning pool from this request. Direct
         # ``compress()`` callers don't go through ``apply()`` and
-        # have ``self._runtime_compression_policy is None`` — those
+        # have ``runtime.compression_policy is None`` — those
         # keep write-enabled behaviour.
-        policy = self._runtime_compression_policy
+        policy = runtime.compression_policy
         if policy is not None and policy.toin_read_only:
             logger.debug(
                 "ContentRouter: skipping TOIN record_compression for %s "
@@ -676,25 +675,18 @@ class ContentRouter(Transform):
         content: str,
         context: str,
         bias: float,
-        runtime_options: dict[str, Any] | None = None,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> tuple[RouterCompressionResult, float]:
         """Compress with wall-clock timing.  Used by parallel executor.
 
-        Per-request runtime options live in ``self._tls`` (thread-local), which
-        is set on the MAIN thread. Worker threads have their own empty
-        thread-local, so they would read the DEFAULTS and silently drop the
-        per-request options. The main thread snapshots the options and
-        passes them in here; we replay them into the worker's thread-local
-        before compressing so ``force_kompress`` / ``target_ratio`` /
-        ``kompress_model`` / ``compression_policy`` reach every worker.
+        Per-request options ride the frozen ``runtime`` value, passed by
+        argument from the main thread. Worker threads receive the SAME
+        immutable instance by value — there is no thread-local to replay, so
+        ``force_kompress`` / ``target_ratio`` / ``kompress_model`` /
+        ``compression_policy`` reach every worker structurally.
         """
-        if runtime_options is not None:
-            self._runtime_target_ratio = runtime_options["target_ratio"]
-            self._runtime_force_kompress = runtime_options["force_kompress"]
-            self._runtime_kompress_model = runtime_options["kompress_model"]
-            self._runtime_compression_policy = runtime_options["compression_policy"]
         t0 = time.perf_counter()
-        result = self.compress(content, context=context, bias=bias)
+        result = self.compress(content, context=context, bias=bias, runtime=runtime)
         return result, (time.perf_counter() - t0) * 1000
 
     def compress(
@@ -703,6 +695,8 @@ class ContentRouter(Transform):
         context: str = "",
         question: str | None = None,
         bias: float = 1.0,
+        *,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> RouterCompressionResult:
         """Compress content using optimal strategy based on content detection.
 
@@ -712,6 +706,10 @@ class ContentRouter(Transform):
             question: Optional question for QA-aware compression. When provided,
                 tokens relevant to answering this question are preserved.
             bias: Compression bias multiplier (>1 = keep more, <1 = keep fewer).
+            runtime: Frozen per-request options (``target_ratio`` /
+                ``force_kompress`` / ``kompress_model`` /
+                ``compression_policy``). Defaults to the shared
+                ``_DEFAULT_RUNTIME`` for direct callers that pass no options.
 
         Returns:
             RouterCompressionResult with compressed content and routing metadata.
@@ -751,7 +749,7 @@ class ContentRouter(Transform):
             # Determine strategy from content analysis
             mixed = is_mixed_content(content)
             detection = _detect_content(content)
-            force_kompress = bool(self._runtime_force_kompress)
+            force_kompress = bool(runtime.force_kompress)
             strategy = (
                 CompressionStrategy.KOMPRESS
                 if force_kompress
@@ -774,9 +772,13 @@ class ContentRouter(Transform):
                 )
 
             if strategy == CompressionStrategy.MIXED:
-                result = self._compress_mixed(content, context, question, bias=bias)
+                result = self._compress_mixed(
+                    content, context, question, bias=bias, runtime=runtime
+                )
             else:
-                result = self._compress_pure(content, strategy, context, question, bias=bias)
+                result = self._compress_pure(
+                    content, strategy, context, question, bias=bias, runtime=runtime
+                )
 
         # Empty-output guard: compression must NEVER blank out non-empty input.
         # An empty user-message content makes Anthropic reject the whole request
@@ -889,6 +891,8 @@ class ContentRouter(Transform):
         context: str,
         question: str | None = None,
         bias: float = 1.0,
+        *,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> RouterCompressionResult:
         """Compress mixed content by splitting and routing sections.
 
@@ -933,6 +937,7 @@ class ContentRouter(Transform):
                 section.language,
                 question,
                 bias=bias,
+                runtime=runtime,
             )
 
             # Preserve code fence markers
@@ -965,6 +970,8 @@ class ContentRouter(Transform):
         context: str,
         question: str | None = None,
         bias: float = 1.0,
+        *,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> RouterCompressionResult:
         """Compress pure (non-mixed) content.
 
@@ -981,7 +988,7 @@ class ContentRouter(Transform):
         original_tokens = len(content.split())
 
         compressed, compressed_tokens, strategy_chain = self._apply_strategy_to_content(
-            content, strategy, context, question=question, bias=bias
+            content, strategy, context, question=question, bias=bias, runtime=runtime
         )
 
         return RouterCompressionResult(
@@ -1007,6 +1014,8 @@ class ContentRouter(Transform):
         language: str | None = None,
         question: str | None = None,
         bias: float = 1.0,
+        *,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> tuple[str, int, list[str]]:
         """Apply a compression strategy to content.
 
@@ -1016,6 +1025,14 @@ class ContentRouter(Transform):
         in, so monkeypatching those router methods still takes effect (a
         construction-time capture in the dispatcher would have been stale).
 
+        The per-request ``runtime`` is bound into the ``try_ml_compressor`` /
+        ``record_to_toin`` closures here rather than added to the dispatcher's
+        signature: the dispatcher stays a pure leaf that calls them as opaque
+        callables, and ``runtime`` rides the closure to the two sites that read
+        it (``target_ratio`` / ``kompress_model`` for ML, ``compression_policy``
+        for TOIN). Because the closures forward to ``self._try_ml_compressor`` /
+        ``self._record_to_toin``, monkeypatching those methods still bites.
+
         Args:
             content: Content to compress.
             strategy: Strategy to use.
@@ -1023,6 +1040,7 @@ class ContentRouter(Transform):
             language: Language hint for code.
             question: Optional question for QA-aware compression.
             bias: Compression bias multiplier (>1 = keep more, <1 = keep fewer).
+            runtime: Frozen per-request options bound into the ML/TOIN closures.
 
         Returns:
             Tuple of (compressed_content, compressed_token_count,
@@ -1033,6 +1051,17 @@ class ContentRouter(Transform):
             log]``). Log readers use this to see *how* we got to the
             final compressor without parsing decision_reason strings.
         """
+
+        def try_ml_compressor(
+            ml_content: str, ml_context: str, ml_question: str | None
+        ) -> tuple[str, int]:
+            return self._try_ml_compressor(
+                ml_content, ml_context, ml_question, runtime=runtime
+            )
+
+        def record_to_toin(**kwargs: Any) -> None:
+            self._record_to_toin(**kwargs, runtime=runtime)
+
         return self._dispatcher.apply(
             content,
             strategy,
@@ -1045,12 +1074,17 @@ class ContentRouter(Transform):
             get_log_compressor=self._get_log_compressor,
             get_diff_compressor=self._get_diff_compressor,
             get_html_extractor=self._get_html_extractor,
-            try_ml_compressor=self._try_ml_compressor,
-            record_to_toin=self._record_to_toin,
+            try_ml_compressor=try_ml_compressor,
+            record_to_toin=record_to_toin,
         )
 
     def _try_ml_compressor(
-        self, content: str, context: str, question: str | None = None
+        self,
+        content: str,
+        context: str,
+        question: str | None = None,
+        *,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> tuple[str, int]:
         """ML-based compression using Kompress.
 
@@ -1089,14 +1123,14 @@ class ContentRouter(Transform):
 
         # Primary: Kompress — downloads from chopratejas/kompress-v2-base on first use
         if self.config.enable_kompress:
-            compressor = self._get_kompress()
+            compressor = self._get_kompress(runtime.kompress_model)
             if compressor:
                 try:
                     result = compressor.compress(
                         text_to_compress,
                         context=context,
                         question=question,
-                        target_ratio=self._runtime_target_ratio,
+                        target_ratio=runtime.target_ratio,
                     )
                     compressed = result.compressed
                     compressed_tokens = result.compressed_tokens
@@ -1260,18 +1294,16 @@ class ContentRouter(Transform):
 
         return status
 
-    def _get_kompress(self) -> Any:
+    def _get_kompress(self, model_id: str | None = None) -> Any:
         """Get KompressCompressor (lazy load). Downloads from HuggingFace on first use.
 
-        Respects runtime kompress_model kwarg:
+        Respects the per-request ``model_id`` (from ``runtime.kompress_model``):
         - None: use default (chopratejas/kompress-v2-base) — cached on self
         - "disabled": return None (skip ML compression entirely)
         - any model ID string: create compressor with that model
           (model weights are cached at module level in kompress_compressor.py,
           so repeated calls with the same model_id are cheap)
         """
-        model_id = self._runtime_kompress_model
-
         # Explicitly disabled — no ML compression
         if model_id == "disabled":
             return None
@@ -1413,19 +1445,14 @@ class ContentRouter(Transform):
             "min_chars_for_block_compression",
             self.config.min_chars_for_block_compression,
         )
-        # Store runtime options for access by _route_and_compress_block.
-        # These write through to thread-local storage (see the
-        # ``_runtime_*`` properties on __init__), so concurrent
-        # compress() calls with different configs stay isolated.
-        self._runtime_target_ratio = kwargs.get("target_ratio")
-        self._runtime_force_kompress = bool(kwargs.get("force_kompress", False))
-        self._runtime_kompress_model = kwargs.get("kompress_model")
-        # Capture the per-request CompressionPolicy so
-        # ``_record_to_toin`` can gate TOIN writes on
-        # ``policy.toin_read_only``. ``None`` when the caller didn't
-        # pass a policy — ``_record_to_toin`` treats that as "no gate"
-        # for callers that don't set a policy.
-        self._runtime_compression_policy = kwargs.get("compression_policy")
+        # Build the frozen per-request runtime once. It is threaded by
+        # argument into every compress() call below (block handler, inline,
+        # and parallel workers), so concurrent apply() calls on this shared
+        # router stay isolated by value — no thread-local, no replay.
+        # ``compression_policy`` lets ``_record_to_toin`` gate TOIN writes on
+        # ``policy.toin_read_only``; ``None`` (caller passed no policy) means
+        # "no gate".
+        runtime = RouterRuntime.from_kwargs(kwargs)
 
         tokens_before = sum(tokenizer.count_text(str(m.get("content", ""))) for m in messages)
         context = kwargs.get("context", "")
@@ -1559,6 +1586,7 @@ class ContentRouter(Transform):
                     skip_user=skip_user,
                     skip_system=skip_system,
                     compress_assistant_text_blocks=compress_assistant_text_blocks,
+                    runtime=runtime,
                 )
                 result_slots[i] = transformed_message
                 route_counts["content_blocks"] += 1
@@ -1737,18 +1765,15 @@ class ContentRouter(Transform):
                 task_results = []
                 for _, task_content, task_ctx, task_bias, _ in pending_tasks:
                     t0 = time.perf_counter()
-                    r = self.compress(task_content, context=task_ctx, bias=task_bias)
+                    r = self.compress(
+                        task_content, context=task_ctx, bias=task_bias, runtime=runtime
+                    )
                     task_results.append((r, (time.perf_counter() - t0) * 1000))
             else:
-                # Parallel compression via thread pool. Snapshot the per-request
-                # runtime options on THIS (main) thread — worker threads have an
-                # empty thread-local and would otherwise read the defaults.
-                runtime_options = {
-                    "target_ratio": self._runtime_target_ratio,
-                    "force_kompress": self._runtime_force_kompress,
-                    "kompress_model": self._runtime_kompress_model,
-                    "compression_policy": self._runtime_compression_policy,
-                }
+                # Parallel compression via thread pool. The frozen ``runtime``
+                # is passed by value to every worker — there is no thread-local
+                # to replay, so each worker compresses under the same immutable
+                # per-request options the main thread holds.
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = []
                     for _, task_content, task_ctx, task_bias, _ in pending_tasks:
@@ -1758,7 +1783,7 @@ class ContentRouter(Transform):
                                 task_content,
                                 task_ctx,
                                 task_bias,
-                                runtime_options,
+                                runtime,
                             )
                         )
                     task_results = [f.result() for f in futures]
@@ -1908,6 +1933,7 @@ class ContentRouter(Transform):
         skip_user: bool = True,
         skip_system: bool = True,
         compress_assistant_text_blocks: bool = False,
+        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> dict[str, Any]:
         """Process content blocks (Anthropic format) for compression.
 
@@ -2094,7 +2120,9 @@ class ContentRouter(Transform):
                         route_counts.setdefault("cache_miss", 0)
                         route_counts["cache_miss"] += 1
                     t0 = time.perf_counter()
-                    result = self.compress(tool_content, context=context, bias=bias)
+                    result = self.compress(
+                        tool_content, context=context, bias=bias, runtime=runtime
+                    )
                     compress_ms = (time.perf_counter() - t0) * 1000
                     if compressor_timing is not None:
                         key = f"compressor:{result.strategy_used.value}"
@@ -2194,7 +2222,9 @@ class ContentRouter(Transform):
                         route_counts.setdefault("cache_miss", 0)
                         route_counts["cache_miss"] += 1
                     t0 = time.perf_counter()
-                    result = self.compress(text_content, context=context, bias=1.0)
+                    result = self.compress(
+                        text_content, context=context, bias=1.0, runtime=runtime
+                    )
                     compress_ms = (time.perf_counter() - t0) * 1000
                     if compressor_timing is not None:
                         key = f"compressor:{result.strategy_used.value}"

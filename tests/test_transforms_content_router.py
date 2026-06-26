@@ -296,7 +296,7 @@ def test_content_router_mixed_pure_apply_and_toin(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         router,
         "_apply_strategy_to_content",
-        lambda content, strategy, context, language=None, question=None, bias=1.0: (
+        lambda content, strategy, context, language=None, question=None, bias=1.0, **kwargs: (
             f"{strategy.value}:{content}",
             len(content.split()) - 1,
             [strategy.value],
@@ -310,7 +310,7 @@ def test_content_router_mixed_pure_apply_and_toin(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         router,
         "_apply_strategy_to_content",
-        lambda content, strategy, context, language=None, question=None, bias=1.0: (
+        lambda content, strategy, context, language=None, question=None, bias=1.0, **kwargs: (
             "shrunk",
             1,
             [strategy.value],
@@ -437,7 +437,7 @@ def _make_router_with_mock_compress(monkeypatch: pytest.MonkeyPatch) -> ContentR
     ``[compressed]`` payload at ratio 0.5 (passes the < min_ratio check)."""
     router = ContentRouter(ContentRouterConfig())
 
-    def fake_compress(content, context: str = "", bias: float = 1.0):
+    def fake_compress(content, context: str = "", bias: float = 1.0, **kwargs):
         return SimpleNamespace(
             compressed=content[: len(content) // 2] + "[compressed]",
             compression_ratio=0.5,
