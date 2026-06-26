@@ -844,6 +844,62 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn is_iso_datetime_rejects_every_corrupted_position() {
+        // `is_iso_datetime` is a positional structural check
+        // (`DDDD-DD-DD` + `T`|` ` + `DD:DD:DD`). cargo-mutants flagged EVERY
+        // `&&` junction (lines 800-817) as a surviving `&&`→`||` mutant, plus
+        // `is_digit`→`true` (:839), because no test fed a string that is valid
+        // everywhere EXCEPT one position. Corrupting each position with `X`
+        // (a non-digit that is also none of `-`/`:`/`T`/` `) makes exactly one
+        // side of one junction false; a `&&`→`||` there would wrongly accept,
+        // and `is_digit`→`true` would wrongly accept the digit positions.
+        let base = "2024-01-15T12:30:45";
+        assert!(is_iso_datetime(base), "valid ISO datetime must pass");
+        assert!(
+            is_iso_datetime("2024-01-15 12:30:45"),
+            "space at [10] is a valid separator"
+        );
+        assert!(
+            is_iso_datetime("2024-01-15T12:30:45.123Z"),
+            "trailing fraction/zone past index 18 is ignored (len>=19)"
+        );
+        for k in 0..base.len() {
+            let mut bytes = base.as_bytes().to_vec();
+            bytes[k] = b'X';
+            let corrupted = String::from_utf8(bytes).unwrap();
+            assert!(
+                !is_iso_datetime(&corrupted),
+                "a structurally-invalid byte at position {k} must be rejected, \
+                 but was accepted: {corrupted:?}"
+            );
+        }
+        assert!(
+            !is_iso_datetime("2024-01-15T12:30:4"),
+            "len 18 < 19 must be rejected (the length guard)"
+        );
+    }
+
+    #[test]
+    fn is_iso_date_rejects_every_corrupted_position() {
+        // Same kill for the date-only validator (`DDDD-DD-DD`, exactly 10
+        // chars): the `&&` junctions at 825-834 all survived as `&&`→`||`.
+        let base = "2024-01-15";
+        assert!(is_iso_date(base), "valid ISO date must pass");
+        for k in 0..base.len() {
+            let mut bytes = base.as_bytes().to_vec();
+            bytes[k] = b'X';
+            let corrupted = String::from_utf8(bytes).unwrap();
+            assert!(
+                !is_iso_date(&corrupted),
+                "a structurally-invalid byte at position {k} must be rejected, \
+                 but was accepted: {corrupted:?}"
+            );
+        }
+        assert!(!is_iso_date("2024-01-150"), "len 11 != 10 must be rejected");
+        assert!(!is_iso_date("2024-01-1"), "len 9 != 10 must be rejected");
+    }
+
     fn analyzer() -> SmartAnalyzer {
         SmartAnalyzer::new(SmartCrusherConfig::default())
     }
