@@ -190,17 +190,31 @@ def _section_debug(section: ContentSection, index: int) -> dict[str, Any]:
 
 
 def _detect_content(content: str) -> DetectionResult:
-    """Detect content type via the Rust detection chain.
+    """Detect content type via a two-stage Rust-primary / Python-backstop chain.
 
-    This runs through `headroom._core.detect_content_type`,
-    which runs the magika→unidiff→PlainText chain. There is no Python-side
-    Magika+regex fallback path — single detection
-    surface, no parallel paths. The Rust extension is a hard dep
-    (no Python fallback) per `feedback_no_silent_fallbacks.md`.
+    Stage 1 (primary): `headroom._core.detect_content_type` (the Rust
+    detection chain) classifies the content. Its non-``PLAIN_TEXT``
+    verdicts are authoritative and are never overridden.
+
+    Stage 2 (backstop): when — and only when — Rust returns
+    ``PLAIN_TEXT``, the Python regex detector
+    (`content_detector.detect_content_type`) gets a second look. If it
+    recognises a structured type that Rust read as plain text (e.g. a
+    ripgrep block, or a JSON array the Rust tier let through as text),
+    the Python result wins and changes routing. This is a parity
+    backstop for the cases where the two regex engines (`re` vs Rust's
+    `regex` crate) disagree on a boundary input — it is a real, live
+    parallel path, not a retired one.
+
+    The consensus rule (Rust primary; Python backstop ONLY on a
+    Rust-``PLAIN_TEXT`` divergence) is pinned by the parity tests in
+    ``test_transforms_content_router.py``. Removing the Stage-2 branch
+    below silently re-routes every input Rust under-classifies as plain
+    text — keep those tests green if you touch it.
 
     The Rust binding returns the legacy `DetectionResult` shape with
-    `confidence=1.0` and an empty metadata dict. Existing callers
-    only consumed `.content_type` from it; the strategy mapping in
+    `confidence=1.0` and an empty metadata dict. Downstream callers only
+    consume `.content_type`; the strategy mapping in
     `_strategy_from_detection` keys off that field alone.
     """
     from headroom._core import detect_content_type as _rust_detect

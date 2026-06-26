@@ -101,15 +101,14 @@ def test_router_result_helpers_and_summary() -> None:
 
 
 def test_content_signature_and_detection_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stage-3d (PR5) wired `_detect_content` through the Rust chain
-    (`headroom._core.detect_content_type` → magika → unidiff →
-    PlainText). The pre-PR5 Python-side `_get_magika_detector`
-    fallback path is gone.
+    """`_detect_content` Stage 1: a Rust non-``PLAIN_TEXT`` verdict is
+    authoritative and propagates back as the matching Python
+    `ContentType`.
 
-    This test asserts the new contract:
-    1. The detection helper delegates to the Rust binding.
-    2. Whatever `ContentType` the Rust side returns flows back as a
-       Python `DetectionResult` with that same `content_type`.
+    This covers only the Rust-primary path. The Stage-2 Python regex
+    backstop — which fires ONLY when Rust returns ``PLAIN_TEXT`` and the
+    Python detector disagrees — is pinned by the parity tests below
+    (`test_detect_content_*`).
     """
     signature = _create_content_signature("search", "file.py:10:match", language="python")
     assert signature is not None
@@ -131,6 +130,105 @@ def test_content_signature_and_detection_helpers(monkeypatch: pytest.MonkeyPatch
     assert result.content_type is ContentType.SOURCE_CODE
     assert result.confidence == 1.0
     assert result.metadata == {}
+
+
+def _fake_rust(content_type: str) -> SimpleNamespace:
+    """Stand-in for the Rust ``detect_content_type`` binding."""
+    return SimpleNamespace(content_type=content_type, confidence=1.0, metadata={})
+
+
+def test_detect_content_python_backstop_overrides_rust_plaintext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage-2 divergence branch: Rust says ``PLAIN_TEXT``, the Python regex
+    detector disagrees -> the Python verdict wins and changes routing.
+
+    This is the live parallel path the `_detect_content` docstring documents.
+    Deleting the override branch makes this RED -- the precise regression the
+    test exists to catch (a maintainer "cleaning up the dead Python detector").
+    """
+    import headroom._core as _core
+
+    monkeypatch.setattr(_core, "detect_content_type", lambda content: _fake_rust("text"))
+    monkeypatch.setattr(
+        content_router_module,
+        "_regex_detect_content_type",
+        lambda content: DetectionResult(ContentType.SEARCH_RESULTS, 0.9, {}),
+    )
+
+    result = _detect_content("src/main.py:42:    return None")
+    assert result.content_type is ContentType.SEARCH_RESULTS
+
+
+def test_detect_content_rust_nonplaintext_is_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage-1 primacy: a non-``PLAIN_TEXT`` Rust verdict is authoritative --
+    the Python backstop must NOT run and cannot override it."""
+    import headroom._core as _core
+
+    monkeypatch.setattr(_core, "detect_content_type", lambda content: _fake_rust("source_code"))
+
+    consulted = {"python": False}
+
+    def _spy(content: str) -> DetectionResult:
+        consulted["python"] = True
+        return DetectionResult(ContentType.SEARCH_RESULTS, 1.0, {})
+
+    monkeypatch.setattr(content_router_module, "_regex_detect_content_type", _spy)
+
+    result = _detect_content("def main(): pass")
+    assert result.content_type is ContentType.SOURCE_CODE
+    assert consulted["python"] is False  # backstop never consulted on a Rust non-PLAIN_TEXT verdict
+
+
+def test_detect_content_both_plaintext_stays_plaintext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage-2 agreement: Rust ``PLAIN_TEXT`` + Python ``PLAIN_TEXT`` ->
+    ``PLAIN_TEXT`` (the backstop is consulted but does not change the verdict)."""
+    import headroom._core as _core
+
+    monkeypatch.setattr(_core, "detect_content_type", lambda content: _fake_rust("text"))
+    monkeypatch.setattr(
+        content_router_module,
+        "_regex_detect_content_type",
+        lambda content: DetectionResult(ContentType.PLAIN_TEXT, 0.5, {}),
+    )
+
+    result = _detect_content("just some ordinary prose")
+    assert result.content_type is ContentType.PLAIN_TEXT
+
+
+def test_detect_content_real_corpus_consensus() -> None:
+    """End-to-end parity: feed the SAME corpus through the real (un-mocked)
+    Rust + Python detectors and assert the documented consensus rule.
+
+    The ``search`` and ``json`` cases are real Stage-2 overrides -- Rust reads
+    them as ``PLAIN_TEXT`` and the Python backstop recovers the structured
+    type. If the override branch is removed they regress to ``PLAIN_TEXT``, so
+    this pins the live two-detector behavior, not a mock of it.
+    """
+    cases = [
+        (
+            "src/main.py:42:    def handler(self):\nlib/x.py:1:import os",
+            ContentType.SEARCH_RESULTS,
+        ),
+        (
+            '[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]',
+            ContentType.JSON_ARRAY,
+        ),
+        (
+            "--- a/f.py\n+++ b/f.py\n@@ -1,3 +1,3 @@\n-old\n+new\n ctx",
+            ContentType.GIT_DIFF,
+        ),
+        (
+            "Ordinary English prose with nothing structured about it at all today.",
+            ContentType.PLAIN_TEXT,
+        ),
+    ]
+    for content, expected in cases:
+        assert _detect_content(content).content_type is expected, content[:40]
 
 
 def test_mixed_content_section_splitting_and_json_extraction() -> None:
