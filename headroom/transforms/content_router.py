@@ -65,6 +65,7 @@ from .error_detection import content_has_strong_error_indicators
 #   * ``content_router_module.time`` patches still target the same ``time``
 #     module object the cache uses.
 from .router_cache import CompressionCache
+from .router_ccr_mirror import CcrMirror
 from .router_dispatch import StrategyDispatcher
 from .router_policy import (
     CompressionStrategy,
@@ -511,6 +512,12 @@ class ContentRouter(Transform):
             log_router_debug=_log_router_debug,
             json_shape=_json_shape,
         )
+        # CCR-backing seam for the result-cache HIT path. Holds no router
+        # reference: the SmartCrusher getter is passed per-call by the
+        # ``_ensure_ccr_backed`` delegator (resolving ``self._get_smart_crusher``
+        # fresh), so monkeypatching that getter still bites. Only the
+        # lifetime-stable ``logger`` rides the constructor.
+        self._ccr_mirror = CcrMirror(logger=logger)
         self._kompress: Any = None
 
         # TOIN integration for cross-strategy learning
@@ -1138,85 +1145,27 @@ class ContentRouter(Transform):
         """Ensure every ``<<ccr:HASH>>`` pointer in *cached_compressed* resolves
         in the Python ``compression_store`` (the store ``/v1/retrieve`` reads).
 
-        Returns ``True`` iff, after a best-effort re-mirror, EVERY referenced
-        hash is backed by a live store entry. Returns ``False`` if any sentinel
-        is unbackable — the caller MUST then refuse to serve the stale cached
-        output and recompute instead.
-
-        Why this is needed: the Tier-2 result cache (30-min TTL) and BOTH CCR
-        stores (Rust + Python, each 300-s TTL) have INDEPENDENT lifetimes. A
-        result-cache HIT short-circuits ``smart_crush_content``, so the normal
-        Rust→Python mirror never runs. After ~5 minutes BOTH CCR stores expire
-        while the result cache still holds the crushed output: serving it would
-        emit a ``<<ccr:HASH>>`` pointing to nothing — a signalled-but-
-        unrecoverable drop (silent data loss).
-
-        The re-mirror (``SmartCrusher._mirror_ccr_to_python_store``) refreshes
-        the Python store from the Rust store when the Rust entry is still live.
-        If the Rust entry is ALSO gone, the re-mirror is a no-op and the hash
-        stays unbacked — this method reports that via ``False`` so the caller
-        can recompute (a fresh compress re-creates + re-stores the backing).
-
-        Best-effort on errors: a failure to verify is treated as unbacked
-        (``False``) so the caller falls back to the safe recompute path.
+        Thin delegator to :meth:`CcrMirror.ensure_ccr_backed`. The SmartCrusher
+        getter is resolved fresh here on every call and passed in, so
+        monkeypatching ``self._get_smart_crusher`` (or the underlying registry)
+        still takes effect — a construction-time capture in the mirror would
+        have been stale. Kept as an instance method for the test/back-compat
+        seam: the three result-cache HIT sites call ``self._ensure_ccr_backed``.
         """
-        hashes = self._extract_ccr_hashes(cached_compressed)
-        if not hashes:
-            # No sentinels → nothing to back → trivially safe to serve.
-            return True
-
-        crusher = self._get_smart_crusher()
-        if crusher is not None:
-            try:
-                crusher._mirror_ccr_to_python_store(
-                    rendered=cached_compressed,
-                    strategy="result_cache_hit",
-                    query_context=context,
-                    tool_name=None,
-                )
-            except Exception as e:  # pragma: no cover - best effort
-                logger.debug("_ensure_ccr_backed: mirror raised (non-fatal): %s", e)
-
-        # Verify against the authoritative Python store: a sentinel is "backed"
-        # only if `/v1/retrieve` would resolve it right now.
-        try:
-            from ..cache.compression_store import get_compression_store
-
-            store = get_compression_store()
-        except Exception as e:  # pragma: no cover - defensive
-            # Cannot verify → assume unbacked, force the safe recompute path.
-            logger.debug("_ensure_ccr_backed: cannot get compression_store (%s)", e)
-            return False
-
-        for h in hashes:
-            if store.retrieve(h) is None:
-                logger.debug(
-                    "_ensure_ccr_backed: hash %s unbackable after re-mirror "
-                    "(both CCR stores expired) — recompute required",
-                    h,
-                )
-                return False
-        return True
+        return self._ccr_mirror.ensure_ccr_backed(
+            cached_compressed,
+            context,
+            get_smart_crusher=self._get_smart_crusher,
+        )
 
     @staticmethod
     def _extract_ccr_hashes(text: str) -> set[str]:
         """Collect every distinct ``<<ccr:HASH...>>`` hash in *text*.
 
-        Reuses SmartCrusher's marker scanner so the parse grammar stays in one
-        place (no regex; tolerates the row-drop, opaque-blob, and bare marker
-        forms).
+        Thin delegator to :meth:`CcrMirror.extract_ccr_hashes` (kept as a
+        static back-compat seam).
         """
-        if "<<ccr:" not in text:
-            return set()
-        from .smart_crusher import SmartCrusher
-
-        hashes: set[str] = set()
-        try:
-            parsed = json.loads(text)
-            SmartCrusher._collect_ccr_hashes(parsed, hashes)
-        except (json.JSONDecodeError, ValueError):
-            SmartCrusher._collect_ccr_hashes_from_string(text, hashes)
-        return hashes
+        return CcrMirror.extract_ccr_hashes(text)
 
     def _get_search_compressor(self) -> Any:
         """Get SearchCompressor (lazy load).
