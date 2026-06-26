@@ -12,25 +12,17 @@
 //!    field=value filters). Tool-call arguments are usually literal
 //!    keywords that appear verbatim in the response, so BM25 catches
 //!    most cases.
-//! 2. **Embedding** (future commit): sentence-transformer ONNX model
-//!    for semantic matching when query and items use different
-//!    vocabularies.
-//! 3. **Hybrid** (future commit): combines BM25 and embedding signals.
+//! 2. **Hybrid** (`hybrid`): wraps BM25 with a match boost so
+//!    single-term matches clear the relevance threshold. BM25-only (the
+//!    embedding-fusion path was removed with the `embeddings` feature).
 //!
 //! Each scorer implements the `RelevanceScorer` trait — same surface
 //! as Python's abstract base class.
 
 mod base;
 mod bm25;
-// `embedding` is compiled only with the `embeddings` feature — it pulls
-// `fastembed`/`ort` (ONNX Runtime). With the feature off, `HybridScorer`
-// runs BM25-only and the `"embedding"` scorer tier is unavailable.
-#[cfg(feature = "embeddings")]
-mod embedding;
 mod hybrid;
 
 pub use base::{RelevanceScore, RelevanceScorer};
 pub use bm25::BM25Scorer;
-#[cfg(feature = "embeddings")]
-pub use embedding::EmbeddingScorer;
 pub use hybrid::HybridScorer;

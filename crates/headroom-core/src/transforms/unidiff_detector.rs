@@ -1,13 +1,11 @@
-//! Unidiff-based diff detection (Tier 2).
+//! Unidiff-based diff detection (Tier 1).
 //!
-//! Sits behind `magika_detector` (Tier 1, compiled only with the
-//! `magika` feature) in the detection pipeline. When magika is
-//! present it is fast and right most of the time, but
-//! it's a probabilistic ML classifier — short, prose-prefixed, or
-//! "looks like code because the lines are code" diffs can slip past it
-//! into [`ContentType::PlainText`]. Tier 2 catches those by running
-//! the [`unidiff`] parser and checking whether the input parses to a
-//! non-empty patch set.
+//! The first tier of the Rust detection chain (the optional `magika` ML
+//! classifier was removed). It catches diffs — including short,
+//! prose-prefixed, or "looks like code because the lines are code"
+//! shapes — by running the [`unidiff`] parser and checking whether the
+//! input parses to a non-empty patch set. Inputs that don't parse fall
+//! through to [`ContentType::PlainText`].
 //!
 //! # Why a parser, not another regex
 //!
@@ -28,7 +26,6 @@
 //!
 //! - `detect_diff(content)` is the [`ContentType`]-typed wrapper:
 //!   returns `Some(ContentType::GitDiff)` on hit, `None` otherwise.
-//!   The router chains this after Magika.
 //!
 //! # Known gaps (deliberately punted)
 //!
@@ -73,9 +70,9 @@ pub fn is_diff(content: &str) -> bool {
 }
 
 /// [`ContentType`]-typed wrapper. Returns `Some(ContentType::GitDiff)`
-/// when [`is_diff`] is true, `None` otherwise. The router
-/// chains this after Magika and uses the `Option` to cleanly fall
-/// through to Tier 3 (`PlainText`) when both tiers say "not a diff".
+/// when [`is_diff`] is true, `None` otherwise. The router uses the
+/// `Option` to cleanly fall through to `PlainText` when the parser
+/// says "not a diff".
 pub fn detect_diff(content: &str) -> Option<ContentType> {
     if is_diff(content) {
         Some(ContentType::GitDiff)

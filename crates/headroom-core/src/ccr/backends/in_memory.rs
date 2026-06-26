@@ -5,9 +5,9 @@
 //! eviction is the only globally-serialized step.
 //!
 //! This is the **test-default** backend. Production deployments use
-//! [`super::sqlite::SqliteCcrStore`] or [`super::redis::RedisCcrStore`]
-//! which are persistent across worker restarts and shareable across
-//! workers (see `RUST_DEV.md` "Multi-worker deployment").
+//! [`super::sqlite::SqliteCcrStore`], which is persistent across worker
+//! restarts and shareable across workers via a shared DB file (see
+//! `RUST_DEV.md` "Multi-worker deployment").
 //!
 //! # Eviction scheme: generation-counter FIFO
 //!

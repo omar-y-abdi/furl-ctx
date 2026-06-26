@@ -6,8 +6,8 @@
 //!
 //! - **`Scorer`** (already public via `crate::relevance::RelevanceScorer`):
 //!   how relevant is item *i* to query *q*? OSS default `HybridScorer`
-//!   (BM25 + fastembed). Enterprise can plug in a per-tenant Loop-trained
-//!   scorer.
+//!   (BM25 with a match boost). Enterprise can plug in a per-tenant
+//!   Loop-trained scorer.
 //! - **`Constraint`** (this module): which indices must be kept
 //!   regardless of score? OSS defaults preserve errors and structural
 //!   outliers. Enterprise can add `BusinessRuleConstraint`,

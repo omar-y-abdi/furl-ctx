@@ -80,8 +80,8 @@ impl SmartCrusherBuilder {
     }
 
     /// Set the relevance scorer. The Enterprise plug-in point — pass
-    /// a `LoopScorer`, custom `HybridScorer { adaptive: false, alpha: 0.5 }`,
-    /// or any other `RelevanceScorer` impl.
+    /// a `LoopScorer`, a `HybridScorer`, or any other `RelevanceScorer`
+    /// impl.
     pub fn with_scorer(mut self, scorer: Box<dyn RelevanceScorer + Send + Sync>) -> Self {
         self.scorer = Some(scorer);
         self

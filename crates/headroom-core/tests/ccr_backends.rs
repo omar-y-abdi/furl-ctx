@@ -92,9 +92,8 @@ fn from_config_in_memory_roundtrip() {
     assert_eq!(store.get(&hash).as_deref(), Some("bye"));
 }
 
-#[cfg(not(feature = "redis"))]
 #[test]
-fn from_config_redis_unsupported_when_feature_off() {
+fn from_config_redis_unsupported() {
     use headroom_core::ccr::backends::CcrBackendInitError;
 
     let cfg = CcrBackendConfig::Redis {
@@ -108,7 +107,7 @@ fn from_config_redis_unsupported_when_feature_off() {
             assert_eq!(feature, "redis");
         }
         Err(other) => panic!("expected UnsupportedBackend, got {other:?}"),
-        Ok(_) => panic!("redis must error when feature is off"),
+        Ok(_) => panic!("redis backend must error (it was removed)"),
     }
 }
 
@@ -151,51 +150,5 @@ fn backend_swap_byte_equal_keys() {
             v_sqlite, v_mem,
             "sqlite and in-memory must return byte-equal payloads"
         );
-    }
-}
-
-// ─── Redis-feature-gated tests ─────────────────────────────────────────
-
-#[cfg(feature = "redis")]
-mod redis_tests {
-    use super::*;
-    use headroom_core::ccr::backends::RedisCcrStore;
-
-    /// Reads `HEADROOM_TEST_REDIS_URL` from the environment — when the
-    /// feature is on but no URL is configured we silently no-op. CI
-    /// runs the redis test in a docker-compose'd matrix.
-    fn redis_url() -> Option<String> {
-        std::env::var("HEADROOM_TEST_REDIS_URL").ok()
-    }
-
-    #[test]
-    fn redis_round_trip() {
-        let Some(url) = redis_url() else {
-            eprintln!("skipping redis_round_trip: HEADROOM_TEST_REDIS_URL not set");
-            return;
-        };
-        let store = RedisCcrStore::open(&url, 300).expect("open redis store");
-        let payload = "redis payload";
-        let hash = "redis-round-trip-key".to_string();
-        store.put(&hash, payload);
-        assert_eq!(store.get(&hash).as_deref(), Some(payload));
-    }
-
-    #[test]
-    fn redis_round_trip_via_from_config() {
-        let Some(url) = redis_url() else {
-            eprintln!("skipping redis_round_trip_via_from_config: HEADROOM_TEST_REDIS_URL not set");
-            return;
-        };
-        let cfg = CcrBackendConfig::Redis {
-            url,
-            ttl_seconds: 300,
-            key_prefix: Some("ccr_test".to_string()),
-        };
-        let store = from_config(&cfg).expect("from_config(redis)");
-        let payload = "via factory";
-        let hash = "redis-from-config-key".to_string();
-        store.put(&hash, payload);
-        assert_eq!(store.get(&hash).as_deref(), Some(payload));
     }
 }

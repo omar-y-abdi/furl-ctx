@@ -21,13 +21,6 @@ pub mod content_detector;
 pub mod detection;
 pub mod diff_compressor;
 pub mod log_compressor;
-// `magika_detector` is compiled only with the `magika` feature — it
-// pulls the `magika` crate and `ort` (ONNX Runtime). Without the
-// feature, the ContentRouter detection chain (`detection::detect`)
-// skips Tier-1 and runs the deterministic Tier-2 (unidiff) + Tier-3
-// detectors instead; see `detection.rs`.
-#[cfg(feature = "magika")]
-pub mod magika_detector;
 pub mod search_compressor;
 pub mod smart_crusher;
 pub mod tag_protector;
@@ -44,8 +37,6 @@ pub use log_compressor::{
     LogCompressionResult, LogCompressor, LogCompressorConfig, LogCompressorStats, LogFormat,
     LogLevel,
 };
-#[cfg(feature = "magika")]
-pub use magika_detector::{magika_detect, map_magika_label, MagikaDetectorError};
 pub use search_compressor::{
     SearchCompressionResult, SearchCompressor, SearchCompressorConfig, SearchCompressorStats,
 };

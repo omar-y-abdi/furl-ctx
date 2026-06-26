@@ -1,14 +1,13 @@
-//! Pluggable CCR backends — in-memory (test default), SQLite (prod
-//! default), Redis (multi-worker opt-in).
+//! Pluggable CCR backends — in-memory (test default) and SQLite (prod
+//! default).
 //!
 //! Selection is driven by [`CcrBackendConfig`]. The [`from_config`]
-//! factory surfaces every backend-init failure to the caller — there
-//! is no silent fallback to the in-memory backend
-//! (`feedback_no_silent_fallbacks.md`).
+//! factory surfaces every backend-init failure to the caller — there is
+//! no silent fallback to the in-memory backend. A `redis` backend was
+//! removed (never shipped, never CI-tested); requesting it now fails
+//! loudly with `UnsupportedBackend` rather than being silently dropped.
 
 pub mod in_memory;
-#[cfg(feature = "redis")]
-pub mod redis;
 pub mod sqlite;
 
 use std::path::PathBuf;
@@ -17,8 +16,6 @@ use thiserror::Error;
 
 use crate::ccr::CcrStore;
 
-#[cfg(feature = "redis")]
-pub use self::redis::RedisCcrStore;
 pub use in_memory::InMemoryCcrStore;
 pub use sqlite::SqliteCcrStore;
 
@@ -31,8 +28,10 @@ pub enum CcrBackendConfig {
     InMemory { capacity: usize, ttl_seconds: u64 },
     /// SQLite-backed (prod default). DB file at `path`; persistent.
     Sqlite { path: PathBuf, ttl_seconds: u64 },
-    /// Redis-backed (multi-worker opt-in). Cfg-gated; surfaces an
-    /// `UnsupportedBackend` error if the feature is not compiled in.
+    /// Redis-backed (multi-worker). The redis backend was removed (never
+    /// shipped, never CI-tested); `from_config` always rejects this
+    /// variant with `UnsupportedBackend`. Kept so a `backend = "redis"`
+    /// config fails loudly rather than being silently dropped.
     Redis {
         url: String,
         ttl_seconds: u64,
@@ -67,10 +66,6 @@ pub enum CcrBackendInitError {
     /// SQLite open / schema-create failed.
     #[error("ccr sqlite backend init failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    /// Redis open / PING failed (the smoke-test in `RedisCcrStore::open`).
-    #[cfg(feature = "redis")]
-    #[error("ccr redis backend init failed: {0}")]
-    Redis(::redis::RedisError),
     /// Operator selected a backend whose feature flag was not compiled
     /// in. Loud failure rather than silent fallback.
     #[error(
@@ -81,13 +76,6 @@ pub enum CcrBackendInitError {
         backend: &'static str,
         feature: &'static str,
     },
-}
-
-#[cfg(feature = "redis")]
-impl From<::redis::RedisError> for CcrBackendInitError {
-    fn from(err: ::redis::RedisError) -> Self {
-        Self::Redis(err)
-    }
 }
 
 /// Construct a CCR backend from `config`. Errors surface — never falls
@@ -124,26 +112,6 @@ pub fn from_config(config: &CcrBackendConfig) -> Result<Box<dyn CcrStore>, CcrBa
             );
             Ok(Box::new(store))
         }
-        #[cfg(feature = "redis")]
-        CcrBackendConfig::Redis {
-            url,
-            ttl_seconds,
-            key_prefix,
-        } => {
-            let store = match key_prefix {
-                Some(prefix) => RedisCcrStore::open_with_prefix(url, prefix.clone(), *ttl_seconds)?,
-                None => RedisCcrStore::open(url, *ttl_seconds)?,
-            };
-            tracing::info!(
-                target = "ccr.backend",
-                backend = "redis",
-                url = %url,
-                ttl_seconds = *ttl_seconds,
-                "ccr_backend_initialized"
-            );
-            Ok(Box::new(store))
-        }
-        #[cfg(not(feature = "redis"))]
         CcrBackendConfig::Redis { .. } => Err(CcrBackendInitError::UnsupportedBackend {
             backend: "redis",
             feature: "redis",

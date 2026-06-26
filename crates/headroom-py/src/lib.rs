@@ -988,17 +988,17 @@ impl PyDetectionResult {
 /// Detect the type of `content`. Returns a `DetectionResult` with the
 /// same field surface as Python's dataclass.
 ///
-/// This runs through the magika→unidiff→PlainText
-/// detection chain — the regex `content_detector` is no longer on
-/// the production path. The chain returns a `ContentType` only;
+/// This runs through the unidiff→PlainText detection chain — the
+/// regex `content_detector` is no longer on the Rust production path.
+/// The chain returns a `ContentType` only;
 /// we synthesize the legacy `DetectionResult` shape here with
 /// `confidence = 1.0` (the chain doesn't surface a probabilistic
 /// score) and an empty metadata bag (no production caller reads
 /// metadata from this binding today — see audit notes in
 /// `headroom/transforms/content_router.py`).
 ///
-/// Releases the GIL while detecting — magika inference and unidiff
-/// parsing can be substantial on large bodies, and freeing the GIL
+/// Releases the GIL while detecting — unidiff parsing can be
+/// substantial on large bodies, and freeing the GIL
 /// lets other Python threads make progress in the meantime.
 #[pyfunction]
 fn detect_content_type(py: Python<'_>, content: &str) -> PyDetectionResult {

@@ -44,34 +44,6 @@ regex = "1"
 # outcome — but if a parity fixture flakes here, swap to
 # `features = ["zlib"]` to link against system libz for byte-equal output.
 flate2 = "1"
-# `fastembed` is the Rust port of the Python fastembed library. Used by
-# `relevance::EmbeddingScorer` for sentence embeddings in semantic relevance
-# scoring. Default features pull in `ort` (ONNX Runtime) with auto-download
-# of the runtime binary; the model file (BAAI/bge-small-en-v1.5, ~30 MB
-# int8-quantized ONNX) auto-downloads from HuggingFace Hub on first use.
-# Same library + same model = byte-equal embeddings between Python and Rust
-# (both call into ONNX Runtime over the identical ONNX file).
-#
-# `default-features = false` + explicit rustls features eliminates the
-# transitive `native-tls` → `openssl-sys` dependency that fastembed's
-# default features pull in (via `hf-hub-native-tls` + `ort-download-
-# binaries-native-tls`). Without this, every wheel-build surface
-# (release matrix, e2e/wrap, e2e/init, devcontainer, ci.yml) needs
-# system OpenSSL + perl modules for openssl-src vendored compile. Using
-# rustls everywhere removes the entire OpenSSL build-deps surface.
-# `magika` is Google's ONNX-backed content classifier (Tier 1 of the
-# Stage-3d ContentRouter detection arch). Bundled standard-model is
-# loaded once per process via `OnceLock` and shared across calls. The
-# crate depends on `ort`, which is already in our dep tree via
-# `fastembed`, so adding it doesn't pull a new ML runtime — both
-# crates share the ONNX Runtime singleton.
-#
-# Optional + default-off behind the `magika` feature: `ort-sys` has no
-# prebuilt binary for some targets (e.g. x86_64-apple-darwin), so the
-# ONNX runtime is opt-in. With the feature OFF the ContentRouter skips
-# Tier-1 and runs the deterministic Tier-2 (unidiff) + Tier-3 (keyword)
-# detectors, which require no ML runtime.
-magika = { version = "1", optional = true }
 # `unidiff` is the Stage-3d Tier-2 diff detector. We use the parser
 # itself as the "is this a diff?" oracle — anything that successfully
 # parses to ≥1 PatchedFile is a diff. The deterministic parser
@@ -106,64 +78,17 @@ toml = "0.8"
 # connection-open time (see `ccr/backends/sqlite.rs`); no extra feature
 # flags required.
 rusqlite = { version = "0.32", features = ["bundled"] }
-# `redis` for the optional multi-worker CCR backend. Cfg-gated behind
-# the `redis` feature so deploys that don't need it pay no compile
-# cost. Default features include the sync `Connection` API used in
-# `ccr/backends/redis.rs`; `tokio-comp` would pull `tokio` into the
-# core crate, which we do not want.
-redis = { version = "0.27", optional = true, default-features = false }
 # `http` powers the auth-mode classifier (Phase F PR-F1). The proxy
 # crate already depends on this — pulling it into core lets the
 # classifier live with the other Phase B/F policy primitives without
 # cycling through the proxy crate. Tiny crate (no I/O, just types).
 http = "1"
 
-[target.'cfg(not(windows))'.dependencies]
-# Optional + default-off behind the `embeddings` feature: `fastembed`
-# pulls `ort` (ONNX Runtime) transitively, and `ort-sys` has no prebuilt
-# binary for some targets (e.g. x86_64-apple-darwin). With the feature
-# OFF, `relevance::EmbeddingScorer` is not compiled and `HybridScorer`
-# runs BM25-only; no ONNX runtime is pulled.
-fastembed = { version = "5", optional = true, default-features = false, features = [
-    "hf-hub-rustls-tls",
-    "ort-download-binaries-rustls-tls",
-    "image-models",
-] }
-
-[target.'cfg(windows)'.dependencies]
-# `ort-download-binaries-*` emits DirectML link libs on Windows (`DXCORE`,
-# `DXGI`, `D3D12`, `DirectML`). Users installing `headroom-ai[all]` from
-# sdist often do not have those SDK libs, so load ORT dynamically instead.
-# Optional + default-off behind the `embeddings` feature (see the
-# non-windows block above for the full rationale).
-fastembed = { version = "5", optional = true, default-features = false, features = [
-    "hf-hub-rustls-tls",
-    "ort-load-dynamic",
-    "image-models",
-] }
-
 [features]
 # Default is ML-free: no ONNX runtime, no `ort`/`ort-sys`. Every default
 # code path compiles and runs without a prebuilt ONNX binary. ML backends
 # are opt-in via the features below.
 default = []
-# Compile in the Redis CCR backend. Enable for multi-worker deployments
-# that want a shared CCR store with no sticky-session at the LB. The
-# SQLite backend (always compiled) is the production default for
-# single-worker / single-instance setups.
-redis = ["dep:redis"]
-# Compile in the fastembed-backed `relevance::EmbeddingScorer` (semantic
-# relevance scoring via ONNX sentence-transformers). OFF by default —
-# `HybridScorer` runs BM25-only without it. Pulls `ort` transitively.
-embeddings = ["dep:fastembed"]
-# Compile in the magika ONNX content classifier (Stage-3d ContentRouter
-# Tier-1). OFF by default — the detection chain falls back to the
-# deterministic Tier-2 (unidiff) + Tier-3 (keyword) detectors. Pulls
-# `ort` transitively.
-magika = ["dep:magika"]
-# Umbrella for the full ONNX stack (embeddings + magika). Enable on
-# targets that have a prebuilt `ort-sys` binary (or a dynamic ORT lib).
-onnx = ["embeddings", "magika"]
 
 [dev-dependencies]
 proptest = "1"

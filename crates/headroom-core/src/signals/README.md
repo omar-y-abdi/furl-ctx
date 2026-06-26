@@ -26,7 +26,7 @@ Today `KeywordDetector` is the only tier registered. The tier API is the seam wh
 
 ## Canonical future ML extension — BGE classifier head
 
-The most likely next tier is a classification head on the existing `bge-small-en-v1.5` embedder loaded by `relevance::EmbeddingScorer`:
+The most likely next tier is a classification head on a `bge-small-en-v1.5` embedder (the prior `relevance::EmbeddingScorer` was removed with the never-shipped `embeddings` feature; this tier would reintroduce an ONNX embedder):
 
 ```rust
 pub struct BgeClassifierDetector {

@@ -1,13 +1,12 @@
 //! ContentRouter detection chain.
 //!
-//! Wires the per-tier detectors (`magika_detector`, `unidiff_detector`)
-//! into the single function the ContentRouter calls. The locked design
-//! from `project_rust_content_detection_arch.md`:
+//! Wires the per-tier detectors into the single function the
+//! ContentRouter calls. The locked design from
+//! `project_rust_content_detection_arch.md`:
 //!
 //! ```text
-//! Tier 1: magika_detect()       → if non-PlainText, return it
-//! Tier 2: unidiff::is_diff()    → if true, return GitDiff
-//! Tier 3: PlainText (fallthrough)
+//! Tier 1: unidiff::is_diff()    → if true, return GitDiff
+//! Tier 2: PlainText (fallthrough)
 //! ```
 //!
 //! # Why no regex tier
@@ -16,33 +15,19 @@
 //! regex-based [`crate::transforms::content_detector`] in production
 //! detection. The regex path stays in tree as a comparison oracle for
 //! parity testing and as an opt-in escape hatch, but the dispatch is
-//! magika + parser only.
-//!
-//! # Tier-1 errors do not abort the chain
-//!
-//! If magika init or inference fails, we log at warn level and proceed
-//! to Tier 2. The chain's *next* tier is the legitimate fallback for
-//! magika failure — that's the whole point of having tiers. We
-//! deliberately do **not** treat tier-1 error as a hard failure of the
-//! entire chain; that would block all detection on a transient ONNX
-//! issue. Loud-on-error stays at the `magika_detect` entry point for
-//! callers who care; the chain swallows the err with a log line.
+//! the unidiff parser + fallthrough only.
 //!
 //! # SearchResults / BuildOutput
 //!
 //! The retired regex detector recognized grep-style search output
 //! (`file:line:`) and CMake/log output as their own [`ContentType`]
-//! variants. Magika has no equivalent labels. Per the locked design,
+//! variants. The deterministic chain has no equivalent labels, so
 //! these now route to [`ContentType::PlainText`] — we prefer
 //! passthrough to misroute. If a benchmark later shows real
 //! compression loss on grep/build outputs, we add a focused detector
 //! for those specifically; not preemptively.
 
 use crate::transforms::content_detector::ContentType;
-// Tier-1 (magika) is compiled only with the `magika` feature. Without
-// it the chain runs Tier-2 (unidiff) + Tier-3 (fallthrough) only.
-#[cfg(feature = "magika")]
-use crate::transforms::magika_detector::magika_detect;
 use crate::transforms::unidiff_detector::is_diff;
 
 /// Run the detection chain on `content` and return the chosen
@@ -55,37 +40,12 @@ pub fn detect(content: &str) -> ContentType {
         return ContentType::PlainText;
     }
 
-    // ── Tier 1: Magika ──────────────────────────────────────────
-    // Compiled in only with the `magika` feature. When the feature is
-    // off the ONNX runtime is not linked and detection starts at Tier 2;
-    // the deterministic Tier-2/Tier-3 detectors are the legitimate
-    // fallback for an absent (or failed) Tier-1.
-    #[cfg(feature = "magika")]
-    match magika_detect(content) {
-        Ok(ContentType::PlainText) => {
-            // Magika says "I don't know" or "plain text". Continue
-            // to Tier 2 — magika frequently mis-classifies short
-            // diffs and prose-prefixed diffs as text.
-        }
-        Ok(content_type) => return content_type,
-        Err(e) => {
-            // Init or inference failure. Log it (so an ops-side
-            // health check can spot magika trouble in the engine
-            // logs) and fall through to Tier 2 — the chain itself
-            // must not break on a single tier's outage.
-            tracing::warn!(
-                error = %e,
-                "magika detection failed; falling through to unidiff tier"
-            );
-        }
-    }
-
-    // ── Tier 2: unidiff parser ──────────────────────────────────
+    // ── Tier 1: unidiff parser ──────────────────────────────────
     if is_diff(content) {
         return ContentType::GitDiff;
     }
 
-    // ── Tier 3: fallthrough ─────────────────────────────────────
+    // ── Tier 2: fallthrough ─────────────────────────────────────
     ContentType::PlainText
 }
 
@@ -98,50 +58,23 @@ mod tests {
         assert_eq!(detect(""), ContentType::PlainText);
     }
 
-    // These three route exclusively via Tier-1 (magika) — Tier-2 only
-    // recognizes diffs, so without the `magika` feature JSON / source /
-    // HTML fall through to PlainText. Gated to the feature accordingly.
-    #[cfg(feature = "magika")]
     #[test]
-    fn json_array_routes_via_tier_1() {
-        let payload = r#"[{"id": 1}, {"id": 2}, {"id": 3}]"#;
-        assert_eq!(detect(payload), ContentType::JsonArray);
-    }
-
-    #[cfg(feature = "magika")]
-    #[test]
-    fn source_code_routes_via_tier_1() {
-        let py = "def hello():\n    print('world')\n\nclass Foo:\n    pass\n";
-        assert_eq!(detect(py), ContentType::SourceCode);
-    }
-
-    #[cfg(feature = "magika")]
-    #[test]
-    fn html_routes_via_tier_1() {
-        let html = "<!DOCTYPE html><html><body><h1>x</h1></body></html>";
-        assert_eq!(detect(html), ContentType::Html);
-    }
-
-    #[test]
-    fn standard_git_diff_routes_via_tier_1_or_2() {
+    fn standard_git_diff_routes_via_tier_1() {
         let diff = "diff --git a/foo.py b/foo.py\n\
                     --- a/foo.py\n\
                     +++ b/foo.py\n\
                     @@ -1,1 +1,2 @@\n \
                     def hello():\n\
                     +    print(\"new\")\n";
-        // Either magika tags it `diff` (Tier 1 hit) or magika
-        // mis-classifies as text and unidiff catches it (Tier 2).
-        // Both paths produce GitDiff.
+        // The unidiff parser (Tier 1) recognizes the patch set and
+        // returns GitDiff.
         assert_eq!(detect(diff), ContentType::GitDiff);
     }
 
     #[test]
-    fn naked_hunk_diff_routes_via_tier_2() {
-        // Magika often mis-classifies naked hunks (no `diff --git`
-        // wrapper) because the visible bytes look like ordinary
-        // patch lines mixed with code. Tier 2 (unidiff parser)
-        // catches these.
+    fn naked_hunk_diff_routes_via_tier_1() {
+        // Naked hunks (no `diff --git` wrapper) still parse as a
+        // patch set, so the unidiff parser (Tier 1) catches these.
         let diff = "--- a/foo.py\n\
                     +++ b/foo.py\n\
                     @@ -1,2 +1,2 @@\n\
@@ -169,67 +102,27 @@ mod tests {
         let grep = "src/foo.py:42:def process():\n\
                     src/bar.py:10:    return True\n\
                     src/baz.py:7:class Worker:\n";
-        // We assert PlainText to lock the design. If magika
-        // probabilistically detects this as code, that's also fine
-        // for the router (CodeAware compresses code well too) —
-        // but the test pins the safe-default contract.
-        let result = detect(grep);
-        assert!(
-            result == ContentType::PlainText || result == ContentType::SourceCode,
-            "grep output should route to PlainText (preferred) or SourceCode (acceptable), got {result:?}"
-        );
+        // The deterministic chain only special-cases diffs, so grep
+        // output (not a diff) routes to the safe-default PlainText.
+        assert_eq!(detect(grep), ContentType::PlainText);
     }
 
     #[test]
-    fn build_log_output_routes_via_chain() {
-        // Same locked-design note: build/test log output (no
-        // explicit regex detector for it on the Rust side). Magika
-        // can label this either as `txt` (→ PlainText, our mapping)
-        // or, more probabilistically, as a code-group label like
-        // `log` / `c` because the structured `[LEVEL]` shape and
-        // `file.cpp:line` references look code-like to the model.
-        // Either route is acceptable for the router: SourceCode
-        // dispatches to the code-aware compressor (which compresses
-        // log lines reasonably well via repetition collapsing);
-        // PlainText is the safe-default passthrough. The test pins
-        // the contract that it lands somewhere reasonable, not at
-        // a degenerate type like JsonArray or GitDiff.
+    fn build_log_output_routes_to_plain_text() {
+        // Build/test log output has no explicit detector on the Rust
+        // side and is not a diff, so the deterministic chain routes it
+        // to the safe-default PlainText passthrough rather than a
+        // degenerate type like JsonArray or GitDiff.
         let log = "[INFO] Building target foo\n\
                    [WARN] Deprecated API usage in foo.cpp:45\n\
                    [ERROR] Compilation failed: undefined reference\n";
-        let got = detect(log);
-        assert!(
-            matches!(got, ContentType::PlainText | ContentType::SourceCode),
-            "build log should route to PlainText or SourceCode, got {got:?}"
-        );
-    }
-
-    #[cfg(feature = "magika")]
-    #[test]
-    fn yaml_routes_to_source_code() {
-        // YAML lives in magika's `code` group; the chain returns it
-        // as SourceCode so the router picks the code-aware compressor.
-        // Tier-1-only — gated to the `magika` feature.
-        let yaml = "name: my-app\nversion: 1.0\ndependencies:\n  - foo\n";
-        assert_eq!(detect(yaml), ContentType::SourceCode);
-    }
-
-    #[cfg(feature = "magika")]
-    #[test]
-    fn rust_source_routes_to_source_code() {
-        // Tier-1-only — gated to the `magika` feature.
-        let rs = "use std::collections::HashMap;\n\n\
-                  pub struct Counter { counts: HashMap<String, u32> }\n\n\
-                  impl Counter {\n    \
-                      pub fn new() -> Self { Self { counts: HashMap::new() } }\n\
-                  }\n";
-        assert_eq!(detect(rs), ContentType::SourceCode);
+        assert_eq!(detect(log), ContentType::PlainText);
     }
 
     #[test]
     fn chain_is_deterministic_across_repeated_calls() {
-        // Magika returns the same label for identical input on
-        // repeated calls; the chain wraps that determinism.
+        // The chain is a pure function of its input, so identical
+        // input yields identical output on repeated calls.
         let payload = r#"{"users": [{"id": 1}, {"id": 2}]}"#;
         let a = detect(payload);
         let b = detect(payload);

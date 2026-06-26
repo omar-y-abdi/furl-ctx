@@ -20,9 +20,6 @@
 //! - [`backends::SqliteCcrStore`] — production default. Persistent
 //!   across worker restarts; shareable across workers via a shared DB
 //!   file. WAL-mode, prepared statements, lazy TTL purge on read.
-//! - [`backends::RedisCcrStore`] — multi-worker opt-in (cfg-gated
-//!   behind `feature = "redis"`). No sticky-session required at the
-//!   load balancer.
 //!
 //! [`backends::from_config`] selects one at startup and surfaces every
 //! init error to the caller (per `feedback_no_silent_fallbacks.md`).

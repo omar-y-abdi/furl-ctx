@@ -13,7 +13,6 @@
 //! - **PlainText**: Generic fallback
 //!
 //! Detection is **regex-based** — no ML, no model loading, no I/O.
-//! Magika integration lives one level up in `ContentRouter`, not here.
 //!
 //! # Parity with the Python regex fallback
 //!
