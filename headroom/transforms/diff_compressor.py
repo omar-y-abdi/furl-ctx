@@ -109,15 +109,15 @@ class DiffCompressor:
     def compress(self, content: str, context: str = "") -> DiffCompressionResult:
         r = self._rust.compress(content, context)
         cache_key: str | None = r.cache_key
-        if cache_key is not None:
-            # Mirror log_compressor.py + search_compressor.py: when the
-            # Rust path emits a CCR retrieval marker, persist the
-            # original payload to Python's CompressionStore so the
-            # marker actually resolves on the LLM's retrieval tool
-            # call. Without this, every diff CCR marker emitted in
-            # production is dangling — the regression fixed in the
-            # audit-cleanup PR.
-            self._persist_to_python_ccr(content, r.compressed, cache_key)
+        if cache_key is not None and not self._persist_to_python_ccr(
+            content, r.compressed, cache_key
+        ):
+            # Store write failed → the CCR marker in r.compressed would
+            # dangle (retrieve() can't resolve it) and the dropped hunks
+            # would be unrecoverable. Serve the ORIGINAL uncompressed diff
+            # instead — no replacement without recoverability (mirrors
+            # cross_message_dedup's veto).
+            return self._passthrough_result(content, r)
         return DiffCompressionResult(
             compressed=r.compressed,
             original_line_count=r.original_line_count,
@@ -130,25 +130,22 @@ class DiffCompressor:
             cache_key=cache_key,
         )
 
-    def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> None:
+    def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> bool:
         """Promote a Rust-emitted cache_key into the production Python
-        CompressionStore. Failures are logged at ERROR level — when this
-        write fails, the marker emitted in the compressed output dangles
-        (the store production /v1/retrieve reads never gets the original),
-        so the failure is operator-visible loss, not a benign hiccup.
+        CompressionStore. Returns ``True`` on success, ``False`` on any
+        failure (store import or store write).
 
-        Logged-not-raised (LOUD FLOOR, not fail-safe): unlike the
-        SmartCrusher mirror, this helper also runs from
-        ``compress_with_stats`` (a test/sidecar API with NO fail-open
-        production caller), so raising could convert silent loss into a
-        crash on that path. Per the cure-priority (#2), surface at ERROR.
-        Mirrors the same helper on log_compressor.py and
-        search_compressor.py."""
+        Recoverability invariant (mirrors ``cross_message_dedup._persist_original``):
+        the store write must succeed BEFORE the CCR marker ships. On
+        ``False`` the caller serves the ORIGINAL uncompressed content (no
+        marker), so a dropped hunk is never signalled-but-unrecoverable —
+        the same fail-safe SmartCrusher gets by raising. Mirrors the same
+        helper on log_compressor.py and search_compressor.py."""
         try:
             from ..cache.compression_store import get_compression_store
         except ImportError as e:
             logger.error("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
-            return
+            return False
         try:
             store: Any = get_compression_store()
             # The Rust-emitted marker embeds MD5(original)[:24], but
@@ -156,13 +153,32 @@ class DiffCompressor:
             # marker's key explicitly so retrieving the marker hash
             # actually finds the entry.
             store.store(original, compressed, explicit_hash=cache_key)
+            return True
         except Exception as e:
             logger.error(
-                "CCR store write failed; cache_key %s remains in-marker only "
-                "(marker dangles, retrieve() will miss): %s",
+                "CCR store write failed; cache_key %s — serving original "
+                "uncompressed (no dangling marker): %s",
                 cache_key,
                 e,
             )
+            return False
+
+    @staticmethod
+    def _passthrough_result(content: str, r: Any) -> DiffCompressionResult:
+        """No-compression result: serve the original diff verbatim with no
+        CCR marker, used when the store write vetoes. Stats reflect "nothing
+        dropped" so the result object stays honest (compression_ratio → 1.0)."""
+        return DiffCompressionResult(
+            compressed=content,
+            original_line_count=r.original_line_count,
+            compressed_line_count=r.original_line_count,
+            files_affected=r.files_affected,
+            additions=r.additions,
+            deletions=r.deletions,
+            hunks_kept=r.hunks_kept + r.hunks_removed,
+            hunks_removed=0,
+            cache_key=None,
+        )
 
     def compress_with_stats(
         self, content: str, context: str = ""
@@ -174,8 +190,12 @@ class DiffCompressor:
         class has no Python type stub.
         """
         r, stats = self._rust.compress_with_stats(content, context)
-        if r.cache_key is not None:
-            self._persist_to_python_ccr(content, r.compressed, r.cache_key)
+        if r.cache_key is not None and not self._persist_to_python_ccr(
+            content, r.compressed, r.cache_key
+        ):
+            # CCR store vetoed → serve the original (no dangling marker);
+            # `stats` still describes what the Rust pass computed.
+            return self._passthrough_result(content, r), stats
         result = DiffCompressionResult(
             compressed=r.compressed,
             original_line_count=r.original_line_count,

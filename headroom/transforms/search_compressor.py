@@ -173,12 +173,13 @@ class SearchCompressor:
     ) -> SearchCompressionResult:
         rust_result = self._rust.compress(content, context, bias)
         cache_key: str | None = rust_result.cache_key
-        if cache_key is not None:
-            # Mirror the original Python: persist to the production CCR
-            # store. The Rust crate already wrote to its in-memory test
-            # store; promote that to the long-lived Python store so the
-            # marker remains retrievable beyond the request lifecycle.
-            self._persist_to_python_ccr(content, rust_result.compressed, cache_key)
+        if cache_key is not None and not self._persist_to_python_ccr(
+            content, rust_result.compressed, cache_key
+        ):
+            # Store write failed → marker would dangle, dropped matches
+            # unrecoverable. Serve the original uncompressed output instead
+            # (mirrors cross_message_dedup's veto).
+            return self._passthrough_result(content, rust_result)
 
         summaries = dict(cast("dict[str, str]", rust_result.summaries))
         return SearchCompressionResult(
@@ -194,14 +195,14 @@ class SearchCompressor:
 
     # ─── Internal CCR persistence ───────────────────────────────────────
 
-    def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> None:
+    def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> bool:
         """Promote the Rust-emitted cache_key into the production Python
-        `CompressionStore`. Failures are surfaced at ERROR level instead of
-        being silently swallowed (see no-silent-fallbacks rule): a failed
-        write means the marker in the compressed output dangles (the store
-        production /v1/retrieve reads never gets the original), so the loss
-        must be operator-visible (compression_store.py:234-244 'no SILENT
-        loss').
+        `CompressionStore`. Returns ``True`` on success, ``False`` on any
+        failure (store import or store write). On ``False`` the caller serves
+        the ORIGINAL uncompressed content so the CCR marker never ships
+        dangling — the recoverability invariant SmartCrusher (raise) and
+        cross_message_dedup (veto) already enforce. Mirrors diff_compressor.py
+        / log_compressor.py.
 
         Note: the Rust path computes the hash and embeds it in the
         emitted marker text — the Rust hash IS the canonical one
@@ -212,7 +213,7 @@ class SearchCompressor:
             from ..cache.compression_store import get_compression_store
         except ImportError as e:
             logger.error("CCR store import failed; cache_key %s won't persist: %s", cache_key, e)
-            return
+            return False
 
         try:
             store: Any = get_compression_store()
@@ -221,13 +222,30 @@ class SearchCompressor:
             # marker's key explicitly so retrieving the marker hash
             # actually finds the entry.
             store.store(original, compressed, explicit_hash=cache_key)
+            return True
         except Exception as e:
             logger.error(
-                "CCR store write failed; cache_key %s remains in-marker only "
-                "(marker dangles, retrieve() will miss): %s",
+                "CCR store write failed; cache_key %s — serving original "
+                "uncompressed (no dangling marker): %s",
                 cache_key,
                 e,
             )
+            return False
+
+    @staticmethod
+    def _passthrough_result(content: str, r: Any) -> SearchCompressionResult:
+        """No-compression result: serve the original search output verbatim
+        with no CCR marker, used when the store write vetoes."""
+        return SearchCompressionResult(
+            compressed=content,
+            original=content,
+            original_match_count=r.original_match_count,
+            compressed_match_count=r.original_match_count,
+            files_affected=r.files_affected,
+            compression_ratio=1.0,
+            cache_key=None,
+            summaries={},
+        )
 
 
 __all__ = [
