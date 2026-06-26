@@ -128,7 +128,6 @@ def test_every_runtime_field_reaches_workers_by_value(monkeypatch, _force_worker
     router = ContentRouter(ContentRouterConfig())
     tokenizer = get_tokenizer("gpt-4o")
     main_ident = threading.get_ident()
-    policy = object()  # sentinel; identity-compared
 
     seen: list[RouterRuntime] = []
     seen_idents: list[int] = []
@@ -147,7 +146,6 @@ def test_every_runtime_field_reaches_workers_by_value(monkeypatch, _force_worker
         force_kompress=True,
         target_ratio=0.42,
         kompress_model="some/model",
-        compression_policy=policy,
     )
 
     assert any(i != main_ident for i in seen_idents), (
@@ -163,7 +161,6 @@ def test_every_runtime_field_reaches_workers_by_value(monkeypatch, _force_worker
         "force_kompress": True,
         "target_ratio": 0.42,
         "kompress_model": "some/model",
-        "compression_policy": policy,
     }
     declared = {f.name for f in dataclasses.fields(RouterRuntime)}
     assert declared == set(expected), (
@@ -173,7 +170,4 @@ def test_every_runtime_field_reaches_workers_by_value(monkeypatch, _force_worker
     for rt in seen:
         for field_name, want in expected.items():
             got = getattr(rt, field_name)
-            if field_name == "compression_policy":
-                assert got is want, f"worker saw a foreign {field_name}: {got!r}"
-            else:
-                assert got == want, f"worker saw a foreign {field_name}: {got!r} != {want!r}"
+            assert got == want, f"worker saw a foreign {field_name}: {got!r} != {want!r}"

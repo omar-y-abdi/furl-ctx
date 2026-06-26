@@ -85,13 +85,11 @@ def test_known_good_call_does_not_raise() -> None:
 # from grepping every call site in headroom/ AND tests/:
 #   * the production path (``_POST_PIPELINE_KWARGS``, via compress()), plus
 #   * the test-only direct ``router.apply(...)`` call sites, which pass
-#     ``force_kompress`` (test_content_router_worker_options.py) and
-#     ``compression_policy`` (test_every_runtime_field_reaches_workers_by_value),
+#     ``force_kompress`` (test_content_router_worker_options.py),
 #   * plus the keys the pipeline's documented public surface broadcasts
 #     (``request_id`` / ``output_buffer`` / ``tool_profiles`` / ``record_metrics``).
 _REAL_CALLER_KEYS = set(_POST_PIPELINE_KWARGS) | {
     "force_kompress",
-    "compression_policy",
     "request_id",
     "output_buffer",
     "tool_profiles",

@@ -238,22 +238,8 @@ class CacheAligner(Transform):
 
         Detection is cheap; we run it whenever ``enabled`` is set so the
         warning log line is emitted on every relevant turn.
-
-        When a request supplies a compression
-        policy object via ``kwargs["compression_policy"]`` whose
-        ``cache_aligner_enabled`` is ``False`` (Subscription auth mode
-        under the enforcement flag), this method returns ``False`` so the
-        detector is skipped for that request. In the standalone build
-        nothing sets that kwarg, so ``policy`` is always ``None`` here. The hidden state
-        ``self._previous_prefix_hash`` is NOT cleared on skip — the
-        field is per-pipeline-instance, not per-request, so clearing
-        it would race with concurrent PAYG requests on the same
-        pipeline (which is the production shape).
         """
         if not self.config.enabled:
-            return False
-        policy = kwargs.get("compression_policy")
-        if policy is not None and not policy.cache_aligner_enabled:
             return False
         for msg in messages:
             if msg.get("role") == "system":

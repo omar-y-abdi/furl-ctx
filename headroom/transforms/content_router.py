@@ -104,29 +104,24 @@ class RouterRuntime:
         target_ratio: Per-request ML target ratio (``None`` = compressor default).
         force_kompress: Force the KOMPRESS strategy regardless of detection.
         kompress_model: Override Kompress model id (``"disabled"`` skips ML).
-        compression_policy: Per-request CompressionPolicy; ``_record_to_toin``
-            gates TOIN writes on ``policy.toin_read_only`` (Subscription mode).
-            ``None`` = no gate (direct ``compress()`` callers).
     """
 
     target_ratio: float | None = None
     force_kompress: bool = False
     kompress_model: str | None = None
-    compression_policy: Any = None
 
     @classmethod
     def from_kwargs(cls, kwargs: dict[str, Any]) -> RouterRuntime:
         """Build a RouterRuntime from ``apply()`` kwargs.
 
         Mirrors the historical defaults exactly: ``target_ratio`` /
-        ``kompress_model`` / ``compression_policy`` default to ``None`` and
-        ``force_kompress`` coerces to ``bool`` (``False`` when absent).
+        ``kompress_model`` default to ``None`` and ``force_kompress``
+        coerces to ``bool`` (``False`` when absent).
         """
         return cls(
             target_ratio=kwargs.get("target_ratio"),
             force_kompress=bool(kwargs.get("force_kompress", False)),
             kompress_model=kwargs.get("kompress_model"),
-            compression_policy=kwargs.get("compression_policy"),
         )
 
 
@@ -502,7 +497,7 @@ class ContentRouterConfig:
 # The set is the union of TWO sources:
 #   1. Keys apply() itself READS — directly via ``kwargs.get(...)`` and
 #      indirectly via ``RouterRuntime.from_kwargs`` (``target_ratio`` /
-#      ``force_kompress`` / ``kompress_model`` / ``compression_policy``).
+#      ``force_kompress`` / ``kompress_model``).
 #   2. Keys a real caller PASSES but apply() never reads. The pipeline
 #      broadcasts the SAME ``**kwargs`` to every transform
 #      (``pipeline.py``: ``transform.apply(..., **kwargs)``), so apply()
@@ -533,7 +528,6 @@ _APPLY_ALLOWED_KWARGS: frozenset[str] = frozenset(
         "target_ratio",
         "force_kompress",
         "kompress_model",
-        "compression_policy",
         # --- received via the pipeline broadcast but not read here ---
         # (pipeline public surface + sibling transforms + positionals) ---
         "model",
@@ -638,7 +632,7 @@ class ContentRouter(Transform):
         self._toin: Any = None
 
         # Per-request runtime options (target_ratio / force_kompress /
-        # kompress_model / compression_policy) are NOT router state. They are
+        # kompress_model) are NOT router state. They are
         # carried per call as a frozen ``RouterRuntime`` value passed down the
         # call chain (``compress(..., runtime=...)``), so concurrent requests
         # on this shared instance are isolated structurally — no thread-local,
@@ -655,8 +649,6 @@ class ContentRouter(Transform):
         compressed_tokens: int,
         language: str | None = None,
         context: str = "",
-        *,
-        runtime: RouterRuntime = _DEFAULT_RUNTIME,
     ) -> None:
         """Record compression to TOIN for cross-user learning.
 
@@ -679,22 +671,6 @@ class ContentRouter(Transform):
 
         # Skip if no actual compression happened
         if original_tokens <= compressed_tokens:
-            return
-
-        # Read-only gate: when the active CompressionPolicy says
-        # ``toin_read_only=True`` (Subscription auth mode), don't
-        # mutate the TOIN learning pool from this request. Direct
-        # ``compress()`` callers don't go through ``apply()`` and
-        # have ``runtime.compression_policy is None`` — those
-        # keep write-enabled behaviour.
-        policy = runtime.compression_policy
-        if policy is not None and policy.toin_read_only:
-            logger.debug(
-                "ContentRouter: skipping TOIN record_compression for %s "
-                "— policy.toin_read_only=True (auth_mode resolved as "
-                "Subscription, F2.2 gate)",
-                strategy.value,
-            )
             return
 
         try:
@@ -748,8 +724,8 @@ class ContentRouter(Transform):
         Per-request options ride the frozen ``runtime`` value, passed by
         argument from the main thread. Worker threads receive the SAME
         immutable instance by value — there is no thread-local to replay, so
-        ``force_kompress`` / ``target_ratio`` / ``kompress_model`` /
-        ``compression_policy`` reach every worker structurally.
+        ``force_kompress`` / ``target_ratio`` / ``kompress_model`` reach
+        every worker structurally.
         """
         t0 = time.perf_counter()
         result = self.compress(content, context=context, bias=bias, runtime=runtime)
@@ -773,9 +749,9 @@ class ContentRouter(Transform):
                 tokens relevant to answering this question are preserved.
             bias: Compression bias multiplier (>1 = keep more, <1 = keep fewer).
             runtime: Frozen per-request options (``target_ratio`` /
-                ``force_kompress`` / ``kompress_model`` /
-                ``compression_policy``). Defaults to the shared
-                ``_DEFAULT_RUNTIME`` for direct callers that pass no options.
+                ``force_kompress`` / ``kompress_model``). Defaults to the
+                shared ``_DEFAULT_RUNTIME`` for direct callers that pass no
+                options.
 
         Returns:
             RouterCompressionResult with compressed content and routing metadata.
@@ -1091,13 +1067,13 @@ class ContentRouter(Transform):
         in, so monkeypatching those router methods still takes effect (a
         construction-time capture in the dispatcher would have been stale).
 
-        The per-request ``runtime`` is bound into the ``try_ml_compressor`` /
-        ``record_to_toin`` closures here rather than added to the dispatcher's
-        signature: the dispatcher stays a pure leaf that calls them as opaque
-        callables, and ``runtime`` rides the closure to the two sites that read
-        it (``target_ratio`` / ``kompress_model`` for ML, ``compression_policy``
-        for TOIN). Because the closures forward to ``self._try_ml_compressor`` /
-        ``self._record_to_toin``, monkeypatching those methods still bites.
+        The per-request ``runtime`` is bound into the ``try_ml_compressor``
+        closure here rather than added to the dispatcher's signature: the
+        dispatcher stays a pure leaf that calls it as an opaque callable, and
+        ``runtime`` rides the closure to the site that reads it
+        (``target_ratio`` / ``kompress_model`` for ML). Because the closures
+        forward to ``self._try_ml_compressor`` / ``self._record_to_toin``,
+        monkeypatching those methods still bites.
 
         Args:
             content: Content to compress.
@@ -1126,7 +1102,7 @@ class ContentRouter(Transform):
             )
 
         def record_to_toin(**kwargs: Any) -> None:
-            self._record_to_toin(**kwargs, runtime=runtime)
+            self._record_to_toin(**kwargs)
 
         return self._dispatcher.apply(
             content,
@@ -1531,9 +1507,6 @@ class ContentRouter(Transform):
         # argument into every compress() call below (block handler, inline,
         # and parallel workers), so concurrent apply() calls on this shared
         # router stay isolated by value — no thread-local, no replay.
-        # ``compression_policy`` lets ``_record_to_toin`` gate TOIN writes on
-        # ``policy.toin_read_only``; ``None`` (caller passed no policy) means
-        # "no gate".
         runtime = RouterRuntime.from_kwargs(kwargs)
 
         tokens_before = sum(tokenizer.count_text(str(m.get("content", ""))) for m in messages)

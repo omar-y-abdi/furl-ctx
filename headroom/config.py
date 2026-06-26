@@ -424,11 +424,11 @@ class CompressRequest:
     default lives in exactly one place.
 
     Scope: currently owns ``min_tokens_to_compress`` — the one per-request
-    option whose default genuinely diverged between entry paths. The four
+    option whose default genuinely diverged between entry paths. The three
     per-request runtime options on ``ContentRouter`` (``target_ratio`` /
-    ``force_kompress`` / ``kompress_model`` / ``compression_policy``) live in
-    their own frozen ``RouterRuntime`` value, threaded by argument down the
-    compress() call chain: that value-by-argument isolation is pinned by
+    ``force_kompress`` / ``kompress_model``) live in their own frozen
+    ``RouterRuntime`` value, threaded by argument down the compress() call
+    chain: that value-by-argument isolation is pinned by
     ``test_runtime_options_thread_safety`` (concurrent compress() calls with
     distinct runtimes, spied at the ML consumer) and they stay there rather
     than here.

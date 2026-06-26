@@ -2,8 +2,8 @@
 
 The proxy reuses ONE ``ContentRouter`` / ``SmartCrusher`` (and one module
 level ``compress()`` pipeline) across every concurrent request. Per-request
-options — ``target_ratio`` / ``force_kompress`` / ``kompress_model`` /
-``compression_policy`` — are NOT router state. They are carried as a frozen
+options — ``target_ratio`` / ``force_kompress`` / ``kompress_model`` —
+are NOT router state. They are carried as a frozen
 ``RouterRuntime`` value passed by argument down the call chain
 (``compress(..., runtime=...)``), so two concurrent calls hold distinct
 instances and neither can observe the other's options.
@@ -43,7 +43,6 @@ from headroom.transforms.content_router import (
     ContentRouterConfig,
     RouterRuntime,
 )
-from headroom.transforms.smart_crusher import SmartCrusher
 
 N_THREADS = 16
 
@@ -160,47 +159,6 @@ class TestContentRouterRuntimeOptionsIsolation:
 
         assert seen["target_ratio"] is None
         assert seen["model_id"] is None
-
-
-class TestSmartCrusherRuntimeOptionsIsolation:
-    """A shared SmartCrusher must not leak its per-request policy across threads.
-
-    SmartCrusher keeps its own thread-local mechanism (out of scope for the
-    RouterRuntime migration); this class still pins that contract.
-    """
-
-    def test_concurrent_policy_writes_do_not_cross_contaminate(self) -> None:
-        crusher = SmartCrusher()
-        barrier = threading.Barrier(N_THREADS)
-        observed: dict[int, object] = {}
-        lock = threading.Lock()
-        policies = [object() for _ in range(N_THREADS)]
-
-        def worker(i: int) -> None:
-            crusher._runtime_compression_policy = policies[i]
-            barrier.wait()
-            with lock:
-                observed[i] = crusher._runtime_compression_policy
-
-        with ThreadPoolExecutor(max_workers=N_THREADS) as pool:
-            list(pool.map(worker, range(N_THREADS)))
-
-        for i in range(N_THREADS):
-            assert observed[i] is policies[i], f"thread {i} saw a foreign policy"
-
-    def test_policy_default_when_unset(self) -> None:
-        crusher = SmartCrusher()
-        crusher._runtime_compression_policy = object()
-        seen: list[object] = []
-
-        def worker() -> None:
-            seen.append(crusher._runtime_compression_policy)
-
-        t = threading.Thread(target=worker)
-        t.start()
-        t.join()
-
-        assert seen == [None]
 
 
 class TestCompressConcurrentDifferentConfigs:

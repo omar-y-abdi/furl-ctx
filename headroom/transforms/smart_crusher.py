@@ -52,7 +52,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -323,22 +322,6 @@ class SmartCrusher(Transform):
         self._toin: Any = None
         self._toin_load_failed = False
 
-        # Per-request CompressionPolicy, set from
-        # ``kwargs["compression_policy"]`` at the start of ``apply()``
-        # and read by ``_record_to_toin`` to gate TOIN writes when
-        # ``policy.toin_read_only`` is true (Subscription mode).
-        # Defaults to ``None`` so the direct ``crush()`` / ``crush_array_json()``
-        # / ``compact_document_json()`` entry points (which don't go
-        # through ``apply()``) leave TOIN writes ungated.
-        #
-        # Backed by ``threading.local`` because the pipeline reuses ONE
-        # SmartCrusher across every ``compress()`` call: a plain instance
-        # attribute would let two concurrent calls with different
-        # policies clobber each other. The property getter returns
-        # ``None`` when the current thread hasn't set a value, preserving
-        # single-threaded behaviour exactly.
-        self._tls = threading.local()
-
         # Build the Rust crusher. Forward EVERY field of the Python
         # `SmartCrusherConfig` dataclass via `asdict(cfg)` so the field
         # set is single-sourced from the dataclass definition — adding a
@@ -400,20 +383,6 @@ class SmartCrusher(Transform):
             self._rust = _RustSmartCrusher(rust_cfg)
         else:
             self._rust = _RustSmartCrusher.with_compaction_format(rust_cfg, resolved_format)
-
-    @property
-    def _runtime_compression_policy(self) -> Any:
-        """Per-request CompressionPolicy (thread-local backed).
-
-        Returns ``None`` when the current thread hasn't set a policy,
-        matching the pre-thread-local default. See ``__init__`` for why
-        this is thread-local rather than a plain instance attribute.
-        """
-        return getattr(self._tls, "compression_policy", None)
-
-    @_runtime_compression_policy.setter
-    def _runtime_compression_policy(self, value: Any) -> None:
-        self._tls.compression_policy = value
 
     def crush(self, content: str, query: str = "", bias: float = 1.0) -> CrushResult:
         """Crush a single JSON content string.
@@ -666,28 +635,8 @@ class SmartCrusher(Transform):
         implementation used. The router doesn't pass a tokenizer down
         this far, and re-tokenizing here would dominate the recording
         cost. Rough estimates are fine for learning aggregates.
-
-        When the active ``CompressionPolicy`` (set by
-        ``apply()`` from ``kwargs["compression_policy"]``) has
-        ``toin_read_only=True``, the write is skipped — Subscription
-        users keep prompt-cache stability AND don't mutate the global
-        TOIN learning pool from cache-sensitive traffic. Direct
-        ``crush()`` / ``crush_array_json()`` callers don't set the
-        policy, so they keep write-enabled behaviour.
         """
         if self._toin_load_failed:
-            return
-        # Read-only gate. Read the per-request policy set by ``apply()``;
-        # ``None`` means we are not running under the Transform
-        # protocol (direct caller via ``crush()``) and the
-        # write-enabled behaviour applies.
-        policy = self._runtime_compression_policy
-        if policy is not None and policy.toin_read_only:
-            logger.debug(
-                "SmartCrusher: skipping TOIN record_compression — "
-                "policy.toin_read_only=True (auth_mode resolved as "
-                "Subscription, F2.2 gate)"
-            )
             return
         try:
             try:
@@ -1207,15 +1156,6 @@ class SmartCrusher(Transform):
         transforms_applied: list[str] = []
         markers_inserted: list[str] = []
         warnings: list[str] = []
-
-        # Capture the per-request CompressionPolicy so
-        # ``_record_to_toin`` can gate TOIN writes on
-        # ``policy.toin_read_only``. Same one-liner pattern the
-        # ContentRouter uses for ``_runtime_target_ratio``. ``None``
-        # when the caller didn't pass a policy (e.g. direct-
-        # apply callers in tests) — ``_record_to_toin`` treats that
-        # as "no gate".
-        self._runtime_compression_policy = kwargs.get("compression_policy")
 
         query_context = self._extract_context_from_messages(result_messages)
         crushed_count = 0
