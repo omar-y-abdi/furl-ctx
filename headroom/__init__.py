@@ -103,7 +103,6 @@ __all__ = [
     "PipelineStage",
     "PipelineEvent",
     "PipelineExtensionManager",
-    "CANONICAL_PIPELINE_STAGES",
 ]
 
 # Keep package-level imports lightweight so `import headroom` does not eagerly
@@ -156,7 +155,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "PipelineStage": ("headroom.pipeline", "PipelineStage"),
     "PipelineEvent": ("headroom.pipeline", "PipelineEvent"),
     "PipelineExtensionManager": ("headroom.pipeline", "PipelineExtensionManager"),
-    "CANONICAL_PIPELINE_STAGES": ("headroom.pipeline", "CANONICAL_PIPELINE_STAGES"),
 }
 
 def __getattr__(name: str) -> Any:

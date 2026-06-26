@@ -254,7 +254,7 @@ def compress(
         cfg = replace(cfg, **overrides)
 
     pipeline = _get_pipeline()
-    pipeline_extensions = PipelineExtensionManager(hooks=hooks, discover=False)
+    pipeline_extensions = PipelineExtensionManager(hooks=hooks)
 
     try:
         # Compute biases from hooks if provided
