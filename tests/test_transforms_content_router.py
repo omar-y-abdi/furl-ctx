@@ -743,3 +743,26 @@ def test_pinning_skips_already_compressed(monkeypatch: pytest.MonkeyPatch) -> No
     )
     # Already-compressed marker keeps proxy idempotent across turns
     assert result["content"][0]["text"] == pinned
+
+
+def test_unknown_rust_content_type_tag_routes_plain_text(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unrecognised Rust content_type tag maps to PLAIN_TEXT + warns, never
+    raises ValueError mid-pipeline (total function across the FFI boundary).
+
+    Pre-fix the bare ``ContentType(rust_result.content_type)`` raised on an
+    unknown tag (exception-as-control-flow). Enum(bad-value) raising is
+    stdlib-guaranteed, so reverting the try/except turns this test red.
+    """
+    import logging
+
+    fake = SimpleNamespace(content_type="some_future_tag_not_in_enum", confidence=1.0)
+    monkeypatch.setattr("headroom._core.detect_content_type", lambda content: fake)
+
+    with caplog.at_level(logging.WARNING, logger="headroom.transforms.content_router"):
+        result = _detect_content("just some plain prose, nothing structured here")
+
+    assert result.content_type is ContentType.PLAIN_TEXT
+    assert any("unknown content_type tag" in r.getMessage() for r in caplog.records)

@@ -40,7 +40,11 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..telemetry.models import ToolSignature
+    from .kompress_compressor import KompressCompressor
 
 from ..config import (
     DEFAULT_EXCLUDE_TOOLS,
@@ -217,8 +221,18 @@ def _detect_content(content: str) -> DetectionResult:
     rust_result = _rust_detect(content)
     # Rust's `content_type` is the lowercase string tag (e.g.
     # "json_array"); translate to the Python `ContentType` enum so
-    # downstream mapping keys match.
-    content_type = ContentType(rust_result.content_type)
+    # downstream mapping keys match. An unrecognised tag (version skew
+    # between the Rust detector and this enum) maps to PLAIN_TEXT — the safe
+    # routing default — rather than raising a ValueError mid-pipeline. Total
+    # function: no exception-as-control-flow across the FFI boundary.
+    try:
+        content_type = ContentType(rust_result.content_type)
+    except ValueError:
+        logger.warning(
+            "unknown content_type tag %r from Rust detector; routing as PLAIN_TEXT",
+            rust_result.content_type,
+        )
+        content_type = ContentType.PLAIN_TEXT
     if content_type is ContentType.PLAIN_TEXT:
         regex_result = _regex_detect_content_type(content)
         if regex_result.content_type is not ContentType.PLAIN_TEXT:
@@ -234,7 +248,7 @@ def _create_content_signature(
     content_type: str,
     content: str,
     language: str | None = None,
-) -> Any:
+) -> "ToolSignature | None":
     """Create a ToolSignature for non-JSON content types.
 
     This allows TOIN to track compression patterns for code, search results,
@@ -312,11 +326,6 @@ class RouterCompressionResult:
             LOG fallback chain it's three. Lets log readers see *how*
             we got to the final compressor without parsing the
             decision_reason string.
-        cache_hit: True when this result came from the router's
-            result_cache (no fresh compression ran). Currently the
-            single-content compress() path doesn't populate the cache,
-            so this is False in practice — placeholder for the
-            cache-wire-up follow-up.
     """
 
     compressed: str
@@ -325,7 +334,6 @@ class RouterCompressionResult:
     routing_log: list[RoutingDecision] = field(default_factory=list)
     sections_processed: int = 1
     strategy_chain: list[str] = field(default_factory=list)
-    cache_hit: bool = False
 
     @property
     def total_original_tokens(self) -> int:
@@ -1275,7 +1283,7 @@ class ContentRouter(Transform):
         """
         return self._registry.get_html_extractor()
 
-    def _get_kompress(self, model_id: str | None = None) -> Any:
+    def _get_kompress(self, model_id: str | None = None) -> "KompressCompressor | None":
         """Get KompressCompressor (lazy load). Downloads from HuggingFace on first use.
 
         Respects the per-request ``model_id`` (from ``runtime.kompress_model``):
