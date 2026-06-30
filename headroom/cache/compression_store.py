@@ -119,9 +119,9 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
     quote the TTL and age. A ``missing`` status is genuinely ambiguous without
     per-eviction tracking — the entry may have been evicted under capacity
     pressure, expired-then-reaped, or never stored — so we name every real cause
-    plus the durable-backend remedy instead of implying TTL alone (the old
-    "Entry not found (CCR TTL: ...)" wording misattributed capacity evictions to
-    the TTL, which is misleading for the common 1000-entry-overflow case).
+    instead of implying TTL alone (the old "Entry not found (CCR TTL: ...)"
+    wording misattributed capacity evictions to the TTL, which is misleading for
+    the common 1000-entry-overflow case).
     """
     default_ttl = status.get("default_ttl_seconds", DEFAULT_CCR_TTL_SECONDS)
     ttl_seconds = status.get("ttl_seconds", default_ttl)
@@ -137,8 +137,7 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
     return (
         f"Entry no longer retrievable from the CCR store: it was evicted under "
         f"capacity pressure{capacity_note}, expired (TTL {default_ttl}s), or was "
-        f"never stored. Recompute the source content, or configure a durable CCR "
-        f"backend (Sqlite/Redis) for longer retention."
+        f"never stored. Recompute the source content."
     )
 
 

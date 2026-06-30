@@ -30,7 +30,7 @@ md-5 = "0.10"
 sha2 = "0.10"
 # `dashmap` for the CCR storage backend. Concurrent HashMap with sharded
 # locking — distinct keys hashed to different shards never contend, so
-# multi-worker proxy load doesn't queue on a single Mutex. Lock-free
+# concurrent multi-threaded load doesn't queue on a single Mutex. Lock-free
 # reads inside each shard via RwLock semantics.
 dashmap = "6"
 # `regex` is already a transitive dep of tokenizers; depend on it directly so
@@ -60,13 +60,6 @@ unidiff = "0.4"
 # happen as a post-filter on the byte offsets the automaton returns.
 # Default features (std, perf-literal) keep the build small.
 aho-corasick = "1"
-# `rusqlite` for the SQLite-backed CCR store (the production default).
-# `bundled` builds SQLite from source so deploys do not need a system
-# libsqlite3 — matters for Lambda / container builds where the host
-# image may lag behind. Sub-1 MB binary cost. WAL is enabled at
-# connection-open time (see `ccr/backends/sqlite.rs`); no extra feature
-# flags required.
-rusqlite = { version = "0.32", features = ["bundled"] }
 
 [features]
 # Default is ML-free: no ONNX runtime, no `ort`/`ort-sys`. Every default

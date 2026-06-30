@@ -13,16 +13,12 @@
 //! feedback, no per-tool metadata. Those live in the runtime layer; this
 //! crate only needs put/get.
 //!
-//! # Backends
+//! # Backend
 //!
 //! - [`backends::InMemoryCcrStore`] — process-local, sharded `DashMap`.
-//!   Test default; lost on restart, fragmented across workers.
-//! - [`backends::SqliteCcrStore`] — production default. Persistent
-//!   across worker restarts; shareable across workers via a shared DB
-//!   file. WAL-mode, prepared statements, lazy TTL purge on read.
-//!
-//! [`backends::from_config`] selects one at startup and surfaces every
-//! init error to the caller (per `feedback_no_silent_fallbacks.md`).
+//!   Constructed once at startup, shared across worker threads behind an
+//!   `Arc`; entries are lost on restart. CCR recovery is scoped to the
+//!   process / request window (see `CCR-RETENTION.md`).
 //!
 //! [`CompressionStore`]: ../../../../headroom/cache/compression_store.py
 
@@ -31,7 +27,7 @@ mod markers;
 
 use std::time::Duration;
 
-pub use backends::{from_config, CcrBackendConfig, CcrBackendInitError, InMemoryCcrStore};
+pub use backends::InMemoryCcrStore;
 pub(crate) use markers::{
     marker_for_diff, marker_for_opaque, marker_for_retrieve_more, marker_for_row_index,
     marker_for_rows_offloaded,

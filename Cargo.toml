@@ -65,10 +65,11 @@ pyo3 = { version = "0.24", features = ["abi3-py310"] }
 # * Single codegen unit (better inlining + dead-code elim, at the
 #   cost of slightly slower release builds)
 #
-# We deliberately do NOT set ``panic = "abort"``. The proxy is a
-# long-lived async process — a single misbehaving request triggering
-# panic-abort would terminate the whole proxy and disconnect every
-# concurrent client. Accept the smaller savings; keep unwind behaviour.
+# We deliberately do NOT set ``panic = "abort"``. headroom ships as a
+# PyO3 extension loaded into a host Python process — panic-abort would
+# tear down the whole interpreter on a single Rust panic instead of
+# unwinding into a catchable Python exception. Accept the smaller
+# savings; keep unwind behaviour.
 #
 # Estimated impact: 213 MB/release → ~130 MB/release. Buys ~30+ more
 # release slots within the 10 GB ceiling at the current release

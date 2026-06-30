@@ -4,10 +4,10 @@
 //! map). Distinct keys never contend on the read path; capacity-bound
 //! eviction is the only globally-serialized step.
 //!
-//! This is the **test-default** backend. Production deployments use
-//! [`super::sqlite::SqliteCcrStore`], which is persistent across worker
-//! restarts and shareable across workers via a shared DB file (see
-//! `RUST_DEV.md` "Multi-worker deployment").
+//! This is the only CCR backend. The engine constructs one at startup and
+//! shares it across worker threads behind an `Arc` for the process lifetime;
+//! entries are lost on restart (CCR recovery is request-window-scoped — see
+//! `CCR-RETENTION.md`).
 //!
 //! # Eviction scheme: generation-counter FIFO
 //!

@@ -286,76 +286,19 @@ doesn't rediscover them.
   version so CI picks up the same toolchain the local box uses. Tighten to a
   pinned version (e.g. `1.78`) once the port stabilizes.
 
-## Multi-worker deployment — CCR fragmentation
+## CCR storage — process-local, request-window-scoped
 
-**Status:** PR-B7 (`REALIGNMENT/04-phase-B-live-zone.md`) introduced two
-persistent CCR backends. The single-`--workers` recommendation no longer
-applies once you select a persistent backend.
+The CCR store (`crates/headroom-core/src/ccr/backends/`) ships a single
+backend: `InMemoryCcrStore`, a process-local sharded `DashMap` constructed once
+at startup and shared across worker threads behind an `Arc`. Entries are bounded
+(capacity-LRU + TTL, defaults 1000 entries / 300 s) and lost on restart, so
+byte-exact CCR recovery is guaranteed only **within the process / request
+window** — long enough for the `<<ccr:HASH>>` markers a single compression emits
+to round-trip on the model's retrieval call.
 
-### Backend selection
-
-`crates/headroom-core/src/ccr/backends/` ships three implementations of
-the `CcrStore` trait:
-
-| Backend                | When to use                                 | Persistence | Multi-worker safe          |
-| ---------------------- | ------------------------------------------- | ----------- | -------------------------- |
-| `InMemoryCcrStore`     | Tests, single-worker prototyping            | No          | No                         |
-| `SqliteCcrStore` (default) | Single-instance prod / single-host fleet | Yes (file)  | Yes (sticky session)       |
-| `RedisCcrStore` (opt-in)   | Multi-host / horizontally-scaled prod     | Yes (Redis) | Yes (no stickiness needed) |
-
-`backends::from_config` picks one at startup from the operator's
-`CcrBackendConfig`. **Init failures surface to the caller**
-(`feedback_no_silent_fallbacks.md`) — a misconfigured DB path or
-unreachable Redis URL aborts startup rather than silently degrading to
-in-memory.
-
-### When does what work?
-
-- **`SqliteCcrStore`** is the default for new deploys. The DB file lives
-  on the local disk; multiple workers on the **same host** share it via
-  SQLite's WAL-mode locking, so `--workers N` works as long as a sticky
-  load balancer routes each session to the same host. Survives proxy
-  restarts: a new worker that opens the same DB file recovers every
-  in-flight `<<ccr:HASH>>` marker.
-- **`RedisCcrStore`** (cfg-gated behind the `redis` feature) is the
-  drop-in for **horizontally-scaled** deployments. Every worker on
-  every host hits the same Redis instance; no sticky session is
-  required at any layer of the LB. Enable with `--features redis` in
-  the proxy crate's Cargo build.
-- **`InMemoryCcrStore`** is fine for tests and single-worker
-  development. Production deployments using it lose every
-  `<<ccr:HASH>>` marker on restart and fragment across workers — keep
-  it confined to local boxes.
-
-### What goes wrong with the in-memory backend on `--workers N > 1`
-
-Each uvicorn worker is a separate Python process. The following state is
-fragmented across workers:
-
-1. **Python `CompressionStore`** — defaults to `InMemoryBackend` (per-process)
-   when `HEADROOM_CCR_BACKEND` is unset. Each worker has its own singleton; CCR
-   markers written on worker A are invisible to worker B. Set
-   `HEADROOM_CCR_BACKEND=sqlite` to use a shared cross-worker store.
-2. **`HeadroomProxy._compression_caches`** (`headroom/proxy/server.py`)
-   — per-session `CompressionCache` dict (instance var, always per-worker).
-3. **`HeadroomProxy.session_tracker_store`** — per-session prefix-tracker
-   state derived from Anthropic's `cache_read_input_tokens` responses
-   (instance var, always per-worker).
-4. **TOIN learner state** — writes snapshots to `~/.headroom/toin.json` but
-   keeps per-process in-memory state; pattern statistics on one worker are not
-   visible to others until the next disk flush.
-
-When uvicorn round-robins requests across workers, a session whose
-turn-1 landed on worker A may have turn-2 land on worker B. Worker B has
-zero knowledge of what worker A did, the `<<ccr:HASH>>` marker resolves
-to `None`, and the model sees an opaque directive it can't act on.
-Switching to `SqliteCcrStore` (default) or `RedisCcrStore` resolves the
-CCR fragmentation; a sticky-session load balancer resolves all of them.
-
-### Detecting it in the wild
-
-The proxy emits a `WARNING`-level log line on startup when `--workers N > 1`.
-When `HEADROOM_CCR_BACKEND` is unset (default InMemoryBackend), the warning
-includes CCR retrieval failures and suggests setting `HEADROOM_CCR_BACKEND=sqlite`.
-When a cross-worker backend is already configured, the warning covers only the
-remaining per-worker stores (compression cache, prefix tracker, TOIN, CostTracker).
+No persistent or cross-process backend ships. Spilling evicted entries to a
+durable store (keyed by session for cleanup) is a deliberately-deferred epic —
+see `CCR-RETENTION.md` for the design and trade-offs. On the Python side,
+`CompressionStore` exposes a `headroom.ccr_backend` setuptools entry point so a
+durable adapter can be registered out-of-tree (`HEADROOM_CCR_BACKEND=<name>`),
+but none ships by default and the in-memory backend is the only one wired.
