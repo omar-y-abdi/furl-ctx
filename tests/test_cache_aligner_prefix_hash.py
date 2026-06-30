@@ -59,12 +59,16 @@ def test_delimiter_collision_now_yields_distinct_hashes() -> None:
 
 
 def test_prefix_changed_flips_on_structural_change() -> None:
-    # A single aligner instance fed the colliding pair in sequence must report
+    # Threading the prior turn's hash back in, the colliding pair must report
     # prefix_changed=True on the second call (the set really did change).
     aligner = _aligner()
     tok = _tok()
-    aligner.apply([_sys("a\n---\nb")], tok)
-    second = aligner.apply([_sys("a"), _sys("b")], tok)
+    first = aligner.apply([_sys("a\n---\nb")], tok)
+    second = aligner.apply(
+        [_sys("a"), _sys("b")],
+        tok,
+        previous_prefix_hash=first.cache_metrics.stable_prefix_hash,
+    )
     assert second.cache_metrics.prefix_changed is True
 
 
@@ -76,9 +80,30 @@ def test_prefix_hash_is_deterministic() -> None:
 def test_identical_set_reports_no_change() -> None:
     aligner = _aligner()
     tok = _tok()
-    aligner.apply([_sys("stable system prompt")], tok)
-    second = aligner.apply([_sys("stable system prompt")], tok)
+    first = aligner.apply([_sys("stable system prompt")], tok)
+    second = aligner.apply(
+        [_sys("stable system prompt")],
+        tok,
+        previous_prefix_hash=first.cache_metrics.stable_prefix_hash,
+    )
     assert second.cache_metrics.prefix_changed is False
+
+
+def test_no_cross_request_leak_on_shared_instance() -> None:
+    # The aligner is a process-wide singleton in the pipeline. Two DIFFERENT
+    # prompts through the SAME instance with no threaded hash must NOT latch
+    # one request's prefix into the next: both report prefix_changed=False /
+    # previous_hash=None. (Pre-fix the instance latched _previous_prefix_hash,
+    # so the 2nd call falsely reported prefix_changed=True and leaked the 1st
+    # request's hash — a cross-request observability corruption + data race.)
+    aligner = _aligner()
+    tok = _tok()
+    a = aligner.apply([_sys("prompt A")], tok)
+    b = aligner.apply([_sys("totally different prompt B")], tok)
+    assert a.cache_metrics.prefix_changed is False
+    assert a.cache_metrics.previous_hash is None
+    assert b.cache_metrics.prefix_changed is False
+    assert b.cache_metrics.previous_hash is None
 
 
 # ── #6: warnings are surfaced, not swallowed ─────────────────────────────

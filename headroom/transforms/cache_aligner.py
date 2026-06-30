@@ -223,10 +223,15 @@ class CacheAligner(Transform):
     name = "cache_aligner"
 
     def __init__(self, config: CacheAlignerConfig | None = None):
-        """Initialize the detector-only cache aligner."""
+        """Initialize the detector-only cache aligner.
+
+        Stateless across calls: the ``prefix_changed`` / ``previous_hash``
+        metrics derive from a caller-supplied ``previous_prefix_hash`` threaded
+        into :meth:`apply`, never latched on the instance. The aligner is a
+        process-wide singleton in the pipeline, so an instance latch would
+        compare unrelated requests' prompts and race under concurrency.
+        """
         self.config = config or CacheAlignerConfig()
-        # Track previous hash for cache hit detection (observability only).
-        self._previous_prefix_hash: str | None = None
 
     def should_apply(
         self,
@@ -259,6 +264,12 @@ class CacheAligner(Transform):
         Invariant: ``result.messages`` is byte-equal to the input
         ``messages`` (modulo a deep copy for downstream isolation). The
         prompt is never rewritten.
+
+        Optional kwarg ``previous_prefix_hash``: the prior turn's
+        ``cache_metrics.stable_prefix_hash``. When supplied, the result's
+        ``prefix_changed`` / ``previous_hash`` reflect the comparison; when
+        omitted (the pipeline default) they are ``False`` / ``None`` — the
+        aligner keeps no cross-call state of its own.
         """
         tokens_before = tokenizer.count_messages(messages)
         # Deep copy so callers receive a stable list they can further
@@ -314,11 +325,13 @@ class CacheAligner(Transform):
         stable_hash = compute_short_hash(framed)
         prefix_bytes = len(system_text.encode("utf-8"))
         prefix_tokens_est = tokenizer.count_text(system_text)
-        prefix_changed = (
-            self._previous_prefix_hash is not None and self._previous_prefix_hash != stable_hash
-        )
-        previous_hash = self._previous_prefix_hash
-        self._previous_prefix_hash = stable_hash
+        # Cross-call prefix tracking is threaded by the caller, not latched on
+        # this instance: the aligner is a shared singleton, so an instance latch
+        # would compare unrelated requests' prompts and race under concurrency.
+        # Callers wanting turn-to-turn tracking pass the prior turn's
+        # ``stable_prefix_hash`` back in as ``previous_prefix_hash``.
+        previous_hash = kwargs.get("previous_prefix_hash")
+        prefix_changed = previous_hash is not None and previous_hash != stable_hash
 
         cache_metrics = CachePrefixMetrics(
             stable_prefix_bytes=prefix_bytes,

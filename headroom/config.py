@@ -376,8 +376,8 @@ class CachePrefixMetrics:
     stable_prefix_bytes: int  # Byte length of static prefix
     stable_prefix_tokens_est: int  # Estimated token count of static prefix
     stable_prefix_hash: str  # Hash of canonicalized prefix (16 chars)
-    prefix_changed: bool  # True if hash differs from previous request in session
-    previous_hash: str | None = None  # Previous hash for comparison (None = first request)
+    prefix_changed: bool  # True iff stable_prefix_hash differs from the caller-supplied previous hash
+    previous_hash: str | None = None  # The previous_prefix_hash the caller threaded in (None = not supplied)
 
 
 #: The minimum token count for a message to be compressed, used as the single
