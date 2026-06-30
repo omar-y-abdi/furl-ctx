@@ -1,28 +1,25 @@
 # Headroom
 
-> Context optimization layer for LLM applications. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, 60–95% fewer tokens. Library, proxy, and MCP server. Apache 2.0, local-first.
+> Context optimization layer for LLM applications. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, 60–95% fewer tokens. Python library and MCP server. Apache 2.0, local-first.
 
-Headroom is shipped as a Python package (`headroom-ai`), a TypeScript package (`headroom-ai`), an OpenAI + Anthropic-compatible HTTP proxy (`headroom proxy`), and an MCP server (`headroom_compress`, `headroom_retrieve`, `headroom_stats` tools). All four modes use the same compression pipeline: per-content-type compressors (JSON, code, logs, diffs, text) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original whenever it wants.
+Headroom is shipped as a Python package (`headroom-ai`) with an MCP server (`headroom_compress`, `headroom_retrieve`, `headroom_stats` tools). Both use the same compression pipeline: per-content-type compressors (JSON, code, logs, diffs, text) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original whenever it wants.
 
 ## Packages
 
 - [PyPI package](https://pypi.org/project/headroom-ai/): Python install.
-- [npm package](https://www.npmjs.com/package/headroom-ai): TypeScript install.
 
 ## Install (copy-paste-runnable)
 
 - Python: `pip install headroom-ai` (add `[all]` for every optional extra)
-- TypeScript / Node: `npm install headroom-ai` (or `pnpm add headroom-ai`, `bun add headroom-ai`)
-- Run the proxy: `headroom proxy --port 8787` then point any client at `http://127.0.0.1:8787`
-- Wrap an agent in one command: `headroom wrap claude` (also: `codex`, `cursor`, `aider`, `copilot`, `gemini`)
+- MCP server: `pip install "headroom-ai[mcp]"` then run `python -m headroom.ccr.mcp_server`
+- Compress in code: `from headroom import compress`
 
 ## Entry points
 
 - **Quickstart**: 5-minute end-to-end (install → compress → call the model).
 - **Installation**: All install paths, extras, env vars.
-- **Proxy server**: Run as a local HTTP proxy in front of OpenAI / Anthropic / Gemini.
 - **MCP server**: `headroom_compress`, `headroom_retrieve`, `headroom_stats` for Claude Code / Cursor / any MCP host.
-- **API reference**: Python + TypeScript `compress()` API.
+- **API reference**: Python `compress()` API.
 
 ## How it works
 
@@ -31,22 +28,6 @@ Headroom is shipped as a Python package (`headroom-ai`), a TypeScript package (`
 - **Code compression**: AST-aware via tree-sitter (preserves imports, signatures, types).
 - **Text & log compression**: Search results, build logs, diffs.
 - **CCR (reversible)**: Compress-Cache-Retrieve — originals never deleted; LLM retrieves on demand.
-
-## SDK / framework integrations
-
-- **Anthropic SDK**: `withHeadroom(anthropic)` wrapper.
-- **OpenAI SDK**: `withHeadroom(openai)` wrapper.
-- **Vercel AI SDK**: Middleware + `withHeadroom()`.
-- **LangChain**: Chat models, memory, retrievers, agents.
-- **Agno**: Model wrapping + observability hooks.
-- **Strands**: Model wrapping + hook-based tool output compression.
-- **LiteLLM**: Single callback; works with all 100+ LiteLLM providers.
-
-## Memory & cross-agent state
-
-- **Persistent memory**: Per-project SQLite + HNSW vector store. No cross-project bleed.
-- **SharedContext**: Compressed inter-agent context handoffs.
-- **Failure learning**: Offline analysis writes corrections to `CLAUDE.md` / `AGENTS.md`.
 
 ## Operations
 
@@ -57,4 +38,4 @@ Headroom is shipped as a Python package (`headroom-ai`), a TypeScript package (`
 
 ## Licensing
 
-Apache 2.0. Use commercially, modify, redistribute. Data stays on the user's machine when running the library, proxy, or MCP server locally. Anonymous telemetry enabled by default; set `HEADROOM_TELEMETRY=off` to disable.
+Apache 2.0. Use commercially, modify, redistribute. Data stays on the user's machine when running the library or MCP server locally. Anonymous telemetry enabled by default; set `HEADROOM_TELEMETRY=off` to disable.

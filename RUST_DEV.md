@@ -11,13 +11,7 @@ Cargo.toml                       # workspace root
 rust-toolchain.toml              # pins stable rustc with rustfmt+clippy
 crates/
   headroom-core/                 # library: shared types + transform trait surface
-  headroom-proxy/                # binary: axum /healthz (Phase 2 grows this)
   headroom-py/                   # PyO3 cdylib exposing `headroom._core`
-  headroom-parity/               # lib + `parity-run` CLI for Python parity tests
-tests/parity/
-  fixtures/<transform>/*.json    # recorded Python outputs (Phase 1 ports match)
-  recorder.py                    # Python-side fixture recorder
-scripts/record_fixtures.py       # entry point for running the recorder
 ```
 
 `cargo build --workspace` builds every crate. `default-members` drops
@@ -33,99 +27,11 @@ exposes the same targets:
 | Target | What it does |
 | --- | --- |
 | `make test` | `cargo test --workspace` |
-| `make test-parity` | Builds `headroom-py` via maturin, runs `parity-run run` |
 | `make bench` | `cargo bench --workspace` |
-| `make build-proxy` | Release-builds `headroom-proxy`, strips, prints size |
-| `make build-wheel` | `maturin build --release -m crates/headroom-py/pyproject.toml` |
+| `make build-wheel` | `maturin build --release -m crates/headroom-py/Cargo.toml` |
+| `make verify-rust-core` | maturin-develop + import-verify `headroom._core` in one shot |
 | `make fmt` | `cargo fmt --all` |
-| `make lint` | `cargo fmt --check` + `cargo clippy --workspace -- -D warnings` |
-
-## Running the proxy
-
-`headroom-proxy` is a transparent reverse proxy. Phase 1 forwards HTTP/1.1,
-HTTP/2, SSE, and WebSocket traffic verbatim to a configured upstream — no
-provider logic yet. The intent is that operators run the existing Python
-proxy on a private port and put `headroom-proxy` on the public port pointed
-at it; end users notice nothing.
-
-```bash
-# Build
-make build-proxy
-./target/release/headroom-proxy --help
-
-# Run against a local upstream
-./target/release/headroom-proxy \
-    --listen 0.0.0.0:8787 \
-    --upstream http://127.0.0.1:8788
-
-# Health checks
-curl -s http://127.0.0.1:8787/healthz            # => {"ok":true,...}
-curl -s http://127.0.0.1:8787/healthz/upstream   # => 200 if upstream reachable
-```
-
-### Operator runbook (Phase 1 cutover)
-
-```bash
-# 1. Move the Python proxy to a private port (e.g. 8788)
-HEADROOM_HOST=127.0.0.1 HEADROOM_PORT=8788 python -m headroom.proxy &  # or your existing launcher
-
-# 2. Run the Rust proxy on the previously-public port (8787) pointing at it
-./target/release/headroom-proxy --listen 0.0.0.0:8787 --upstream http://127.0.0.1:8788 &
-
-# 3. End users keep hitting :8787 unchanged.
-# 4. Confirm passthrough:
-curl -si http://127.0.0.1:8787/v1/models
-# 5. Rollback = stop the Rust proxy and rebind Python back to 8787.
-```
-
-### Configuration flags
-
-| Flag | Env var | Default | Notes |
-| --- | --- | --- | --- |
-| `--listen` | `HEADROOM_PROXY_LISTEN` | `0.0.0.0:8787` | bind address |
-| `--upstream` | `HEADROOM_PROXY_UPSTREAM` | (required) | base URL the proxy forwards to |
-| `--upstream-timeout` |  | `600s` | end-to-end request timeout (long for streams) |
-| `--upstream-connect-timeout` |  | `10s` | TCP/TLS connect timeout |
-| `--max-body-bytes` |  | `100MB` | for buffered cases; streams bypass |
-| `--log-level` |  | `info` | `RUST_LOG`-style filter |
-| `--rewrite-host` / `--no-rewrite-host` | | rewrite | rewrite Host to upstream (default) |
-| `--graceful-shutdown-timeout` | | `30s` | wait for in-flight on SIGTERM/SIGINT |
-
-### Picking the next port: invocation telemetry
-
-Before porting another Python compressor to Rust, check what's actually
-running. The Python proxy already exposes per-transform telemetry on
-`/stats` (`headroom.proxy.prometheus_metrics`):
-
-```bash
-# Top compressors by invocation count (last process lifetime)
-curl -s http://127.0.0.1:8788/stats | jq '.compressions_by_strategy'
-# {
-#   "intelligent_context": 12453,
-#   "smart_crusher": 487,
-#   "search":         312,
-#   "diff":            28,
-#   "code":             0,        # ← never fires; safe to defer porting
-#   ...
-# }
-
-# Per-transform timing (avg/max/count by transform name)
-curl -s http://127.0.0.1:8788/stats | jq '.pipeline_timing'
-
-# Token savings attributable to each strategy
-curl -s http://127.0.0.1:8788/stats | jq '.tokens_saved_by_strategy'
-```
-
-This is the data the audit-cleanup PR (2026-04-30) recommended for
-prioritizing the next Python → Rust port. Strategies with zero or
-near-zero invocations are deferral candidates; strategies on the hot
-path are porting candidates regardless of LOC count.
-
-### Reserved paths
-
-`/healthz` and `/healthz/upstream` are intercepted by the Rust proxy and
-**not** forwarded. Operators must not name a real upstream route either of
-these. Everything else is a catch-all forward.
+| `make fmt-check` | `cargo fmt --check` |
 
 ## Maturin + Python wiring
 
@@ -163,31 +69,6 @@ make build-wheel
 
 CI (`.github/workflows/rust.yml`) builds linux-x86_64, macos-arm64, and
 macos-x86_64 wheels via `PyO3/maturin-action` and uploads them as artifacts.
-
-## Parity harness
-
-`crates/headroom-parity` owns the Rust-vs-Python oracle:
-
-- JSON fixtures under `tests/parity/fixtures/<transform>/` (schema:
-  `{ transform, input, config, output, recorded_at, input_sha256 }`).
-- `TransformComparator` trait — one impl per transform. Phase 0 stubs return
-  `Err(...)`; the harness flags those as `Skipped`, not panics.
-- `parity-run` CLI: `cargo run -p headroom-parity -- run [--only TRANSFORM]`.
-- Unit tests in `crates/headroom-parity/src/lib.rs` include a **negative
-  test** (`harness_reports_diff_for_divergent_comparator`) proving the
-  harness detects mismatched output before any real port lands.
-
-### Recording fresh fixtures
-
-```bash
-source .venv/bin/activate           # the main Python SDK venv
-python scripts/record_fixtures.py   # uses tests/parity/recorder.py
-ls tests/parity/fixtures/*/ | sort | uniq -c
-```
-
-The recorder monkey-patches the in-process transform classes (see
-`record_all()` in `tests/parity/recorder.py`). It does **not** modify any
-file under `headroom/`.
 
 ## Known regressions in retired-Python components
 
@@ -255,7 +136,7 @@ boundary** — is captured in issue #315 and
 ### Watch list (potential regressions, not yet audited)
 
 - `CCRConfig.enabled=False` end-to-end — **closed 2026-04-29**. Both `enabled=False` and `inject_retrieval_marker=False` collapse to the same Rust `enable_ccr_marker=False` gate (no marker, no store write). See the SmartCrusher table above.
-- `SmartCrusherConfig.use_feedback_hints=False` — config field is forwarded to Rust but its honoring inside the Rust crusher hasn't been verified against a parity fixture for the disabled path.
+- `SmartCrusherConfig.use_feedback_hints=False` — config field is forwarded to Rust but its honoring inside the Rust crusher hasn't been verified for the disabled path.
 
 When any item above changes, update both this section and the test file. The shim's docstring also references this section — keep them aligned.
 
@@ -264,19 +145,6 @@ When any item above changes, update both this section and the test file. The shi
 These are known limitations for Phase 0. They are tracked here so Phase 1
 doesn't rediscover them.
 
-- **`cache_aligner` fixtures**: `CacheAligner.apply()` takes
-  `(messages, tokenizer, **kwargs)` — a `Tokenizer` is provider-specific and
-  its cheapest `NoopTokenCounter` / `TiktokenTokenCounter` construction still
-  requires pulling `headroom.providers.*` which imports the full observability
-  stack (opentelemetry, etc). The recorder records `cache_aligner` only if a
-  usable tokenizer is cheaply available; otherwise it logs a blocker and
-  skips. See `recorder.py::_build_cache_aligner_tokenizer`.
-- **`ccr` is not a single class**: The repo has `CCRToolInjector`,
-  `CCRResponseHandler`, `CCRToolCall`, `CCRToolResult` etc. rather than a
-  single `CCR` class. The recorder targets the encoder-style entry point
-  most analogous to the Rust port (`CCRToolInjector.inject_tool` and
-  `CCRResponseHandler.parse_response`). If Phase 1 wants a different split
-  it should update `recorder.py::record_all` accordingly.
 - **Pre-commit hook noise**: `scripts/sync-plugin-versions.py` mutates
   `.claude-plugin/marketplace.json`, `.github/plugin/marketplace.json`, and
   `plugins/headroom-agent-hooks/**/plugin.json` on every commit. Those

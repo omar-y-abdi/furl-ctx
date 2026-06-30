@@ -90,7 +90,7 @@ A human maintainer reviews every dep change. PRs that add or bump a package must
 git clone <your-fork-url>
 cd headroom
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,relevance,proxy]"
+pip install -e ".[dev]"
 pytest
 ```
 
