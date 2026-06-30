@@ -788,9 +788,11 @@ class ContentRouter(Transform):
                 routing_log=[],
             )
         else:
-            # Determine strategy from content analysis
-            mixed = is_mixed_content(content)
-            detection = _detect_content(content)
+            # Determine strategy from content analysis. ``_determine_strategy``
+            # already runs ``is_mixed_content`` + ``_detect_content`` (a Rust
+            # FFI round-trip) internally — on the hot path (debug off) we do NOT
+            # recompute them here. The detection locals below are built only for
+            # the debug log, so the per-call detection cost is paid once.
             force_kompress = bool(runtime.force_kompress)
             strategy = (
                 CompressionStrategy.KOMPRESS
@@ -798,6 +800,8 @@ class ContentRouter(Transform):
                 else self._determine_strategy(content)
             )
             if debug_enabled:
+                mixed = is_mixed_content(content)
+                detection = _detect_content(content)
                 _log_router_debug(
                     "content_router_input",
                     **request_debug,
