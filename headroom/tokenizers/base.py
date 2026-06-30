@@ -34,6 +34,17 @@ class TokenCounter(Protocol):
         """
         ...
 
+    def count_message(self, message: dict[str, Any]) -> int:
+        """Count tokens in a single message dict.
+
+        Args:
+            message: A message dict with 'role' and 'content'.
+
+        Returns:
+            Token count for this single message.
+        """
+        ...
+
     def count_messages(self, messages: list[dict[str, Any]]) -> int:
         """Count tokens in a list of chat messages.
 
