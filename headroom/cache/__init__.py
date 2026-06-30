@@ -1,7 +1,6 @@
 """Headroom Cache module.
 
-Exposes the dynamic-content detection types (``DynamicContentDetector`` and
-friends) plus the shared ``CacheConfig`` / ``CacheStrategy`` types. The
+Exposes the shared ``CacheConfig`` / ``CacheStrategy`` types. The
 provider-specific cache optimizers were retired with the public SDK surface.
 """
 
@@ -16,36 +15,17 @@ if TYPE_CHECKING:
         CacheConfig,
         CacheStrategy,
     )
-    from headroom.cache.dynamic_detector import (  # noqa: F401
-        DetectorConfig,
-        DynamicCategory,
-        DynamicContentDetector,
-        DynamicSpan,
-        detect_dynamic_content,
-    )
 
 __all__ = [
     # Base types
     "CacheConfig",
     "CacheStrategy",
-    # Dynamic content detection
-    "DetectorConfig",
-    "DynamicCategory",
-    "DynamicContentDetector",
-    "DynamicSpan",
-    "detect_dynamic_content",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # Base types
     "CacheConfig": ("headroom.cache.base", "CacheConfig"),
     "CacheStrategy": ("headroom.cache.base", "CacheStrategy"),
-    # Dynamic content detection
-    "DetectorConfig": ("headroom.cache.dynamic_detector", "DetectorConfig"),
-    "DynamicCategory": ("headroom.cache.dynamic_detector", "DynamicCategory"),
-    "DynamicContentDetector": ("headroom.cache.dynamic_detector", "DynamicContentDetector"),
-    "DynamicSpan": ("headroom.cache.dynamic_detector", "DynamicSpan"),
-    "detect_dynamic_content": ("headroom.cache.dynamic_detector", "detect_dynamic_content"),
 }
 
 
