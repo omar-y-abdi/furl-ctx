@@ -671,7 +671,7 @@ def _load_kompress(
         return _load_kompress_pytorch(model_id, device, allow_download=allow_download)
 
     raise ImportError(
-        "Kompress requires onnxruntime or torch. Install with: pip install headroom-ai[proxy]"
+        "Kompress requires onnxruntime or torch. Install with: pip install headroom-ai[ml]"
     )
 
 

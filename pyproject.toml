@@ -26,7 +26,6 @@ keywords = [
     "optimization",
     "compression",
     "caching",
-    "proxy",
     "ai",
     "machine-learning",
 ]
@@ -59,11 +58,7 @@ ml = [
     "onnxruntime>=1.16.0",
     "transformers>=4.30.0,<6.0",
     "huggingface-hub>=1.5.0,<2.0",
-]
-# Semantic relevance scoring with embeddings (fastembed, torch-free ONNX).
-relevance = [
-    "fastembed>=0.4.0",
-    "numpy>=1.24.0",
+    "numpy>=1.24.0",  # kompress ONNX inputs (np.asarray) — kompress_compressor.py
 ]
 # MCP server for Claude Code integration (headroom.ccr.mcp_server).
 mcp = [
@@ -92,7 +87,7 @@ dev = [
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
-    "headroom-ai[code,ml,relevance,mcp,progress,html]",
+    "headroom-ai[ml,mcp,progress,html]",
 ]
 
 # Maturin builds a single wheel containing both the Python source under

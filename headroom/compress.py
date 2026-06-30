@@ -216,8 +216,9 @@ def compress(
         hooks: Optional CompressionHooks instance for custom behavior.
         config: Compression options (CompressConfig). Overrides defaults.
         **kwargs: Shorthand for CompressConfig fields. These override config:
-            compress_user_messages, target_ratio, protect_recent,
-            protect_analysis_context, kompress_model.
+            compress_user_messages, compress_system_messages, target_ratio,
+            protect_recent, protect_analysis_context, min_tokens_to_compress,
+            kompress_model.
 
     Returns:
         CompressResult with compressed messages and metrics.

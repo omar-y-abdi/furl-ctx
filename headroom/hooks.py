@@ -26,7 +26,7 @@ Usage:
                 biases[i] = 1.0 + 0.5 * (1.0 - abs(2 * pos - 1))
             return biases
 
-    config = ProxyConfig(hooks=MyHooks())
+    result = compress(messages, hooks=MyHooks())
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ class CompressionHooks:
     """Base class for compression hooks. Override methods to customize.
 
     All methods have no-op defaults — OSS behavior is unchanged unless
-    a subclass is provided via ProxyConfig(hooks=MyHooks()).
+    a subclass is provided via compress(messages, hooks=MyHooks()).
     """
 
     def pre_compress(

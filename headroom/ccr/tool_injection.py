@@ -27,9 +27,10 @@ CCR_TOOL_NAME = "headroom_retrieve"
 # truth lives in ``marker_grammar.HASH_WIDTHS``; this name is re-exported for
 # backwards compatibility (importers + the spoofing-guard width check below).
 # - 12: SmartCrusher path — sha256(payload)[:6] → 12 hex chars
-#        (crusher.rs:1620, asserted at crusher.rs:2792)
-# - 24: Canonical compute_key — BLAKE3 → 24 lowercase hex chars
-#        (ccr/mod.rs:69), used by read_lifecycle, diff_compressor, etc.
+#        (crusher.rs `hash_canonical`).
+# - 24: diff/log/search use md5(payload)[:24]; cross_message_dedup,
+#        read_lifecycle, and the store default key use sha256(payload)[:24].
+#        No central key helper — each producer owns its algorithm.
 # Do NOT add arbitrary lengths — the exact-width check is the spoofing guard.
 CCR_HASH_WIDTHS: frozenset[int] = marker_grammar.HASH_WIDTHS
 
@@ -142,10 +143,7 @@ def create_ccr_tool_definition(
         return openai_definition
 
 
-def create_system_instructions(
-    hashes: list[str],
-    retrieval_endpoint: str = "/v1/retrieve",
-) -> str:
+def create_system_instructions(hashes: list[str]) -> str:
     """Create system message instructions for CCR retrieval.
 
     This is an alternative to tool injection - adds instructions to the
@@ -153,7 +151,6 @@ def create_system_instructions(
 
     Args:
         hashes: List of hash keys for compressed content in this context.
-        retrieval_endpoint: The endpoint path for retrieval.
 
     Returns:
         Instruction text to append to system message.
@@ -202,7 +199,6 @@ class CCRToolInjector:
     provider: str = "anthropic"
     inject_tool: bool = True
     inject_system_instructions: bool = True
-    retrieval_endpoint: str = "/v1/retrieve"
 
     # Detected compression markers
     _detected_hashes: list[str] = field(default_factory=list)
@@ -222,7 +218,7 @@ class CCRToolInjector:
     #      emitted by SmartCrusher (markers.rs marker_for_rows_offloaded /
     #      marker_for_row_index / marker_for_opaque), the bare CCR helper, and
     #      cross_message_dedup. 12-hex (SmartCrusher sha256[:6]) or 24-hex
-    #      (canonical BLAKE3 / SHA-256[:24]). The trailing delimiter guards the
+    #      (cross_message_dedup sha256[:24]). The trailing delimiter guards the
     #      width — a 24-hex hash cannot be truncated to 12 because char 12 of a
     #      24-run is itself hex, not a delimiter.
     _marker_patterns: list[re.Pattern] = field(
@@ -379,10 +375,7 @@ class CCRToolInjector:
         if not self.inject_system_instructions or not self.has_compressed_content:
             return messages
 
-        instructions = create_system_instructions(
-            self._detected_hashes,
-            self.retrieval_endpoint,
-        )
+        instructions = create_system_instructions(self._detected_hashes)
 
         # Find and update system message
         updated_messages = []

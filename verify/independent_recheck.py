@@ -24,7 +24,6 @@ from headroom.cache.compression_store import (
 )
 from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
 
-from verify import generators as gen
 from verify.worker import build_case
 
 CCR_PREFIX = "<<ccr:"
