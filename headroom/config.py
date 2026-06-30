@@ -5,16 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from headroom.models.config import ML_MODEL_DEFAULTS
-
 
 @dataclass
 class CacheAlignerConfig:
     """Configuration for cache alignment.
 
-    The CacheAligner transform is detector-only: it reads
-    only ``.enabled``; all detector/whitespace tuning lives on the
-    ``DynamicContentDetector`` / ``CacheConfig`` path.
+    The CacheAligner transform is detector-only: it reads only ``.enabled``
+    and emits prefix-stability warnings; it never rewrites the prompt.
 
     SAFE: Only applied to SYSTEM messages, not user/assistant/tool content.
     """
@@ -24,45 +21,27 @@ class CacheAlignerConfig:
 
 @dataclass
 class RelevanceScorerConfig:
-    """Configuration for relevance scoring in SmartCrusher.
+    """Configuration for BM25 relevance scoring in SmartCrusher.
 
-    Relevance scoring determines which items to keep when compressing
-    tool outputs. Uses the pattern: relevance(item, context) -> [0, 1].
+    Relevance scoring determines which items to keep when compressing tool
+    outputs: relevance(item, context) -> [0, 1]. The Python surface is
+    BM25-only (zero dependencies, fast keyword matching) — the semantic /
+    embedding / hybrid scorers were retired with the public SDK surface.
 
-    Available tiers:
-    - "bm25": BM25 keyword matching (zero dependencies, fast)
-    - "embedding": Semantic similarity via sentence-transformers
-    - "hybrid": BM25 + embedding with adaptive fusion (RECOMMENDED)
-
-    DEFAULT: "hybrid" - combines exact matching (UUIDs, IDs) with semantic
-    understanding. Falls back to BM25 if sentence-transformers not installed.
-
-    For full hybrid support, install: pip install headroom[relevance]
-
-    WHY HYBRID IS DEFAULT:
-    - Missing important items during compression is catastrophic
-    - BM25 alone gives low scores for single-term matches (e.g., "Alice" = 0.07)
-    - Semantic matching catches "errors" -> "failed", "issues", etc.
-    - 5-10ms latency is acceptable vs. losing critical data
+    NOTE: in the standalone build the live compression core scores items in
+    Rust with a fixed threshold; ``SmartCrusher`` raises ``NotImplementedError``
+    if a custom ``relevance_config`` / ``scorer`` is supplied. These fields are
+    the documented defaults, not per-call tunables.
     """
 
-    tier: Literal["bm25", "embedding", "hybrid"] = "hybrid"
+    tier: Literal["bm25"] = "bm25"
 
     # BM25 parameters
     bm25_k1: float = 1.5  # Term frequency saturation
     bm25_b: float = 0.75  # Length normalization
 
-    # Embedding parameters
-    embedding_model: str = field(default_factory=lambda: ML_MODEL_DEFAULTS.sentence_transformer)
-
-    # Hybrid parameters
-    hybrid_alpha: float = 0.5  # BM25 weight (1-alpha = embedding weight)
-    adaptive_alpha: bool = True  # Adjust alpha based on query type
-
-    # Scoring thresholds
-    # With hybrid/embedding: semantic scores are meaningful (0.3-0.5 for good matches)
-    # With BM25 fallback: threshold is still reasonable for multi-term matches
-    # Lower threshold = safer (keeps more items), higher = more aggressive compression
+    # Scoring threshold
+    # Lower threshold = safer (keeps more items), higher = more aggressive.
     relevance_threshold: float = 0.25  # Keep items above this score
 
 

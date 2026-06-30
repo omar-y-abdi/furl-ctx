@@ -86,21 +86,3 @@ class RelevanceScorer(ABC):
             True if the scorer can be instantiated.
         """
         return True
-
-
-def default_batch_score(
-    scorer: RelevanceScorer, items: list[str], context: str
-) -> list[RelevanceScore]:
-    """Default batch implementation that calls score() per item.
-
-    Use this as a fallback for scorers that don't have optimized batching.
-
-    Args:
-        scorer: The scorer instance.
-        items: List of items to score.
-        context: Query context.
-
-    Returns:
-        List of scores.
-    """
-    return [scorer.score(item, context) for item in items]
