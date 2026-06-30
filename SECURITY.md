@@ -37,16 +37,14 @@ Include the following information:
 When using Headroom:
 
 1. **API Keys**: Never commit API keys. Use environment variables.
-2. **Proxy Exposure**: Don't expose the proxy server to the public internet without authentication
-3. **Log Files**: Be aware that request logs may contain sensitive information
-4. **Budget Limits**: Set budget limits to prevent unexpected costs
+2. **Log Files**: Be aware that request logs may contain sensitive information
+3. **Budget Limits**: Set budget limits to prevent unexpected costs
 
 ### Scope
 
 The following are in scope for security reports:
-- Headroom Python package (`pip install headroom`)
-- Headroom proxy server
-- Official integrations (LangChain, MCP)
+- Headroom Python package (`pip install headroom-ai`)
+- Headroom MCP server (`headroom.ccr.mcp_server`)
 
 The following are out of scope:
 - Third-party integrations not maintained by us

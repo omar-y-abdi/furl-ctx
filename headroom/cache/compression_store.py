@@ -1266,7 +1266,7 @@ def clear_request_compression_store() -> None:
 
 
 def _create_default_ccr_backend() -> CompressionStoreBackend | None:
-    """Create a CCR backend from env (e.g. HEADROOM_CCR_BACKEND=redis).
+    """Create a CCR backend from env (e.g. HEADROOM_CCR_BACKEND=<your-plugin-name>).
 
     Loads adapters via setuptools entry point 'headroom.ccr_backend'.
     Returns None to use default InMemoryBackend.
