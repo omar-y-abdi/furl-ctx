@@ -41,11 +41,12 @@
 //! discarding every stale token in O(capacity) time.
 //!
 //! The third defect (unbacked-sentinel / large-call self-eviction) cannot
-//! be fully eliminated in an in-memory store with a fixed capacity — for
-//! unbounded sessions the production path must use sqlite or redis. The
-//! generation scheme makes eviction order well-defined and re-insert-safe;
+//! be fully eliminated in an in-memory store with a fixed capacity: a single
+//! call dropping more rows than `capacity` cannot keep every sentinel backed.
+//! The generation scheme makes eviction order well-defined and re-insert-safe;
 //! callers relying on the full sentinel window must configure a larger
-//! capacity or switch backends.
+//! `capacity`. This is the only CCR backend — recovery is intentionally
+//! request-window-scoped (see `CCR-RETENTION.md`), not a durable store.
 
 use std::collections::VecDeque;
 use std::sync::{
