@@ -1697,6 +1697,22 @@ class ContentRouter(Transform):
             # Two-tier compression cache.
             # Tier 1 (skip): known won't-compress → instant skip.
             # Tier 2 (result): known compresses → reuse compressed text.
+            #
+            # This lookup shares its DECISION SHAPE with _compress_content_block
+            # (is_skipped → get → ratio-gate → ccr-backed), but is deliberately
+            # NOT merged with it: this path DEFERS recompute to the batched
+            # ThreadPoolExecutor pass below (pending_tasks → Pass 2/3) while
+            # _compress_content_block compresses INLINE, the serve/skip
+            # dispositions differ (result_slots[i] + continue vs returning a
+            # block tuple), and the transform-string formats differ (flat
+            # router:{strategy}:{ratio} here vs label-threaded
+            # router:{label}:{strategy} there). Unifying would re-introduce that
+            # format/label threading to bridge genuinely-distinct control flow on
+            # the hottest path — net complexity, not reduction. The two truly
+            # near-identical content-block branches ARE shared (see
+            # _compress_content_block). Lookup outcomes pinned in
+            # test_content_router_cache_lookup_paths.py +
+            # test_result_cache_ccr_divergence.py.
             content_key = hash(content)
 
             # Tier 1: skip set — instant rejection
