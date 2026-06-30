@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,22 +86,31 @@ def _safe_decode_for_logging(raw: bytes) -> str:
 # realistic source file or tool output while bounding worst-case allocation.
 _MAX_READ_BYTES = 10 * 1024 * 1024
 
-# Per-payload preview budget for --debug logging. Tool arguments and outputs can
-# contain whole file contents; logging them verbatim at INFO bloats logs and can
-# leak large payloads. Truncate to this many chars (see _truncate_for_log).
-_LOG_PREVIEW_CHARS = 200
+def _describe_arguments_for_log(arguments: dict[str, Any]) -> str:
+    """Non-sensitive descriptor of a tool-call ``arguments`` dict for logging.
 
-
-def _truncate_for_log(text: str) -> str:
-    """Cap a string for log display, marking truncation explicitly.
-
-    Returns ``text`` unchanged when within ``_LOG_PREVIEW_CHARS``; otherwise the
-    first ``_LOG_PREVIEW_CHARS`` chars plus an ellipsis marker so the log makes
-    clear the value was trimmed (never silently lossy).
+    Truncating a payload still leaks its leading bytes (file contents, queries,
+    retrieved originals). Emit only the *shape* — each key with the length of a
+    string value (or the type for non-strings) — never the values themselves.
+    Used at DEBUG; safe to enable at any level because no payload is included.
     """
-    if len(text) <= _LOG_PREVIEW_CHARS:
-        return text
-    return text[:_LOG_PREVIEW_CHARS] + "…[truncated]"
+    parts: list[str] = []
+    for key in sorted(arguments):
+        value = arguments[key]
+        if isinstance(value, str):
+            parts.append(f"{key}:len={len(value)}")
+        else:
+            parts.append(f"{key}:{type(value).__name__}")
+    return "{" + ", ".join(parts) + "}"
+
+
+def _result_chars_for_log(result: list[Any]) -> int:
+    """Total character count of a handler's TextContent result, for logging.
+
+    A byte/char count is operationally useful (outcome size) without exposing
+    the payload — which may carry retrieved original content or file bodies.
+    """
+    return sum(len(getattr(item, "text", str(item))) for item in result)
 
 
 def _workspace_root() -> Path:
@@ -114,10 +124,28 @@ def _workspace_root() -> Path:
 
     The result is ``resolve()``-d so the jail check compares two canonical
     (symlink-collapsed) paths.
+
+    Floor (defense-in-depth): an env value that is a bare ``~`` (no path after
+    the home marker) or that resolves to the filesystem root ``/`` would widen
+    the jail to the entire home/disk, defeating the confinement. Such a value is
+    rejected and the jail falls back to the current working directory (logged at
+    WARNING so the misconfiguration is visible). The empty/blank case already
+    falls through to cwd via the ``if env_value`` guard.
     """
     env_value = os.environ.get(_paths.HEADROOM_WORKSPACE_DIR_ENV, "").strip()
-    if env_value:
-        return Path(env_value).expanduser().resolve()
+    if env_value and env_value != "~":
+        candidate = Path(env_value).expanduser().resolve()
+        if candidate != Path("/"):
+            return candidate
+        logger.warning(
+            "event=mcp_workspace_root_rejected reason=resolves_to_filesystem_root "
+            "falling_back_to=cwd"
+        )
+    elif env_value == "~":
+        logger.warning(
+            "event=mcp_workspace_root_rejected reason=bare_home_marker "
+            "falling_back_to=cwd"
+        )
     return Path.cwd().resolve()
 
 
@@ -542,10 +570,16 @@ class HeadroomMCPServer:
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             started = time.perf_counter()
-            logger.info(
-                "event=mcp_tool_call_received tool=%s arguments=%s",
+            # INFO: operationally-useful identity only (which tool was invoked).
+            # The arguments carry sensitive payloads (file contents, queries,
+            # paths) and must NOT be logged verbatim at any level — even a
+            # truncated dump leaks the leading bytes. The per-call DEBUG line
+            # below records only the argument SHAPE (keys + value lengths).
+            logger.info("event=mcp_tool_call_received tool=%s", name)
+            logger.debug(
+                "event=mcp_tool_call_received_detail tool=%s arguments_shape=%s",
                 name,
-                _truncate_for_log(json.dumps(arguments, ensure_ascii=False, default=str)),
+                _describe_arguments_for_log(arguments),
             )
             try:
                 if name == COMPRESS_TOOL_NAME:
@@ -563,17 +597,15 @@ class HeadroomMCPServer:
                             text=json.dumps({"error": f"Unknown tool: {name}"}),
                         )
                     ]
+                # INFO: outcome envelope — tool, latency, and result SIZE. The
+                # result body can carry retrieved original content or whole file
+                # bodies, so it is never logged verbatim; a char count conveys
+                # the outcome magnitude without the payload.
                 logger.info(
-                    "event=mcp_tool_call_completed tool=%s duration_ms=%.2f output=%s",
+                    "event=mcp_tool_call_completed tool=%s duration_ms=%.2f result_chars=%d",
                     name,
                     (time.perf_counter() - started) * 1000.0,
-                    _truncate_for_log(
-                        json.dumps(
-                            [getattr(item, "text", str(item)) for item in result],
-                            ensure_ascii=False,
-                            default=str,
-                        )
-                    ),
+                    _result_chars_for_log(result),
                 )
                 return result
             except Exception as e:
@@ -648,17 +680,28 @@ class HeadroomMCPServer:
             ]
 
         query = arguments.get("query")
-        logger.info(
-            "event=mcp_retrieve_started hash=%s query=%s",
+        # INFO: the hash is a content-address (validated 12/24-hex above), safe
+        # to log; the query is a user-supplied search string and the result can
+        # carry the retrieved ORIGINAL content — neither is logged verbatim. The
+        # DEBUG line records whether a query was present and its length only.
+        has_query = query is not None
+        logger.info("event=mcp_retrieve_started hash=%s has_query=%s", hash_key, has_query)
+        logger.debug(
+            "event=mcp_retrieve_started_detail hash=%s query_len=%s",
             hash_key,
-            _truncate_for_log(json.dumps(query, ensure_ascii=False, default=str)),
+            len(query) if isinstance(query, str) else 0,
         )
         result = await self._retrieve_content(hash_key, query)
+        # INFO: outcome — hash, whether the entry resolved, and the result size.
+        # ``original_content`` (when present) must never reach the log; report a
+        # boolean hit/miss and a char count instead of the payload.
+        resolved = "error" not in result
+        result_chars = len(json.dumps(result, ensure_ascii=False, default=str))
         logger.info(
-            "event=mcp_retrieve_completed hash=%s query=%s result=%s",
+            "event=mcp_retrieve_completed hash=%s resolved=%s result_chars=%d",
             hash_key,
-            _truncate_for_log(json.dumps(query, ensure_ascii=False, default=str)),
-            _truncate_for_log(json.dumps(result, ensure_ascii=False, default=str)),
+            resolved,
+            result_chars,
         )
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -741,41 +784,127 @@ class HeadroomMCPServer:
                 )
             ]
 
-        if not path.exists():
+        # Open ONCE and pin the file descriptor, then stat + read from that SAME
+        # fd (TOCTOU defense): the old flow re-opened the path by name for the
+        # size stat and again for the body read, so a swap between checks could
+        # serve a different inode than the one validated. ``O_NOFOLLOW`` refuses
+        # a final-component symlink (the jail's resolve() already collapses
+        # symlinks before is_relative_to, this is the belt-and-braces at open).
+        # ``fstat`` on the fd drives the regular-file, hardlink, and size checks
+        # so they describe exactly the inode we will read — no second lookup.
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            # Missing path (or a final-component symlink removed between resolve
+            # and open). Mirror the prior exists()-check message + path echo.
             return [
                 TextContent(
                     type="text",
                     text=json.dumps({"error": f"File not found: {file_path}"}),
                 )
             ]
-        if not path.is_file():
+        except OSError as e:
+            # Non-missing open failure: O_NOFOLLOW on a symlink raises ELOOP,
+            # permission-denied raises EACCES, etc. Reserve "File not found" for a
+            # genuine FileNotFoundError above; route everything else to the
+            # generic read-error message (never confirm existence, never echo
+            # errno detail to the model). Detail is logged server-side only.
+            logger.warning(
+                "event=mcp_read_open_failed errno=%s root=%s",
+                getattr(e, "errno", None),
+                root,
+            )
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"error": f"Not a file: {file_path}"}),
+                    text=json.dumps({"error": "Cannot read file"}),
                 )
             ]
 
-        # Reject oversized files before reading them into memory (OOM DoS guard).
-        # stat() reports the true on-disk byte length, so we never allocate the
-        # payload for a file past the cap.
+        # fstat the BARE fd first and run the type/link/size gates before any
+        # read wrapper: os.fdopen(fd, "rb") raises IsADirectoryError on a
+        # directory fd, so the S_ISREG gate has to happen on the raw fstat. The
+        # fd is closed on every path — by os.fdopen's context manager once we
+        # reach the read, by the explicit os.close otherwise.
+        adopted_for_read = False
         try:
-            size_bytes = path.stat().st_size
+            st = os.fstat(fd)
+
+            # os.open succeeds on a directory (S_ISREG is then False); the prior
+            # is_file() guard surfaced that as "Not a file".
+            if not stat.S_ISREG(st.st_mode):
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": f"Not a file: {file_path}"}),
+                    )
+                ]
+
+            # Reject a multiply-linked inode: an in-jail hardlink can point at an
+            # out-of-jail inode and resolve() cannot see through a hardlink
+            # (unlike a symlink), so is_relative_to alone would pass it.
+            if st.st_nlink > 1:
+                logger.warning(
+                    "event=mcp_read_rejected reason=multiply_linked_inode "
+                    "nlink=%d root=%s",
+                    st.st_nlink,
+                    root,
+                )
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": "path outside workspace"}),
+                    )
+                ]
+
+            # Reject oversized files via the fd's own size (OOM DoS guard) BEFORE
+            # reading the body, so a file past the cap is never allocated. Read
+            # the module global live so the cap stays patchable in tests.
+            if st.st_size > _MAX_READ_BYTES:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": (
+                                    f"File too large to read: {st.st_size} bytes "
+                                    f"(limit {_MAX_READ_BYTES} bytes)"
+                                )
+                            }
+                        ),
+                    )
+                ]
+
+            # Read from the pinned fd, bounded by the cap so an append after fstat
+            # cannot blow the budget on the same descriptor. os.fdopen adopts the
+            # fd; its `with` block closes it, so skip the finally-close path.
+            adopted_for_read = True
+            with os.fdopen(fd, "rb") as fh:
+                raw = fh.read(_MAX_READ_BYTES + 1)
         except OSError as e:
+            logger.warning(
+                "event=mcp_read_failed errno=%s root=%s",
+                getattr(e, "errno", None),
+                root,
+            )
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"error": f"Cannot read file: {e}"}),
+                    text=json.dumps({"error": "Cannot read file"}),
                 )
             ]
-        if size_bytes > _MAX_READ_BYTES:
+        finally:
+            if not adopted_for_read:
+                os.close(fd)
+
+        if len(raw) > _MAX_READ_BYTES:
             return [
                 TextContent(
                     type="text",
                     text=json.dumps(
                         {
                             "error": (
-                                f"File too large to read: {size_bytes} bytes "
+                                f"File too large to read: >{_MAX_READ_BYTES} bytes "
                                 f"(limit {_MAX_READ_BYTES} bytes)"
                             )
                         }
@@ -783,19 +912,11 @@ class HeadroomMCPServer:
                 )
             ]
 
-        # Read file from disk. Avoid lossy decode kwargs
+        # Decode the bytes read from the pinned fd. Avoid lossy decode kwargs
         # in headroom/ccr/ — use the centralized safe-log decoder (this path
         # is for tool output display, not SSE/wire path, so a replacement
         # char on invalid bytes is acceptable).
-        try:
-            content = _safe_decode_for_logging(path.read_bytes())
-        except Exception as e:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Cannot read file: {e}"}),
-                )
-            ]
+        content = _safe_decode_for_logging(raw)
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:24]
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)

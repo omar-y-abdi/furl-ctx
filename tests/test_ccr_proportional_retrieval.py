@@ -264,5 +264,16 @@ def test_whole_blob_model_reproduces_audit_negative() -> None:
         compressed_tokens=compressed_tokens,
         retrieved_tokens=sum(chunk_tokens[:k]),
     )
+    # The headline premise of this anchor test (and the audit it reproduces):
+    # under whole-blob retrieval, pulling back even 25% of the rows pays for the
+    # ENTIRE offloaded blob, so effective savings go NEGATIVE — the compressed
+    # prompt plus the retrieved blob costs MORE than the uncompressed original.
+    # Pin the SIGN directly; the relative-gap assertion below cannot catch a
+    # regression that lifted whole-blob back to positive while still trailing
+    # granular.
+    assert eff_whole < 0.0, (
+        f"whole-blob effective savings must go negative at 25% retrieval "
+        f"(audit reproduction); got {eff_whole:+.1%}"
+    )
     # Granular must be strictly, materially better than whole-blob here.
     assert eff_granular > eff_whole + 0.10

@@ -593,7 +593,14 @@ class TestCompressFrozenPrefixByteIdentity:
         )
 
     def test_msg_index_0_never_dropped(self) -> None:
-        """Message at index 0 must always be present in the output."""
+        """Message at index 0 must never be dropped OR reordered.
+
+        The contract is stronger than "index 0 is present somewhere": the three
+        input messages map to three output messages (none dropped, none added)
+        AND message 0 comes back byte-identical and still first. ``>= 1`` would
+        pass a path that dropped the two trailing messages, or that mutated msg 0
+        in place — neither honours "index 0 never dropped/reordered".
+        """
         messages = [
             {
                 "role": "user",
@@ -608,6 +615,16 @@ class TestCompressFrozenPrefixByteIdentity:
             {"role": "assistant", "content": _big_json_content()},
             {"role": "user", "content": _big_json_content()},
         ]
+        msg0_snapshot = copy.deepcopy(messages[0])
         result = compress(messages, model="gpt-4o", min_tokens_to_compress=1)
-        assert len(result.messages) >= 1
-        assert result.messages[0]["role"] == "user"
+        # No message dropped or injected (input was three messages).
+        assert len(result.messages) == len(messages) == 3, (
+            "exactly the 3 input messages, none dropped or added"
+        )
+        # Index 0 returns byte-identical AND still first (content unchanged,
+        # position preserved) — not merely "a user message exists at index 0".
+        assert result.messages[0] == msg0_snapshot, (
+            "Message 0 (frozen prefix) must be byte-identical and remain first. "
+            f"Original content: {msg0_snapshot['content']!r}, "
+            f"result[0] content: {result.messages[0].get('content', '')!r}"
+        )

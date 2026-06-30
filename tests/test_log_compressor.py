@@ -240,21 +240,28 @@ WARN: Über important
         assert len(result.compressed) > 0
 
     def test_mixed_line_endings(self):
-        """Mixed line endings are handled."""
+        """Mixed line endings are handled and the ERROR line survives."""
         content = "INFO: line 1\r\nERROR: line 2\rINFO: line 3\n"
 
         compressor = LogCompressor()
         # Should not crash
         result = compressor.compress(content)
         assert result.compressed is not None
+        # Content is the real contract for a log compressor: the ERROR line must
+        # survive regardless of which line ending precedes it. `is not None`
+        # alone would pass output that silently dropped it.
+        assert "ERROR: line 2" in result.compressed
 
     def test_binary_like_content(self):
-        """Content with binary-like patterns doesn't crash."""
+        """Content with binary-like patterns doesn't crash; ERROR survives."""
         content = "INFO: data\x00\x01\x02ERROR: test"
 
         compressor = LogCompressor()
         result = compressor.compress(content)
         assert result.compressed is not None
+        # The ERROR line must survive even when embedded NUL/control bytes sit
+        # next to it; pin the content, not just non-None.
+        assert "ERROR: test" in result.compressed
 
 
 class TestConfigOptions:
