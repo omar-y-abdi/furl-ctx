@@ -168,6 +168,10 @@ def test_granular_retrieval_stays_positive(retrieval_fraction: float) -> None:
     blob_hash = _hash_from_marker(sentinel["_ccr_dropped"])
     blob_payload = crusher.ccr_get(blob_hash)
     assert blob_payload is not None, "whole-blob must resolve"
+    # Byte-exact recovery, not mere presence: the whole blob must round-trip to
+    # the ORIGINAL rows. A mutation that corrupts a row but keeps the payload
+    # non-None passes `is not None` — it must fail this content equality.
+    assert json.loads(blob_payload) == items, "whole-blob must recover the original rows exactly"
     blob_tokens = _toks(blob_payload)
 
     # ── Granular retrieval cost (NEW model) ──
@@ -180,6 +184,12 @@ def test_granular_retrieval_stays_positive(retrieval_fraction: float) -> None:
     assert index_raw is not None, "row index must resolve"
     row_hashes = json.loads(index_raw)
     assert len(row_hashes) == len(items), "one chunk per original row"
+    # The granular contract is not just "a chunk exists per row" — each chunk
+    # must resolve to its OWN single original row, in order. Reconstruct every
+    # per-row chunk and pin it to the original array; this catches a corrupted
+    # or mis-indexed chunk that the count check and `is not None` would miss.
+    reconstructed = [json.loads(crusher.ccr_get(rh))[0] for rh in row_hashes]
+    assert reconstructed == items, "per-row chunks must recover the original rows exactly, in order"
 
     # Number of rows the model needs to pull back.
     k = math.ceil(retrieval_fraction * len(items))

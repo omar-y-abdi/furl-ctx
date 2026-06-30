@@ -51,7 +51,11 @@ def test_explicit_hash_at_floor_accepted() -> None:
     # constant) so a moved floor fails this loudly. Matches recovery regex {6,}.
     key = store.store(json.dumps([{"id": 0}]), f"<<ccr:{h}>>", explicit_hash=h)
     assert key == h
-    assert store.retrieve(h) is not None
+    # Byte-exact recovery: the stored entry must round-trip to the ORIGINAL
+    # content, not merely be present. A corrupted-but-non-None payload fails.
+    entry = store.retrieve(h)
+    assert entry is not None
+    assert entry.original_content == '[{"id": 0}]'
 
 
 def test_explicit_hash_real_producer_width_accepted() -> None:
@@ -60,7 +64,9 @@ def test_explicit_hash_real_producer_width_accepted() -> None:
     h = "abcdef123456"
     key = store.store(json.dumps([{"id": 0}]), f"<<ccr:{h}>>", explicit_hash=h)
     assert key == h
-    assert store.retrieve(h) is not None
+    entry = store.retrieve(h)
+    assert entry is not None
+    assert entry.original_content == '[{"id": 0}]'
 
 
 # --------------------------------------------------------------------------- #
@@ -88,8 +94,14 @@ def test_positive_ttl_and_none_unaffected() -> None:
     store = CompressionStore(max_entries=10)
     k1 = store.store(json.dumps([{"id": 0}]), "<<ccr:aaaaaa>>", explicit_hash="aaaaaa", ttl=300)
     k2 = store.store(json.dumps([{"id": 1}]), "<<ccr:bbbbbb>>", explicit_hash="bbbbbb")  # ttl=None
-    assert store.retrieve(k1) is not None
-    assert store.retrieve(k2) is not None
+    # A positive/None ttl must not just keep the entry present — it must keep the
+    # ORIGINAL content recoverable byte-for-byte (k1 and k2 carry distinct rows).
+    e1 = store.retrieve(k1)
+    e2 = store.retrieve(k2)
+    assert e1 is not None
+    assert e1.original_content == '[{"id": 0}]'
+    assert e2 is not None
+    assert e2.original_content == '[{"id": 1}]'
 
 
 # --------------------------------------------------------------------------- #

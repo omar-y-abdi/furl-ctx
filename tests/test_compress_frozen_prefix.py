@@ -512,7 +512,10 @@ class TestCompressFrozenPrefixByteIdentity:
         )
 
         out = result.messages
-        assert len(out) >= 3, "no messages should be dropped"
+        # No messages dropped AND none injected: the 3 input messages map to
+        # exactly 3 output messages. `>= 3` would pass a path that silently
+        # appended a message; pin the exact count (input was [msg0, msg1, msg2]).
+        assert len(out) == len(messages) == 3, "exactly the 3 input messages, none dropped or added"
 
         # Self-validation: compression actually ran (msg2 was compressed).
         # If this fails, the test proves nothing about the frozen prefix.

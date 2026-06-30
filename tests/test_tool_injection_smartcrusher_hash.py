@@ -200,7 +200,7 @@ class TestToolInjectionWithSmartCrusherMarkers:
 
         assert not injector.has_compressed_content
         tools, was_injected = injector.inject_tool_definition(None)
-        assert not was_injected
+        assert was_injected is False
         assert tools == []
 
     def test_process_request_with_smartcrusher_marker(self):
