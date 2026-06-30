@@ -62,9 +62,8 @@ unidiff = "0.4"
 aho-corasick = "1"
 
 [features]
-# Default is ML-free: no ONNX runtime, no `ort`/`ort-sys`. Every default
-# code path compiles and runs without a prebuilt ONNX binary. ML backends
-# are opt-in via the features below.
+# The core is ML-free: no ONNX runtime, no `ort`/`ort-sys`, and no feature
+# flags. Every code path compiles and runs without a prebuilt ONNX binary.
 default = []
 
 [dev-dependencies]
