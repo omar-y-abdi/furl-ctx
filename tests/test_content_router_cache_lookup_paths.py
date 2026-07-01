@@ -34,7 +34,13 @@ from __future__ import annotations
 
 from headroom.tokenizer import Tokenizer
 from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from headroom.transforms.content_router import (
+    ContentRouter,
+    ContentRouterConfig,
+    Recompute,
+    ServeCached,
+    ServeOriginal,
+)
 
 
 def _make_tokenizer() -> Tokenizer:
@@ -215,3 +221,246 @@ class TestContentBlockPathCacheLookup:
         assert router._cache.size == 0
         assert router._cache.skip_size == 1
         assert dict(router._cache.stats)["cache_hits"] - before["cache_hits"] == 1
+
+
+class _CapturingObserver:
+    """Duck-typed ``CompressionObserver`` (the router takes ``observer: Any``)
+    that records the ``route_counts`` dict forwarded at the end of ``apply()``.
+
+    Both methods the router may call are present: ``record_router_route_counts``
+    (fired once per ``apply()`` with the merged counters) is captured as a COPY
+    — the router holds a live mutable ref — and ``record_compression`` (fired
+    during any recompute) is an inert no-op so the stale/miss outcomes, which do
+    run compression, never ``AttributeError``.
+    """
+
+    def __init__(self) -> None:
+        self.route_counts: dict[str, int] | None = None
+
+    def record_router_route_counts(self, counts: dict[str, int]) -> None:
+        self.route_counts = dict(counts)
+
+    def record_compression(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+def _served_block_text(result) -> str:
+    return result.messages[0]["content"][0]["content"]
+
+
+class TestCacheLookupRouteCounts:
+    """Characterization pins on the ``route_counts`` dict — the SECOND observable
+    surface of the two-tier lookup (the first, ``_cache.stats``, is pinned above).
+
+    ``route_counts`` is what the lookup forwards to the observer and ``/stats``;
+    it is the dict where the string-path and content-block copies of the decision
+    tree must agree exactly. These lock the per-outcome counter deltas BEFORE the
+    lookup half is extracted into one ``_lookup_cached_disposition``, so a rewire
+    that double-counts (a bump left in the caller after moving it into the shared
+    fn) or drops a counter fails here. Every pure-lookup outcome — the three that
+    short-circuit before ``compress()`` runs — is covered on BOTH paths.
+
+    Exact counts (``== 1``, not ``>= 1``) are the point: double-counting is the
+    dominant rewire failure mode, and only an exact assertion catches it.
+    """
+
+    # --- string path (apply() inline) -------------------------------------
+
+    def test_string_skip_hit_route_counts(self):
+        content = _routable_tool_content()
+        obs = _CapturingObserver()
+        router = ContentRouter(ContentRouterConfig(), observer=obs)
+        router._cache.mark_skip(hash(content))
+
+        router.apply([_tool_message(content)], _make_tokenizer())
+
+        assert obs.route_counts is not None
+        rc = obs.route_counts
+        assert rc.get("cache_hit", 0) == 1
+        assert rc["ratio_too_high"] == 1
+        assert rc.get("cache_miss", 0) == 0
+        assert rc.get("cache_stale_recompute", 0) == 0
+
+    def test_string_tightened_route_counts(self):
+        content = _routable_tool_content()
+        obs = _CapturingObserver()
+        router = ContentRouter(ContentRouterConfig(), observer=obs)
+        router._cache.put(hash(content), "STALE", 0.99, "log")
+
+        router.apply([_tool_message(content)], _make_tokenizer())
+
+        rc = obs.route_counts
+        assert rc is not None
+        # Tightened relocates to skip and serves original: hit + ratio_too_high,
+        # never a miss.
+        assert rc.get("cache_hit", 0) == 1
+        assert rc["ratio_too_high"] == 1
+        assert rc.get("cache_miss", 0) == 0
+
+    def test_string_serve_cached_route_counts(self):
+        """Live cached entry (ratio below the bar, no CCR sentinel to back) is
+        served: exactly one ``cache_hit``, and — unlike the two skip outcomes —
+        NO ``ratio_too_high``."""
+        content = _routable_tool_content()
+        obs = _CapturingObserver()
+        router = ContentRouter(ContentRouterConfig(), observer=obs)
+        payload = "PRECOMPRESSED-PAYLOAD-NO-CCR-MARKERS"
+        router._cache.put(hash(content), payload, 0.3, "log")
+
+        result = router.apply([_tool_message(content)], _make_tokenizer())
+
+        # The cached payload was served (proves the serve-cached branch, not a
+        # tightened relocate or a recompute).
+        assert result.messages[0]["content"] == payload
+        rc = obs.route_counts
+        assert rc is not None
+        assert rc.get("cache_hit", 0) == 1
+        assert rc["ratio_too_high"] == 0
+        assert rc.get("cache_miss", 0) == 0
+        assert rc.get("cache_stale_recompute", 0) == 0
+
+    # --- content-block path (_compress_content_block) ---------------------
+
+    def test_block_skip_hit_route_counts(self):
+        text = _routable_block_content()
+        obs = _CapturingObserver()
+        router = ContentRouter(ContentRouterConfig(), observer=obs)
+        router._cache.mark_skip(hash(text))
+
+        router.apply([_tool_result_message(text)], _make_tokenizer())
+
+        rc = obs.route_counts
+        assert rc is not None
+        assert rc.get("cache_hit", 0) == 1
+        assert rc["ratio_too_high"] == 1
+        assert rc.get("cache_miss", 0) == 0
+        assert rc["content_blocks"] == 1
+
+    def test_block_tightened_route_counts(self):
+        text = _routable_block_content()
+        obs = _CapturingObserver()
+        router = ContentRouter(ContentRouterConfig(), observer=obs)
+        router._cache.put(hash(text), "STALE", 0.99, "log")
+
+        router.apply([_tool_result_message(text)], _make_tokenizer())
+
+        rc = obs.route_counts
+        assert rc is not None
+        assert rc.get("cache_hit", 0) == 1
+        assert rc["ratio_too_high"] == 1
+        assert rc.get("cache_miss", 0) == 0
+        assert rc["content_blocks"] == 1
+
+    def test_block_serve_cached_route_counts(self):
+        text = _routable_block_content()
+        obs = _CapturingObserver()
+        router = ContentRouter(ContentRouterConfig(), observer=obs)
+        payload = "PRECOMPRESSED-BLOCK-PAYLOAD-NO-CCR-MARKERS"
+        router._cache.put(hash(text), payload, 0.3, "log")
+
+        result = router.apply([_tool_result_message(text)], _make_tokenizer())
+
+        assert _served_block_text(result) == payload
+        rc = obs.route_counts
+        assert rc is not None
+        assert rc.get("cache_hit", 0) == 1
+        assert rc["ratio_too_high"] == 0
+        assert rc.get("cache_miss", 0) == 0
+        assert rc["content_blocks"] == 1
+
+
+class TestLookupCachedDispositionDirect:
+    """Direct unit coverage of the extracted ``_lookup_cached_disposition`` — the
+    single home of the two-tier lookup decision and its data-loss guard, which
+    both the string path (``apply``) and the content-block path
+    (``_compress_content_block``) now route through.
+
+    Each of the five outcomes is driven by pre-seeding the cache and calling the
+    method directly, so NO compression runs — the method returns a disposition
+    BEFORE any recompute. This is the strongest guard on the invariant *never
+    serve a ``<<ccr:HASH>>`` sentinel whose backing has expired*: the unbackable
+    case MUST evict and return ``Recompute``, never ``ServeCached``. Counter
+    dicts are asserted whole (``==``) so a rewire that double-counts or drops a
+    bump — the dominant refactor failure mode — fails here.
+    """
+
+    MIN_RATIO = 0.85
+
+    def _router(self) -> ContentRouter:
+        return ContentRouter(ContentRouterConfig())
+
+    def test_skip_hit_returns_serve_original(self):
+        router = self._router()
+        key = hash("probe-skip")
+        router._cache.mark_skip(key)
+        rc: dict[str, int] = {}
+
+        disp = router._lookup_cached_disposition(key, "", self.MIN_RATIO, rc)
+
+        assert isinstance(disp, ServeOriginal)
+        assert rc == {"ratio_too_high": 1, "cache_hit": 1}
+
+    def test_tightened_relocates_and_returns_serve_original(self):
+        router = self._router()
+        key = hash("probe-tightened")
+        router._cache.put(key, "STALE", 0.99, "log")
+        rc: dict[str, int] = {}
+
+        disp = router._lookup_cached_disposition(key, "", self.MIN_RATIO, rc)
+
+        assert isinstance(disp, ServeOriginal)
+        assert rc == {"ratio_too_high": 1, "cache_hit": 1}
+        # Entry relocated result-cache → skip set.
+        assert router._cache.size == 0
+        assert router._cache.skip_size == 1
+
+    def test_live_backed_returns_serve_cached_with_payload(self):
+        router = self._router()
+        key = hash("probe-serve")
+        router._cache.put(key, "LIVE-PAYLOAD-NO-MARKERS", 0.3, "log")
+        rc: dict[str, int] = {}
+
+        disp = router._lookup_cached_disposition(key, "", self.MIN_RATIO, rc)
+
+        assert isinstance(disp, ServeCached)
+        assert disp.compressed == "LIVE-PAYLOAD-NO-MARKERS"
+        assert disp.strategy == "log"
+        assert disp.ratio == 0.3
+        assert rc == {"cache_hit": 1}
+
+    def test_unbackable_sentinel_evicts_and_returns_recompute(self):
+        router = self._router()
+        key = hash("probe-stale")
+        # A sentinel pointing at a hash with NO live CCR backing (fresh router →
+        # both stores empty). It must NOT be served: evict + recompute.
+        router._cache.put(key, "head <<ccr:deadbeefdead>> tail", 0.3, "log")
+        rc: dict[str, int] = {}
+
+        disp = router._lookup_cached_disposition(key, "", self.MIN_RATIO, rc)
+
+        assert isinstance(disp, Recompute)
+        # The stale entry was evicted, not left to be re-served next call.
+        assert router._cache.size == 0
+        # Both counters bump on the stale path (stale_recompute AND miss).
+        assert rc == {"cache_stale_recompute": 1, "cache_miss": 1}
+
+    def test_plain_miss_returns_recompute(self):
+        router = self._router()
+        key = hash("probe-miss")
+        rc: dict[str, int] = {}
+
+        disp = router._lookup_cached_disposition(key, "", self.MIN_RATIO, rc)
+
+        assert isinstance(disp, Recompute)
+        assert rc == {"cache_miss": 1}
+
+    def test_route_counts_none_is_tolerated(self):
+        """The block path may pass ``route_counts=None`` (routing summary opted
+        out); the lookup must still resolve without raising."""
+        router = self._router()
+        key = hash("probe-none")
+        router._cache.mark_skip(key)
+
+        disp = router._lookup_cached_disposition(key, "", self.MIN_RATIO, None)
+
+        assert isinstance(disp, ServeOriginal)

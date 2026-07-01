@@ -135,6 +135,42 @@ class RouterRuntime:
 _DEFAULT_RUNTIME = RouterRuntime()
 
 
+@dataclass(frozen=True)
+class ServeOriginal:
+    """Serve the original message/block unchanged — the two-tier cache says this
+    content will not compress: a Tier-1 skip hit, or a Tier-2 entry whose ratio
+    no longer clears ``min_ratio`` and was relocated to the skip set."""
+
+
+@dataclass(frozen=True)
+class ServeCached:
+    """Serve a live cached compression whose ``<<ccr:HASH>>`` sentinels (if any)
+    are confirmed still backed. The caller swaps in ``compressed`` and formats
+    the transform string — the flat (string-path) and label-threaded
+    (block-path) formats differ, so formatting stays in the caller."""
+
+    compressed: str
+    strategy: str
+    ratio: float
+
+
+@dataclass(frozen=True)
+class Recompute:
+    """Cache miss, or a stale Tier-2 entry whose CCR backing has expired and was
+    evicted. The caller (re)compresses — inline on the block path, deferred to
+    the batched parallel pass on the string path."""
+
+
+# A two-tier cache lookup resolves to exactly one of three dispositions. The two
+# empty variants carry no data, so they are shared module singletons: the hot
+# path resolves one per message and must not allocate for the common
+# serve-original / recompute cases. ``ServeCached`` holds per-entry payload and
+# stays fresh.
+CacheDisposition = ServeOriginal | ServeCached | Recompute
+_SERVE_ORIGINAL = ServeOriginal()
+_RECOMPUTE = Recompute()
+
+
 def _router_debug_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
 
@@ -1694,76 +1730,31 @@ class ContentRouter(Transform):
             if i in hook_biases:
                 msg_bias *= hook_biases[i]
 
-            # Two-tier compression cache.
-            # Tier 1 (skip): known won't-compress → instant skip.
-            # Tier 2 (result): known compresses → reuse compressed text.
-            #
-            # This lookup shares its DECISION SHAPE with _compress_content_block
-            # (is_skipped → get → ratio-gate → ccr-backed), but is deliberately
-            # NOT merged with it: this path DEFERS recompute to the batched
-            # ThreadPoolExecutor pass below (pending_tasks → Pass 2/3) while
-            # _compress_content_block compresses INLINE, the serve/skip
-            # dispositions differ (result_slots[i] + continue vs returning a
-            # block tuple), and the transform-string formats differ (flat
-            # router:{strategy}:{ratio} here vs label-threaded
-            # router:{label}:{strategy} there). Unifying would re-introduce that
-            # format/label threading to bridge genuinely-distinct control flow on
-            # the hottest path — net complexity, not reduction. The two truly
-            # near-identical content-block branches ARE shared (see
-            # _compress_content_block). Lookup outcomes pinned in
-            # test_content_router_cache_lookup_paths.py +
+            # Two-tier compression cache. The lookup DECISION — Tier-1 skip,
+            # Tier-2 ratio-gate, CCR-backing check, plus every cache mutation and
+            # routing-counter bump — is shared with the content-block path in
+            # _lookup_cached_disposition. Only what genuinely differs stays here:
+            # this path formats a flat ``router:{strategy}:{ratio}`` transform and
+            # DEFERS recompute to the batched ThreadPoolExecutor pass below
+            # (pending_tasks → Pass 2/3), whereas _compress_content_block threads a
+            # ``router:{label}:{strategy}`` format and recompresses inline. The
+            # match is the last statement in the loop body, so each arm falls
+            # through to the next iteration (no ``continue`` needed). Outcomes
+            # pinned in test_content_router_cache_lookup_paths.py +
             # test_result_cache_ccr_divergence.py.
             content_key = hash(content)
-
-            # Tier 1: skip set — instant rejection
-            if self._cache.is_skipped(content_key):
-                result_slots[i] = message
-                route_counts["ratio_too_high"] += 1
-                route_counts.setdefault("cache_hit", 0)
-                route_counts["cache_hit"] += 1
-                continue
-
-            # Tier 2: result cache — reuse compressed output
-            cached = self._cache.get(content_key)
-            if cached is not None:
-                cached_compressed, cached_ratio, cached_strategy = cached
-                # Re-check ratio against current min_ratio (shifts with context pressure)
-                if cached_ratio < min_ratio:
-                    # Invariant: every <<ccr:HASH>> in a served output must be
-                    # backed by a live CCR store entry.  Both CCR stores (Rust +
-                    # Python, 300s TTL) expire independently of this result cache
-                    # (30-min TTL).  Re-mirror to refresh the backing; if a
-                    # sentinel is unbackable (both CCR stores already expired),
-                    # DO NOT serve the stale dead pointer — evict and recompute.
-                    if self._ensure_ccr_backed(cached_compressed, context):
-                        result_slots[i] = {**message, "content": cached_compressed}
-                        transforms_applied.append(f"router:{cached_strategy}:{cached_ratio:.2f}")
-                        compressed_details.append(f"{cached_strategy}:{cached_ratio:.2f}")
-                        route_counts.setdefault("cache_hit", 0)
-                        route_counts["cache_hit"] += 1
-                        continue
-                    # Unbackable sentinel — evict and fall through to recompute,
-                    # which re-creates + re-stores the CCR backing.
-                    self._cache.invalidate(content_key)
-                    route_counts.setdefault("cache_stale_recompute", 0)
-                    route_counts["cache_stale_recompute"] += 1
-                    route_counts.setdefault("cache_miss", 0)
-                    route_counts["cache_miss"] += 1
-                    pending_tasks.append((i, content, context, msg_bias, content_key))
-                    continue
-                else:
-                    # Threshold tightened — no longer qualifies. Move to skip.
-                    self._cache.move_to_skip(content_key)
+            match self._lookup_cached_disposition(
+                content_key, context, min_ratio, route_counts
+            ):
+                case ServeOriginal():
                     result_slots[i] = message
-                    route_counts["ratio_too_high"] += 1
-                    route_counts.setdefault("cache_hit", 0)
-                    route_counts["cache_hit"] += 1
-                    continue
-
-            # Cache miss — defer to parallel compression pass
-            route_counts.setdefault("cache_miss", 0)
-            route_counts["cache_miss"] += 1
-            pending_tasks.append((i, content, context, msg_bias, content_key))
+                case ServeCached(compressed=served, strategy=strategy, ratio=ratio):
+                    result_slots[i] = {**message, "content": served}
+                    transforms_applied.append(f"router:{strategy}:{ratio:.2f}")
+                    compressed_details.append(f"{strategy}:{ratio:.2f}")
+                case Recompute():
+                    # Defer to the parallel compression pass (Pass 2/3).
+                    pending_tasks.append((i, content, context, msg_bias, content_key))
 
         # --- Pass 2: Parallel compression of all cache-miss messages ---
         if pending_tasks:
@@ -1933,6 +1924,72 @@ class ContentRouter(Transform):
 
         return 1.0  # Default: moderate
 
+    def _lookup_cached_disposition(
+        self,
+        content_key: int,
+        context: str,
+        min_ratio: float,
+        route_counts: dict[str, int] | None,
+    ) -> CacheDisposition:
+        """Resolve one content key against the two-tier compression cache.
+
+        The single home of the lookup decision tree that the string path
+        (``apply``) and the content-block path (``_compress_content_block``)
+        both run. Returns WHAT to do; each caller owns the HOW — the
+        transform-string format and the serve-vs-defer recompute mechanism
+        genuinely differ between the two and stay in the callers.
+
+        Every cache mutation and routing-counter bump lives HERE, so the
+        data-loss guard — never serve a ``<<ccr:HASH>>`` sentinel whose CCR
+        backing has expired — is provable in one place. The five outcomes and
+        their counter effects (identical on both former copies):
+
+          * Tier-1 skip hit            → ServeOriginal (ratio_too_high, cache_hit)
+          * Tier-2 tightened→skip      → ServeOriginal (ratio_too_high, cache_hit)
+          * Tier-2 live, CCR-backed    → ServeCached   (cache_hit)
+          * Tier-2 unbackable sentinel → Recompute     (cache_stale_recompute, cache_miss)
+          * cache miss                 → Recompute     (cache_miss)
+
+        ``route_counts`` is ``None`` only when the block-path caller opts out of
+        routing summaries; the bumps are then skipped.
+        """
+
+        def bump(*keys: str) -> None:
+            if route_counts is not None:
+                for k in keys:
+                    route_counts[k] = route_counts.get(k, 0) + 1
+
+        # Tier 1: skip set — instant rejection.
+        if self._cache.is_skipped(content_key):
+            bump("ratio_too_high", "cache_hit")
+            return _SERVE_ORIGINAL
+
+        # Tier 2: result cache — reuse compressed output.
+        cached = self._cache.get(content_key)
+        if cached is not None:
+            cached_compressed, cached_ratio, cached_strategy = cached
+            if cached_ratio >= min_ratio:
+                # Threshold tightened — no longer qualifies. Relocate to skip.
+                self._cache.move_to_skip(content_key)
+                bump("ratio_too_high", "cache_hit")
+                return _SERVE_ORIGINAL
+            # Invariant: every <<ccr:HASH>> in a served output must be backed by
+            # a live CCR store entry. Both CCR stores (Rust + Python, 300s TTL)
+            # expire independently of this result cache (30-min TTL). Re-mirror
+            # to refresh the backing; if a sentinel is unbackable (both CCR
+            # stores expired), DO NOT serve the stale dead pointer — evict and
+            # recompute (which re-creates + re-stores the CCR backing).
+            if self._ensure_ccr_backed(cached_compressed, context):
+                bump("cache_hit")
+                return ServeCached(cached_compressed, cached_strategy, cached_ratio)
+            self._cache.invalidate(content_key)
+            bump("cache_stale_recompute", "cache_miss")
+            return _RECOMPUTE
+
+        # Cache miss.
+        bump("cache_miss")
+        return _RECOMPUTE
+
     def _compress_content_block(
         self,
         block: dict[str, Any],
@@ -1968,36 +2025,24 @@ class ContentRouter(Transform):
                     route_counts[k] = route_counts.get(k, 0) + 1
 
         content_key = hash(text)
-
-        # Tier 1: skip set — instant rejection.
-        if self._cache.is_skipped(content_key):
-            bump("ratio_too_high", "cache_hit")
-            return block, False
-
-        # Tier 2: result cache — reuse compressed output.
-        cached = self._cache.get(content_key)
-        if cached is not None:
-            cached_compressed, cached_ratio, cached_strategy = cached
-            if cached_ratio >= min_ratio:
-                # Threshold tightened — move to skip.
-                self._cache.move_to_skip(content_key)
-                bump("ratio_too_high", "cache_hit")
+        match self._lookup_cached_disposition(
+            content_key, context, min_ratio, route_counts
+        ):
+            case ServeOriginal():
                 return block, False
-            # Re-mirror CCR entries so the independent CCR TTL never leaves a
-            # served <<ccr:HASH>> sentinel unbacked. If a sentinel is unbackable
-            # (both CCR stores expired), evict and fall through to recompute
-            # rather than serve a dead pointer.
-            if self._ensure_ccr_backed(cached_compressed, context):
-                transforms_applied.append(f"router:{label}:{cached_strategy}")
+            case ServeCached(compressed=served, strategy=strategy, ratio=ratio):
+                transforms_applied.append(f"router:{label}:{strategy}")
                 if compressed_details is not None:
-                    compressed_details.append(f"{detail_prefix}:{cached_strategy}:{cached_ratio:.2f}")
-                bump("cache_hit")
-                return {**block, block_key: cached_compressed}, True
-            self._cache.invalidate(content_key)
-            bump("cache_stale_recompute")
+                    compressed_details.append(
+                        f"{detail_prefix}:{strategy}:{ratio:.2f}"
+                    )
+                return {**block, block_key: served}, True
+            case Recompute():
+                pass  # fall through to full compression below
 
-        # Cache miss (or unbackable sentinel) — run full compression.
-        bump("cache_miss")
+        # Recompute (cache miss or evicted stale sentinel). All cache bookkeeping
+        # — skip/stale/miss counters and any eviction — already happened inside
+        # _lookup_cached_disposition; here we only (re)compress and store.
         t0 = time.perf_counter()
         result = self.compress(text, context=context, bias=bias, runtime=runtime)
         compress_ms = (time.perf_counter() - t0) * 1000
