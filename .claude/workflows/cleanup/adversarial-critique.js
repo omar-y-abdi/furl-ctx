@@ -34,7 +34,7 @@ const ORIENT =
   'ordering. The proxy was removed (standalone hook/MCP fork). 626 tests, ~59% coverage. ' +
   (MAP ? `A code map may exist at ${MAP} — read it for orientation. ` : '') +
   'Use Read/Grep/Glob + read-only shell to survey BROADLY (sample many files across your lens, not just one). ' +
-  'Exclude archive/, target/, .venv*, .git/, node_modules/. READ-ONLY: never Edit/Write/git-mutate/build.'
+  'Survey ONLY the shipped codebase (crates/, headroom/) and its REAL user-facing docs (README, BENCHMARKS, CONTRIBUTING, RUST_DEV, llms.txt, CODEBASE-MAP). EXCLUDE — do not read or critique — archive/, target/, .venv*, .git/, node_modules/, .claude/, docs/audits/, and the owner working/session docs at repo root and under .claude/runtime/ (PLAN.md, handoff.md, codebase-CRITIQUE.md, recon-findings.md, and any *CRITIQUE*/*AUDIT* markdown): these are session scaffolding, NOT part of the codebase under review, and critiquing them is noise. READ-ONLY: never Edit/Write/git-mutate/build.'
 
 const STANCE =
   'YOUR STANCE: a sharp, fresh-eyed senior/staff engineer who just inherited this repo and is doing an honest, ' +

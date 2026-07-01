@@ -80,9 +80,11 @@ Exec steps (advisor-refined) — extraction DONE `92088258`:
 - RUST_DEV.md pre-commit bullet references absent `scripts/sync-plugin-versions.py`.
 
 ## Current position
-HEAD = `1d8a69e9` (ML→Kompress rename); site-3 extraction `92088258` + format guards `0844692f`.
-Gated-GREEN (G1-G5 incl. bench, 750 passed, recovery 23, floor needle 100%), zero uncommitted code.
-Cycle-6 CODE work COMPLETE (extraction + rename). Round-3 re-recon DONE → found MATERIAL (doc-integrity, not code).
+HEAD = `c7693fa7` (round-4 doc-integrity + config batch). Prior: `7fc45aaa` reconcile ← `e64602e2` round-3 batch ← `1d8a69e9` rename ← `92088258`/`0844692f` extraction.
+Gated-GREEN (G1-G5 incl. bench, full pytest, recovery 23, floor needle 100%), zero uncommitted code.
+Cycle-6 CODE work COMPLETE. Round-3 AND round-4 re-recon DONE → CODE zero-material both; doc/config material fixed. **NEXT = pre-stamp gate → 200-agent confirmation workflow.**
+
+Round-4 deferred cosmetics (logged, NOT blocking — re-recon arbitrates): C4 lazy-init compressor-singleton race (benign under GIL; threading-change risk); C8 CODEBASE-MAP ~15 anchors ~1-3 lines early (re-drifts next edit); C6 `compression_ratio` cross-type name-collision. `.gitignore` has OTHER pre-existing dead allowlist negations (`!scripts/install-git-hooks.sh`, `install.sh`, `install.ps1`, `version-sync.py`) — harmless no-ops, left per surgical-scope, flagged for optional future cleanup.
 
 ## Round-3 re-recon — findings (3 opus agents, diff-weighted a341bf4f..HEAD)
 CODE verdict: **zero material** — extraction behavior-equivalent (all 5 outcomes' counters preserved, CCR guard intact, match totality holds), rename zero code stragglers, Rust 0 warnings, public API honest (39 exports resolve), CacheDisposition ADT exemplary+correctly-private. The material is ALL in the doc/packaging surface:
@@ -108,8 +110,9 @@ Batch-fix plan: mechanical/clear-cut (M1,M2,M6,M7,M8,N1,N2,N3) fix autonomously.
 ## Remaining
 - [x] Batch-fix round-3 material — ALL 11 (M1-M8, N1-N3) landed — `e64602e2`. README Proof-table → honest BASELINE (user chose Option A), accuracy-table deleted, RTK→peer, phantom [progress]/ENTERPRISE/hook removed, telemetry reworded, CODEBASE-MAP re-anchored, docstrings/signature fixed. Verified: 0 fabrications remain, pyproject/pre-commit/imports valid, gate G1-G4 green 750 passed.
 - [x] Round-3 reconcile (advisor-caught) — `7fc45aaa`: my honest BASELINE table contradicted the "60–95%" headline (which IS backed by BENCHMARKS.md's 6-seed sweep, not fabricated) → added a bridge line scoping table-vs-sweep; verified llms.txt clean (0 fabrications); finished compress.py map anchors to exact.
-- [ ] **Round-4 re-recon** — confirm zero NEW/residual material. MUST be HOLISTIC not diff-only (advisor): the round-3 diff changed the table but a diff-weighted pass would miss the untouched headline/tagline + `.txt` surface. Sweep the FULL doc set for savings-claim consistency (README tagline/GIF/table/BENCHMARKS/llms.txt all agree), incl. `.txt`. Fresh agents. (Very long session — /compact STRONGLY recommended first for recon quality — deep recon is the whole point; a context-starved lead defeats it.)
+- [x] **Round-4 re-recon** (3 fresh opus agents: doc-integrity / code-correctness / config-surface, holistic, baseline `a341bf4f..HEAD`) — **CODE zero-material** (all 5 CacheDisposition outcomes correct, no route_counts double-count, CCR guard single-seam, ML→Kompress rename complete, hooks typing sound). Found **3 MATERIAL all doc/config** → batch-fixed `c7693fa7`, gate G1-G5 GREEN (recovery 23, needle 100%, 0 bench regression): **M1** BENCHMARKS.md 6 broken repro citations → real `verify/measure.py` + re-runnable harnesses (430KB `raw_results.json` stays regenerable, NOT committed); **M2** README:11 headline "60–95%" scoped to "redundant workloads" (user chose (b) — 60-floor mapped to no measured tier) + retired "6 algorithms" (C1) + unified model→`Kompress-v2-base`; **M3** Makefile/CONTRIBUTING `make install-git-hooks` (exit 127, absent script + phantom pre-push) → `pre-commit install`, commit-stage hooks only. Plus **C5** content_router.py exhaustive `case other: raise` on BOTH CacheDisposition matches; **C10** .gitignore dead negation removed.
 - [ ] **200-agent confirmation workflow** — ONLY after re-recon confirms beyond-perfect. Confirmation, never discovery.
+  - [x] **PRE-STAMP GATE — DONE:** patched `adversarial-critique.js` ORIENT exclude (line 37) to name `.claude/`, `docs/audits/`, PLAN/handoff/codebase-CRITIQUE/recon-findings + any `*CRITIQUE*`/`*AUDIT*` md as session-scaffolding-not-under-review; real shipped docs (README/BENCHMARKS/CONTRIBUTING/RUST_DEV/llms.txt/CODEBASE-MAP) stay in scope. Durable for all future runs.
 
 ## Cycle-6 commit ledger
-`92088258` site-3 extraction · `0844692f` format guards · `1d8a69e9` ML→Kompress rename · `e64602e2` round-3 doc-integrity batch · `7fc45aaa` round-3 reconcile · (+ PLAN.md checkpoints cbda82af/5477ebfc/bf9234d0/e021bb3c)
+`92088258` site-3 extraction · `0844692f` format guards · `1d8a69e9` ML→Kompress rename · `e64602e2` round-3 doc-integrity batch · `7fc45aaa` round-3 reconcile · `c7693fa7` round-4 doc-integrity + config batch · (+ PLAN.md checkpoints cbda82af/5477ebfc/bf9234d0/e021bb3c)
