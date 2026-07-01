@@ -8,8 +8,7 @@ Supported Compressors:
 - SmartCrusher: JSON arrays
 - SearchCompressor: grep/ripgrep results
 - LogCompressor: Build/test output
-- KompressCompressor: Plain text (ML-based)
-- Kompress: Plain text (ML-based, requires [ml] extra)
+- KompressCompressor: Plain text (ML-based, requires [ml] extra)
 
 Routing Strategy:
 1. Use source hint if available (highest confidence)
@@ -1274,7 +1273,8 @@ class ContentRouter(Transform):
         monkeypatching ``self._get_smart_crusher`` (or the underlying registry)
         still takes effect — a construction-time capture in the mirror would
         have been stale. Kept as an instance method for the test/back-compat
-        seam: the three result-cache HIT sites call ``self._ensure_ccr_backed``.
+        seam: the single result-cache HIT path (in ``_lookup_cached_disposition``)
+        calls ``self._ensure_ccr_backed``.
         """
         return self._ccr_mirror.ensure_ccr_backed(
             cached_compressed,

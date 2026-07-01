@@ -71,10 +71,6 @@ mcp = [
 html = [
     "trafilatura>=1.6",
 ]
-# Rich progress bars for the binary downloader (headroom.binaries).
-progress = [
-    "rich>=13.0.0",
-]
 # Development dependencies
 dev = [
     "pytest>=7.0.0",
@@ -87,7 +83,7 @@ dev = [
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
-    "headroom-ai[ml,mcp,progress,html]",
+    "headroom-ai[ml,mcp,html]",
 ]
 
 # Maturin builds a single wheel containing both the Python source under

@@ -38,4 +38,4 @@ Headroom is shipped as a Python package (`headroom-ai`) with an MCP server (`hea
 
 ## Licensing
 
-Apache 2.0. Use commercially, modify, redistribute. Data stays on the user's machine when running the library or MCP server locally. Anonymous telemetry enabled by default; set `HEADROOM_TELEMETRY=off` to disable.
+Apache 2.0. Use commercially, modify, redistribute. Data stays on the user's machine when running the library or MCP server locally. Usage stats are recorded locally on-disk only — nothing leaves your machine; set `HEADROOM_TELEMETRY=off` to disable.
