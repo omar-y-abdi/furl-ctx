@@ -444,7 +444,7 @@ def _get_pipeline() -> Any:
         # Default pipeline: CacheAligner → ContentRouter
         # CacheAligner: stabilizes prefix for provider KV cache hits
         # ContentRouter: routes to the right compressor per content type
-        #   (SmartCrusher for JSON, CodeCompressor for code, Kompress for text)
+        #   (SmartCrusher for JSON, Kompress for text and source code)
         # There is no trailing context-management stage —
         # live-zone-only compression never drops messages.
         _pipeline = TransformPipeline()

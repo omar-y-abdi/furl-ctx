@@ -26,6 +26,14 @@ _JWT = (
 )
 # Constructed so the literal does not appear verbatim in source (hook-safe).
 _API_KEY = "sk" + "-" + "abcdefghijklmnopqrstuvwx"
+# Non-``sk-`` secrets in JSON quoted-key form: these leaked before the group-2
+# ``["']?`` fix because the key's closing quote broke the ``[:=]`` adjacency and,
+# lacking an ``sk-`` prefix, nothing else caught them. All hook-safe (no verbatim
+# token literal in source).
+_GH_TOKEN = "ghp" + "_" + "A" * 36
+_AWS_KEY_ID = "AKIA" + "IOSFODNN7EXAMPLE"
+_AWS_SECRET = "wJalr" + "XUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"
+_OPAQUE_PW = "hunter2" + "correcthorsebattery"
 
 
 @pytest.mark.parametrize(
@@ -43,12 +51,32 @@ _API_KEY = "sk" + "-" + "abcdefghijklmnopqrstuvwx"
         ("api_key_json", f'{{"api_key": "{_API_KEY}"}}', _API_KEY),
         # token=<value> key/value form.
         ("token_kv", f"token={_JWT}", _JWT),
+        # JSON quoted-key secrets whose VALUE is not an ``sk-`` key. These are the
+        # primary regression: before the group-2 quote fix the whole key/value
+        # rule missed them (closing key-quote broke ``[:=]`` adjacency).
+        ("json_token_ghp", f'{{"token": "{_GH_TOKEN}"}}', _GH_TOKEN),
+        ("json_password", f'{{"password": "{_OPAQUE_PW}"}}', _OPAQUE_PW),
+        ("json_aws_secret", f'{{"aws_secret_access_key": "{_AWS_SECRET}"}}', _AWS_SECRET),
+        ("json_apikey_camel", f'{{"apiKey":"{_OPAQUE_PW}"}}', _OPAQUE_PW),
+        ("nested_json_api_key", f'{{"cfg": {{"api_key": "{_API_KEY}"}}}}', _API_KEY),
+        # Provider-prefixed tokens with NO surrounding key name (bare in text) —
+        # caught by the prefix rule, not the key/value rule.
+        ("bare_aws_key_id", f"cred {_AWS_KEY_ID} end", _AWS_KEY_ID),
+        ("bare_gh_token", f"{_GH_TOKEN} loose", _GH_TOKEN),
     ],
 )
 def test_credential_is_redacted(label: str, payload: str, secret: str) -> None:
     redacted = _redact_retrieval_log_payload(payload)
     assert secret not in redacted, f"{label}: credential leaked into log preview: {redacted!r}"
     assert "[REDACTED]" in redacted, f"{label}: nothing was redacted: {redacted!r}"
+
+
+def test_benign_json_structure_is_untouched() -> None:
+    # Over-redaction guard: ordinary JSON with no credential — and specifically the
+    # store's own SHA-256 hash keys that the retrieval log emits — must survive so
+    # logs stay useful. A generic high-entropy rule would wrongly redact these.
+    payload = f'{{"hash": "{"a" * 24}", "tool_name": "search", "count": 7}}'
+    assert _redact_retrieval_log_payload(payload) == payload
 
 
 def test_plain_bearer_redacts_both_scheme_and_token() -> None:

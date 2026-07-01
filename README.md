@@ -54,8 +54,7 @@ Headroom compresses everything your AI agent reads — tool outputs, logs, RAG c
     │  ────────────────────────────────────────────────  │
     │  CacheAligner  →  ContentRouter  →  CCR            │
     │                    ├─ SmartCrusher   (JSON)        │
-    │                    ├─ CodeCompressor (AST)         │
-    │                    └─ Kompress-v2-base  (text, HF) │
+    │                    └─ Kompress-v2-base  (text+code)│
     │                                                    │
     │  Reversible CCR store  ·  MCP server               │
     └────────────────────────────────────────────────────┘
@@ -65,7 +64,7 @@ Headroom compresses everything your AI agent reads — tool outputs, logs, RAG c
 ```
 
 - **ContentRouter** — detects content type, selects the right compressor
-- **SmartCrusher / CodeCompressor / Kompress-v2-base** — compress JSON, AST, or prose
+- **SmartCrusher / Kompress-v2-base** — compress JSON, or prose and source code
 - **CacheAligner** — stabilizes prefixes so provider KV caches actually hit
 - **CCR** — stores originals locally; LLM calls `headroom_retrieve` if it needs them
 
@@ -133,10 +132,10 @@ The table above is a single conservative capture (lossless structural folding, m
 <summary><b>What's inside</b></summary>
 
 - **SmartCrusher** — universal JSON: arrays of dicts, nested objects, mixed types.
-- **CodeCompressor** — AST-aware for Python, JS, Go, Rust, Java, C++.
-- **Kompress-v2-base** — our HuggingFace model, trained on agentic traces.
+- **Kompress-v2-base** — our HuggingFace model, trained on agentic traces; also handles source code.
+- **SearchCompressor / LogCompressor / DiffCompressor** — search results, build logs, and diffs.
+- **HTMLExtractor** — strips boilerplate from fetched HTML (optional, needs `trafilatura`).
 - **CacheAligner** — stabilizes prefixes so Anthropic/OpenAI KV caches actually hit.
-- **IntelligentContext** — score-based context fitting with learned importance.
 - **CCR** — reversible compression; LLM retrieves originals on demand.
 
 </details>
@@ -148,7 +147,7 @@ The table above is a single conservative capture (lossless structural folding, m
 
 `Input Received` → `Input Routed` → `Input Compressed`
 
-- **Transforms** do the work: CacheAligner, ContentRouter, SmartCrusher, CodeCompressor, Kompress-v2-base, IntelligentContext / RollingWindow.
+- **Transforms** do the work: CacheAligner, CrossMessageDeduper, ContentRouter, SmartCrusher, Kompress-v2-base.
 - **Pipeline extensions** observe or customize these stages via `on_pipeline_event(...)`; `compress()` passes your `hooks` object as the extension.
 - **Compression hooks** sit alongside the lifecycle as an additional extension seam.
 
