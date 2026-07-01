@@ -4,7 +4,11 @@
 
 **Campaign pivot:** master plan is now `FABLE-RECON-PLAN.md` (repo root, committed). Fable full-tree audit: 189 findings (3 crit · 31 high · 90 med · 65 low) + 2 refactor blueprints (§4.1 ContentRouter, §4.2 typed-CCR-refs) + §5's 15 owner decisions + 9-phase roadmap (§2). Supersedes round-5 campaign framing.
 
-**Execution model (user mandate 2026-07-02):** PM = ZERO IC — subagents only. Tough tier → fable local subagents (PROVEN: COR-1/COR-2 dry-run = rigorous RED→GREEN, byte-exact). Easy tier → sonnet. PM: spec → review → gate → commit → push to `origin/main` (omar-y-abdi/headroom-mcp).
+**Execution model (user 2026-07-02, refined — 4-tier):** PM does ZERO IC work; only spec → review → gate → commit → merge to main + push to remote. Difficulty → model routing, ALL local subagents:
+- **tough → fable** — the 2 wire-contract refactors (§4.1/§4.2), the hardest CCR/FFI-typing items. (PROVEN: COR-1/COR-2 dry-run = rigorous RED→GREEN, byte-exact, self-verified.)
+- **hard → opus** — complex correctness/security, multi-file changes, the Great Excision coordination.
+- **medium → sonnet** — standard fixes, test hardening, moderate refactors.
+- **easy only → haiku** — lint, doc sweeps, dead-code deletion, mechanical one-liners.
 
 **Phase 0 wave 1 DONE + pushed:**
 - `c5b58ca8` — gate honesty (G4 exit-code keyed, G5 floor_check rejects stale captured_at, portable cd). RED-proofed.

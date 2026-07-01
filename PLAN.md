@@ -83,7 +83,11 @@ Exec steps (advisor-refined) — extraction DONE `92088258`:
 
 **Master plan: `FABLE-RECON-PLAN.md`** (repo root, committed to main) — fable full-tree audit: 189 findings (3 critical · 31 high · 90 medium · 65 low) + 2 refactor blueprints (§4.1 ContentRouter decomposition, §4.2 typed-CCR-refs) + §5's 15 owner decisions + 9-phase roadmap (§2). All execution follows FABLE-RECON-PLAN's roadmap.
 
-**Execution model (user mandate 2026-07-02):** PM = ZERO IC work — everything via subagents. Tough tier (criticals, 2 wire-contract refactors) → fable local subagents (PROVEN: COR-1/COR-2 dry-run = rigorous RED→GREEN, byte-exact, self-verified). Easy tier (gate/lint/mechanical/doc/dead-code) → sonnet local subagents. PM only: spec → review → gate → commit → push to `origin/main` (github omar-y-abdi/headroom-mcp). Fallback: opus for tough tier if fable unavailable.
+**Execution model (user 2026-07-02, refined — 4-tier):** PM does ZERO IC work; only spec → review → gate → commit → merge to main + push to remote. Difficulty → model routing, ALL local subagents:
+- **tough → fable** — the 2 wire-contract refactors (§4.1/§4.2), the hardest CCR/FFI-typing items. (PROVEN: COR-1/COR-2 dry-run = rigorous RED→GREEN, byte-exact, self-verified.)
+- **hard → opus** — complex correctness/security, multi-file changes, the Great Excision coordination.
+- **medium → sonnet** — standard fixes, test hardening, moderate refactors.
+- **easy only → haiku** — lint, doc sweeps, dead-code deletion, mechanical one-liners.
 
 **Phase 0 — wave 1 DONE + pushed (HEAD `f1c44778` on main):**
 - `c5b58ca8` — gate honesty: TEST-1 G4 keyed on exit code not grep; TEST-2 G5 captures run_bench exit code + floor_check rejects stale captured_at; portable cd. RED-proofed. (Also bundled FABLE-RECON-PLAN.md.)
