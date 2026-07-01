@@ -20,8 +20,7 @@
   <a href="#get-started-60-seconds">Install</a> ·
   <a href="#proof">Proof</a> ·
   <a href="https://discord.gg/yRmaUNpsPJ">Discord</a> ·
-  <a href="llms.txt">llms.txt</a> ·
-  <a href="ENTERPRISE.md">Enterprise</a>
+  <a href="llms.txt">llms.txt</a>
 </p>
 
 <p align="center"><sub>
@@ -93,29 +92,21 @@ result = compress(messages, model="claude-sonnet-4")
 python -m headroom.ccr.mcp_server       # exposes headroom_compress / _retrieve / _stats
 ```
 
-Granular extras: `[mcp]`, `[ml]` (Kompress-base), `[html]`, `[progress]`, `[dev]`. Requires **Python 3.10+**.
+Granular extras: `[mcp]`, `[ml]` (Kompress-base), `[html]`, `[dev]`. Requires **Python 3.10+**.
 
 ## Proof
 
-**Savings on real agent workloads:**
+**Token reduction on real captured data** — reproducible; inputs committed under `benchmarks/data/`, captured by `benchmarks/run_bench.py` into [BASELINE.md](benchmarks/BASELINE.md):
 
-| Workload                      | Before | After  | Savings |
-|-------------------------------|-------:|-------:|--------:|
-| Code search (100 results)     | 17,765 |  1,408 | **92%** |
-| SRE incident debugging        | 65,694 |  5,118 | **92%** |
-| GitHub issue triage           | 54,174 | 14,761 | **73%** |
-| Codebase exploration          | 78,502 | 41,254 | **47%** |
+| Dataset | Items | Before | After  | Reduction       | Info retention |
+|---------|------:|-------:|-------:|-----------------|---------------:|
+| search  |    90 |  4,102 |  2,462 | 40% (lossless)  |           100% |
+| logs    |    90 |  8,595 |  1,332 | 84%*            |   100% (via CCR) |
+| code    |     7 | 41,025 | 41,025 | 0% (passthrough)|           100% |
 
-**Accuracy preserved on standard benchmarks:**
+<sub>*log savings come partly from row deletion, not free compression — every dropped row stays CCR-recoverable within the configured TTL. `code` is large distinct source files that don't compress, so Headroom passes them through untouched (0%).</sub>
 
-| Benchmark  | Category | N   | Baseline | Headroom | Delta      |
-|------------|----------|----:|---------:|---------:|------------|
-| GSM8K      | Math     | 100 |    0.870 |    0.870 | **±0.000** |
-| TruthfulQA | Factual  | 100 |    0.530 |    0.560 | **+0.030** |
-| SQuAD v2   | QA       | 100 |        — |  **97%** | 19% compression |
-| BFCL       | Tools    | 100 |        — |  **97%** | 32% compression |
-
-For the full, adversarially-verified methodology and re-runnable token-reduction sweeps, see [BENCHMARKS.md](BENCHMARKS.md).
+For the full methodology and re-runnable token-reduction sweeps, see [BENCHMARKS.md](BENCHMARKS.md).
 
 ## When to use · When to skip
 
@@ -169,7 +160,7 @@ For the full, adversarially-verified methodology and re-runnable token-reduction
 pip install "headroom-ai[all]"          # everything
 ```
 
-Granular extras: `[mcp]` (MCP server), `[ml]` (Kompress-base), `[html]` (HTML extraction), `[progress]` (download progress bars), `[dev]`. Requires **Python 3.10+**.
+Granular extras: `[mcp]` (MCP server), `[ml]` (Kompress-base), `[html]` (HTML extraction), `[dev]`. Requires **Python 3.10+**.
 
 Using `pipx`? Choose a supported interpreter explicitly:
 
@@ -216,7 +207,7 @@ Headroom runs **locally**, covers **every** content type, and is **reversible**.
 | [Compresr](https://compresr.ai), [Token Co.](https://thetokencompany.ai)    | Text sent to their API                         | Hosted API call                    | No    | No         |
 | OpenAI Compaction                                                            | Conversation history                           | Provider-native                    | No    | No         |
 
-> **Attribution.** Headroom ships with the excellent [RTK](https://github.com/rtk-ai/rtk) binary for shell-output rewriting — `git show --short`, scoped `ls`, summarized installers. Huge thanks to the RTK team; their tool is a first-class part of our stack, and Headroom compresses everything downstream of it.
+> **RTK** ([rtk-ai/rtk](https://github.com/rtk-ai/rtk)) is a complementary CLI-output rewriter — a peer in the table above, **not** bundled with or a dependency of Headroom. If you already use it for shell-output rewriting, Headroom compresses everything downstream; the two compose cleanly. Credit to the RTK team for a great tool.
 
 ## Contributing
 

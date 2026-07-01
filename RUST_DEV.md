@@ -145,11 +145,6 @@ When any item above changes, update both this section and the test file. The shi
 These are known limitations for Phase 0. They are tracked here so Phase 1
 doesn't rediscover them.
 
-- **Pre-commit hook noise**: `scripts/sync-plugin-versions.py` mutates
-  `.claude-plugin/marketplace.json`, `.github/plugin/marketplace.json`, and
-  `plugins/headroom-agent-hooks/**/plugin.json` on every commit. Those
-  changes are harmless but each commit in Phase 0 picks them up. Phase 1
-  does not need to do anything special — just let the hook run.
 - **`rust-toolchain.toml`** pins `channel = "stable"` rather than a specific
   version so CI picks up the same toolchain the local box uses. Tighten to a
   pinned version (e.g. `1.78`) once the port stabilizes.

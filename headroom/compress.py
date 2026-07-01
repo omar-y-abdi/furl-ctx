@@ -59,11 +59,14 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import DEFAULT_MIN_TOKENS_TO_COMPRESS
 from .pipeline import PipelineExtensionManager, PipelineStage, summarize_routing_markers
 from .utils import extract_user_query as _extract_user_query
+
+if TYPE_CHECKING:
+    from .hooks import CompressionHooks
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +202,7 @@ def compress(
     model: str = "claude-sonnet-4-5-20250929",
     model_limit: int = 200000,
     optimize: bool = True,
-    hooks: Any = None,
+    hooks: CompressionHooks | None = None,
     config: CompressConfig | None = None,
     **kwargs: Any,
 ) -> CompressResult:
