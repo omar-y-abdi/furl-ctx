@@ -62,7 +62,7 @@ Exec steps (advisor-refined) — extraction DONE `92088258`:
 - [x] S5 — rewire string site (`apply`) via `match`; moved bumps DELETED; non-merge comment rewritten (lookup IS shared now); gate green. — `92088258`
 - [x] S6 — DIRECT unit test of `_lookup_cached_disposition` (all 5 outcomes + route_counts=None, no compression) = architectural guard. Full gate → committed. — `92088258`
 - [x] S8 — final `gate.sh bench` → G1-G5 PASS, floor needle 100%, ratios untouched (dispatch-only change confirmed).
-- [ ] S7 — rename `_try_ml_compressor`→`_try_kompress` — **DEFERRED (not half-done).** Recon rider scoped "same file / 5 min" but is actually a ~20-site cross-cutting ML→Kompress vocab migration: method `_try_ml_compressor` (content_router.py def+call, 4 test files) + LIVE dispatcher param `try_ml_compressor` (router_dispatch.py 80/127/205/212/249) + type alias `_TryMlCompressor`. Method-only rename would INTRODUCE inconsistency (method `_try_kompress` passed as param `try_ml_compressor`). It's the last old-vocab holdout (round-1 migrated the rest). Surgical-changes rule (trace-to-request) + it's my rider not user's ask → capture for a deliberate COMPLETE pass, don't rush into the extraction diff. Codebase currently CONSISTENT (untouched). Needs user greenlight.
+- [x] S7 — complete ML→Kompress rename (user greenlit "gör nu") — `1d8a69e9`. All 3 holdouts in lockstep: method `_try_ml_compressor`→`_try_kompress`, LIVE dispatcher param `try_ml_compressor`→`try_kompress` (+ delegator closure/kwarg + call sites), type alias `_TryMlCompressor`→`_TryKompress`. CODEBASE-MAP refs updated; historical audit docs left as dated records. Pure identifier rename, zero behavior change. Gate G1-G4 green, 750 passed.
 - [ ] **Round-3 re-recon** — diff-weighted on the round-2 batch → confirm zero MATERIAL (by-design/nitpick don't count). Loop if material.
 - [ ] **200-agent confirmation workflow** — ONLY when re-recon confirms beyond-perfect. `adversarial-critique.js`, `args.map=CODEBASE-MAP.md`. Confirmation, never discovery.
 
@@ -73,8 +73,8 @@ Exec steps (advisor-refined) — extraction DONE `92088258`:
 - RUST_DEV.md pre-commit bullet references absent `scripts/sync-plugin-versions.py`.
 
 ## Current position
-HEAD = `92088258` (site-3 extraction), gated-GREEN (G1-G5 incl. bench, 750 passed +12, recovery 23, floor needle 100%), zero uncommitted code.
-Cycle-6 code work COMPLETE. Remaining = VERIFY-phase re-recon + confirmation:
-- [ ] **Round-3 re-recon** — diff-weighted on the round-2+site-3 batch (`a341bf4f..HEAD`) → confirm zero MATERIAL (by-design/nitpick don't count). Loop if material.
+HEAD = `1d8a69e9` (ML→Kompress rename); site-3 extraction `92088258` + format guards `0844692f`.
+Gated-GREEN (G1-G5 incl. bench, 750 passed, recovery 23, floor needle 100%), zero uncommitted code.
+Cycle-6 code work COMPLETE (extraction + rename both landed). Remaining = VERIFY-phase:
+- [ ] **Round-3 re-recon** — IN PROGRESS. Diff-weighted `a341bf4f..HEAD` → confirm zero MATERIAL (by-design/nitpick don't count). Loop if material.
 - [ ] **200-agent confirmation workflow** — ONLY after re-recon confirms beyond-perfect. Confirmation, never discovery.
-- [ ] S7 rename (deferred, above) — user greenlight.
