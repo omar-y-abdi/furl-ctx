@@ -95,6 +95,19 @@ _DICT_PREFIX = "__dict:"
 _AFFIX_PREFIX = "__affix:"
 _HEAD_PREFIX = "__head:"
 
+# Exact-match reserved cell sentinels (NOT prefixes — matched exactly, like
+# the ditto ``=``). An unquoted cell equal to ``_NULL_SENTINEL`` decodes to
+# ``None`` (JSON null); one equal to ``_MISSING_SENTINEL`` OMITS the key from
+# the reconstructed row (the original object had no such key). This keeps
+# ``null`` / a missing key / the empty string ``""`` distinct on the lossless
+# path. A CSV-quoted cell that unquotes to the literal ``__null__`` /
+# ``__missing__`` is a genuine string value (the Rust ``csv_render_str`` quotes
+# any string equal to a sentinel), so it falls through to ``_decode_cell`` and
+# stays a string. These byte strings + the escape rule must match the Rust
+# encoder ``formatter.rs`` (``NULL_SENTINEL`` / ``MISSING_SENTINEL``) exactly.
+_NULL_SENTINEL = "__null__"
+_MISSING_SENTINEL = "__missing__"
+
 
 def _days_from_civil(y: int, m: int, d: int) -> int:
     """Days since 1970-01-01 (proleptic Gregorian, Hinnant's algorithm).
@@ -514,6 +527,19 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
             else:
                 resolved = raw
                 carry_raw[j] = raw
+            # Exact-match reserved sentinels (see ``_NULL_SENTINEL`` /
+            # ``_MISSING_SENTINEL`` above). Checked on the ditto-resolved raw
+            # cell, BEFORE any encoding dispatch, so a sentinel in any column
+            # kind (dict/affix/head/plain) decodes uniformly. A quoted
+            # ``"__null__"`` keeps its quotes in ``resolved`` and so does NOT
+            # match here — it falls through and ``_decode_cell`` unquotes it to
+            # the literal string, exactly like a quoted ``"="``.
+            if resolved == _NULL_SENTINEL:
+                row[spec.name] = None
+                continue
+            if resolved == _MISSING_SENTINEL:
+                # Absent key: OMIT it from the row (do not set row[spec.name]).
+                continue
             if spec.head_dict:
                 hd = head_dicts.get(spec.name)
                 value = _decode_head_cell(resolved, hd)

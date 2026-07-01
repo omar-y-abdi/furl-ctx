@@ -11,11 +11,13 @@ Two test families:
 
 2. **Property/fuzz** (200 adversarial cases, fixed seed): fresh
    out-of-sample rows with adversarial cell shapes — embedded newlines,
-   commas-in-cells, embedded double-quotes, JSON nulls, empty strings,
-   unicode — feed through the real Rust compaction render →
+   commas-in-cells, embedded double-quotes, JSON nulls, absent keys,
+   empty strings, unicode — feed through the real Rust compaction render →
    ``decode_csv_schema_rows`` and assert deep equality (or, when the Rust
    path takes the lossy/opaque branch, assert the ``_ccr_dropped``
    sentinel is present and the item is covered by a recoverable hash).
+   ``null`` / absent-key / ``""`` are kept distinct via the reserved
+   ``__null__`` / ``__missing__`` cell sentinels.
 
 Note on "colons-in-keys": the Rust formatter CSV-quotes column names
 containing special characters into the ``[N]{...}`` declaration, but
@@ -142,22 +144,18 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
       - Commas inside cells
       - Colons inside VALUES (avoid colon in key names; pre-existing limit)
       - Embedded double-quotes in values
-      - Empty strings (consistent use avoids null vs "" ambiguity)
+      - Empty strings
+      - JSON ``null`` values (the ``__null__`` sentinel path)
+      - Absent keys (the ``__missing__`` sentinel path)
       - Unicode (emoji, CJK, RTL)
       - Multi-line stack-trace style values (the primary Cluster-A shape)
 
-    Note on JSON nulls: the Rust CSV formatter encodes both ``null`` and
-    ``""`` as an empty CSV cell in a nullable ``string?`` column.  The
-    Python decoder maps an empty cell to ``""`` (via ``_decode_cell``
-    fallback), not ``None``.  Mixing null and empty-string in the same
-    run therefore produces a round-trip ambiguity that is a PRE-EXISTING
-    limitation, NOT the defect this unit fixes.  To keep the fuzz
-    assertions clean (zero invented/missing) we avoid null values.
-    Null-only runs round-trip correctly (all decode to ``""``); see the
-    dedicated null-consistency test below.
-
-    All rows share the SAME schema (``id``, ``msg``, ``tag``) so the
-    lossless formatter always emits a single homogeneous CSV-schema table.
+    JSON ``null``, an absent key, and the empty string ``""`` are now
+    encoded distinctly by the Rust formatter (the reserved ``__null__`` /
+    ``__missing__`` cell sentinels) and inverted exactly by the decoder, so
+    all three coexist in one run with zero round-trip ambiguity.  The ``id``
+    column stays present + non-null in every row so the table always has a
+    stable variable anchor column; only ``msg`` carries null / absent.
     """
     UNICODE_SAMPLES = [
         "héllo",
@@ -171,7 +169,7 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
     ]
     rows = []
     for i in range(n_rows):
-        choice = rng.randint(0, 6)
+        choice = rng.randint(0, 8)
         if choice == 0:
             # Embedded newline in a value.
             row = {
@@ -201,8 +199,7 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
                 "tag": f"tag-{i % 5}",
             }
         elif choice == 4:
-            # Empty string (non-nullable column: formatter uses non-nullable
-            # type so empty and null are not conflated).
+            # Empty string — must stay distinct from null / missing.
             row = {
                 "id": i,
                 "msg": "",
@@ -213,6 +210,19 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
             row = {
                 "id": i,
                 "msg": rng.choice(UNICODE_SAMPLES) + f" row-{i}",
+                "tag": f"tag-{i % 5}",
+            }
+        elif choice == 6:
+            # JSON null value (the ``__null__`` sentinel path).
+            row = {
+                "id": i,
+                "msg": None,
+                "tag": f"tag-{i % 5}",
+            }
+        elif choice == 7:
+            # Absent ``msg`` key (the ``__missing__`` sentinel path).
+            row = {
+                "id": i,
                 "tag": f"tag-{i % 5}",
             }
         else:
@@ -403,6 +413,89 @@ def test_embedded_double_quote_in_cell_round_trips_lossless() -> None:
     recovered = {_repr(row) for row in rows}
     missing = {_repr(it) for it in items} - recovered
     assert not missing, f"{len(missing)} rows lost with double-quote-in-cell"
+
+
+# ─────────────── Test #1b — null / missing-key / empty-string parity ──────────
+
+
+def test_null_missing_empty_string_are_distinct_on_lossless_path() -> None:
+    """JSON ``null``, an absent key, and ``""`` must reconstruct DISTINCTLY.
+
+    Before the ``__null__`` / ``__missing__`` cell sentinels, the Rust
+    formatter rendered all three as an empty CSV cell and the decoder mapped
+    every empty cell to ``""`` — so ``null`` and a missing key were silently,
+    unrecoverably corrupted into the empty string.  This drives the real
+    Rust crush → Python decode and asserts each shape round-trips exactly:
+
+      - ``{"a": None, "b": X}``  ->  ``a`` present and ``None``
+      - ``{"b": X}``             ->  ``a`` ABSENT from the reconstructed row
+      - ``{"a": "",  "b": X}``   ->  ``a`` present and ``""``
+
+    ``b`` is a genuinely variable string column (non-arith, non-constant) so
+    the table keeps a stable per-row anchor and routes through the normal
+    multi-column CSV-schema path (not the single-var empty-line path).
+    """
+    # 60 rows to clear the compressor's min-token threshold (matches the
+    # other lossless-path tests in this module).
+    items: list[dict] = []
+    for i in range(60):
+        shape = i % 3
+        if shape == 0:
+            items.append({"a": None, "b": f"v{i}"})       # JSON null
+        elif shape == 1:
+            items.append({"b": f"v{i}"})                    # key "a" absent
+        else:
+            items.append({"a": "", "b": f"v{i}"})          # empty string
+
+    text = _compress_csv(items)
+    rows = decode_csv_schema_rows(text)
+    assert rows is not None, "expected CSV-schema output for homogeneous rows"
+
+    # Exact deep-equality reconstruction of the whole corpus, in order.
+    assert rows == items, (
+        "null / missing-key / empty-string not reconstructed distinctly.\n"
+        f"Rendered text (first 300):\n{text[:300]}\n"
+        f"First 3 decoded: {rows[:3]}"
+    )
+
+    # Explicit per-shape assertions (belt-and-suspenders on the invariant).
+    assert rows[0]["a"] is None, f"null row lost: {rows[0]!r}"
+    assert "a" not in rows[1], f"missing-key row leaked an 'a' key: {rows[1]!r}"
+    assert rows[2]["a"] == "", f"empty-string row corrupted: {rows[2]!r}"
+
+
+def test_literal_sentinel_string_value_round_trips_as_string() -> None:
+    """A STRING value literally equal to a sentinel must NOT become ``None``.
+
+    The Rust ``csv_render_str`` CSV-quotes any string equal to ``__null__`` /
+    ``__missing__``, so the bare sentinels stay unambiguous.  A row whose
+    ``a`` value is the literal string ``"__null__"`` must round-trip back to
+    that string, never to ``None`` (and likewise ``"__missing__"`` must not
+    drop the key).
+    """
+    items: list[dict] = []
+    for i in range(60):
+        shape = i % 3
+        if shape == 0:
+            items.append({"a": "__null__", "b": f"v{i}"})     # literal sentinel
+        elif shape == 1:
+            items.append({"a": "__missing__", "b": f"v{i}"})  # literal sentinel
+        else:
+            items.append({"a": f"plain-{i}", "b": f"v{i}"})
+
+    text = _compress_csv(items)
+    rows = decode_csv_schema_rows(text)
+    assert rows is not None
+
+    assert rows == items, (
+        "literal sentinel string value corrupted on round-trip.\n"
+        f"Rendered text (first 300):\n{text[:300]}\n"
+        f"First 3 decoded: {rows[:3]}"
+    )
+    assert rows[0]["a"] == "__null__", f"literal '__null__' became {rows[0]['a']!r}"
+    assert rows[1]["a"] == "__missing__", (
+        f"literal '__missing__' became {rows[1].get('a')!r} (key present={'a' in rows[1]})"
+    )
 
 
 # ───────────────────────── Test #2 — Property / fuzz ──────────────────────────

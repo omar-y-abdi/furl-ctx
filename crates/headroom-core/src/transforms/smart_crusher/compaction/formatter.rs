@@ -57,6 +57,18 @@ const DICT_PREFIX: &str = "__dict:";
 const AFFIX_PREFIX: &str = "__affix:";
 const HEAD_PREFIX: &str = "__head:";
 
+// Exact-match reserved cell sentinels (NOT prefixes, unlike the markers
+// above — matched like the ditto `=`). `NULL_SENTINEL` renders a JSON
+// `null`; `MISSING_SENTINEL` renders an absent key. This keeps `null`,
+// a missing key, and the empty string `""` distinct on the lossless CSV
+// path (all three previously collapsed to an empty cell). A literal
+// STRING cell equal to either sentinel is CSV-quoted by `csv_render_str`,
+// so the bare sentinels stay unambiguous. The Python decoder
+// `csv_schema_decoder.py` (`_NULL_SENTINEL` / `_MISSING_SENTINEL`) must
+// match these byte-for-byte + apply the same escape rule.
+const NULL_SENTINEL: &str = "__null__";
+const MISSING_SENTINEL: &str = "__missing__";
+
 /// Format a `Compaction` tree into bytes.
 pub trait Formatter: Send + Sync {
     /// Stable name for telemetry (e.g. `"json"`, `"csv-schema"`).
@@ -545,6 +557,8 @@ fn head_cell_for(value: &str, delim: char, heads: &[String]) -> Option<String> {
 
 pub(super) fn csv_render_str(s: &str) -> String {
     if s == "="
+        || s == NULL_SENTINEL
+        || s == MISSING_SENTINEL
         || s.starts_with(DICT_PREFIX)
         || s.starts_with(AFFIX_PREFIX)
         || s.starts_with(HEAD_PREFIX)
@@ -558,7 +572,7 @@ pub(super) fn csv_render_str(s: &str) -> String {
 
 fn format_cell(c: &CellValue) -> String {
     match c {
-        CellValue::Missing => String::new(),
+        CellValue::Missing => MISSING_SENTINEL.to_string(),
         // Grammar guards (ditto `=`, `__dict:` prefix) + CSV quoting.
         CellValue::Scalar(Value::String(s)) => csv_render_str(s),
         CellValue::Scalar(v) => json_scalar_to_csv(v),
@@ -582,7 +596,7 @@ fn format_ccr_marker(hash: &str, byte_size: usize, kind: &OpaqueKind) -> String 
 
 fn json_scalar_to_csv(v: &Value) -> String {
     match v {
-        Value::Null => String::new(),
+        Value::Null => NULL_SENTINEL.to_string(),
         Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => {
