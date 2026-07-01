@@ -12,15 +12,15 @@ explicitly:
 * ``config`` and the debug helpers (``log_router_debug`` / ``json_shape``) plus
   the shared ``logger`` come in via the constructor — they are stable for the
   router's lifetime.
-* The compressor getters (``get_smart_crusher`` etc.), ``try_ml_compressor`` and
+* The compressor getters (``get_smart_crusher`` etc.), ``try_kompress`` and
   ``record_to_toin`` are passed to :meth:`apply` *per call*. The router's thin
   ``_apply_strategy_to_content`` delegator resolves them fresh on every
   invocation, so monkeypatching ``router._get_log_compressor`` /
-  ``router._try_ml_compressor`` (as the test-suite does) still bites — a
+  ``router._try_kompress`` (as the test-suite does) still bites — a
   construction-time capture would have been stale.
 
-The ML text path (``try_ml_compressor``) and TOIN recording
-(``record_to_toin``) deliberately stay on the router: ``try_ml_compressor``
+The ML text path (``try_kompress``) and TOIN recording
+(``record_to_toin``) deliberately stay on the router: ``try_kompress``
 binds the per-request ``RouterRuntime`` (target_ratio / kompress_model) as a
 closure via ``_apply_strategy_to_content`` so it is NOT self-contained, and
 both forward to router methods the test-suite monkeypatches. The dispatcher
@@ -37,7 +37,7 @@ from .router_policy import CompressionStrategy
 
 # Type aliases for the injected callables (documentation, not enforcement).
 _GetCompressor = Callable[[], Any]
-_TryMlCompressor = Callable[[str, str, str | None], tuple[str, int]]
+_TryKompress = Callable[[str, str, str | None], tuple[str, int]]
 _RecordToToin = Callable[..., None]
 
 
@@ -77,7 +77,7 @@ class StrategyDispatcher:
         get_log_compressor: _GetCompressor,
         get_diff_compressor: _GetCompressor,
         get_html_extractor: _GetCompressor,
-        try_ml_compressor: _TryMlCompressor,
+        try_kompress: _TryKompress,
         record_to_toin: _RecordToToin,
     ) -> tuple[str, int, list[str]]:
         """Apply a compression strategy to content.
@@ -94,7 +94,7 @@ class StrategyDispatcher:
             get_log_compressor: Router getter for the LogCompressor.
             get_diff_compressor: Router getter for the DiffCompressor.
             get_html_extractor: Router getter for the HTMLExtractor.
-            try_ml_compressor: Router-bound ML (Kompress) compression callable.
+            try_kompress: Router-bound ML (Kompress) compression callable.
             record_to_toin: Router-bound TOIN recording callable.
 
         Returns:
@@ -124,7 +124,7 @@ class StrategyDispatcher:
                 # falls through to Kompress (source code keeps routing there).
                 if compressed is None:
                     # Fallback to Kompress
-                    compressed, compressed_tokens = try_ml_compressor(
+                    compressed, compressed_tokens = try_kompress(
                         content, context, question
                     )
                     strategy = CompressionStrategy.KOMPRESS  # Update for TOIN
@@ -202,14 +202,14 @@ class StrategyDispatcher:
                         decision_reason = "html_extractor"
 
             elif strategy == CompressionStrategy.KOMPRESS:
-                compressed, compressed_tokens = try_ml_compressor(content, context, question)
+                compressed, compressed_tokens = try_kompress(content, context, question)
                 compressor_name = "KompressCompressor"
                 decision_reason = "kompress"
 
             elif strategy == CompressionStrategy.TEXT:
                 # Prefer Kompress ML compressor for text
                 # Passes through unchanged if Kompress not available
-                compressed, compressed_tokens = try_ml_compressor(content, context, question)
+                compressed, compressed_tokens = try_kompress(content, context, question)
                 compressor_name = "KompressCompressor"
                 decision_reason = "text_uses_kompress"
 
@@ -246,7 +246,7 @@ class StrategyDispatcher:
             fallback_no_savings = compressed == content or compressed_tokens >= original_tokens
             if fallback_eligible_strategy and fallback_no_savings:
                 strategy_chain.append(CompressionStrategy.KOMPRESS.value)
-                fallback_compressed, fallback_tokens = try_ml_compressor(
+                fallback_compressed, fallback_tokens = try_kompress(
                     content, context, question
                 )
                 if fallback_tokens < compressed_tokens:

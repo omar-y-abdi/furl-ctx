@@ -78,7 +78,7 @@ class TestContentRouterRuntimeOptionsIsolation:
 
         # Patch the ML boundary ONCE (not per worker — that would be a write
         # race on the shared router). ``model_id`` is THIS call's binding (a
-        # call-local in ``_try_ml_compressor``), and ``target_ratio`` arrives at
+        # call-local in ``_try_kompress``), and ``target_ratio`` arrives at
         # the SAME ``.compress`` call — so the pair is per-call with no shared
         # bridge. The barrier lives in the EARLIEST consumer (``_get_kompress``)
         # so that, under a hypothetical shared-field regression, every thread's

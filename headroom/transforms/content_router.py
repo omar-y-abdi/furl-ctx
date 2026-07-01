@@ -654,7 +654,7 @@ class ContentRouter(Transform):
         self._registry = CompressorRegistry(self.config)
         # Per-strategy dispatch + no-savings fallback chain. Holds no router
         # reference: the compressor getters and the two router-bound callables
-        # (``_try_ml_compressor`` / ``_record_to_toin``) are passed per-call by
+        # (``_try_kompress`` / ``_record_to_toin``) are passed per-call by
         # the ``_apply_strategy_to_content`` delegator, so monkeypatching those
         # router methods still takes effect. Only the lifetime-stable deps
         # (config + the module-level debug helpers/logger) ride the constructor.
@@ -1110,17 +1110,17 @@ class ContentRouter(Transform):
         """Apply a compression strategy to content.
 
         Thin delegator to :meth:`StrategyDispatcher.apply`. The compressor
-        getters and the two router-bound callables (``_try_ml_compressor`` /
+        getters and the two router-bound callables (``_try_kompress`` /
         ``_record_to_toin``) are resolved fresh here on every call and passed
         in, so monkeypatching those router methods still takes effect (a
         construction-time capture in the dispatcher would have been stale).
 
-        The per-request ``runtime`` is bound into the ``try_ml_compressor``
+        The per-request ``runtime`` is bound into the ``try_kompress``
         closure here rather than added to the dispatcher's signature: the
         dispatcher stays a pure leaf that calls it as an opaque callable, and
         ``runtime`` rides the closure to the site that reads it
         (``target_ratio`` / ``kompress_model`` for ML). Because the closures
-        forward to ``self._try_ml_compressor`` / ``self._record_to_toin``,
+        forward to ``self._try_kompress`` / ``self._record_to_toin``,
         monkeypatching those methods still bites.
 
         Args:
@@ -1142,10 +1142,10 @@ class ContentRouter(Transform):
             final compressor without parsing decision_reason strings.
         """
 
-        def try_ml_compressor(
+        def try_kompress(
             ml_content: str, ml_context: str, ml_question: str | None
         ) -> tuple[str, int]:
-            return self._try_ml_compressor(
+            return self._try_kompress(
                 ml_content, ml_context, ml_question, runtime=runtime
             )
 
@@ -1164,11 +1164,11 @@ class ContentRouter(Transform):
             get_log_compressor=self._get_log_compressor,
             get_diff_compressor=self._get_diff_compressor,
             get_html_extractor=self._get_html_extractor,
-            try_ml_compressor=try_ml_compressor,
+            try_kompress=try_kompress,
             record_to_toin=record_to_toin,
         )
 
-    def _try_ml_compressor(
+    def _try_kompress(
         self,
         content: str,
         context: str,

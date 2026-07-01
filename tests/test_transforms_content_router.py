@@ -475,7 +475,7 @@ def test_diff_strategy_does_not_fallback_to_kompress_when_diff_is_noop(
     def fail_kompress(*_args: object, **_kwargs: object) -> tuple[str, int]:
         raise AssertionError("Diff compression must not fallback to Kompress")
 
-    monkeypatch.setattr(router, "_try_ml_compressor", fail_kompress)
+    monkeypatch.setattr(router, "_try_kompress", fail_kompress)
 
     compressed, compressed_tokens, strategy_chain = router._apply_strategy_to_content(
         diff,
@@ -503,7 +503,7 @@ def test_log_strategy_does_not_fallback_to_kompress_when_log_is_noop(
     def fail_kompress(*_args: object, **_kwargs: object) -> tuple[str, int]:
         raise AssertionError("Log compression must not fallback to Kompress")
 
-    monkeypatch.setattr(router, "_try_ml_compressor", fail_kompress)
+    monkeypatch.setattr(router, "_try_kompress", fail_kompress)
 
     compressed, compressed_tokens, strategy_chain = router._apply_strategy_to_content(
         log,

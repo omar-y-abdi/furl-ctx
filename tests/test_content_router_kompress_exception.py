@@ -2,7 +2,7 @@
 strategy-dispatch net in `_apply_strategy_to_content`.
 
 Two-layer fix:
-  Layer 1 (committed earlier): `_try_ml_compressor` narrows its catch to
+  Layer 1 (committed earlier): `_try_kompress` narrows its catch to
       `_MODEL_UNAVAILABLE_ERRORS` so Kompress bugs propagate out.
   Layer 2 (this fix): `_apply_strategy_to_content` narrows its outer catch-all
       to the same `_MODEL_UNAVAILABLE_ERRORS`, so bugs that escaped Layer 1 are
@@ -12,7 +12,7 @@ Together they guarantee: for every strategy, a real compressor bug raises at the
 caller boundary; a legitimate model-unavailable error degrades to passthrough.
 
 Mutation-sensitive:
-  - Reverting `_try_ml_compressor` to `except Exception` → test_kompress_bug_propagates fails.
+  - Reverting `_try_kompress` to `except Exception` → test_kompress_bug_propagates fails.
   - Reverting `_apply_strategy_to_content` to `except Exception` →
     test_strategy_net_propagates_real_bug / test_all_strategies_propagate_real_bug fail.
   - Changing `_MODEL_UNAVAILABLE_ERRORS` check to unconditional passthrough →
@@ -46,21 +46,21 @@ def _router_with_kompress(raising_exc: BaseException | None) -> ContentRouter:
 
 
 # ---------------------------------------------------------------------------
-# Layer 1: _try_ml_compressor boundary
+# Layer 1: _try_kompress boundary
 # ---------------------------------------------------------------------------
 
 
 def test_kompress_bug_propagates() -> None:
-    """Layer-1: real bug exits _try_ml_compressor loud."""
+    """Layer-1: real bug exits _try_kompress loud."""
     router = _router_with_kompress(TypeError("simulated model bug: bad tensor op"))
     with pytest.raises(TypeError, match="simulated model bug"):
-        router._try_ml_compressor(_CONTENT, context="")
+        router._try_kompress(_CONTENT, context="")
 
 
 def test_model_unavailable_degrades_to_passthrough() -> None:
-    """Layer-1: model-not-downloaded degrades gracefully in _try_ml_compressor."""
+    """Layer-1: model-not-downloaded degrades gracefully in _try_kompress."""
     router = _router_with_kompress(KompressModelNotCached("some/model"))
-    compressed, tokens = router._try_ml_compressor(_CONTENT, context="")
+    compressed, tokens = router._try_kompress(_CONTENT, context="")
     assert compressed == _CONTENT
     assert tokens == len(_CONTENT.split())
 
@@ -75,13 +75,13 @@ def _router_with_failing_strategy(strategy: CompressionStrategy, exc: BaseExcept
     router = ContentRouter()
 
     if strategy in (CompressionStrategy.KOMPRESS, CompressionStrategy.TEXT, CompressionStrategy.CODE_AWARE):
-        # Stub _try_ml_compressor — the lowest-level ML path
+        # Stub _try_kompress — the lowest-level ML path
         def _failing_ml(
             content: str, context: str, question: object = None, **kwargs: object
         ) -> tuple[str, int]:
             raise exc
 
-        router._try_ml_compressor = _failing_ml  # type: ignore[method-assign]
+        router._try_kompress = _failing_ml  # type: ignore[method-assign]
     elif strategy == CompressionStrategy.SMART_CRUSHER:
         class _FailSmartCrusher:
             def crush(self, *a, **kw):

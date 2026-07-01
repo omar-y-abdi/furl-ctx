@@ -5,7 +5,7 @@ each ran the ML compressor: an inner SMART_CRUSHER-only fallback AND the generic
 post-dispatch fallback (which already lists SMART_CRUSHER as fallback-eligible).
 Result: `compress('[1,2,3]')` produced strategy_chain
 ``['smart_crusher','kompress','kompress','log']`` and ran Kompress twice (a
-duplicate _try_ml_compressor -> duplicate CCR/TOIN side effects).
+duplicate _try_kompress -> duplicate CCR/TOIN side effects).
 
 Fix: removed the inner duplicate; the generic fallback handles the KOMPRESS
 (then LOG) fallback exactly once. Each strategy now appears at most once.
