@@ -106,7 +106,7 @@ Granular extras: `[mcp]`, `[ml]` (Kompress-base), `[html]`, `[dev]`. Requires **
 
 <sub>*log savings come partly from row deletion, not free compression — every dropped row stays CCR-recoverable within the configured TTL. `code` is large distinct source files that don't compress, so Headroom passes them through untouched (0%).</sub>
 
-For the full methodology and re-runnable token-reduction sweeps, see [BENCHMARKS.md](BENCHMARKS.md).
+The table above is a single conservative capture (lossless structural folding, minimal offload). The **60–95%** headline reflects the fuller 6-seed adversarial sweep — logs, search, and disk workloads land 80–95% with CCR offload, with honest per-workload caveats (code passes through at 0%, low-redundancy multiturn lands lower). Full methodology and re-runnable sweeps: [BENCHMARKS.md](BENCHMARKS.md).
 
 ## When to use · When to skip
 
