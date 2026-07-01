@@ -1,6 +1,22 @@
 # 🔶 CYCLE-6 + NEW PERMANENT PROCESS — recon→fix→DEEP-recon-VERIFY loop (user mandate 2026-06-27)
 
-## LATEST — 2026-07-01 (round-5 = 200-agent stamp aftermath; HEAD `3403a4a8`, all gated-green — 5 HIGHS COMPLETE)
+## LATEST — 2026-07-02 (fable-recon campaign launched; HEAD `f1c44778`, main, pushed to origin)
+
+**Campaign pivot:** master plan is now `FABLE-RECON-PLAN.md` (repo root, committed). Fable full-tree audit: 189 findings (3 crit · 31 high · 90 med · 65 low) + 2 refactor blueprints (§4.1 ContentRouter, §4.2 typed-CCR-refs) + §5's 15 owner decisions + 9-phase roadmap (§2). Supersedes round-5 campaign framing.
+
+**Execution model (user mandate 2026-07-02):** PM = ZERO IC — subagents only. Tough tier → fable local subagents (PROVEN: COR-1/COR-2 dry-run = rigorous RED→GREEN, byte-exact). Easy tier → sonnet. PM: spec → review → gate → commit → push to `origin/main` (omar-y-abdi/headroom-mcp).
+
+**Phase 0 wave 1 DONE + pushed:**
+- `c5b58ca8` — gate honesty (G4 exit-code keyed, G5 floor_check rejects stale captured_at, portable cd). RED-proofed.
+- `f1c44778` — COR-1/COR-2 critical: lossless-decoder data-loss (tables decoded to 0 rows; re.DOTALL header + _unq head-dict cell; fuzz hardened). RED 0/60 → GREEN 60/60, 762 passed, G1-G4 green.
+
+**Phase 0 NEXT waves:** TEST-27 (lint pin) · COR-3 (verify.run missing jsonl) · TEST-5/6 (anti-vacuity) · TEST-3/0.4 (re-baseline) [all sonnet] → then Phase 1 invariant gaps + 2 fable refactors.
+
+**Still-open:** §5's 15 owner decisions — batch before Phase 3 Excision.
+
+---
+
+## PRIOR — 2026-07-01 (round-5 = 200-agent stamp aftermath; HEAD `3403a4a8`, all gated-green — 5 HIGHS COMPLETE)
 **Ran the 200-agent confirmation stamp (`adversarial-critique.js`, 204 agents, 13.5M tok) after round-4. Contrary to "confirmation not discovery" it FOUND 5 NOVEL highs round-4 recon missed → mandate "workflow finds it = PM miss" fired. Census (triaged from RAW, not the 16KB synth slice): 0 crit · 5 high · 47 med · 69 low · 4 nit. ALL 5 HIGHS FIXED + gate-green.**
 - `aa89cf6d` — 4/5 highs: DOCS #3/#4 (README+llms.txt marketed CodeCompressor [retired] + IntelligentContext [never existed] → aligned to real set SmartCrusher/Kompress-v2-base/Search/Log/Diff/HTMLExtractor/CacheAligner/CrossMessageDeduper/CCR; comment-rot fixed) + SECURITY #2/#5 (compression_store.py retrieval-log redaction missed JSON quoted-key + bare AWS/GitHub secrets → regex fix + provider-token rule + query redaction + honest SECURITY.md; +7 tests). Gate G1-G4 green.
 - `3403a4a8` — high #1: CSV "lossless" path corrupted JSON null + missing-key (both→"", unrecoverable, reachable; fuzz was green-by-avoiding-null). User chose true-lossless (a): two exact-match reserved sentinels `__null__`/`__missing__`, Rust encoder + Python decoder byte-lockstep, escaped like ditto `=`. Gate G1-G5 GREEN incl bench floor-check (no compression regression).

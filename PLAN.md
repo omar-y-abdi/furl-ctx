@@ -79,18 +79,24 @@ Exec steps (advisor-refined) — extraction DONE `92088258`:
 - RTK-binary-shipping claim (README attribution) unconfirmed in the live package.
 - RUST_DEV.md pre-commit bullet references absent `scripts/sync-plugin-versions.py`.
 
-## Current position
-HEAD = `3403a4a8` (round-5 high #1 CSV true-lossless sentinels). Prior: `aa89cf6d` round-5 stamp-highs 4/5 ← `c7693fa7` round-4 batch ← `7fc45aaa` reconcile ← `e64602e2` round-3 batch ← `1d8a69e9` rename ← `92088258`/`0844692f` extraction.
-Gated-GREEN (G1-G5 incl. bench, full pytest, recovery 23, floor needle 100%), zero uncommitted code.
-Cycle-6 CODE work COMPLETE. 200-agent stamp RAN (round-5) → found 5 NOVEL highs (round-4 recon miss); **all 5 FIXED + gate-green**.
+## Current position — FABLE-RECON CAMPAIGN (supersedes round-5 framing)
 
-**SCOPE DECISION (user 2026-07-01): FULL ZERO-MATERIAL.** Burn down ALL 120 remaining (47 med + 69 low + 4 nit) — INCLUDING the deliberately-deferred **Large** god-object (ContentRouter decompose) + CCR opaque-path typing (A2) — before MCP tool creation. Not "usage-only"; the whole thing.
-**CAMPAIGN (multi-round, PM-orchestrated):**
-1. FULL TRIAGE — parse all 125 stamp findings → master fix-list by theme/severity/location/leverage (5 highs done; 120 remain). Source: triage agent `adbdeb2b88fb17721` (parsed) + raw `wsg5h14yn.output`.
-2. BATCH-FIX by theme, worst-leverage first — (a) architecture Larges: god-object decompose [recon-arch has a 6-step blueprint in handoff/prior recon] + CCR opaque-path typing; (b) usage-mediums (docs/security/correctness/api ≈21); (c) types/perf/tests/simplicity mediums; (d) 69 lows + 4 nits. Edit-only subagents; I spec→review→gate→commit each cohesive batch.
-3. round-6 RE-RECON (fresh agents) after each major batch → loop until zero material.
-4. FINAL stamp = true confirmation.
-**/compact before starting — big campaign needs fresh context (perf.md: avoid last 20% for large refactor).**
+**Master plan: `FABLE-RECON-PLAN.md`** (repo root, committed to main) — fable full-tree audit: 189 findings (3 critical · 31 high · 90 medium · 65 low) + 2 refactor blueprints (§4.1 ContentRouter decomposition, §4.2 typed-CCR-refs) + §5's 15 owner decisions + 9-phase roadmap (§2). All execution follows FABLE-RECON-PLAN's roadmap.
+
+**Execution model (user mandate 2026-07-02):** PM = ZERO IC work — everything via subagents. Tough tier (criticals, 2 wire-contract refactors) → fable local subagents (PROVEN: COR-1/COR-2 dry-run = rigorous RED→GREEN, byte-exact, self-verified). Easy tier (gate/lint/mechanical/doc/dead-code) → sonnet local subagents. PM only: spec → review → gate → commit → push to `origin/main` (github omar-y-abdi/headroom-mcp). Fallback: opus for tough tier if fable unavailable.
+
+**Phase 0 — wave 1 DONE + pushed (HEAD `f1c44778` on main):**
+- `c5b58ca8` — gate honesty: TEST-1 G4 keyed on exit code not grep; TEST-2 G5 captures run_bench exit code + floor_check rejects stale captured_at; portable cd. RED-proofed. (Also bundled FABLE-RECON-PLAN.md.)
+- `f1c44778` — COR-1/COR-2 critical lossless-decoder data-loss (tables decoded to 0 rows; re.DOTALL header + _unq head-dict cell; fuzz generator hardened to stamp both shapes). RED 0/60 → GREEN 60/60, 762 passed, gate G1-G4 green.
+
+**Phase 0 — NEXT waves (per FABLE-RECON-PLAN §2 Phase 0):**
+- TEST-27: lint RED at HEAD — pin ruff/mypy across ci.yml+pre-commit+dev, one `ruff --fix` commit, wire into ci-precheck [sonnet]
+- COR-3: `verify.run` crashes on never-committed `verify/data/slugify_rg.raw.jsonl` — repoint or re-commit [sonnet]
+- TEST-5/TEST-6: anti-vacuity — convert 20+ conditional-skip sites in CCR invariant suites to hard asserts; fix assertion-free MinTokens fuzz [sonnet]
+- TEST-3/0.4: re-baseline after the decoder fix [sonnet]
+- THEN Phase 1 (invariant gaps COR-4/5/6/7/8), the 2 refactors → fable, per roadmap
+
+**Still-open:** §5's 15 owner decisions — surface as a batch before Phase 3 Excision. User chose "full zero-material" (DO-everything); HOW is open (delete-vs-shrink TOIN, restore-AST-vs-accept-0%-code, etc.).
 
 Round-4 deferred cosmetics (logged, NOT blocking — re-recon arbitrates): C4 lazy-init compressor-singleton race (benign under GIL; threading-change risk); C8 CODEBASE-MAP ~15 anchors ~1-3 lines early (re-drifts next edit); C6 `compression_ratio` cross-type name-collision. `.gitignore` has OTHER pre-existing dead allowlist negations (`!scripts/install-git-hooks.sh`, `install.sh`, `install.ps1`, `version-sync.py`) — harmless no-ops, left per surgical-scope, flagged for optional future cleanup.
 
@@ -128,3 +134,6 @@ Batch-fix plan: mechanical/clear-cut (M1,M2,M6,M7,M8,N1,N2,N3) fix autonomously.
 
 ## Cycle-6 commit ledger
 `92088258` site-3 extraction · `0844692f` format guards · `1d8a69e9` ML→Kompress rename · `e64602e2` round-3 doc-integrity batch · `7fc45aaa` round-3 reconcile · `c7693fa7` round-4 doc-integrity + config batch · `aa89cf6d` round-5 stamp-highs 4/5 (docs #3/#4 + security #2/#5) · `3403a4a8` round-5 high #1 CSV true-lossless sentinels · (+ PLAN.md checkpoints cbda82af/5477ebfc/bf9234d0/e021bb3c)
+
+## Fable-recon campaign commit ledger (Phase 0)
+`c5b58ca8` gate honesty + FABLE-RECON-PLAN.md · `f1c44778` COR-1/COR-2 lossless-decoder data-loss fix
