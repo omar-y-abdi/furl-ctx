@@ -4,7 +4,7 @@
 #   gate.sh bench   -> the above + G5 run_bench floor-check (for changes touching compression)
 # Exit 0 = all gates pass. Nonzero = a gate failed (do NOT commit; revert/restart agent).
 set -uo pipefail
-cd /Users/k/dev/headroom
+cd "$(git rev-parse --show-toplevel)"
 PY=.venv/bin/python
 fail=0
 
@@ -38,19 +38,26 @@ else
 fi
 
 echo "=== G4 recovery invariant (must be 23) ==="
-if $PY -m pytest tests/test_ccr_recovery_invariant.py -q --no-header -p no:cacheprovider 2>&1 | grep -q '23 passed'; then
-  echo "G4 PASS"
+if $PY -m pytest tests/test_ccr_recovery_invariant.py -q --no-header -p no:cacheprovider >/tmp/gate_g4.log 2>&1; then
+  if grep -q '23 passed' /tmp/gate_g4.log; then
+    echo "G4 PASS"
+  else
+    echo "G4 FAIL: exit 0 but count != 23"; tail -5 /tmp/gate_g4.log; fail=1
+  fi
 else
-  echo "G4 FAIL: recovery invariant not 21-green"; fail=1
+  echo "G4 FAIL: recovery invariant exited nonzero"; tail -5 /tmp/gate_g4.log; fail=1
 fi
 
 if [ "${1:-}" = "bench" ]; then
   echo "=== G5 run_bench + floor-check ==="
-  $PY -m benchmarks.run_bench >/tmp/runbench.out 2>&1
-  if $PY .claude/runtime/floor_check.py; then
-    echo "G5 PASS"
+  if $PY -m benchmarks.run_bench >/tmp/runbench.out 2>&1; then
+    if $PY .claude/runtime/floor_check.py; then
+      echo "G5 PASS"
+    else
+      echo "G5 FAIL: compression regression"; fail=1
+    fi
   else
-    echo "G5 FAIL: compression regression"; fail=1
+    echo "G5 FAIL: run_bench exited nonzero (crash/error)"; tail -5 /tmp/runbench.out; fail=1
   fi
   # run_bench overwrites these — always restore
   git checkout HEAD -- benchmarks/baseline_results.json benchmarks/BASELINE.md

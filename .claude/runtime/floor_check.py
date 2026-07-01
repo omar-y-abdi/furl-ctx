@@ -32,6 +32,16 @@ def main() -> int:
     floor = _load_committed()
     cur = json.load(open(CUR_PATH))
 
+    # Reject stale captures: if the timestamp hasn't changed, run_bench didn't
+    # actually write a fresh measurement (e.g. it crashed before writing output).
+    floor_ts = floor.get("captured_at_utc")
+    cur_ts = cur.get("captured_at_utc")
+    if cur_ts is not None and floor_ts is not None and cur_ts == floor_ts:
+        print("FLOOR CHECK: FAIL")
+        print("  - captured_at_utc unchanged: current file is identical to HEAD "
+              "(run_bench did not produce a fresh measurement)")
+        return 1
+
     f_sets, c_sets = _by_name(floor), _by_name(cur)
     failures: list[str] = []
 
