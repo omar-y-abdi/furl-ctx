@@ -1,24 +1,126 @@
-# 🔻 NEXT SESSION — process the cycle-5 rerun result (I ran out of context at launch)
+# 🔶 CYCLE-6 + NEW PERMANENT PROCESS — recon→fix→DEEP-recon-VERIFY loop (user mandate 2026-06-27)
 
-Rerun LAUNCHED (runId recorded below). It runs in background. To process when it completes:
-1. Output file: `tasks/<runId>.output` under the session task dir (the task-notification gives the path).
-2. Extract: `python -c "import json; d=json.load(open('<output>')); print(d['result']['critique'])"` → it has a
-   leading agent-preamble + a trailing `result:` line; strip both → write `codebase-CRITIQUE.md`.
-3. DELTA vs `/tmp/critique-cycle4-prev.md` (the cycle-4 critique I just resolved).
-4. **"Felfri" calibration (advisor):** a 12-lens loop-until-dry all-opus critique finds a NEXT layer BY
-   CONSTRUCTION — "flawless" = ONLY nitpicks + by-design left, ZERO material defects, NOT zero findings.
-   EXPECT the rerun to re-flag **ContentRouter still-large (~2344 LOC)** and possibly re-air **lossy-by-deletion
-   reachability** — those PERSIST BY DECISION (never-regress + critique's own by-design ruling), NOT oversight.
-   A re-surfaced by-design item is NOT "unresolved" — do not trigger another fix cycle for it.
-5. **RERUN LAUNCHED: task `wmf8x4ufn`, runId `wf_d705ee60-a48`. Output: `tasks/wmf8x4ufn.output`.**
-   Workflow = adversarial-critique.js UNCHANGED, args.map=CODEBASE-MAP.md (byte-identical to cycle-4 run).
-6. **State at launch:** git HEAD = `94b714a4`, branch verify/phase2-audit-report, tree clean (only untracked
-   `.claude/*`, `verify/raw_results.json`). All work committed. If a NEW fix cycle is needed after the delta:
-   gate = `.claude/runtime/gate.sh [bench]`; per-part 3%-regression tool = `bash /tmp/regcheck.sh` (vs
-   `/tmp/bench_ref.json`, determinism-confirmed); PM-loop = subagent edit-only → I gate → commit `git add -u`
-   (ALWAYS `git checkout HEAD -- uv.lock` first + guard `grep -iE 'uv.lock|critique'`). uv.lock truncates on
-   any agent `uv` op. NOTE: /tmp tooling is ephemeral — regenerate bench_ref via `python -m benchmarks.run_bench`
-   + capture if gone.
+Rerun #6 (wf_01820141-b7e, 199 agents) done → NOT beyond-perfect (as predicted). Deduped real material:
+**A** blake3 doc-lie (ccr/mod.rs:70 says BLAKE3, code uses sha256[:6]) · **B** dead SQLite/Redis CCR backend
+(sqlite.rs 205 LOC + from_config, test-only; "production default" docs lie) · **C** CCR mirror 6-file
+replication → one `CcrMirror` owner · **D** ContentRouter god-object (1855 LOC, high) · **E** RelevanceConfig/
+fastembed (the critique MISSED it — my known finding) · recovery-honesty docs ("within request window").
+By-design re-surfaces: DC1 lossy/CCR scope, DC4 two-engine detection (no action). Deflated: MinTokens re-clone (WRONG).
+
+**USER DECISIONS (AskUserQuestion 2026-06-27):** D god-object = **REFAKTORERA FULLT UT, korrekt, before next workflow**.
+B SQLite backend = **RADERA** (lazy-dev, like A2 redis).
+
+**USER MANDATE — NEW PERMANENT PROCESS** (replaces "surface-fix → run 200-agent workflow to DISCOVER"):
+1. **RECON FIRST** — 2-3 opus DEEP-recon subagents, same lens-scope as the workflow but smaller/cheaper. Find EVERYTHING incl. small details. I (PM) am the toughest critic.
+2. **CONSOLIDATE** — merge recon findings + known into ONE master defect list.
+3. **BATCH-FIX EVERYTHING** in one informed pass (god-object full refactor + SQLite delete + RelevanceConfig + C mirror owner + A/docs + every recon finding).
+4. **VERIFY = DEEP RECON AGAIN** (fresh subagents, NOT a surface gate). Anything found → FIX → repeat 3–4 until ABSOLUTE CERTAINTY beyond-perfect.
+5. **CONFIRM** — run the 200-agent workflow ONLY as the final stamp, when already certain. Workflow = CONFIRMATION, never DISCOVERY.
+PM owns cleanliness: a flaw the workflow can still find = PM's fault. NO slop, no missed small details.
+
+**RECON ROUND 1 — DONE** (3 opus agents + 2 sub-sweeps). All findings consolidated → `.claude/runtime/recon-findings.md` (the MASTER list + P0-P8 plan). recon-arch produced the full god-object extraction blueprint (in recon-findings.md ARCHITECTURE section).
+
+**BATCH-FIX PROGRESS (gate G1-G5 PASS each, recovery 23, needle 100%, bench 0%):**
+- ✅ **P0** `a341bf4f` — CCR silent-loss HIGH fixed (bool-veto + passthrough in diff/log/search; RED→GREEN bite-verified). test_ccr_persist_failure_vetoes.py added.
+- ✅ **P3+P4** `6aba33b3` — deleted ~1400 LOC dead ML/embedding subsystem (dynamic_detector.py + models/ + RelevanceScorerConfig embedding fields + create_scorer + default_batch_score). User-confirmed delete. Public-API change.
+- ✅ **P1py+P5** `30c8742d` — Python doc-lies (tool_injection/marker_grammar blake3/compute_key, hooks.py ProxyConfig, kompress [proxy]→[ml]) + pyproject ([all]/[code], dropped [relevance], numpy→[ml], "proxy" keyword) + retrieval_endpoint dead param + verify F401.
+
+- ✅ **Rust dead-deps + core doc-lies** `df173f5a` — dropped unused rayon/toml/http deps + config/pipeline.toml; fixed blake3→sha256[:6] (ccr/mod.rs:70) + sha2 [:16]→[:8] comment. maturin clean, gate PASS.
+- ✅ **B SQLite/Redis backend deletion** `4c0b1b6d` — deleted sqlite.rs (205 LOC) + the whole from_config/CcrBackendConfig/CcrBackendInitError factory (test-only, verified zero prod callers — prod builds InMemoryCcrStore directly via SmartCrusherBuilder::with_default_ccr_store) + tests/ccr_backends.rs (in_memory coverage stays in in_memory.rs) + rusqlite dep (Cargo.lock regen, libsqlite3-sys gone). Reconciled EVERY "production default" doc-lie: ccr/mod.rs+in_memory.rs+backends/mod.rs docstrings, workspace Cargo.toml panic=abort (proxy→PyO3 host), crates Cargo.toml dashmap "proxy" comment, RUST_DEV.md 73-line uvicorn/sqlite/redis multi-worker section → process-local request-window note, CODEBASE-MAP.md from_config/backend lines (+ trait :45→:38 drift), compression_store.py format_retrieval_miss_detail model-facing "(Sqlite/Redis)". −590 net LOC. Gate G1-G5 PASS, recovery 23, needle 100%, bench 0%. KEPT `dyn CcrStore` trait (DI seam via with_ccr_store ×6 modules — NOT abstraction-for-one). HEADROOM_CCR_BACKEND Python entry-point hook LEFT (honest extension seam, registered-nowhere by design). DEFERRED: llms.txt SQLite-memory + proxy refs (separate dead subsystem — memory/ deleted 74a6f348; fold into doc-lie cleanup pass).
+
+**REMAINING (in recon-findings.md detail):**
+- **P6 god-object FULL refactor** — recon-arch 6-step blueprint. PROGRESS:
+  - ✅ step 1 `68da6f03` — deleted dead eager_load_compressors + route_and_compress (router 2399→2313 LOC).
+  - ✅ perf double-detection `47dce416` — compress() now computes detection once (moved the mixed/detection locals into `if debug_enabled:`; _determine_strategy seam untouched — test patches it with `lambda content:`, so do NOT change its call signature).
+  - ✅ step 2 (block de-dup) `924ce8cc` — extracted `_compress_content_block(block, text, *, block_key, label, detail_prefix, ...)`; the tool_result + text branches of `_process_content_blocks` now both call it (was 2× near-identical). Behavior-identical (cache/CCR-divergence + content-block + persist-failure tests pass). Router 2399→2284 LOC. The method is currently a ContentRouter METHOD (de-dups but stays coupled) — a follow-up could move it to `router_compress_unit.py` as a free fn w/ injected deps (cache, ensure_ccr_backed, compress_fn) for full decoupling.
+  - ⏭ **NEXT (remaining de-trip / extraction):**
+    - apply() STRING path (~1685-1738) is the THIRD near-identical site but DEFERS compression to the parallel pending_tasks pass (Pass 2/3) — structurally distinct (no inline compress; result→result_slots not new_blocks). Its cache-LOOKUP decision (Tier1/Tier2/CCR/ratio) still duplicates `_compress_content_block`'s lookup half — could extract a `_lookup_cached_unit(content_key,context,min_ratio) -> decision` that BOTH the block method and the apply path use, leaving recompute-dispatch (defer vs inline) per-site. Higher risk (touches the parallel path). the cache+`_ensure_ccr_backed`+pin+ratio-gate logic is 3× near-identical — `apply()` string path (now ~1685-1738), `_process_content_blocks` tool_result branch (~2004-2145), text-block branch (~2147-2243). Extract `router_compress_unit.py::compress_cacheable_unit(text, *, cache, context, min_ratio, runtime, compress_fn, ensure_ccr_backed) -> UnitOutcome`, rewire ONE site per gated commit (apply string → tool_result → text). MUST-PRESERVE seams: `_ensure_ccr_backed` (test_result_cache_ccr_divergence.py calls it directly + asserts hasattr), `self._cache.{is_skipped,get,put,mark_skip,move_to_skip,invalidate,stats}`, `self.compress`, `self._timed_compress`. The 3 sites have SUBTLE diffs (tool_result uses block.content, text uses block.text, apply uses message slots + parallel pending_tasks) — read all 3 carefully, the shared core takes a string + returns (new_content|None, route_key, transform_label, detail). Gate (recovery 23 + needle + bench + test_result_cache_ccr_divergence) after EACH rewire. RISK: this is the recovery/cache hot path — a subtle behavior change = silent loss (the exact P0 class). Do it with fresh focus.
+  - then step 5 ContentBlockWalker (extract `_process_content_blocks` body, keep delegator seam), step 6 ToinRecorder (optional; re-export `_create_content_signature` as module global — test patches it).
+  - ✅ CONTAINED P6/P7-adjacent `091b319f` — ContentType total-fn (unknown Rust tag→PLAIN_TEXT+warn, +test) + `_get_kompress`/`_create_content_signature` Optional sigs (TYPE_CHECKING block) + RouterCompressionResult.cache_hit dead-flag drop. REJECTED prefer_code_aware_for_code "dead" finding (live: gates SOURCE_CODE→KOMPRESS at router_policy.py:65, tested). STILL PENDING: TokenCounter Protocol dedup (providers/base.py vs tokenizers/base.py) + providers/ fold.
+- ✅ **P7 correctness/API — ALL DONE:** csv phantom-row guard `4551c0a1` (ordinal-bound, RED→GREEN) · compress() reject-unknown-kwargs `4551c0a1` (warn→raise TypeError, match apply()) · cache_aligner `34cf1bbc` (stateless: dropped instance latch, thread previous_prefix_hash kwarg — singleton no longer leaks cross-request; +no-cross-leak test) · mcp_server `163b131c` (TEAMMATE: headroom_read jail to HEADROOM_WORKSPACE_DIR/cwd before exists-probe + 10MiB caps + 200-char log truncation + generic model errors; I built the jail/cap tests).
+- ✅ **P8 Python test hardening `b745e9b0`** (TEAMMATE, diff-reviewed): weak-assert→content-equality across 5 files (compression_store_guards, ccr_proportional, tool_injection_smartcrusher, compress_frozen_prefix, adaptive_min_ratio off-boundary). No strict assert weakened; G4 file untouched (23). csv adversarial fuzz + cache_aligner singleton test already landed in 4551c0a1/34cf1bbc.
+- ⏭ **MY REMAINING LANE:** (1) **god-object STRUCTURAL** = apply-string-path de-trip (site 3, hot-path, P0-class risk — see NEXT above) + ContentBlockWalker. (2) **P8 RUST boundary tests** — crusher.rs SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES(256: 255/256/257), LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES(64: 63/64/65), diff/search(0.8)/log(0.5) min_compression_ratio_for_ccr inline boundaries (cargo-slow → I do, not teammate).
+- **THEN:** deep RE-RECON (fresh agents, NOT surface gate) → fix anything → loop until zero MATERIAL (advisor stop-criterion: by-design/taste/nitpick don't count) → run confirmation workflow.
+
+## CYCLE-6 BATCH-2 (this session, post-compact) — 6 commits, Hybrid orchestration
+SQLite-del `4c0b1b6d` · P7-csv+compress `4551c0a1` · cache_aligner `34cf1bbc` · router-contained `091b319f` · mcp-sec `163b131c`(teammate) · p8-tests `b745e9b0`(teammate). User mandated PM-orchestration (not solo IC): I own god-object hot-path + review/gate/commit all; teammates fan-out isolated lanes. All gated G1-G4+ PASS, recovery 23.
+Snapshots: codebase-CRITIQUE.md (cycle-6, root, untracked) + .claude/runtime/critique-cycle5-prev.md (cycle-5).
+
+## CYCLE-6 BATCH-3 (this session, post-compact #2) — 4 commits, master-list MATERIAL items exhausted
+- ✅ **god-object site-3 RESOLVED (banked + documented + pinned)** `591a897f` — apply-string-path is the 3rd cache-lookup copy but is DELIBERATELY NOT merged with `_compress_content_block`: it DEFERS recompute to the batched ThreadPoolExecutor pass (pending_tasks→Pass 2/3) while the block path compresses INLINE, and their transform-string formats differ. Advisor reframed the merge as MARGINAL tidiness on a hot path (the P0-class `_ensure_ccr_backed` is already shared at both sites — I'd overstated the safety case). Banking is only drift-safe if BOTH copies are pinned → added `tests/test_content_router_cache_lookup_paths.py` pinning the 2 previously-UNCOVERED lookup outcomes (Tier-1 skip-hit, Tier-2 tightened→move_to_skip) on BOTH the string path AND the content-block path; the other 3 (miss→serve, serve-cached, stale-recompute) are pinned in test_result_cache_ccr_divergence.py. Pins drive public apply() with the cache pre-seeded via mark_skip/put; cache-stat deltas double as proof the lookup was reached. Divergence documented at the lookup site so re-recon won't re-flag the untaken dedup. RED-bite verified (move_to_skip-noop + Tier-1-disabled mutations caught). **=> The high-value de-triplication (the recon-arch "REAL lever") is DONE: 2 truly-identical block branches merged (924ce8cc), 3rd site banked w/ evidence.**
+- ✅ **SQLite residue** `1a78e6b4` — advisor pre-recon grep (from_config/CcrBackendConfig/SqliteCcrStore/rusqlite/sqlite across .rs/.py/.md/.toml) found ONE surviving doc-lie: in_memory.rs module docstring still said "production path must use sqlite or redis" / "switch backends" (no other backend exists post-4c0b1b6d). Fixed to accurate guidance (larger capacity; CCR-RETENTION.md). CODEBASE-MAP.md refs correctly DESCRIBE the deletion (left). Excision now verifiably clean.
+- ✅ **TokenCounter dedup + providers/ fold** `9eb82351` — two identical-purpose TokenCounter Protocols (providers/base.py had count_text/count_message/count_messages; tokenizers/base.py had only the first+last, though its BaseTokenizer already implemented count_message). Added count_message to the tokenizers Protocol, repointed the SOLE importer (tokenizer.py), deleted the providers/ package (abstraction-for-one, not in top-level public API, zero tests/external imports). Gate PASS (G2 confirms no broken import).
+- ✅ **P8 crusher boundary tests [High]** `ee847a30` — extracted the two absolute-saved floor gates (SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES=256, LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES=64) into `#[inline]` pure predicates (clears_small_array_lossless_floor / clears_lossy_survivor_floor) so the inclusive `>=` boundary (255/256/257, 63/64/65) is unit-testable WITHOUT a renderer-byte-exact fixture (saved = estimate_array_bytes − rendered.len() is renderer-coupled → brittle). Kills a `>=`→`>` mutation the directional tests survived. Behavior-identical (all 721 crusher tests green).
+
+**CONSCIOUSLY BANKED (low-value/cosmetic — re-recon arbitrates):**
+- **Ratio-gate exact boundaries (diff/search/log `min_compression_ratio_for_ccr`) [Med]** — DOCUMENTED RESIDUAL, not churned. diff has strong directional coverage already (min_compression_ratio_for_ccr_is_configurable: 0.8 emits / 0.5 suppresses + 0.1 no-op test, via the clean config knob). search/log gates are trivial `ratio >= min` comparisons (extraction = over-engineering). The exact-float boundary is renderer-coupled (the recon "0.79/0.80/0.81" conflated the default 0.8 with the fixture's actual 0.729 ratio) → brittle, consequence-low (CCR is a recovery aid, not correctness). Honest test-quality residual.
+- **god-object ContentBlockWalker (step 5) + ToinRecorder (step 6, optional)** — NOT a bug/behavior fix; pure COHESION extraction (move `_process_content_blocks` body ~300 LOC to its own module, keep delegator seam). The MATERIAL god-object work (de-trip, dead-code, perf double-detection, Optional sigs, ContentType total-fn) is ALL done. This is cosmetic LOC-split on a P0-class recovery hot path; the handoff itself says "do it with fresh focus." Advisor was DOWN this turn → not started blind. Recommend: do it next with advisor-backed focus IF the user wants the full cosmetic split, else proceed to re-recon (the arbiter of whether the god-object is still "material").
+
+**RE-RECON PRE-NOTES (new findings discovered this turn — belong to the re-recon, NOT reactive fixes):**
+- `headroom/exceptions.py:85` `StorageError` is exported in __all__ but NEVER raised anywhere; no telemetry uses sqlite (its docstring `sqlite:///foo.db` example is a harmless generic URL, unrelated to the deleted CCR backend). Dead-but-public exception — re-recon to decide remove vs wire.
+- `RUST_DEV.md:265-274` phantom-recorder bullet: references `recorder.py::_build_cache_aligner_tokenizer`, `NoopTokenCounter`/`TiktokenTokenCounter`, and "headroom.providers.* imports opentelemetry" — ALL absent from the tree (opentelemetry fully gone; providers/ now deleted). Pre-existing dead-doc cluster for the doc-rot re-recon pass.
+
+**NEXT = the VERIFY phase: deep RE-RECON** (fresh opus deep-recon agents, diff-weighted on this multi-session effort's commits — newest/least-audited surface: SQLite excision, ML-chain deletion, P0 CCR-veto, god-object de-trip + banking, compress-kwargs raise, csv/cache_aligner/mcp P7, the new test pins, crusher predicate extraction). Find anything material → fix → loop until zero MATERIAL (by-design/taste/nitpick don't count) → THEN the 200-agent confirmation workflow.
+
+---
+
+# 🔻 CYCLE-5 "FIX EVERYTHING" — ALL 5 MATERIAL FINDINGS FIXED → rerun #6 launched
+
+Cycle-5 critique (wf_d705ee60-a48): **NOT felfri** — 5 distinct material findings (ceiling Medium, 0 crit/high).
+User mandate: **FIX EVERYTHING** + **A2 = delete gated Rust**. North star: rerun says "beyond perfect, nothing
+needs to change". All 5 fixed, gate G1-G5 PASS per part (0% bench, needle 100%, recovery 23):
+
+- [x] **A1** `756ba6f1` — `_detect_content` docstring truth + 4 Rust↔Python parity tests (bite-verified RED).
+  MY cleanup defect: docstring claimed "no parallel paths" + cited phantom doc, but the Python regex backstop
+  overrides routing on Rust=PLAIN_TEXT. KEPT the path.
+- [x] **#5** `aecf3972` — explicit_hash floor: DOCUMENT not tighten (marker_grammar.py:27-35 = two-contracts design,
+  loose store floor vs strict {12,24} ingress is BY DESIGN). Fixed false comments.
+- [x] **T1** `8b37efe2` — `PipelineEvent` → `@dataclass(frozen=True)` + honest docstring. Only handler returns None.
+- [x] **A2** `3b1d04b4` — DELETE gated Rust (magika/embeddings/redis + onnx feature): 45 cfg sites + 3 src files +
+  deps (ort/ort-sys transitive) + redis tests. HybridScorer→BM25-only clean rewrite; redis→UnsupportedBackend
+  loud-fail. −2373 LOC. (Builder agent timed out 3× on silent cargo → finished by hand.)
+- [x] **A3** `b4940ca0` — EXCISE the whole `compression_policy` proxy vestige (advisor: full excision, not gate-trim).
+  Read ONLY by 3 dead gates (`if policy is not None and …`, policy ALWAYS None — proxy gone, no Python constructs
+  CompressionPolicy, public compress() ignores the kwarg). Removed: RouterRuntime field + from_kwargs + allowlist;
+  SmartCrusher's ENTIRE threading.local (carried only this); cache_aligner gate; the now-unused `runtime` param on
+  ContentRouter._record_to_toin. Behavior-neutral: gates controlled TOIN telemetry / cache-aligner warnings, NEVER
+  compressed bytes (bench provably 0% — skipped redundant A/B per advisor). Reversed the #7 determination-lock
+  (mandate shifted churn→dead-code); worker-isolation/thread-safety tests rewritten for the remaining 3 fields.
+- [x] **map refresh** `d13adc30` — A2/A3-induced staleness in CODEBASE-MAP (MY mess): removed the broken
+  `--features redis,magika,embeddings` cheatsheet command, the compression_policy allowlist entry, the feature-flag
+  note; refreshed drifted line numbers in the touched lines.
+
+**RERUN #6 LAUNCHED** (this turn): adversarial-critique.js UNCHANGED, args.map=CODEBASE-MAP.md, background.
+Snapshot of cycle-5 critique → `.claude/runtime/critique-cycle5-prev.md` (/tmp was CLEARED — no longer durable).
+**Advisor expectation: rerun #6 will NOT be "beyond perfect"** — RelevanceConfig (below) is a KNOWN live defect.
+Rerun #6 hands the COMPLETE remaining list → fix in ONE scoped pass → rerun #7 = beyond-perfect candidate.
+
+## ⏭ NEXT-PASS FINDING (known, pre-existing, DO NOT front-run pre-rerun) — RelevanceConfig / fastembed drift
+Genuine material defect in the tree, separate from cycle-5 (deferred during A2). Confirmed this session:
+- `config.py:49` `RelevanceConfig.tier: Literal["bm25","embedding","hybrid"] = "hybrid"` DEFAULTS to "hybrid",
+  but `relevance/__init__.py:69-73` `create_scorer` accepts ONLY "bm25" and RAISES ValueError on hybrid/embedding.
+- `relevance/` is BM25-only (base.py + bm25.py); "semantic/embedding scorers were retired" (__init__.py:15).
+- `config.py:34-46` docstring + `embedding_model` field (config.py:56) advertise sentence-transformers/hybrid.
+- `pyproject.toml` `[relevance]` extra installs `fastembed>=0.4.0` — NO Python code imports fastembed (DEAD extra).
+- `tier` is DEAD config: smart_crusher IGNORES relevance_config (smart_crusher.py:310-312, warns if non-None).
+- **CORRECTION (recon-arch verified 2026-06-27): sentence-transformers/spacy are DEAD, my earlier "LIVE" warning was WRONG.**
+  `dynamic_detector.py` (1034 LOC) has ZERO live callers (only cache/__init__.py lazy-export + a config.py docstring;
+  no transform/compress/pipeline/test imports it). `ml_models.py` (338 LOC, MLModelRegistry) is consumed ONLY by the
+  dead dynamic_detector. sentence_transformers/spacy are imported ONLY in those two dead modules AND are in NO pyproject
+  extra (not installable via the package) → vestigial. The WHOLE chain deletes: dynamic_detector.py + ml_models.py +
+  their cache/__init__.py + models/__init__.py lazy-exports + ML_MODEL_DEFAULTS.sentence_transformer/.spacy +
+  config.py embedding_model field + the RelevanceConfig embedding/hybrid advertising (the known E finding). ~1400 LOC.
+  CAVEAT: these are PUBLIC lazy-exports (headroom.cache / headroom.models) — deletion is a public-API change; given size
+  + the user's MCP-tools direction, likely confirm with user before nuking (analogous to the SQLite-backend ask).
+  `onnxruntime` (ml extra) LIVE (kompress_compressor.py:28 onnx_runtime.py) — keep. numpy: verify live usage before touch.
+- **Next-pass gate (advisor):** first test if `RelevanceConfig` is reachable via public `compress()`/`CompressConfig`
+  (same test as compression_policy: not a CompressConfig field → ignored-with-warning = internal-only → tier-Literal
+  narrowing is FREE; if public → narrow as a deliberate API change, not silent).
+
+After rerun #6: delta vs critique-cycle5-prev.md → fix RelevanceConfig + whatever else surfaces in ONE pass → rerun #7.
+PM-loop commit discipline: `git checkout HEAD -- uv.lock` first, `git add <specific>` (NEVER -A), guard
+`grep -iE 'uv.lock|critique'`. Critique doc NEVER committed. branch verify/phase2-audit-report.
+NOTE: /tmp tooling (bench_ref.json/regcheck.sh/critique snapshots) was CLEARED — reconstruct if needed.
 
 ---
 
