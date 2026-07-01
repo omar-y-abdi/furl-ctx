@@ -49,7 +49,9 @@ DEV_CLAIMS = {
     "logs@90": 0.930,
     "search@90": 0.927,
     "repeated_logs@90": 0.971,
-    "multiturn@135": 0.708,
+    # Key is @90 (the actual generated size); threshold 0.708 was measured at
+    # 135 items — intentional approximation to restore the auto-flag at @90.
+    "multiturn@90": 0.708,
     "disk@9": 0.50,
     "code@7": 0.0,
 }
@@ -279,9 +281,8 @@ def main() -> int:
         f"all 2nd-compress sentinels unbacked on cache-hit: {inproc['all_second_unbacked']}"
     )
 
-    # Degradations: fresh token-reduction mean BELOW the dev claim. Compare the
-    # MEDIUM tier (our realistic middle, closest to the dev fixtures) for the
-    # canonical case-id sizes, but record every tier for transparency.
+    # Degradations: fresh token-reduction mean BELOW the dev claim. Flags every
+    # tier where a case_id matches; all tiers recorded for transparency.
     degradations: list[dict] = []
     for g in groups:
         claim = DEV_CLAIMS.get(g["case_id"])
