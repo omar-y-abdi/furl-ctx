@@ -1,5 +1,11 @@
 # 🔶 CYCLE-6 + NEW PERMANENT PROCESS — recon→fix→DEEP-recon-VERIFY loop (user mandate 2026-06-27)
 
+## LATEST — 2026-07-01 (cycle-6 tail; HEAD `f56f5927`, all gated-green)
+Site-3 lookup-half extraction DONE (`92088258` + format guards `0844692f`) — `_lookup_cached_disposition` ADT (`ServeOriginal|ServeCached|Recompute`), both cache-lookup sites unified via `match`, data-loss guard centralized in one place; characterization-first route_counts pins + direct unit test (all 5 outcomes). ML→Kompress rename DONE (`1d8a69e9`, ~20 sites: method+dispatcher-param+type-alias). Round-3 re-recon (3 opus agents): **CODE zero-material**; found 8 doc-integrity MATERIAL → batch-fixed `e64602e2` + reconcile `7fc45aaa` (README fabricated benchmarks → honest BASELINE per user Option-A; accuracy-table deleted; RTK "ships with"→peer; phantom `[progress]`/ENTERPRISE-link/pre-commit-hook removed; telemetry→local-only; CODEBASE-MAP re-anchored exact; "60–95%" headline verified BACKED by BENCHMARKS.md 6-seed sweep + bridged to table). Gate G1-G5 green, 750 passed, recovery 23, needle 100%. Full ledger + round-4 scope = `PLAN.md`. **NEXT = round-4 re-recon (HOLISTIC doc sweep incl `.txt`, fresh agents) → confirmation workflow.**
+
+**LESSON — PM DISCIPLINE (user correction 2026-07-01):** In cycle-6 I burned a full context window doing the round-3 batch-fix MYSELF (read ~15 files + 30 edits) after ONE edit-agent timed out — that is IC behavior, not PM. FIX going forward: **DELEGATE + VERIFY, never self-execute.** Recon = fresh subagents. Batch-fixes = edit-only subagents (I only spec → review → gate → commit). Agent times out → re-dispatch TIGHTER-scoped, do NOT drop into IC mode. PM writes to files sparingly + surgically. My context = orchestration, never execution.
+
+
 Rerun #6 (wf_01820141-b7e, 199 agents) done → NOT beyond-perfect (as predicted). Deduped real material:
 **A** blake3 doc-lie (ccr/mod.rs:70 says BLAKE3, code uses sha256[:6]) · **B** dead SQLite/Redis CCR backend
 (sqlite.rs 205 LOC + from_config, test-only; "production default" docs lie) · **C** CCR mirror 6-file

@@ -11,6 +11,13 @@ to one master list → BATCH-FIX informed → VERIFY = DEEP RE-RECON AGAIN (fres
 loop until zero MATERIAL → 200-agent workflow = CONFIRMATION only. A flaw the workflow can
 still find = PM's fault.
 
+**PM DISCIPLINE (user mandate 2026-07-01 — non-negotiable):** You are the PM. DELEGATE +
+VERIFY; do NOT execute. Round-4 recon = fresh subagents (not you reading files). Batch-fixes
+= edit-only subagents (not you making 30 edits). You ONLY: spec the work → review findings →
+gate → commit. Write to files SPARINGLY + SURGICALLY. If an edit-agent times out, re-dispatch
+a TIGHTER-scoped agent — do NOT drop into IC mode and do it yourself (that failure burned a
+whole context window in cycle-6). Your context = orchestration, never execution.
+
 ---
 
 ## Round 1 — recon + batch-fix — DONE
