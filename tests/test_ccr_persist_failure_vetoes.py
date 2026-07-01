@@ -160,8 +160,11 @@ def test_working_store_still_emits_marker(producer: str, working_store: Any) -> 
     original, run = _CASES[producer]()
     result = run()
 
-    if result.cache_key is None:
-        pytest.skip(f"{producer}: CCR did not fire on this build; parametrization gap")
+    assert result.cache_key is not None, (
+        f"{producer}: CCR did not fire on this build — the fixture no longer "
+        "triggers the CCR path. Verify the fixture content meets the CCR threshold "
+        "for this producer (diff/log/search compressor)."
+    )
     assert result.compressed != original, (
         f"{producer}: cache_key set but content unchanged — CCR marker not actually emitted"
     )

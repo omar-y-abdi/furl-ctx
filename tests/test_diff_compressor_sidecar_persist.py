@@ -123,10 +123,11 @@ class TestCompressWithStatsPersistsToStore:
         result, _stats = compressor.compress_with_stats(diff)
 
         # The fix is only meaningful when the Rust path actually emits a cache_key.
-        # Skip if the diff is too small / CCR didn't fire — this is not a
-        # test failure, just a parametrisation gap.
-        if result.cache_key is None:
-            pytest.skip("No cache_key produced — CCR did not fire; increase diff size")
+        assert result.cache_key is not None, (
+            "No cache_key produced — CCR did not fire. "
+            "_make_large_diff(n_files=5, hunks_each=20) with min_lines_for_ccr=10 "
+            "must emit a cache_key; increase diff size if the threshold changed."
+        )
 
         cache_key = result.cache_key
         entry = isolated_store.retrieve(cache_key)
@@ -149,8 +150,11 @@ class TestCompressWithStatsPersistsToStore:
 
         result, _stats = compressor.compress_with_stats(diff)
 
-        if result.cache_key is None:
-            pytest.skip("No cache_key produced — CCR did not fire")
+        assert result.cache_key is not None, (
+            "No cache_key produced — CCR did not fire. "
+            "_make_large_diff(n_files=5, hunks_each=20) with min_lines_for_ccr=10 "
+            "must emit a cache_key; increase diff size if the threshold changed."
+        )
 
         # Confirm the marker is resolvable.
         entry = isolated_store.retrieve(result.cache_key)
@@ -216,8 +220,11 @@ class TestCompressAndSidecarSameCacheKey:
 
         # Main path
         result_main = compressor.compress(diff)
-        if result_main.cache_key is None:
-            pytest.skip("No cache_key from main compress() — CCR did not fire")
+        assert result_main.cache_key is not None, (
+            "No cache_key from main compress() — CCR did not fire. "
+            "_make_large_diff(n_files=5, hunks_each=20) with min_lines_for_ccr=10 "
+            "must emit a cache_key; increase diff size if the threshold changed."
+        )
 
         # Sidecar path uses a fresh store to avoid collision from above write.
         fresh2 = CompressionStore(max_entries=500, enable_feedback=False)
@@ -228,8 +235,11 @@ class TestCompressAndSidecarSameCacheKey:
             # Restore the test fixture store.
             set_request_compression_store(isolated_store)
 
-        if result_sidecar.cache_key is None:
-            pytest.skip("No cache_key from compress_with_stats() — CCR did not fire")
+        assert result_sidecar.cache_key is not None, (
+            "No cache_key from compress_with_stats() — CCR did not fire. "
+            "_make_large_diff(n_files=5, hunks_each=20) with min_lines_for_ccr=10 "
+            "must emit a cache_key; increase diff size if the threshold changed."
+        )
 
         assert result_main.cache_key == result_sidecar.cache_key, (
             f"cache_key mismatch: compress={result_main.cache_key!r}, "

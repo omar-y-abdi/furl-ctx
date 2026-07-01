@@ -199,8 +199,11 @@ class TestResultCacheCCRDivergence:
         out1 = _flatten_content(r1.messages)
         hashes1 = _extract_ccr_hashes(out1)
 
-        if not hashes1:
-            pytest.skip("No CCR drop produced for this fixture — cannot test invariant")
+        assert hashes1, (
+            "No CCR drop produced for this fixture — cannot test invariant. "
+            "_log_rows(90) with fractional-second timestamps must force the lossy "
+            "drop path and emit at least one <<ccr:HASH>> sentinel."
+        )
 
         cache_stats_after_r1 = dict(router._cache.stats)
         assert cache_stats_after_r1["cache_misses"] >= 1, (
@@ -267,8 +270,11 @@ class TestResultCacheCCRDivergence:
         # Warm the result cache.
         r0 = router.apply(messages, tokenizer)
         hashes0 = _extract_ccr_hashes(_flatten_content(r0.messages))
-        if not hashes0:
-            pytest.skip("No CCR drop produced — cannot test invariant")
+        assert hashes0, (
+            "No CCR drop produced — cannot test invariant. "
+            "_log_rows(90) with fractional-second timestamps must force the lossy "
+            "drop path and emit at least one <<ccr:HASH>> sentinel."
+        )
 
         for cycle in range(3):
             reset_compression_store()
@@ -356,8 +362,11 @@ class TestResultCacheCCRDivergence:
         r1 = router.apply(messages, tokenizer)
         out1 = _flatten_content(r1.messages)
         hashes1 = _extract_ccr_hashes(out1)
-        if not hashes1:
-            pytest.skip("No CCR drop produced for this fixture — cannot test invariant")
+        assert hashes1, (
+            "No CCR drop produced for this fixture — cannot test invariant. "
+            "_log_rows(90) with fractional-second timestamps must force the lossy "
+            "drop path and emit at least one <<ccr:HASH>> sentinel."
+        )
 
         crusher = router._get_smart_crusher()
         assert crusher is not None, "SmartCrusher must be available for this test"
@@ -412,8 +421,11 @@ class TestResultCacheCCRDivergence:
         router = ContentRouter(ContentRouterConfig())
 
         r1 = router.apply(messages, tokenizer)
-        if not _extract_ccr_hashes(_flatten_content(r1.messages)):
-            pytest.skip("No CCR drop produced — cannot test invariant")
+        assert _extract_ccr_hashes(_flatten_content(r1.messages)), (
+            "No CCR drop produced — cannot test invariant. "
+            "_log_rows(90) with fractional-second timestamps must force the lossy "
+            "drop path and emit at least one <<ccr:HASH>> sentinel."
+        )
 
         crusher = router._get_smart_crusher()
 

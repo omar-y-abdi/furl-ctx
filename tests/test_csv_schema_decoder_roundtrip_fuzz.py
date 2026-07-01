@@ -46,6 +46,11 @@ from headroom.transforms.csv_schema_decoder import (
     decode_csv_schema_rows,
 )
 
+# CCR recovery helper — resolves drop sentinels in the compressed output via
+# both the Rust store and the Python compression_store.  Imported from the
+# CCR recovery invariant suite; do NOT modify that function here.
+from tests.test_ccr_recovery_invariant import _recover_from_output as _ccr_recover_from_output
+
 # Force lossless-first so the targeted regression uses the lossless path.
 # Mirrors the approach used in tests/test_lossless_column_encodings.py.
 _LOSSLESS_FIRST = ContentRouterConfig(smart_crusher_routing_policy="lossless-first")
@@ -677,14 +682,24 @@ def test_fuzz_adversarial_cases_min_tokens_policy_zero_silent_loss() -> None:
         if rows is not None:
             # Strip internal engine fields before comparing.
             stripped = [_strip_engine(row) for row in rows]
-            recovered = {_repr(row) for row in stripped}
-            # All stripped rows must come from the input.
-            invented = recovered - expected_reprs
+            recovered_inline = {_repr(row) for row in stripped}
+            # All stripped rows must come from the input (no invented data).
+            invented = recovered_inline - expected_reprs
             assert not invented, (
                 f"Decoder produced {len(invented)} row(s) after stripping engine fields "
                 f"that were not in the input: {sorted(invented)[:2]}"
             )
-        # Non-CSV-schema lossless output — valid but uncommon for homogeneous rows.
+        # Whether or not rows decoded from the CSV, some rows may be in the
+        # CCR store (referenced by <<ccr:HASH>> sentinels embedded in the
+        # string output).  Use the full recovery machinery to check zero loss.
+        recovered = _ccr_recover_from_output(items, ccr_enabled=True, ccr_inject_marker=True)
+        missing = expected_reprs - recovered
+        assert not missing, (
+            f"{len(missing)}/{len(items)} rows are silently lost on the MinTokens path "
+            f"(lossless CSV-schema branch): neither decoded directly from the CSV nor "
+            f"recoverable from the CCR store via sentinels in the output.\n"
+            f"First missing: {sorted(missing)[:2]}"
+        )
     elif isinstance(parsed, list):
         # MinTokens kept all rows inline (array below threshold) or
         # partially dropped rows with sentinels.
@@ -694,7 +709,7 @@ def test_fuzz_adversarial_cases_min_tokens_policy_zero_silent_loss() -> None:
         ]
 
         if sentinel_rows:
-            # Some rows were dropped; verify sentinel is present.
+            # Some rows were dropped; verify each sentinel row carries the key.
             for sentinel in sentinel_rows:
                 assert _CCR_SENTINEL_KEY in sentinel, f"Missing sentinel key: {sentinel}"
             # Rows that were not dropped must match the input (after stripping).
@@ -715,10 +730,21 @@ def test_fuzz_adversarial_cases_min_tokens_policy_zero_silent_loss() -> None:
                     assert _repr(stripped) in expected_reprs, (
                         f"Inline row (stripped) not in input: {stripped!r}"
                     )
+        # Zero-silent-loss check for the list branch: dropped rows must be CCR-recoverable.
+        recovered = _ccr_recover_from_output(items, ccr_enabled=True, ccr_inject_marker=True)
+        missing = expected_reprs - recovered
+        assert not missing, (
+            f"{len(missing)}/{len(items)} rows are silently lost on the MinTokens path "
+            f"(JSON-list branch): neither kept inline nor recoverable from the CCR store "
+            f"via sentinels in the output.\n"
+            f"First missing: {sorted(missing)[:2]}"
+        )
     else:
-        # Unexpected output type — check for sentinel coverage.
-        assert _has_json_ccr_sentinel(parsed), (
-            f"Non-list, non-string output with no CCR sentinel: {str(parsed)[:200]}"
+        # Unexpected output type — must never occur for a valid compression.
+        pytest.fail(
+            f"MinTokens policy produced an unexpected output type {type(parsed).__name__!r} "
+            f"(not str or list). This branch previously silently passed via a tautological "
+            f"sentinel check. Raw output head: {str(parsed)[:200]!r}"
         )
 
 

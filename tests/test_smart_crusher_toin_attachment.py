@@ -75,8 +75,10 @@ def test_crush_records_to_toin_on_modification(fresh_toin):
 
     result = crusher.crush(payload, query="test query", bias=1.0)
 
-    if not result.was_modified:
-        pytest.skip("payload didn't trigger compression — bump the size")
+    assert result.was_modified, (
+        "payload did not trigger compression — _bigger_array(60) must exceed "
+        "min_tokens_to_crush; bump n if the threshold changed"
+    )
     post = sum(p.total_compressions for p in fresh_toin._patterns.values())
     assert post > pre, "TOIN should have recorded a compression event"
 
@@ -107,8 +109,10 @@ def test_crush_signature_groups_similar_inputs(fresh_toin):
     crusher.crush(payload_a, query="", bias=1.0)
     crusher.crush(payload_b, query="", bias=1.0)
 
-    if not fresh_toin._patterns:
-        pytest.skip("neither payload compressed — bump the size")
+    assert fresh_toin._patterns, (
+        "neither payload compressed — _bigger_array(60) and _bigger_array(80) must "
+        "exceed min_tokens_to_crush; bump n if the threshold changed"
+    )
     # Both share field shape {status, tag, n} → same structure hash →
     # one pattern with at least 2 recordings.
     pattern_counts = {h: p.total_compressions for h, p in fresh_toin._patterns.items()}
@@ -129,8 +133,10 @@ def test_smart_crush_content_records_to_toin(fresh_toin):
         payload, query_context="user query", tool_name="get_records", bias=1.0
     )
 
-    if not was_modified:
-        pytest.skip("payload didn't trigger compression")
+    assert was_modified, (
+        "payload did not trigger compression — _bigger_array(60) must exceed "
+        "min_tokens_to_crush; bump n if the threshold changed"
+    )
     post = sum(p.total_compressions for p in fresh_toin._patterns.values())
     assert post > pre
 
@@ -190,8 +196,10 @@ def test_ccr_inject_marker_false_suppresses_markers_in_output(fresh_toin):
     payload = _bigger_array(60)
     result = crusher.crush(payload, query="", bias=1.0)
 
-    if result.strategy == "passthrough":
-        pytest.skip("payload didn't trigger compression — bump the size")
+    assert result.strategy != "passthrough", (
+        "payload must compress on lossless-first — _bigger_array(60) must exceed "
+        "min_tokens_to_crush; bump n if the threshold changed"
+    )
 
     assert "<<ccr:" not in result.compressed, f"expected no marker, got: {result.compressed!r}"
     assert "_ccr_dropped" not in result.compressed
@@ -210,13 +218,18 @@ def test_ccr_inject_marker_true_emits_markers_when_lossy(fresh_toin):
     payload = _bigger_array(60)
     result = crusher.crush(payload, query="", bias=1.0)
 
-    if result.strategy == "passthrough":
-        pytest.skip("payload didn't trigger compression")
-    # If lossless won, marker won't appear (no row drops). If lossy
-    # ran on these uniform `{status, tag, n}` records, we expect rows
-    # to drop and the marker to fire.
-    if "lossy" in result.strategy or "row" in result.strategy.lower():
-        assert "<<ccr:" in result.compressed
+    assert result.strategy != "passthrough", (
+        "payload must compress — _bigger_array(60) must exceed "
+        "min_tokens_to_crush; bump n if the threshold changed"
+    )
+    # The engine drops rows (smart_sample, lossy, or any row-offload strategy)
+    # and emits a <<ccr:HASH>> marker when inject_retrieval_marker=True.
+    # The uniform {status, tag, n} shape always produces a drop on a non-passthrough
+    # compression, so the marker must be present regardless of the strategy label.
+    assert "<<ccr:" in result.compressed, (
+        f"marker absent after non-passthrough compression (strategy={result.strategy!r}); "
+        "inject_retrieval_marker=True must emit a marker whenever rows are dropped"
+    )
 
 
 def test_ccr_enabled_false_suppresses_markers_in_output(fresh_toin):
@@ -242,8 +255,10 @@ def test_ccr_enabled_false_suppresses_markers_in_output(fresh_toin):
     payload = _bigger_array(60)
     result = crusher.crush(payload, query="", bias=1.0)
 
-    if result.strategy == "passthrough":
-        pytest.skip("payload didn't trigger compression — bump the size")
+    assert result.strategy != "passthrough", (
+        "payload must compress on lossless-first — _bigger_array(60) must exceed "
+        "min_tokens_to_crush; bump n if the threshold changed"
+    )
 
     assert "<<ccr:" not in result.compressed, f"expected no marker, got: {result.compressed!r}"
     assert "_ccr_dropped" not in result.compressed
@@ -279,8 +294,11 @@ def test_ccr_marker_off_still_persists_and_is_retrievable(fresh_toin):
     result = crusher.crush_array_json(payload, query="", bias=1.0)
 
     strategy = str(result.get("strategy_info") or "")
-    if not result.get("ccr_hash"):
-        pytest.skip(f"payload didn't trigger a row drop (strategy={strategy!r})")
+    assert result.get("ccr_hash"), (
+        f"payload did not trigger a row drop (strategy={strategy!r}); "
+        "_bigger_array(60) must produce a drop via crush_array_json; "
+        "bump n if the threshold changed"
+    )
 
     # The recovery pointer IS surfaced on a drop — it is the retrieval
     # key (Defect 1), not gated by the marker flag.

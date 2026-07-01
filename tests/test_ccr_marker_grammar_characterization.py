@@ -816,8 +816,11 @@ def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> 
         )
         compressor = DiffCompressor(DiffCompressorConfig(enable_ccr=True, min_lines_for_ccr=10))
         result, _stats = compressor.compress_with_stats(diff)
-        if result.cache_key is None:
-            pytest.skip("diff CCR did not fire (cache_key is None) — environment gap, not a grammar failure")
+        assert result.cache_key is not None, (
+            "diff CCR did not fire (cache_key is None). "
+            "A 200-line diff with min_lines_for_ccr=10 must emit a cache_key; "
+            "increase diff size if the threshold changed."
+        )
 
         output = result.compressed if isinstance(result.compressed, str) else str(result.compressed)
         detected = _scan(CCRToolInjector(), output)
@@ -833,3 +836,25 @@ def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> 
         )
     finally:
         clear_request_compression_store()
+
+
+def test_fixture_actually_fires_row_index_path() -> None:
+    """Prove that the 500-item fixture produces a granular ``#rows`` marker.
+
+    ``test_producer_driven_B_row_index_binds_to_production_consumer`` skips
+    when ``#rows`` is absent in the output (labelled "environment gap").
+    This companion asserts the skip precondition never silently hides a gap:
+    if the engine stops emitting ``#rows`` markers for this fixture, THIS
+    test fails loudly instead of the main test going green-via-skip.
+    """
+    import json as _json
+
+    from headroom.transforms.content_router import ContentRouter
+
+    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(500)]
+    router = ContentRouter()
+    output = router.compress(_json.dumps(items)).compressed
+    assert "#rows" in output, (
+        "500-item fixture did not produce a granular '#rows' CCR marker; "
+        "the row-index grammar test will skip silently — fix the fixture size"
+    )

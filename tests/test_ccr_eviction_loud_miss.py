@@ -167,3 +167,55 @@ def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
     assert "error" in result and result["hash"] == victim, "MCP miss must be loud"
     err = result["error"].lower()
     assert "evict" in err and "capacity" in err, f"MCP miss must be cause-honest: {result['error']!r}"
+
+
+def test_fixture_actually_fires_granular_sentinel() -> None:
+    """Prove that the 240-item fixture does emit a CCR sentinel on this build.
+
+    ``test_capacity_evicted_granular_offload_retrieval_is_loud`` skips when
+    the engine emits no sentinel for the 240-item payload.  This companion
+    asserts the skip precondition never silently hides the gap: if the engine
+    stops emitting sentinels for this fixture, THIS test fails loudly instead
+    of the main test going green-via-skip.
+    """
+    store = get_compression_store(max_entries=8)
+    router = ContentRouter(ContentRouterConfig())
+    items = [
+        {"id": i, "user": f"u{i % 9}", "msg": f"event {i} payload {'x' * 12}", "ok": True}
+        for i in range(240)
+    ]
+    res = router.compress(json.dumps(items, ensure_ascii=False))
+    bare = re.findall(r"<<ccr:([a-f0-9]{6,})(?:[ ,>])", res.compressed)
+    assert bare, (
+        "engine emitted no CCR sentinel for the 240-item fixture — "
+        "the granular eviction tests will skip silently; fix the fixture size"
+    )
+
+
+def test_fixture_actually_fires_eviction() -> None:
+    """Prove that the overflow loop does evict the victim on this build.
+
+    ``test_capacity_evicted_granular_offload_retrieval_is_loud`` skips when
+    the victim survives eviction.  This companion asserts the eviction actually
+    occurs so the skip cannot silently disable the loudness check.
+    """
+    store = get_compression_store(max_entries=8)
+    router = ContentRouter(ContentRouterConfig())
+    items = [
+        {"id": i, "user": f"u{i % 9}", "msg": f"event {i} payload {'x' * 12}", "ok": True}
+        for i in range(240)
+    ]
+    res = router.compress(json.dumps(items, ensure_ascii=False))
+    bare = re.findall(r"<<ccr:([a-f0-9]{6,})(?:[ ,>])", res.compressed)
+    if not bare:
+        pytest.skip("no sentinel emitted — fixture_actually_fires_granular_sentinel handles this")
+    victim = bare[0]
+
+    for c in range(20):
+        rows = [{"c": c, "j": j, "d": f"r_{c}_{j}_{'y' * 7}"} for j in range(60)]
+        router.compress(json.dumps(rows, ensure_ascii=False))
+
+    assert store.retrieve(victim) is None, (
+        "victim was NOT evicted after 20 overflow batches in a max_entries=8 store; "
+        "the loudness test skips silently — increase the overflow batch count"
+    )
