@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
+HELDOUT_DATA_DIR = Path(__file__).resolve().parent / "heldout" / "data"
 
 # Entropy tiers.
 TIERS = ("low", "medium", "high")
@@ -111,10 +112,19 @@ def _real_commit_subjects() -> list[str]:
     return subs or ["Initial commit"]
 
 
+def _load_heldout_text(name: str) -> str:
+    return (HELDOUT_DATA_DIR / name).read_text(encoding="utf-8", errors="replace")
+
+
 def _real_paths() -> list[str]:
-    """Real file paths harvested from the ripgrep JSON capture."""
+    """Real file paths harvested from the ripgrep JSON capture.
+
+    Uses express_rg.raw.jsonl (verify/heldout/data/) — the committed rg capture.
+    slugify_rg.raw.jsonl (verify/data/) is excluded by .gitignore (*.jsonl) and
+    was never committed; express_rg shares the identical rg JSONL schema.
+    """
     paths: set[str] = set()
-    for line in _load_text("slugify_rg.raw.jsonl").splitlines():
+    for line in _load_heldout_text("express_rg.raw.jsonl").splitlines():
         try:
             o = json.loads(line)
         except json.JSONDecodeError:
@@ -127,8 +137,12 @@ def _real_paths() -> list[str]:
 
 
 def _real_match_lines() -> list[str]:
+    """Real match-line text harvested from the ripgrep JSON capture.
+
+    Uses express_rg.raw.jsonl (verify/heldout/data/) — see _real_paths docstring.
+    """
     lines: list[str] = []
-    for line in _load_text("slugify_rg.raw.jsonl").splitlines():
+    for line in _load_heldout_text("express_rg.raw.jsonl").splitlines():
         try:
             o = json.loads(line)
         except json.JSONDecodeError:

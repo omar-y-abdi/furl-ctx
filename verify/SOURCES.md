@@ -18,7 +18,7 @@ Captured: 2026-06-13 (UTC). Platform: macOS (darwin 24.6.0).
 
 | # | Source | Type | Exact citation | Used for | File |
 |---|--------|------|----------------|----------|------|
-| 1 | GitHub repo `sindresorhus/slugify` | git repo (fresh clone) | `git clone --depth 1 https://github.com/sindresorhus/slugify.git` then `git fetch --unshallow`; pinned commit `7c318bd1aa4b4affab29761f15a9604323fe2a3b` | code blobs (real source), git-log rows, ripgrep rows | `slugify_index.js`, `slugify_gitlog.raw.txt`, `slugify_rg.raw.jsonl` |
+| 1 | GitHub repo `sindresorhus/slugify` | git repo (fresh clone) | `git clone --depth 1 https://github.com/sindresorhus/slugify.git` then `git fetch --unshallow`; pinned commit `7c318bd1aa4b4affab29761f15a9604323fe2a3b` | code blobs (real source), git-log rows | `slugify_index.js`, `slugify_gitlog.raw.txt` |
 | 2 | GitHub repo `sindresorhus/is-plain-obj` | git repo (fresh clone) | `git clone --depth 1 https://github.com/sindresorhus/is-plain-obj.git`; pinned commit `97f38e8836f86a642cce98fc6ab3058bc36df181` | second real source blob (code case) | `isplainobj_index.js` |
 | 3 | GitHub REST API — commits | JSON API dump | `curl -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/sindresorhus/slugify/commits?per_page=100'` → 71-element array, 291,779 bytes | structured-log vocabulary (authors, messages, ISO dates) | `github_commits_slugify.json` |
 | 4 | npm registry — package metadata | JSON API dump | `curl 'https://registry.npmjs.org/slugify'` → 103,522 bytes | additional real JSON-API dump (provenance) | `npm_registry_slugify.json` |
@@ -45,9 +45,11 @@ fixtures. They are clearly labelled as such.
   timestamps, monotonic ids, fresh sha1 commit hashes (`medium`) or fully
   unique uuid-bearing messages + random hashes (`high`). `repeated_logs` forces
   the low-entropy repetitive shape.
-- **search** — seed real file paths + real match lines from the ripgrep JSON
-  capture; synthesize match rows with fresh line numbers / columns (`medium`)
-  or unique synthetic paths + uuid-bearing match text (`high`).
+- **search** — seed real file paths + real match lines from `express_rg.raw.jsonl`
+  (heldout/data/, committed); synthesize match rows with fresh line numbers /
+  columns (`medium`) or unique synthetic paths + uuid-bearing match text (`high`).
+  Note: `slugify_rg.raw.jsonl` (verify/data/) is excluded by `.gitignore` (`*.jsonl`)
+  and was never committed; express_rg shares the identical rg JSONL schema.
 - **code** — assemble N source blobs from the two real cloned `index.js` files;
   identical copies (`low`), unique-header copies (`medium`), or uuid-comment-
   perturbed near-unique copies (`high`).
