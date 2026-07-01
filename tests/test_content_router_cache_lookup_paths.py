@@ -312,6 +312,12 @@ class TestCacheLookupRouteCounts:
         # The cached payload was served (proves the serve-cached branch, not a
         # tightened relocate or a recompute).
         assert result.messages[0]["content"] == payload
+        # Drift-guard on the DIVERGENT surface the extraction deliberately keeps
+        # in the caller: the string path formats a FLAT router:{strategy}:{ratio}
+        # transform (WITH the ratio). This is the exact format whose difference
+        # justifies NOT unifying the two callers — a "helpful" unification that
+        # collapsed it to the block path's label form would fail here.
+        assert "router:log:0.30" in result.transforms_applied
         rc = obs.route_counts
         assert rc is not None
         assert rc.get("cache_hit", 0) == 1
@@ -361,6 +367,11 @@ class TestCacheLookupRouteCounts:
         result = router.apply([_tool_result_message(text)], _make_tokenizer())
 
         assert _served_block_text(result) == payload
+        # Drift-guard, block-path counterpart: the content-block path threads a
+        # router:{label}:{strategy} transform (label, NO ratio) — the divergent
+        # counterpart to the string path's flat router:{strategy}:{ratio}. Pinning
+        # BOTH formats is what makes the deliberate non-unification drift-safe.
+        assert "router:tool_result:log" in result.transforms_applied
         rc = obs.route_counts
         assert rc is not None
         assert rc.get("cache_hit", 0) == 1
