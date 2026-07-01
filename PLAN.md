@@ -99,6 +99,9 @@ BY-DESIGN (no fix): bump() widening (no-op); StorageError+5 exceptions exported-
 Batch-fix plan: mechanical/clear-cut (M1,M2,M6,M7,M8,N1,N2,N3) fix autonomously. README Proof/accuracy tables (M3,M4,M5) = outward-facing headline → surfaced to user for shape (delete vs replace-with-honest-BASELINE). Then re-recon round-4 (confirm zero material) → confirmation workflow.
 
 ## Remaining
-- [ ] Batch-fix round-3 material (mechanical + README-per-user-choice) → gate → commit.
-- [ ] **Round-4 re-recon** — confirm zero MATERIAL after doc batch.
+- [x] Batch-fix round-3 material — ALL 11 (M1-M8, N1-N3) landed — `e64602e2`. README Proof-table → honest BASELINE (user chose Option A), accuracy-table deleted, RTK→peer, phantom [progress]/ENTERPRISE/hook removed, telemetry reworded, CODEBASE-MAP re-anchored, docstrings/signature fixed. Verified: 0 fabrications remain, pyproject/pre-commit/imports valid, gate G1-G4 green 750 passed.
+- [ ] **Round-4 re-recon** — confirm the doc batch introduced zero NEW material (README now matches BASELINE, CODEBASE-MAP refs land, no new doc-lie) + zero residual rounds 1-3 missed. Fresh agents. (Long session — /compact recommended first for recon quality.)
 - [ ] **200-agent confirmation workflow** — ONLY after re-recon confirms beyond-perfect. Confirmation, never discovery.
+
+## Cycle-6 commit ledger
+`92088258` site-3 extraction · `0844692f` format guards · `1d8a69e9` ML→Kompress rename · `e64602e2` round-3 doc-integrity batch · (+ PLAN.md checkpoints cbda82af/5477ebfc/bf9234d0)
