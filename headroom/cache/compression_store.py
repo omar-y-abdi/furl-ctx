@@ -72,12 +72,28 @@ CCR_TTL_SECONDS_ENV = "HEADROOM_CCR_TTL_SECONDS"
 _MIN_EXPLICIT_HASH_LEN = 6
 
 _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
+# Match ``<sensitive-key><sep><value>`` in both plain (``api_key=...``) and JSON
+# quoted-key (``"api_key": "..."``) form. Group 2 allows an OPTIONAL closing quote
+# before the separator: in JSON the key's own closing ``"`` sits between the key
+# name and the ``:``, so without it the ``[:=]`` never abuts the key and the whole
+# rule silently misses every JSON-embedded secret (the PRIMARY shape in tool
+# output) — the value stayed un-redacted unless it independently matched the
+# ``sk-`` rule below. Group 3 still captures the value's optional opening quote so
+# ``\1\2\3[REDACTED]`` preserves surrounding structure and only the value is cut.
 _SECRET_KEY_VALUE_RE = re.compile(
     r"(?i)\b([A-Z0-9_-]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[A-Z0-9_-]*)"
-    r"(\s*[:=]\s*)([\"']?)([^\"'\s,}]+)"
+    r"([\"']?\s*[:=]\s*)([\"']?)([^\"'\s,}]+)"
 )
 _AUTH_VALUE_RE = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}")
 _API_KEY_VALUE_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+# Provider-issued tokens that are recognizable by prefix alone, so they leak even
+# when the surrounding key name is absent or unrecognized (a bare ``AKIA...`` /
+# ``ghp_...`` in free text). Same prefix-anchored approach as ``_API_KEY_VALUE_RE``.
+# AWS access-key IDs are ``AKIA`` + 16 uppercase alnum; GitHub tokens are
+# ``gh[opsru]_`` + >=36 alnum. Deliberately NOT a generic long-hex/base64 rule:
+# the retrieval log emits SHA-256 store hash keys throughout, and a blanket
+# high-entropy rule would redact the log's own hashes and other benign IDs.
+_PROVIDER_TOKEN_RE = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|gh[opsru]_[A-Za-z0-9]{36,})\b")
 
 
 def _get_env_default_ttl_seconds() -> int:
@@ -149,7 +165,8 @@ def _redact_retrieval_log_payload(payload: str) -> str:
     # ``Authorization: Bearer <JWT>`` header. Over-redaction is safe.
     redacted = _AUTH_VALUE_RE.sub(r"\1 [REDACTED]", payload)
     redacted = _SECRET_KEY_VALUE_RE.sub(r"\1\2\3[REDACTED]", redacted)
-    return _API_KEY_VALUE_RE.sub("sk-[REDACTED]", redacted)
+    redacted = _API_KEY_VALUE_RE.sub("sk-[REDACTED]", redacted)
+    return _PROVIDER_TOKEN_RE.sub("[REDACTED]", redacted)
 
 
 def _payload_for_retrieval_log(payload: str) -> dict[str, Any]:
@@ -641,7 +658,10 @@ class CompressionStore:
             "event": "headroom_retrieve",
             "hash": hash_key,
             "retrieval_type": retrieval_type,
-            "query": query,
+            # The query is caller/model-supplied and can itself carry a secret
+            # (e.g. searching retrieved content for a token), so redact it with
+            # the same rules as the payload before it reaches the log sink.
+            "query": _redact_retrieval_log_payload(query) if query else query,
             "items_retrieved": items_retrieved,
             "total_items": total_items,
             "tool_name": entry.tool_name,

@@ -55,7 +55,7 @@ The following are out of scope:
 
 Headroom includes several security features:
 
-- **No credential storage**: We never store or log API keys
+- **Credential redaction in logs**: Retrieval-event logs (the `headroom_retrieve` event, which previews retrieved content and the query) redact known credential formats on a best-effort basis — JSON and `key=value` secrets (`api_key`, `token`, `secret`, `password`, `credential`, `auth`), `Authorization: Bearer`/`Basic` schemes, and provider prefixes (`sk-`, AWS `AKIA…`, GitHub `gh*_…`). Redaction is pattern-based, so a bare high-entropy secret with no recognizable key name or prefix may not be caught; treat logs as potentially sensitive (see "Log Files" above).
 - **Passthrough mode**: Sensitive content passes through unchanged by default
 - **Input validation**: All inputs are validated before processing
 - **Safe defaults**: Security-conscious defaults out of the box

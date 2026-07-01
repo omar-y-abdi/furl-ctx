@@ -25,7 +25,7 @@ Headroom is shipped as a Python package (`headroom-ai`) with an MCP server (`hea
 
 - **How compression works**: Three-stage pipeline + automatic content routing.
 - **SmartCrusher**: Statistical JSON / array compression (70–90% on tool outputs).
-- **Code compression**: AST-aware via tree-sitter (preserves imports, signatures, types).
+- **Code compression**: source code routes through the Kompress text compressor.
 - **Text & log compression**: Search results, build logs, diffs.
 - **CCR (reversible)**: Compress-Cache-Retrieve — originals never deleted; LLM retrieves on demand.
 

@@ -52,7 +52,7 @@ class TransformPipeline:
     Transform order:
     1. Cache Aligner - normalize prefix for cache hits
     2. Content Router - intelligent content-aware compression (routes to appropriate
-       compressor: Kompress for text, SmartCrusher for JSON, CodeCompressor for code, etc.)
+       compressor: Kompress for text and source code, SmartCrusher for JSON, etc.)
 
     There is no IntelligentContextManager / RollingWindow
     "drop messages from history" stage. Live-zone-only compression is the
@@ -113,7 +113,7 @@ class TransformPipeline:
         # ContentRouter handles ALL content types intelligently:
         # - JSON arrays -> SmartCrusher
         # - Plain text -> Kompress (ML-based) or passthrough
-        # - Code -> CodeCompressor (AST-aware)
+        # - Code -> Kompress (AST compressor retired; source routes to text)
         # - Logs -> LogCompressor
         # - Search results -> SearchCompressor
         # - HTML -> HTMLExtractor
