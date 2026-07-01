@@ -42,12 +42,27 @@ still find = PM's fault.
 - [x] paths.py dead-code (−213 LOC, 0-caller verified) + CODEBASE-MAP drift + Cargo comment — `0841826a`
 - [x] mcp log redaction + jail fd-pin (TOCTOU/hardlink) + 3 test strengthenings — `f1119fce`
 
-## REMAINING (in progress — next actionable)
-- [ ] **site-3 lookup-half extraction** — user chose EXTRACT. P0 recovery hot-path; CHECKPOINTED for fresh context (advisor budget-fork: don't half-do it low on context). Full exec spec in `recon-findings.md` SITE-3 block:
-      1. PIN `route_counts` FIRST via stub observer (all 5 outcomes × string+block) — the advisor's blind-spot: current pins assert `_cache.stats`, NOT the `route_counts` dict where the two sites differ + which ships to observer/`/stats`.
-      2. Extract `_lookup_cached_disposition(...) -> CacheDisposition` (3 actions: `ServeOriginal | ServeCached | Recompute`); ALL effects inside (counter bumps, move_to_skip, invalidate, `_ensure_ccr_backed`, stale-vs-miss split); formatting stays in callers.
-      3. Rewire block site → gate → string site → gate.
-      Fold the `_try_ml_compressor`→`_try_kompress` rename (same file).
+## Site-3 lookup-half extraction — DONE (`92088258`); cycle-6 tail below
+Outcome table (verified vs code + advisor — byte-identical route_counts across both paths):
+| outcome | route_counts effect | action |
+|---|---|---|
+| Tier-1 skip-hit | `ratio_too_high`+`cache_hit` | ServeOriginal |
+| Tier-2 tightened→skip | `move_to_skip`; `ratio_too_high`+`cache_hit` | ServeOriginal |
+| Tier-2 live CCR-backed | `cache_hit` | ServeCached(compressed,strategy,ratio) |
+| Tier-2 unbacked sentinel | `invalidate`; `cache_stale_recompute`+`cache_miss` | Recompute |
+| plain miss | `cache_miss` | Recompute |
+
+Divergence blocking full merge = format (`router:{strat}:{ratio}` flat vs `router:{label}:{strat}` threaded) + recompute mechanism (deferred pending_tasks vs inline). Lookup-half extracts clean.
+
+Exec steps (advisor-refined) — extraction DONE `92088258`:
+- [x] S1 — characterization net FIRST: `_CapturingObserver` (BOTH methods; `record_compression` no-op) + `TestCacheLookupRouteCounts` (skip-hit/tightened/serve-cached × string+block) asserting EXACT route_counts deltas. Ran on CURRENT code → green (proved pins reflect real behavior). — `92088258`
+- [x] S2 — ADT near RouterRuntime: `ServeOriginal | ServeCached(compressed,strategy,ratio) | Recompute`; singletons `_SERVE_ORIGINAL`/`_RECOMPUTE`. — `92088258`
+- [x] S3 — extract `_lookup_cached_disposition(content_key, context, min_ratio, route_counts) -> CacheDisposition`; ALL effects inside (bumps, move_to_skip, invalidate, `_ensure_ccr_backed`, stale bumps BOTH stale_recompute+cache_miss). — `92088258`
+- [x] S4 — rewire block site (`_compress_content_block`) via `match`; moved bumps DELETED; gate green. — `92088258`
+- [x] S5 — rewire string site (`apply`) via `match`; moved bumps DELETED; non-merge comment rewritten (lookup IS shared now); gate green. — `92088258`
+- [x] S6 — DIRECT unit test of `_lookup_cached_disposition` (all 5 outcomes + route_counts=None, no compression) = architectural guard. Full gate → committed. — `92088258`
+- [x] S8 — final `gate.sh bench` → G1-G5 PASS, floor needle 100%, ratios untouched (dispatch-only change confirmed).
+- [ ] S7 — rename `_try_ml_compressor`→`_try_kompress` — **DEFERRED (not half-done).** Recon rider scoped "same file / 5 min" but is actually a ~20-site cross-cutting ML→Kompress vocab migration: method `_try_ml_compressor` (content_router.py def+call, 4 test files) + LIVE dispatcher param `try_ml_compressor` (router_dispatch.py 80/127/205/212/249) + type alias `_TryMlCompressor`. Method-only rename would INTRODUCE inconsistency (method `_try_kompress` passed as param `try_ml_compressor`). It's the last old-vocab holdout (round-1 migrated the rest). Surgical-changes rule (trace-to-request) + it's my rider not user's ask → capture for a deliberate COMPLETE pass, don't rush into the extraction diff. Codebase currently CONSISTENT (untouched). Needs user greenlight.
 - [ ] **Round-3 re-recon** — diff-weighted on the round-2 batch → confirm zero MATERIAL (by-design/nitpick don't count). Loop if material.
 - [ ] **200-agent confirmation workflow** — ONLY when re-recon confirms beyond-perfect. `adversarial-critique.js`, `args.map=CODEBASE-MAP.md`. Confirmation, never discovery.
 
@@ -58,5 +73,8 @@ still find = PM's fault.
 - RUST_DEV.md pre-commit bullet references absent `scripts/sync-plugin-versions.py`.
 
 ## Current position
-HEAD = `f1119fce`, gated-GREEN (G1-G4, 738 passed, recovery 23), zero uncommitted code.
-Next actionable = **site-3** (fresh context recommended — long session).
+HEAD = `92088258` (site-3 extraction), gated-GREEN (G1-G5 incl. bench, 750 passed +12, recovery 23, floor needle 100%), zero uncommitted code.
+Cycle-6 code work COMPLETE. Remaining = VERIFY-phase re-recon + confirmation:
+- [ ] **Round-3 re-recon** — diff-weighted on the round-2+site-3 batch (`a341bf4f..HEAD`) → confirm zero MATERIAL (by-design/nitpick don't count). Loop if material.
+- [ ] **200-agent confirmation workflow** — ONLY after re-recon confirms beyond-perfect. Confirmation, never discovery.
+- [ ] S7 rename (deferred, above) — user greenlight.
