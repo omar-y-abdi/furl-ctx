@@ -67,9 +67,16 @@ pyo3 = { version = "0.24", features = ["abi3-py310"] }
 #
 # We deliberately do NOT set ``panic = "abort"``. headroom ships as a
 # PyO3 extension loaded into a host Python process — panic-abort would
-# tear down the whole interpreter on a single Rust panic instead of
-# unwinding into a catchable Python exception. Accept the smaller
-# savings; keep unwind behaviour.
+# tear down the whole interpreter on a single Rust panic. Keeping
+# ``panic = "unwind"`` lets the hot bridge methods wrap their compute in
+# ``std::panic::catch_unwind`` and convert a panic into a ``PyRuntimeError``
+# (a normal Python ``Exception`` that ``compress()``'s fail-open catches);
+# under ``panic = "abort"`` that ``catch_unwind`` would be a no-op. NB a bare
+# (un-caught) PyO3 panic surfaces as ``pyo3_runtime.PanicException``, which is
+# a ``BaseException`` — it would escape ``except Exception`` — which is exactly
+# why the bridge converts it and why the Python fail-open also catches
+# ``BaseException`` (see crates/headroom-py/src/lib.rs, headroom/compress.py).
+# Accept the smaller wheel-size savings; keep unwind behaviour.
 #
 # Estimated impact: 213 MB/release → ~130 MB/release. Buys ~30+ more
 # release slots within the 10 GB ceiling at the current release

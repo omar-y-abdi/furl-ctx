@@ -392,13 +392,27 @@ def compress(
             transforms_applied=result.transforms_applied,
         )
 
-    except Exception as e:
+    except (KeyboardInterrupt, SystemExit):
+        # NEVER swallow these: a Ctrl-C or an interpreter shutdown during
+        # compression must tear down exactly as the operator intended, not be
+        # masked as a fail-open no-op. Re-raise before the BaseException catch
+        # below can reach them.
+        raise
+    except BaseException as e:  # noqa: BLE001
         # Fail-open: a compression bug must NEVER break the host's request, so
         # we return the ORIGINAL messages and do not re-raise. But the failure
         # must be LOUD and HONEST — log at ERROR with a full traceback (this may
         # be a genuine bug or a Rust panic, not a benign no-op) and report the
         # real input token count instead of a fabricated 0, so a caller cannot
         # mistake a swallowed failure for "nothing to compress".
+        #
+        # We catch BaseException (not just Exception) on purpose: a Rust panic
+        # crosses the PyO3 FFI as ``pyo3_runtime.PanicException``, which is a
+        # ``BaseException`` and would otherwise escape ``except Exception`` —
+        # crashing the host request, the exact class this fail-open exists for.
+        # The bridge methods also convert panics to ``PyRuntimeError`` at the
+        # Rust edge (see crates/headroom-py/src/lib.rs); this is the
+        # belt-and-braces backstop for any entry point not wrapped there.
         logger.error(
             "compress() failed; returning original messages (fail-open): %s",
             e,

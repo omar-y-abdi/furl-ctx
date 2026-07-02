@@ -13,6 +13,7 @@
 //! IPC / subprocess / RPC bridge would dominate the cost we're trying to
 //! save. PyO3 calls cost ~microseconds; staying in-process is ~free.
 
+use std::any::Any;
 use std::collections::BTreeMap;
 
 use headroom_core::signals::{
@@ -51,6 +52,29 @@ fn hello() -> &'static str {
 /// (and none of them panic — see `crush_array_json`).
 fn invalid_input(msg: String) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(msg)
+}
+
+/// Convert a caught `catch_unwind` panic payload into a `PyRuntimeError`.
+///
+/// A bare Rust panic crossing the PyO3 boundary surfaces as
+/// `pyo3_runtime.PanicException`, a `BaseException` that escapes the caller's
+/// `except Exception` (and Python `compress()`'s fail-open). Wrapping the hot
+/// bridge methods in `std::panic::catch_unwind` and routing the payload through
+/// here turns an engine-bug panic into an ordinary `Exception`, so the
+/// fail-open path reverts to the original messages instead of crashing the host
+/// request. The workspace keeps `panic = "unwind"` (see Cargo.toml) precisely so
+/// this `catch_unwind` is not a no-op.
+///
+/// The payload is `Box<dyn Any + Send>`; the message string set by
+/// `panic!(...)` is either a `&str` (literal) or a `String` (formatted), so we
+/// try both before falling back.
+fn panic_to_pyerr(payload: Box<dyn Any + Send>) -> PyErr {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string());
+    pyo3::exceptions::PyRuntimeError::new_err(format!("Rust panic in headroom-core: {msg}"))
 }
 
 fn type_name(v: &serde_json::Value) -> &'static str {
@@ -412,11 +436,26 @@ impl PyDiffCompressor {
     /// `&str` inputs are copied to owned `String`s first because
     /// PyO3 ties their lifetime to the GIL hold.
     #[pyo3(signature = (content, context = ""))]
-    fn compress(&self, py: Python<'_>, content: &str, context: &str) -> PyDiffCompressionResult {
+    fn compress(
+        &self,
+        py: Python<'_>,
+        content: &str,
+        context: &str,
+    ) -> PyResult<PyDiffCompressionResult> {
         let content = content.to_string();
         let context = context.to_string();
-        let inner = py.allow_threads(|| self.inner.compress(&content, &context));
-        PyDiffCompressionResult { inner }
+        // catch_unwind inside allow_threads: keep the GIL released during the
+        // Rust compute, catch any panic there, convert after re-acquiring so an
+        // engine bug becomes a catchable PyRuntimeError instead of a
+        // BaseException that crashes the host (COR-7).
+        let inner = py
+            .allow_threads(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.inner.compress(&content, &context)
+                }))
+            })
+            .map_err(panic_to_pyerr)?;
+        Ok(PyDiffCompressionResult { inner })
     }
 
     /// `compress_with_stats(content, context="") -> (result, stats)`.
@@ -761,11 +800,25 @@ impl PySmartCrusher {
     /// inputs are copied to owned `String`s up-front since PyO3 ties
     /// their lifetime to the GIL hold.
     #[pyo3(signature = (content, query = "", bias = 1.0))]
-    fn crush(&self, py: Python<'_>, content: &str, query: &str, bias: f64) -> PyCrushResult {
+    fn crush(
+        &self,
+        py: Python<'_>,
+        content: &str,
+        query: &str,
+        bias: f64,
+    ) -> PyResult<PyCrushResult> {
         let content = content.to_string();
         let query = query.to_string();
-        let inner = py.allow_threads(|| self.inner.crush(&content, &query, bias));
-        PyCrushResult { inner }
+        // catch_unwind inside allow_threads (see `panic_to_pyerr`): a panic in
+        // the recursive crush becomes a catchable PyRuntimeError (COR-7).
+        let inner = py
+            .allow_threads(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.inner.crush(&content, &query, bias)
+                }))
+            })
+            .map_err(panic_to_pyerr)?;
+        Ok(PyCrushResult { inner })
     }
 
     /// `smart_crush_content(content, query="", bias=1.0) -> (str, bool, str)`.
@@ -780,10 +833,16 @@ impl PySmartCrusher {
         content: &str,
         query: &str,
         bias: f64,
-    ) -> (String, bool, String) {
+    ) -> PyResult<(String, bool, String)> {
         let content = content.to_string();
         let query = query.to_string();
-        py.allow_threads(|| self.inner.smart_crush_content(&content, &query, bias))
+        // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
+        py.allow_threads(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.inner.smart_crush_content(&content, &query, bias)
+            }))
+        })
+        .map_err(panic_to_pyerr)
     }
 
     /// Crush a JSON array directly and return the structured result.
@@ -803,9 +862,11 @@ impl PySmartCrusher {
     /// runtime can reach the CCR hash directly (rather than parsing it
     /// out of the prompt marker).
     /// Raises `ValueError` when `items_json` is not valid JSON or not a
-    /// JSON array — boundary validation, not a panic: PyO3 panics map to
-    /// `pyo3_runtime.PanicException`, a `BaseException` that escapes the
-    /// caller's `except Exception` handlers.
+    /// JSON array — explicit boundary validation with a specific, clean error.
+    /// A panic anywhere in the compute is caught by `catch_unwind` and
+    /// converted to `PyRuntimeError` (see `panic_to_pyerr`) so it does not
+    /// surface as `pyo3_runtime.PanicException` — a `BaseException` that would
+    /// escape the caller's `except Exception` handlers.
     #[pyo3(signature = (items_json, query = "", bias = 1.0))]
     fn crush_array_json<'py>(
         &self,
@@ -819,31 +880,41 @@ impl PySmartCrusher {
         // re-acquire to build the PyDict from the owned outputs.
         let items_json = items_json.to_string();
         let query = query.to_string();
+        // catch_unwind wraps the whole GIL-free compute so a panic in the JSON
+        // parse / crush / re-serialize becomes a catchable PyRuntimeError
+        // (COR-7). Two Result layers to flatten: the outer is the panic
+        // (`map_err(panic_to_pyerr)?`), the inner is the existing input-validation
+        // `PyErr` (`?`).
         let (kept_json, ccr_hash, dropped_summary, strategy_info, compacted, compaction_kind) = py
             .allow_threads(|| {
-                let parsed: serde_json::Value = serde_json::from_str(&items_json)
-                    .map_err(|e| invalid_input(format!("items_json must be JSON: {e}")))?;
-                let items = match parsed {
-                    serde_json::Value::Array(a) => a,
-                    other => {
-                        return Err(invalid_input(format!(
-                            "items_json must be a JSON array, got {}",
-                            type_name(&other)
-                        )))
-                    }
-                };
-                let result = self.inner.crush_array(&items, &query, bias);
-                let kept_json = serde_json::to_string(&serde_json::Value::Array(result.items))
-                    .map_err(|e| invalid_input(format!("failed to serialize kept items: {e}")))?;
-                Ok::<_, PyErr>((
-                    kept_json,
-                    result.ccr_hash,
-                    result.dropped_summary,
-                    result.strategy_info,
-                    result.compacted,
-                    result.compaction_kind,
-                ))
-            })?;
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let parsed: serde_json::Value = serde_json::from_str(&items_json)
+                        .map_err(|e| invalid_input(format!("items_json must be JSON: {e}")))?;
+                    let items = match parsed {
+                        serde_json::Value::Array(a) => a,
+                        other => {
+                            return Err(invalid_input(format!(
+                                "items_json must be a JSON array, got {}",
+                                type_name(&other)
+                            )))
+                        }
+                    };
+                    let result = self.inner.crush_array(&items, &query, bias);
+                    let kept_json = serde_json::to_string(&serde_json::Value::Array(result.items))
+                        .map_err(|e| {
+                            invalid_input(format!("failed to serialize kept items: {e}"))
+                        })?;
+                    Ok::<_, PyErr>((
+                        kept_json,
+                        result.ccr_hash,
+                        result.dropped_summary,
+                        result.strategy_info,
+                        result.compacted,
+                        result.compaction_kind,
+                    ))
+                }))
+            })
+            .map_err(panic_to_pyerr)??;
         Ok(build_crush_array_dict(
             py,
             kept_json,
@@ -874,17 +945,24 @@ impl PySmartCrusher {
         // Heavy: JSON parse + recursive walker + tabular compaction +
         // re-serialize. None of it touches Python; release the GIL.
         let doc_json = doc_json.to_string();
+        // catch_unwind wraps the GIL-free walker compute (COR-7). Flatten the
+        // panic Result (`map_err(panic_to_pyerr)?`) over the existing
+        // input-validation `PyErr` (`?`).
         py.allow_threads(|| {
-            let parsed: serde_json::Value = serde_json::from_str(&doc_json)
-                .map_err(|e| invalid_input(format!("doc_json must be JSON: {e}")))?;
-            let mut dc = DocumentCompactor::new();
-            if let Some(store) = self.inner.ccr_store() {
-                dc = dc.with_ccr_store(store.clone());
-            }
-            let out = dc.compact(parsed);
-            serde_json::to_string(&out)
-                .map_err(|e| invalid_input(format!("failed to serialize compacted document: {e}")))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let parsed: serde_json::Value = serde_json::from_str(&doc_json)
+                    .map_err(|e| invalid_input(format!("doc_json must be JSON: {e}")))?;
+                let mut dc = DocumentCompactor::new();
+                if let Some(store) = self.inner.ccr_store() {
+                    dc = dc.with_ccr_store(store.clone());
+                }
+                let out = dc.compact(parsed);
+                serde_json::to_string(&out).map_err(|e| {
+                    invalid_input(format!("failed to serialize compacted document: {e}"))
+                })
+            }))
         })
+        .map_err(panic_to_pyerr)?
     }
 
     /// Look up an original payload by CCR hash.
@@ -1273,24 +1351,29 @@ impl PySearchCompressor {
         content: &str,
         context: &str,
         bias: f64,
-    ) -> PySearchCompressionResult {
+    ) -> PyResult<PySearchCompressionResult> {
         // Synthesize a tiny in-memory store so the Rust path can
         // populate `cache_key`; the Python side reads `cache_key` and
         // writes the original to its own `CompressionStore` if it
         // wants persistence beyond the request lifecycle.
         let owned = content.to_string();
         let owned_ctx = context.to_string();
-        let (result, stats) = py.allow_threads(move || {
-            let store = headroom_core::ccr::InMemoryCcrStore::new();
-            let (r, s) = self
-                .inner
-                .compress_with_store(&owned, &owned_ctx, bias, Some(&store));
-            (r, s)
-        });
-        PySearchCompressionResult {
+        // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
+        let (result, stats) = py
+            .allow_threads(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let store = headroom_core::ccr::InMemoryCcrStore::new();
+                    let (r, s) =
+                        self.inner
+                            .compress_with_store(&owned, &owned_ctx, bias, Some(&store));
+                    (r, s)
+                }))
+            })
+            .map_err(panic_to_pyerr)?;
+        Ok(PySearchCompressionResult {
             inner: result,
             stats,
-        }
+        })
     }
 }
 
@@ -1465,17 +1548,27 @@ impl PyLogCompressor {
     /// emits the `cache_key`; the Python shim is responsible for
     /// writing the original to the production `CompressionStore`.
     #[pyo3(signature = (content, bias = 1.0))]
-    fn compress(&self, py: Python<'_>, content: &str, bias: f64) -> PyLogCompressionResult {
+    fn compress(
+        &self,
+        py: Python<'_>,
+        content: &str,
+        bias: f64,
+    ) -> PyResult<PyLogCompressionResult> {
         let owned = content.to_string();
-        let (result, stats) = py.allow_threads(move || {
-            let store = headroom_core::ccr::InMemoryCcrStore::new();
-            let (r, s) = self.inner.compress_with_store(&owned, bias, Some(&store));
-            (r, s)
-        });
-        PyLogCompressionResult {
+        // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
+        let (result, stats) = py
+            .allow_threads(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let store = headroom_core::ccr::InMemoryCcrStore::new();
+                    let (r, s) = self.inner.compress_with_store(&owned, bias, Some(&store));
+                    (r, s)
+                }))
+            })
+            .map_err(panic_to_pyerr)?;
+        Ok(PyLogCompressionResult {
             inner: result,
             stats,
-        }
+        })
     }
 }
 
