@@ -59,11 +59,18 @@ def _msg_bytes(message: dict[str, Any]) -> str:
 
 
 def _conversation() -> list[dict[str, Any]]:
+    # The duplicate sits at index 3; the trailing turns keep it OUTSIDE the
+    # default ``protect_recent`` window (4), so the public compress() path is
+    # allowed to elide it (dedup never replaces inside that window).
     return [
         {"role": "user", "content": "Run the test suite."},
         {"role": "tool", "content": PAYLOAD, "tool_call_id": "t1"},
         {"role": "user", "content": "Run it again to confirm."},
         {"role": "tool", "content": PAYLOAD, "tool_call_id": "t2"},
+        {"role": "assistant", "content": "Both runs pass with identical output."},
+        {"role": "user", "content": "Any flakes in the second run?"},
+        {"role": "assistant", "content": "None — the outputs are byte-identical."},
+        {"role": "user", "content": "Good, wrap up."},
     ]
 
 
@@ -79,6 +86,9 @@ def test_public_compress_preserves_count_order_and_index0() -> None:
         {"role": "user", "content": "Run it again to confirm."},
         {"role": "tool", "content": PAYLOAD, "tool_call_id": "t2"},
         {"role": "user", "content": "Anything new?"},
+        {"role": "assistant", "content": "No — the rerun matches the first output."},
+        {"role": "user", "content": "Run the linter next."},
+        {"role": "assistant", "content": "Linter queued."},
     ]
     before = [_msg_bytes(m) for m in messages]
 
@@ -399,3 +409,96 @@ def test_near_duplicate_source_must_be_kept_verbatim() -> None:
     ]
     near_sentinel = json.loads(result.messages[3]["content"])[-1]
     assert "message 1" in near_sentinel["_ccr_dropped"]
+
+
+# --------------------------------------------------------------------------- #
+# protect_recent window (COR-52).
+# --------------------------------------------------------------------------- #
+
+
+def test_protect_recent_window_never_replaced() -> None:
+    # The newest tool output is the costliest place to force a retrieval
+    # round-trip: inside the window nothing is replaced, so the pass is a
+    # no-op here.
+    messages = [
+        {"role": "user", "content": "Run the tests."},
+        {"role": "tool", "content": PAYLOAD, "tool_call_id": "t1"},
+        {"role": "user", "content": "Run them again."},
+        {"role": "tool", "content": PAYLOAD, "tool_call_id": "t2"},
+    ]
+
+    result = _apply(messages, protect_recent=4)
+
+    assert result.messages[3]["content"] == PAYLOAD
+    assert result.transforms_applied == []
+
+
+def test_duplicate_outside_protect_recent_window_still_replaced() -> None:
+    # The window is a suffix (router accounting: len(messages) - index <= N).
+    # A later duplicate outside it is elided; the one inside it is kept.
+    messages = [
+        {"role": "user", "content": "Run the tests."},
+        {"role": "tool", "content": PAYLOAD, "tool_call_id": "t1"},
+        {"role": "user", "content": "Run them again."},
+        {"role": "tool", "content": PAYLOAD, "tool_call_id": "t2"},  # from_end=3
+        {"role": "user", "content": "And once more."},
+        {"role": "tool", "content": PAYLOAD, "tool_call_id": "t3"},  # from_end=1
+    ]
+
+    result = _apply(messages, protect_recent=2)
+
+    assert result.messages[1]["content"] == PAYLOAD, "first occurrence verbatim"
+    assert _DUP_RE.search(str(result.messages[3]["content"])), "outside window: elided"
+    assert result.messages[5]["content"] == PAYLOAD, "inside window: kept"
+    assert result.transforms_applied == ["cross_message_dedup:exact:1"]
+
+
+# --------------------------------------------------------------------------- #
+# Encoding totality: lone surrogates must never raise (COR-42).
+# --------------------------------------------------------------------------- #
+
+
+def test_lone_surrogate_duplicate_never_crashes() -> None:
+    # json.loads legally yields lone surrogates from \ud8xx escapes (and
+    # surrogateescape decoding yields them from any non-UTF-8 byte). One
+    # weird byte may cost one skipped unit — never an exception (which would
+    # fail this and EVERY subsequent request while the message stays in
+    # history).
+    payload = PAYLOAD + "\udcef"
+    messages = [
+        {"role": "user", "content": "Read the log."},
+        {"role": "tool", "content": payload, "tool_call_id": "t1"},
+        {"role": "user", "content": "Read it again."},
+        {"role": "tool", "content": payload, "tool_call_id": "t2"},
+    ]
+
+    result = _apply(messages)  # must not raise
+
+    assert result.messages[1]["content"] == payload, "first occurrence verbatim"
+    later = result.messages[3]["content"]
+    if later != payload:  # replaced → the pointer must be recoverable
+        match = _DUP_RE.search(str(later))
+        assert match, "replacement must surface the ccr pointer"
+        entry = get_compression_store().retrieve(match.group(1))
+        assert entry is not None
+        assert entry.original_content == payload
+
+
+def test_lone_surrogate_near_duplicate_never_crashes() -> None:
+    # Same totality contract on the near-dup tier (row signatures, the byte
+    # gates and the rendering all re-encode the surrogate).
+    rows_a = _status_rows(20, generation=0)
+    rows_b = [dict(row) for row in rows_a]
+    rows_b[0] = {**rows_b[0], "detail": "drifted \udcef row"}
+    content_a = json.dumps(rows_a, ensure_ascii=False)
+    content_b = json.dumps(rows_b, ensure_ascii=False)
+    messages = [
+        {"role": "user", "content": "Check service status."},
+        {"role": "tool", "content": content_a, "tool_call_id": "s1"},
+        {"role": "user", "content": "Poll it again."},
+        {"role": "tool", "content": content_b, "tool_call_id": "s2"},
+    ]
+
+    result = _apply(messages)  # must not raise
+
+    assert result.messages[1]["content"] == content_a, "first occurrence verbatim"

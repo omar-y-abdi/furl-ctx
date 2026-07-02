@@ -1,9 +1,9 @@
 # BASELINE — Imp3 Honest Benchmark (Phase-2 current engine)
 
-- Captured: `2026-07-02T06:34:52.143428+00:00`
-- Commit: `cace67e0865a3295f1c3d4df54138e7f4ef8b19c`
+- Captured: `2026-07-02T07:20:37.290595+00:00`
+- Commit: `2cf086256152df82956a8cd1b38e1f3e1f0a34de`
 - Token model: `gpt-4o` (real tiktoken BPE via the engine's tokenizer registry)
-- Python: `3.11.15`  Platform: `Linux-6.18.5-x86_64-with-glibc2.39`
+- Python: `3.14.2`  Platform: `macOS-15.7.6-x86_64-i386-64bit-Mach-O`
 
 All numbers come from REAL captured data (no synthetic low-entropy
 inputs). Token counts use the SAME tokenizer the engine uses
@@ -28,7 +28,7 @@ inputs). Token counts use the SAME tokenizer the engine uses
 | search@90 | 90 | 4102 | 318 | 92.2% | 85.6% | 100.0% | LOSSY |
 | repeated_logs@90 | 90 | 3621 | 120 | 96.7% | 95.6% | 100.0% | LOSSY |
 | disk@9 | 9 | 694 | 347 | 50.0% | 0.0% | 100.0% | lossless |
-| multiturn@135 | 135 | 14866 | 2009 | 86.5% | 66.7% | 100.0% | LOSSY |
+| multiturn@135 | 135 | 14866 | 2211 | 85.1% | 65.2% | 100.0% | LOSSY |
 
 ## Needle-recall
 

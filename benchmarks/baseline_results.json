@@ -1,10 +1,10 @@
 {
   "schema": "headroom.imp3.baseline.v1",
-  "captured_at_utc": "2026-07-02T06:34:52.143428+00:00",
-  "git_commit": "cace67e0865a3295f1c3d4df54138e7f4ef8b19c",
+  "captured_at_utc": "2026-07-02T07:20:37.290595+00:00",
+  "git_commit": "2cf086256152df82956a8cd1b38e1f3e1f0a34de",
   "engine_model": "gpt-4o",
-  "python": "3.11.15",
-  "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+  "python": "3.14.2",
+  "platform": "macOS-15.7.6-x86_64-i386-64bit-Mach-O",
   "provenance": [
     {
       "dataset": "code",
@@ -139,17 +139,16 @@
       "name": "multiturn@135",
       "n_input_items": 135,
       "tokens_before": 14866,
-      "tokens_after": 2009,
-      "lossless_reduction": 0.8648594107359074,
-      "n_present": 45,
-      "n_dropped": 90,
-      "n_recoverable": 90,
-      "lossy_drop_ratio": 0.6666666666666666,
+      "tokens_after": 2211,
+      "lossless_reduction": 0.8512713574599757,
+      "n_present": 47,
+      "n_dropped": 88,
+      "n_recoverable": 88,
+      "lossy_drop_ratio": 0.6518518518518519,
       "information_retention": 1.0,
       "took_lossy_path": true,
       "transforms": [
         "cross_message_dedup:exact:1",
-        "cross_message_dedup:near:1",
         "router:protected:user_message",
         "router:protected:user_message",
         "router:protected:user_message",
@@ -159,6 +158,7 @@
         "router:smart_crusher:0.09",
         "router:smart_crusher:0.01",
         "router:smart_crusher:0.01",
+        "router:mixed:0.11",
         "router:mixed:0.11"
       ]
     }

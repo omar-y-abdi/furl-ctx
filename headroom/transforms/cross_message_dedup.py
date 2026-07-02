@@ -23,6 +23,11 @@ Prompt-cache safety contract (P0 — pinned by tests/test_cross_message_dedup.py
   inside it.
 * Messages inside the frozen prefix (``frozen_message_count``) are never
   modified.
+* Messages inside the ``protect_recent`` window (the last N messages of
+  the conversation, router accounting: ``len(messages) - index <= N``) are
+  never REPLACED — the newest tool output is the costliest place to force
+  a retrieval round-trip. They still register as first-occurrence /
+  near-dup reference sources.
 * Any content block carrying ``cache_control`` is passed through
   byte-faithful — it is the client's explicit cache breakpoint.
 * Only LATER occurrences are rewritten. Earlier messages (the ones a
@@ -128,8 +133,23 @@ class _DedupState:
 
 
 def _content_hash(content: str) -> str:
-    """SHA-256[:24] of the exact content bytes (the store's own default)."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:_MARKER_HASH_LEN]
+    """SHA-256[:24] of the exact content bytes (the store's own default).
+
+    ``surrogatepass`` keeps hashing total: ``json.loads`` legally produces
+    lone surrogates from ``\\ud8xx`` escapes (and ``surrogateescape``
+    decoding produces them from any non-UTF-8 byte). Strict encoding would
+    turn one weird byte in one tool output into a raised
+    ``UnicodeEncodeError`` that fails the whole request — and keeps failing
+    it while the message stays in history.
+    """
+    return hashlib.sha256(content.encode("utf-8", errors="surrogatepass")).hexdigest()[
+        :_MARKER_HASH_LEN
+    ]
+
+
+def _utf8_len(text: str) -> int:
+    """Byte length of ``text``; total on lone surrogates (see ``_content_hash``)."""
+    return len(text.encode("utf-8", errors="surrogatepass"))
 
 
 def _row_signature(row: Any) -> str:
@@ -219,15 +239,25 @@ class CrossMessageDeduper(Transform):
 
         Never mutates the input list or its messages — replaced messages are
         new dicts, untouched messages are passed through by reference.
+
+        Messages in the ``protect_recent`` window are treated like frozen
+        ones for REPLACEMENT (they still register as reference sources), so
+        dedup honors the same recency contract as the router.
+        ``min_tokens_to_compress`` deliberately does NOT gate this transform:
+        it is the router's per-content lossy-compression gate, while dedup is
+        gated per-unit by ``MIN_DEDUP_CHARS`` and every replacement is
+        pointer-recoverable, so it stays net-positive on small requests too.
         """
         frozen_count = int(kwargs.get("frozen_message_count", 0) or 0)
+        protect_recent = int(kwargs.get("protect_recent", 0) or 0)
         query_context = str(kwargs.get("context", "") or "")
 
         state = _DedupState(query_context=query_context)
         new_messages: list[dict[str, Any]] = []
 
         for index, message in enumerate(messages):
-            replaceable = index > 0 and index >= frozen_count
+            in_recent_window = protect_recent > 0 and len(messages) - index <= protect_recent
+            replaceable = index > 0 and index >= frozen_count and not in_recent_window
             new_message = self._process_message(
                 message,
                 index=index,
@@ -414,7 +444,7 @@ class CrossMessageDeduper(Transform):
         tool_name: str | None,
     ) -> str | None:
         """Exact tier: full replacement by the duplicate sentinel."""
-        sentinel = duplicate_sentinel(ccr_hash, len(content.encode("utf-8")), first.message_index)
+        sentinel = duplicate_sentinel(ccr_hash, _utf8_len(content), first.message_index)
         if not self._persist_original(
             content,
             sentinel,
@@ -454,10 +484,8 @@ class CrossMessageDeduper(Transform):
         if best is None or best_shared < NEAR_DUP_MIN_SHARED_ROWS:
             return None
 
-        shared_bytes = sum(
-            len(sig.encode("utf-8")) for sig in signatures if sig in best.row_signatures
-        )
-        total_bytes = len(content.encode("utf-8"))
+        shared_bytes = sum(_utf8_len(sig) for sig in signatures if sig in best.row_signatures)
+        total_bytes = _utf8_len(content)
         if shared_bytes < NEAR_DUP_MIN_SHARED_BYTES:
             return None
         if shared_bytes / total_bytes < NEAR_DUP_MIN_SHARED_FRACTION:
@@ -472,7 +500,7 @@ class CrossMessageDeduper(Transform):
             n_total=len(rows),
             source_message_index=best.message_index,
         )
-        rendering_bytes = len(rendering.encode("utf-8"))
+        rendering_bytes = _utf8_len(rendering)
         if total_bytes - rendering_bytes < NEAR_DUP_MIN_SAVED_BYTES:
             return None
         # Counterfactual gate: beat what per-message lossless compression
