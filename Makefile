@@ -86,6 +86,9 @@ ci-precheck-python:
 		echo "error: activate a venv first (e.g. source .venv/bin/activate)"; \
 		exit 1; \
 	fi
+	ruff check .
+	ruff format --check .
+	mypy headroom --ignore-missing-imports
 	bash scripts/build_rust_extension.sh
 	$(PYTHON) -m pytest tests/ -q
 

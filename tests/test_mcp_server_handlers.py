@@ -125,9 +125,7 @@ async def test_retrieve_malformed_hash_rejected_before_store(server, bad_hash) -
     # never reaches the store. Distinct from the missing-hash and the
     # valid-but-unknown ("0"*24 → loud miss) envelopes.
     env = _envelope(await server._handle_retrieve({"hash": bad_hash}))
-    assert env == {
-        "error": "invalid hash format (expected 12 or 24 lowercase-hex chars)"
-    }
+    assert env == {"error": "invalid hash format (expected 12 or 24 lowercase-hex chars)"}
 
 
 # ─── _handle_read missing / not-found / not-a-file envelopes ────────────────
@@ -248,9 +246,7 @@ async def test_stats_aggregates_subagent_savings(server, tmp_path, monkeypatch) 
     assert env["sub_agents"]["tokens_saved"] == 900
 
 
-async def test_stats_all_input_zero_boundary_returns_zero(
-    server, tmp_path, monkeypatch
-) -> None:
+async def test_stats_all_input_zero_boundary_returns_zero(server, tmp_path, monkeypatch) -> None:
     # :621 boundary — a sub-agent event with input_tokens == 0 enters the
     # aggregation block (other_events non-empty) but yields all_input == 0,
     # so savings_percent must take the `else 0` branch (no ZeroDivisionError).

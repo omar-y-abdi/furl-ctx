@@ -47,9 +47,7 @@ def run_datasets() -> list[CaseMetrics]:
     for dataset in ds_mod.all_datasets():
         name = f"{dataset.name}@{len(dataset.items)}"
         measure = measure_conversation_case if dataset.conversation else measure_case
-        results.append(
-            measure(name, dataset.query, dataset.items, dataset.messages)
-        )
+        results.append(measure(name, dataset.query, dataset.items, dataset.messages))
     return results
 
 
@@ -75,9 +73,7 @@ def build_payload(
     cases: list[CaseMetrics], needles: list[NeedleResult], ab: Imp2AB
 ) -> dict[str, object]:
     overall = recall_rate(needles)
-    visible = (
-        sum(1 for r in needles if r.in_output) / len(needles) if needles else 1.0
-    )
+    visible = sum(1 for r in needles if r.in_output) / len(needles) if needles else 1.0
     needle_by_family: dict[str, dict[str, float]] = {}
     for fam in ("search", "logs"):
         sub = [r for r in needles if r.family == fam]
@@ -112,11 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     refresh = "--refresh" in args
 
     # Fail loudly if any required snapshot is missing — never silently re-capture.
-    missing = [
-        name
-        for name in _REQUIRED_SNAPSHOTS
-        if not (DATA_DIR / f"{name}.raw.json").exists()
-    ]
+    missing = [name for name in _REQUIRED_SNAPSHOTS if not (DATA_DIR / f"{name}.raw.json").exists()]
     if missing and not refresh:
         print(
             f"ERROR: committed snapshots missing: {missing}\n"

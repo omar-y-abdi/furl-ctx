@@ -157,6 +157,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "PipelineExtensionManager": ("headroom.pipeline", "PipelineExtensionManager"),
 }
 
+
 def __getattr__(name: str) -> Any:
     """Resolve package exports lazily while preserving legacy import paths."""
     module_attr = _LAZY_EXPORTS.get(name)

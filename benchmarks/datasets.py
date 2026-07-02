@@ -85,8 +85,7 @@ def _run(cmd: list[str], *, cwd: Path = REPO_ROOT) -> str:
     )
     if proc.returncode != 0 and not proc.stdout:
         raise RuntimeError(
-            f"capture command failed ({proc.returncode}): {' '.join(cmd)}\n"
-            f"{proc.stderr[:500]}"
+            f"capture command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr[:500]}"
         )
     return proc.stdout
 
@@ -500,6 +499,8 @@ def _multiturn_git_log_cmd(ref: str) -> list[str]:
         str(_MULTITURN_GIT_LOG_N),
         ref,
     ]
+
+
 # Successive agent turns are seconds apart, not microseconds — space the two
 # df captures accordingly so the snapshot reflects real inter-turn drift
 # (free-space / inode counters move on a live machine).

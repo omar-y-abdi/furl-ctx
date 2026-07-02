@@ -341,10 +341,7 @@ def test_imp2_stable_hash_collapses_identity_varying_rows(fresh_toin):
     # hashing makes all 90 unique; the stable projection (excluding the
     # identity req_id) sees only 3 distinct rows.
     messages = ["disk full on /dev/sda1", "auth token refreshed", "cache miss for key user:42"]
-    items = [
-        {"req_id": f"{i:040x}", "level": "INFO", "msg": messages[i % 3]}
-        for i in range(90)
-    ]
+    items = [{"req_id": f"{i:040x}", "level": "INFO", "msg": messages[i % 3]} for i in range(90)]
 
     # Force the lossy path (lossless columnar would otherwise keep all
     # rows and never reach the dedup grouping Imp2 touches).
@@ -353,14 +350,18 @@ def test_imp2_stable_hash_collapses_identity_varying_rows(fresh_toin):
 
     kept = result.get("items")
     kept_rows = _json.loads(kept) if isinstance(kept, str) else kept
-    kept_rows = [r for r in kept_rows if not (isinstance(r, dict) and set(r.keys()) == {"_ccr_dropped"})]
+    kept_rows = [
+        r for r in kept_rows if not (isinstance(r, dict) and set(r.keys()) == {"_ccr_dropped"})
+    ]
 
     # The varying req_id column is excluded from the dedup grouping, so
     # the kept representatives collapse to the 3 distinct messages and
     # carry `_dup_count = 30`. Without Imp2 every row hashed unique and
     # the survivors would be 15 arbitrary distinct-by-id rows with no
     # dup_count at all.
-    dup_counts = [r.get("_dup_count") for r in kept_rows if isinstance(r, dict) and "_dup_count" in r]
+    dup_counts = [
+        r.get("_dup_count") for r in kept_rows if isinstance(r, dict) and "_dup_count" in r
+    ]
     assert dup_counts, (
         "expected representatives to carry _dup_count after identity-aware "
         f"collapse; kept rows: {kept_rows}"

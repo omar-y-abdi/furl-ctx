@@ -137,4 +137,3 @@ class TestCompressResultFields:
         assert result.tokens_after >= 0
         assert result.tokens_saved >= 0
         assert 0.0 <= result.compression_ratio <= 1.0
-

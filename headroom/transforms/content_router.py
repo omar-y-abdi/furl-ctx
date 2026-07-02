@@ -283,7 +283,7 @@ def _create_content_signature(
     content_type: str,
     content: str,
     language: str | None = None,
-) -> "ToolSignature | None":
+) -> ToolSignature | None:
     """Create a ToolSignature for non-JSON content types.
 
     This allows TOIN to track compression patterns for code, search results,
@@ -1144,9 +1144,7 @@ class ContentRouter(Transform):
         def try_kompress(
             ml_content: str, ml_context: str, ml_question: str | None
         ) -> tuple[str, int]:
-            return self._try_kompress(
-                ml_content, ml_context, ml_question, runtime=runtime
-            )
+            return self._try_kompress(ml_content, ml_context, ml_question, runtime=runtime)
 
         def record_to_toin(**kwargs: Any) -> None:
             self._record_to_toin(**kwargs)
@@ -1319,7 +1317,7 @@ class ContentRouter(Transform):
         """
         return self._registry.get_html_extractor()
 
-    def _get_kompress(self, model_id: str | None = None) -> "KompressCompressor | None":
+    def _get_kompress(self, model_id: str | None = None) -> KompressCompressor | None:
         """Get KompressCompressor (lazy load). Downloads from HuggingFace on first use.
 
         Respects the per-request ``model_id`` (from ``runtime.kompress_model``):
@@ -1428,9 +1426,7 @@ class ContentRouter(Transform):
         # pipeline to every transform).
         for k in kwargs:
             if k not in _APPLY_ALLOWED_KWARGS:
-                raise TypeError(
-                    f"ContentRouter.apply() got an unexpected keyword argument {k!r}"
-                )
+                raise TypeError(f"ContentRouter.apply() got an unexpected keyword argument {k!r}")
 
         # Pre-process: Read lifecycle management (stale/superseded detection)
         if self.config.read_lifecycle.enabled:
@@ -1743,9 +1739,7 @@ class ContentRouter(Transform):
             # pinned in test_content_router_cache_lookup_paths.py +
             # test_result_cache_ccr_divergence.py.
             content_key = hash(content)
-            match self._lookup_cached_disposition(
-                content_key, context, min_ratio, route_counts
-            ):
+            match self._lookup_cached_disposition(content_key, context, min_ratio, route_counts):
                 case ServeOriginal():
                     result_slots[i] = message
                 case ServeCached(compressed=served, strategy=strategy, ratio=ratio):
@@ -1757,8 +1751,7 @@ class ContentRouter(Transform):
                     pending_tasks.append((i, content, context, msg_bias, content_key))
                 case other:
                     raise RuntimeError(
-                        f"_lookup_cached_disposition returned unexpected "
-                        f"CacheDisposition {other!r}"
+                        f"_lookup_cached_disposition returned unexpected CacheDisposition {other!r}"
                     )
 
         # --- Pass 2: Parallel compression of all cache-miss messages ---
@@ -1767,9 +1760,7 @@ class ContentRouter(Transform):
             try:
                 configured_workers = int(raw_workers)
             except ValueError:
-                logger.warning(
-                    "Invalid HEADROOM_COMPRESS_WORKERS=%r; using default 4", raw_workers
-                )
+                logger.warning("Invalid HEADROOM_COMPRESS_WORKERS=%r; using default 4", raw_workers)
                 configured_workers = 4
             max_workers = min(len(pending_tasks), configured_workers)
             t_parallel_start = time.perf_counter()
@@ -2030,24 +2021,19 @@ class ContentRouter(Transform):
                     route_counts[k] = route_counts.get(k, 0) + 1
 
         content_key = hash(text)
-        match self._lookup_cached_disposition(
-            content_key, context, min_ratio, route_counts
-        ):
+        match self._lookup_cached_disposition(content_key, context, min_ratio, route_counts):
             case ServeOriginal():
                 return block, False
             case ServeCached(compressed=served, strategy=strategy, ratio=ratio):
                 transforms_applied.append(f"router:{label}:{strategy}")
                 if compressed_details is not None:
-                    compressed_details.append(
-                        f"{detail_prefix}:{strategy}:{ratio:.2f}"
-                    )
+                    compressed_details.append(f"{detail_prefix}:{strategy}:{ratio:.2f}")
                 return {**block, block_key: served}, True
             case Recompute():
                 pass  # fall through to full compression below
             case other:
                 raise RuntimeError(
-                    f"_lookup_cached_disposition returned unexpected "
-                    f"CacheDisposition {other!r}"
+                    f"_lookup_cached_disposition returned unexpected CacheDisposition {other!r}"
                 )
 
         # Recompute (cache miss or evicted stale sentinel). All cache bookkeeping

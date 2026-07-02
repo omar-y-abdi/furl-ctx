@@ -20,6 +20,7 @@ keeps its declared 2-tuple shape).
 Compression-neutral: CacheAligner never rewrites messages (transforms_applied
 is always empty).
 """
+
 from __future__ import annotations
 
 import logging

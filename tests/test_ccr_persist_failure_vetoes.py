@@ -17,7 +17,8 @@ GREEN after (cache_key None, no ``<<ccr:`` marker, compressed == original).
 from __future__ import annotations
 
 import textwrap
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -69,7 +70,7 @@ def _make_large_diff(n_files: int = 5, hunks_each: int = 20) -> str:
             parts.append(
                 textwrap.dedent(
                     f"""\
-                    @@ -{h*10+1},{h*10+6} +{h*10+1},{h*10+6} @@
+                    @@ -{h * 10 + 1},{h * 10 + 6} +{h * 10 + 1},{h * 10 + 6} @@
                      context line one for file {i} hunk {h}
                      context line two for file {i} hunk {h}
                     -old code line A in file {i} hunk {h}

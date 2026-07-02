@@ -100,6 +100,7 @@ def is_valid_ccr_hash(value: object) -> bool:
         and all(c in "0123456789abcdef" for c in value.lower())
     )
 
+
 # --------------------------------------------------------------------------- #
 # Literal grammar pieces.
 # --------------------------------------------------------------------------- #
@@ -141,9 +142,7 @@ GENERIC_BRACKET_PATTERN: re.Pattern = re.compile(
 
 # Shapes A/B/C/D/E/F — the ``<<ccr:HASH<delim>...>>`` double-angle family.
 # One capturing group (the hash); the trailing delimiter is non-capturing.
-DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(
-    rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{DOUBLE_ANGLE_DELIM}"
-)
+DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{DOUBLE_ANGLE_DELIM}")
 
 
 def marker_patterns() -> list[re.Pattern]:

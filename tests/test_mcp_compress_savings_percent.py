@@ -15,6 +15,7 @@ sites already computed from tokens directly.
 
 Compression-neutral (metric/observability plane only).
 """
+
 from __future__ import annotations
 
 import importlib

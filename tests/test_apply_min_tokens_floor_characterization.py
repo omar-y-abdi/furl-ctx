@@ -30,9 +30,7 @@ from headroom.transforms.content_router import ContentRouter, ContentRouterConfi
 
 
 def _array(nrows: int) -> str:
-    return json.dumps(
-        [{"id": i, "status": "ok", "msg": "request handled"} for i in range(nrows)]
-    )
+    return json.dumps([{"id": i, "status": "ok", "msg": "request handled"} for i in range(nrows)])
 
 
 @pytest.fixture

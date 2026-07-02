@@ -20,6 +20,7 @@ misattributing a capacity eviction to the TTL. These tests lock BOTH facts:
 True cross-call retention (so the data is actually still there) is the open
 "free lunch" tracked in CCR-RETENTION.md — a separate concern from loudness.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -97,13 +98,21 @@ def test_capacity_evicted_bulk_retrieval_is_loud_and_cause_honest() -> None:
     # Small-cap global store so an overflow deterministically evicts the oldest.
     store = get_compression_store(max_entries=4)
     victim = "aaaaaaaaaaaa"  # 12-hex, the SmartCrusher marker form
-    store.store(original=json.dumps([{"id": 0, "v": "needle"}]), compressed="<<ccr:%s>>" % victim,
-                original_item_count=1, explicit_hash=victim)
+    store.store(
+        original=json.dumps([{"id": 0, "v": "needle"}]),
+        compressed=f"<<ccr:{victim}>>",
+        original_item_count=1,
+        explicit_hash=victim,
+    )
     # Overflow the cap with newer entries -> FIFO evicts the victim.
     for i in range(8):
         h = f"{i:012x}"
-        store.store(original=json.dumps([{"id": i + 1}]), compressed=f"<<ccr:{h}>>",
-                    original_item_count=1, explicit_hash=h)
+        store.store(
+            original=json.dumps([{"id": i + 1}]),
+            compressed=f"<<ccr:{h}>>",
+            original_item_count=1,
+            explicit_hash=h,
+        )
 
     assert store.retrieve(victim) is None, "precondition: victim was evicted (concern #1)"
 
@@ -153,12 +162,20 @@ def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
 
     store = get_compression_store(max_entries=4)
     victim = "bbbbbbbbbbbb"
-    store.store(original=json.dumps([{"id": 0, "v": "needle"}]), compressed=f"<<ccr:{victim}>>",
-                original_item_count=1, explicit_hash=victim)
+    store.store(
+        original=json.dumps([{"id": 0, "v": "needle"}]),
+        compressed=f"<<ccr:{victim}>>",
+        original_item_count=1,
+        explicit_hash=victim,
+    )
     for i in range(8):
         h = f"{i:012x}"
-        store.store(original=json.dumps([{"id": i + 1}]), compressed=f"<<ccr:{h}>>",
-                    original_item_count=1, explicit_hash=h)
+        store.store(
+            original=json.dumps([{"id": i + 1}]),
+            compressed=f"<<ccr:{h}>>",
+            original_item_count=1,
+            explicit_hash=h,
+        )
     assert store.retrieve(victim) is None, "precondition: victim evicted"
 
     stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
@@ -166,7 +183,9 @@ def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
 
     assert "error" in result and result["hash"] == victim, "MCP miss must be loud"
     err = result["error"].lower()
-    assert "evict" in err and "capacity" in err, f"MCP miss must be cause-honest: {result['error']!r}"
+    assert "evict" in err and "capacity" in err, (
+        f"MCP miss must be cause-honest: {result['error']!r}"
+    )
 
 
 def test_fixture_actually_fires_granular_sentinel() -> None:
@@ -178,7 +197,7 @@ def test_fixture_actually_fires_granular_sentinel() -> None:
     stops emitting sentinels for this fixture, THIS test fails loudly instead
     of the main test going green-via-skip.
     """
-    store = get_compression_store(max_entries=8)
+    get_compression_store(max_entries=8)
     router = ContentRouter(ContentRouterConfig())
     items = [
         {"id": i, "user": f"u{i % 9}", "msg": f"event {i} payload {'x' * 12}", "ok": True}

@@ -97,9 +97,7 @@ def run_case_subprocess(family: str, size: int, tier: str, seed: int, needles: b
 
 def run_group(family: str, n: int, tier: str, *, needles: bool) -> dict:
     """Run N_SEEDS fresh-process seeds for one (family,tier,size); aggregate."""
-    per_seed = [
-        run_case_subprocess(family, n, tier, seed, needles) for seed in SEEDS
-    ]
+    per_seed = [run_case_subprocess(family, n, tier, seed, needles) for seed in SEEDS]
 
     token_red = [c["token_reduction"] for c in per_seed]
     retention = [c["information_retention"] for c in per_seed]
@@ -178,13 +176,13 @@ def probe_result_cache_ccr_divergence() -> dict:
     same crushed bytes, mirror skipped) and checks whether the served sentinel
     still resolves.
     """
+    from headroom import compress
+    from headroom.cache.compression_store import reset_compression_store
     from verify.measure import (  # imported lazily; runs in THIS process
         _emitted_drop_hashes,
         _retrieve_originals,
         _stringify,
     )
-    from headroom import compress
-    from headroom.cache.compression_store import reset_compression_store
 
     trials: list[dict] = []
     for seed in (1000, 1137, 1274):
@@ -236,8 +234,7 @@ def probe_result_cache_ccr_divergence() -> dict:
         "trials": trials,
         "any_silent_loss": any(t["silent_loss"] for t in trials),
         "all_second_unbacked": all(
-            (not t["second_compress_backed"]) and t["same_crushed_output"]
-            for t in trials
+            (not t["second_compress_backed"]) and t["same_crushed_output"] for t in trials
         ),
     }
 
@@ -263,12 +260,13 @@ def main() -> int:
                 nd = g["needles"]
                 ndtxt = (
                     f"needles[vis={nd['visible']}/sig={nd['signalled']}/silent={nd['silent_loss']}]"
-                    if nd else ""
+                    if nd
+                    else ""
                 )
                 print(
                     f"{g['case_id']:18s} {tier:6s} "
-                    f"red={g['token_reduction']['mean']*100:6.1f}% "
-                    f"retain={g['information_retention']['mean']*100:6.1f}% "
+                    f"red={g['token_reduction']['mean'] * 100:6.1f}% "
+                    f"retain={g['information_retention']['mean'] * 100:6.1f}% "
                     f"byte_exact={str(g['hash_byte_exact_all']):5s} "
                     f"drop={g['n_dropped']['mean']:6.1f} "
                     f"lossy={str(g['took_lossy_path_any']):5s} {ndtxt}"
@@ -312,9 +310,9 @@ def main() -> int:
                     "size": g["size"],
                     "byte_exact_count": g["hash_byte_exact_count"],
                     "n_seeds": g["n_seeds"],
-                    "missing_examples": [
-                        ex for c in g["per_seed"] for ex in c["missing_examples"]
-                    ][:5],
+                    "missing_examples": [ex for c in g["per_seed"] for ex in c["missing_examples"]][
+                        :5
+                    ],
                 }
             )
 

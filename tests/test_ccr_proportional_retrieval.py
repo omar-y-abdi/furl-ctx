@@ -256,9 +256,7 @@ def test_whole_blob_model_reproduces_audit_negative() -> None:
         compressed_tokens=compressed_tokens,
         retrieved_tokens=blob_tokens,  # any retrieval = full blob
     )
-    chunk_tokens = sorted(
-        (_toks(crusher.ccr_get(rh) or "[]") for rh in row_hashes), reverse=True
-    )
+    chunk_tokens = sorted((_toks(crusher.ccr_get(rh) or "[]") for rh in row_hashes), reverse=True)
     eff_granular = _effective_savings(
         raw_tokens=raw_tokens,
         compressed_tokens=compressed_tokens,

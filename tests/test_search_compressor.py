@@ -364,6 +364,7 @@ src/file (1).py:40:content
 
         assert ":0:" in result.compressed
 
+
 class TestContextIntegration:
     """Tests for context-aware compression."""
 

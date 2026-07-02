@@ -74,9 +74,7 @@ from typing import Any
 # ``(.+)`` must span newlines within the header LOGICAL line.
 _HEADER_RE = re.compile(r"^\[(\d+)\]\{(.+)\}$", re.DOTALL)
 _ARITH_RE = re.compile(r"^(-?\d+)\+(-?\d+)$")
-_ISO_RE = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$"
-)
+_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$")
 _DELTA_RE = re.compile(r"^([+-]\d+)(?:/(Z|[+-]\d{2}:\d{2}))?$")
 _CCR_SENTINEL_KEY = "_ccr_dropped"
 
@@ -141,8 +139,8 @@ def _civil_from_days(z: int) -> tuple[int, int, int]:
 
 
 def _tz_offset_seconds(tz: str) -> int:
-    return 0 if tz == "Z" else (1 if tz[0] == "+" else -1) * (
-        int(tz[1:3]) * 3600 + int(tz[4:6]) * 60
+    return (
+        0 if tz == "Z" else (1 if tz[0] == "+" else -1) * (int(tz[1:3]) * 3600 + int(tz[4:6]) * 60)
     )
 
 
@@ -571,11 +569,11 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
                     break
                 row[spec.name] = value
             elif spec.dec_scale is not None:
-                value = _decode_decimal_scaled_cell(resolved, spec.dec_scale)
-                if value is None:
+                dec_value = _decode_decimal_scaled_cell(resolved, spec.dec_scale)
+                if dec_value is None:
                     ok = False  # never invent data on a bad cell
                     break
-                row[spec.name] = value
+                row[spec.name] = dec_value
             elif spec.name in dict_values:
                 values = dict_values[spec.name]
                 if not resolved.isdigit() or int(resolved) >= len(values):
@@ -619,9 +617,7 @@ def _decode_decimal_scaled_cell(resolved: str, scale: int) -> float | None:
         return None
 
 
-def _decode_head_cell(
-    resolved: str, hd: tuple[str, list[str]] | None
-) -> str | None:
+def _decode_head_cell(resolved: str, hd: tuple[str, list[str]] | None) -> str | None:
     """Decode one head-dict cell ``<idx><delim><tail>`` -> ``head[idx] + tail``.
 
     Reads the maximal leading digit run as the head index, requires the

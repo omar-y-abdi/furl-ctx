@@ -221,9 +221,7 @@ class CCRToolInjector:
     #      (cross_message_dedup sha256[:24]). The trailing delimiter guards the
     #      width — a 24-hex hash cannot be truncated to 12 because char 12 of a
     #      24-run is itself hex, not a delimiter.
-    _marker_patterns: list[re.Pattern] = field(
-        default_factory=marker_grammar.marker_patterns
-    )
+    _marker_patterns: list[re.Pattern] = field(default_factory=marker_grammar.marker_patterns)
 
     def __post_init__(self) -> None:
         # Reset detected hashes

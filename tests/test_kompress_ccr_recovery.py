@@ -16,6 +16,7 @@ marker is the same ~12-word addition already used below 0.8).
 Mutation-sensitive: reverting either gate to ``< 0.8`` drops the cache_key in
 the [0.8, 0.9) band and the round-trip assertion fails.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -54,9 +55,7 @@ class _OneTokenPerWordEncoding:
     def __init__(self, word_lists):
         # one token per word, padded to max len with word_id None (= pad).
         max_len = max(len(w) for w in word_lists)
-        self._batch = [
-            list(range(len(wl))) + [None] * (max_len - len(wl)) for wl in word_lists
-        ]
+        self._batch = [list(range(len(wl))) + [None] * (max_len - len(wl)) for wl in word_lists]
         self._input_ids = _IdMatrix(len(word_lists), max_len)
         self._attention = _IdMatrix(len(word_lists), max_len)
 

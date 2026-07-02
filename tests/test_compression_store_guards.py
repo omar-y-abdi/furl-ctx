@@ -8,6 +8,7 @@ All three are validation/guard fixes at the store boundary or in eviction; they
 must NOT weaken the byte-exact recovery invariant (the live entries that survive
 eviction stay retrievable; evicted ones report the loud miss elsewhere).
 """
+
 from __future__ import annotations
 
 import heapq
@@ -147,8 +148,7 @@ def test_eviction_caps_with_many_stale_heap_refs() -> None:
     c = store.store(json.dumps([{"id": 2}]), "<<ccr:cccccc>>", explicit_hash="cccccc")
 
     assert store._backend.count() <= store._max_entries, (
-        f"store over capacity with many stale refs: "
-        f"{store._backend.count()} > {store._max_entries}"
+        f"store over capacity with many stale refs: {store._backend.count()} > {store._max_entries}"
     )
     assert store.retrieve(c) is not None
 

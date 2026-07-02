@@ -18,6 +18,7 @@ pin:
 If a future edit drops the pop (e.g. while removing telemetry), ``record_metrics``
 would leak into every transform call and these tests fail.
 """
+
 from __future__ import annotations
 
 from typing import Any

@@ -7,6 +7,7 @@ Targets not already covered by test_cache_aligner_prefix_hash.py:
           idx0-ordering invariant (first message never dropped or reordered),
           empty-message-list boundary.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -133,10 +134,8 @@ def test_bnd_messages_order_preserved() -> None:
         ([_sys("X"), _sys("X")], [_sys("X")]),
     ],
 )
-def test_bnd_distinct_prompts_distinct_hashes(
-    msgs_a: list[dict], msgs_b: list[dict]
-) -> None:
+def test_bnd_distinct_prompts_distinct_hashes(msgs_a: list[dict], msgs_b: list[dict]) -> None:
     """Structurally different system-prompt sets must hash differently."""
     assert _hash(msgs_a) != _hash(msgs_b), (
-        f"expected distinct hashes for different prompt structures"
+        "expected distinct hashes for different prompt structures"
     )

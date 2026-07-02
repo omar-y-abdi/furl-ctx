@@ -100,10 +100,7 @@ def _is_identity_shaped(values: list[Any]) -> bool:
         shaped = sum(
             1
             for s in strs
-            if _ISO_DT_RE.match(s)
-            or _ISO_D_RE.match(s)
-            or _UUID_RE.match(s)
-            or _is_hex_run(s)
+            if _ISO_DT_RE.match(s) or _ISO_D_RE.match(s) or _UUID_RE.match(s) or _is_hex_run(s)
         )
         return shaped / len(strs) >= 0.8  # IDENTITY_SHAPE_FRACTION
     return _is_sequential(values)

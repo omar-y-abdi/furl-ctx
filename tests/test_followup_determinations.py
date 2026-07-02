@@ -7,6 +7,7 @@
 
 A determination lock — no production change in the commit.
 """
+
 from __future__ import annotations
 
 import headroom.cache.compression_store as cs

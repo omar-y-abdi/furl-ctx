@@ -553,5 +553,3 @@ class TestCompressionCacheConcurrency:
         # Each (tid, i) is a unique hash → cache entries == n_threads * per_thread_calls.
         assert stats["entries"] == n_threads * per_thread_calls
         assert stats["tokens_saved"] > 0
-
-

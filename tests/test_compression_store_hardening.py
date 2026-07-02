@@ -9,6 +9,7 @@ test_compression_store_redaction.py:
   - exists() reports False for unknown key, True for live key.
   - Retrieved entry attribute pins (hash, original_content, compressed_content).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -136,9 +137,9 @@ def test_retrieve_unknown_key_returns_none() -> None:
 @pytest.mark.parametrize(
     "h",
     [
-        "abcdef123456",         # 12-char (real engine default)
+        "abcdef123456",  # 12-char (real engine default)
         "abcdef1234567890abcd",  # 20-char
-        "a" * 24,               # 24-char (tool_injection.py anti-spoof width)
+        "a" * 24,  # 24-char (tool_injection.py anti-spoof width)
     ],
 )
 def test_wider_explicit_hash_accepted(h: str) -> None:

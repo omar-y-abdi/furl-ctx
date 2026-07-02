@@ -179,9 +179,7 @@ def test_mirror_raises_ccr_mirror_error_on_store_write_failure(
 
     # Now make the Python store write fail and re-mirror the seeded hash.
     real_get = cs.get_compression_store
-    monkeypatch.setattr(
-        cs, "get_compression_store", lambda: _FailingStore(real_get())
-    )
+    monkeypatch.setattr(cs, "get_compression_store", lambda: _FailingStore(real_get()))
 
     with pytest.raises(CcrMirrorError):
         crusher._mirror_single_hash_to_python_store(
@@ -209,9 +207,7 @@ def test_mirror_module_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> No
     real_import = builtins.__import__
 
     def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "headroom.cache.compression_store" or name.endswith(
-            "cache.compression_store"
-        ):
+        if name == "headroom.cache.compression_store" or name.endswith("cache.compression_store"):
             raise ImportError("simulated stripped build")
         return real_import(name, *args, **kwargs)
 

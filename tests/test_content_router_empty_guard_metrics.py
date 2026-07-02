@@ -14,6 +14,7 @@ honestly reports saved=0, ratio=1.0.
 Compression-neutral (routing_log metrics only; the actual output was already
 restored to the original by the pre-existing guard).
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -38,9 +39,7 @@ def _empty_output_result(content: str) -> RouterCompressionResult:
         compressed="",
         original=content,
         strategy_used=CompressionStrategy.KOMPRESS,
-        routing_log=[
-            RoutingDecision(ContentType.PLAIN_TEXT, CompressionStrategy.KOMPRESS, n, 0)
-        ],
+        routing_log=[RoutingDecision(ContentType.PLAIN_TEXT, CompressionStrategy.KOMPRESS, n, 0)],
     )
 
 

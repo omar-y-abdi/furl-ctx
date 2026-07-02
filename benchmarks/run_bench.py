@@ -70,9 +70,7 @@ def run_datasets() -> list[CaseMetrics]:
     for dataset in ds_mod.all_datasets():
         name = f"{dataset.name}@{len(dataset.items)}"
         measure = measure_conversation_case if dataset.conversation else measure_case
-        results.append(
-            measure(name, dataset.query, dataset.items, dataset.messages)
-        )
+        results.append(measure(name, dataset.query, dataset.items, dataset.messages))
     return results
 
 
@@ -161,8 +159,7 @@ def print_table(cases: list[CaseMetrics], needles: list[NeedleResult]) -> None:
         fam_recall = recall_rate(sub)
         fam_visible = sum(1 for r in sub if r.in_output) / len(sub)
         print(
-            f"  {fam:7s}: recall(output|CCR)={_pct(fam_recall)}  "
-            f"visible-only={_pct(fam_visible)}"
+            f"  {fam:7s}: recall(output|CCR)={_pct(fam_recall)}  visible-only={_pct(fam_visible)}"
         )
 
 
@@ -171,9 +168,7 @@ def build_results_payload(
 ) -> dict[str, object]:
     """Assemble the machine-readable results envelope."""
     overall = recall_rate(needles)
-    visible = (
-        sum(1 for r in needles if r.in_output) / len(needles) if needles else 1.0
-    )
+    visible = sum(1 for r in needles if r.in_output) / len(needles) if needles else 1.0
     needle_by_family: dict[str, dict[str, float]] = {}
     for fam in ("search", "logs"):
         sub = [r for r in needles if r.family == fam]
@@ -220,7 +215,9 @@ def render_baseline_md(payload: dict[str, object]) -> str:
     a("")
     a(f"- Captured: `{payload['captured_at_utc']}`")
     a(f"- Commit: `{payload['git_commit']}`")
-    a(f"- Token model: `{payload['engine_model']}` (real tiktoken BPE via the engine's tokenizer registry)")
+    a(
+        f"- Token model: `{payload['engine_model']}` (real tiktoken BPE via the engine's tokenizer registry)"
+    )
     a(f"- Python: `{payload['python']}`  Platform: `{payload['platform']}`")
     a("")
     a("All numbers come from REAL captured data (no synthetic low-entropy")
@@ -239,7 +236,9 @@ def render_baseline_md(payload: dict[str, object]) -> str:
     a("")
     a("## Dataset metrics")
     a("")
-    a("| dataset | items | tok before | tok after | lossless reduction | lossy drop ratio | info retention | path |")
+    a(
+        "| dataset | items | tok before | tok after | lossless reduction | lossy drop ratio | info retention | path |"
+    )
     a("|---|---:|---:|---:|---:|---:|---:|---|")
     for c in cases:  # type: ignore[union-attr]
         path = "LOSSY" if c["took_lossy_path"] else "lossless"
@@ -258,7 +257,9 @@ def render_baseline_md(payload: dict[str, object]) -> str:
     a("- **search** — rg --json rows (lossless columnar path keeps all rows).")
     a("- **logs** — git-log rows (varying-field -> lossy drop path fires).")
     a("")
-    a(f"- Overall recall (visible OR CCR-recoverable): **{needle['overall_output_or_ccr'] * 100:.1f}%**")  # type: ignore[index]
+    a(
+        f"- Overall recall (visible OR CCR-recoverable): **{needle['overall_output_or_ccr'] * 100:.1f}%**"
+    )  # type: ignore[index]
     a(f"- Overall *visible-in-output* recall: **{needle['overall_visible_only'] * 100:.1f}%**")  # type: ignore[index]
     a("")
     a("| family | recall (output\\|CCR) | recall (visible-only) | trials |")
@@ -285,8 +286,10 @@ def render_baseline_md(payload: dict[str, object]) -> str:
     a("auditable and re-derivable. Capture commands:")
     a("")
     for p in prov:  # type: ignore[union-attr]
-        a(f"- **{p['dataset']}** ({p['n_items_default']} items, snapshot "
-          f"`{p['snapshot']}` = {p['snapshot_bytes']} bytes): {p['provenance']}")
+        a(
+            f"- **{p['dataset']}** ({p['n_items_default']} items, snapshot "
+            f"`{p['snapshot']}` = {p['snapshot_bytes']} bytes): {p['provenance']}"
+        )
     a("")
     a("## Honest read")
     a("")
@@ -335,9 +338,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Fail loudly if any snapshot is missing — never silently re-capture.
     missing = [
-        name
-        for name in ("code", "logs", "search")
-        if not (DATA_DIR / f"{name}.raw.json").exists()
+        name for name in ("code", "logs", "search") if not (DATA_DIR / f"{name}.raw.json").exists()
     ]
     if missing and not refresh:
         print(

@@ -19,6 +19,7 @@ fix makes the recovery decoder correct for any conformant producer of the
 shape (alt-producer / future-encoder safety), consistent with the
 ``__affix:`` defensive-contract precedent.
 """
+
 from __future__ import annotations
 
 import pytest

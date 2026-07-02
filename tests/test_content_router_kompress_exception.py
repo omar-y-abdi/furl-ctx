@@ -19,13 +19,14 @@ Mutation-sensitive:
     test_model_unavailable_degrades_to_passthrough still passes but the loud-fail
     tests would now incorrectly pass (wrong behavior), caught by the mutation-revert check.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 import pytest
 
-from headroom.transforms.content_router import ContentRouter, CompressionStrategy
+from headroom.transforms.content_router import CompressionStrategy, ContentRouter
 from headroom.transforms.kompress_compressor import KompressModelNotCached
 
 _CONTENT = " ".join(f"word{i:02d}" for i in range(40))
@@ -70,11 +71,17 @@ def test_model_unavailable_degrades_to_passthrough() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _router_with_failing_strategy(strategy: CompressionStrategy, exc: BaseException) -> ContentRouter:
+def _router_with_failing_strategy(
+    strategy: CompressionStrategy, exc: BaseException
+) -> ContentRouter:
     """Router where the compressor for `strategy` raises `exc`."""
     router = ContentRouter()
 
-    if strategy in (CompressionStrategy.KOMPRESS, CompressionStrategy.TEXT, CompressionStrategy.CODE_AWARE):
+    if strategy in (
+        CompressionStrategy.KOMPRESS,
+        CompressionStrategy.TEXT,
+        CompressionStrategy.CODE_AWARE,
+    ):
         # Stub _try_kompress — the lowest-level ML path
         def _failing_ml(
             content: str, context: str, question: object = None, **kwargs: object
@@ -83,24 +90,28 @@ def _router_with_failing_strategy(strategy: CompressionStrategy, exc: BaseExcept
 
         router._try_kompress = _failing_ml  # type: ignore[method-assign]
     elif strategy == CompressionStrategy.SMART_CRUSHER:
+
         class _FailSmartCrusher:
             def crush(self, *a, **kw):
                 raise exc
 
         router._get_smart_crusher = lambda: _FailSmartCrusher()  # type: ignore[method-assign]
     elif strategy == CompressionStrategy.LOG:
+
         class _FailLogCompressor:
             def compress(self, *a, **kw):
                 raise exc
 
         router._get_log_compressor = lambda: _FailLogCompressor()  # type: ignore[method-assign]
     elif strategy == CompressionStrategy.DIFF:
+
         class _FailDiffCompressor:
             def compress(self, *a, **kw):
                 raise exc
 
         router._get_diff_compressor = lambda: _FailDiffCompressor()  # type: ignore[method-assign]
     elif strategy == CompressionStrategy.HTML:
+
         class _FailHtmlExtractor:
             def extract(self, *a, **kw):
                 raise exc

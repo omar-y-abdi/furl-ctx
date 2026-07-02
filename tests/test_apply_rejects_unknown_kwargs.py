@@ -16,6 +16,7 @@ A false rejection that breaks a real caller is a regression, so the
 caller passes, and the end-to-end ``compress()`` smoke test exercises the live
 pipeline path.
 """
+
 from __future__ import annotations
 
 import pytest

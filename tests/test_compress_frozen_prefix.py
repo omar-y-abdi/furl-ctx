@@ -20,22 +20,19 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from headroom.compress import _compute_frozen_message_count, compress
-
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _big_json_content() -> str:
     """Return a large JSON array that SmartCrusher will want to compress."""
     rows = [
-        {"id": i, "status": "active", "name": f"item_{i:04d}", "value": i * 17}
-        for i in range(300)
+        {"id": i, "status": "active", "name": f"item_{i:04d}", "value": i * 17} for i in range(300)
     ]
     return json.dumps(rows)
 
@@ -426,8 +423,7 @@ class TestCompressFrozenPrefixWiring:
             f"kwargs seen: {list(captured_kwargs.keys())}"
         )
         assert captured_kwargs["frozen_message_count"] == k + 1, (
-            f"expected frozen_message_count={k + 1}, got "
-            f"{captured_kwargs['frozen_message_count']}"
+            f"expected frozen_message_count={k + 1}, got {captured_kwargs['frozen_message_count']}"
         )
 
     def test_pipeline_receives_zero_when_no_cache_control(self) -> None:
@@ -532,9 +528,7 @@ class TestCompressFrozenPrefixByteIdentity:
         )
 
         # Index 1 must be byte-identical (carries the cache_control marker)
-        assert out[1] == msg1_snapshot, (
-            "Message 1 (cache_control marker) must be byte-identical."
-        )
+        assert out[1] == msg1_snapshot, "Message 1 (cache_control marker) must be byte-identical."
 
         # cache_control key must still be present on the marked block
         result_block = out[1]["content"][0]

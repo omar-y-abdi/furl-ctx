@@ -16,6 +16,7 @@ directions so a fix that is newly-wrong the other way still fails.
      into one greedy `{...}` span over the 500-char gate. Fixed by detecting
      each real JSON object span and gating each on its own token count.
 """
+
 from __future__ import annotations
 
 import json

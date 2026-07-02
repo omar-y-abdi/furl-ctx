@@ -18,8 +18,6 @@ SmartCrusher sha256[:6] produces 12-char hashes (crusher.rs:1620).
 
 from __future__ import annotations
 
-import pytest
-
 from headroom.ccr.tool_injection import (
     CCR_HASH_WIDTHS,
     CCR_TOOL_NAME,
@@ -51,9 +49,7 @@ class TestCCRHashWidths:
     def test_ccr_hash_widths_rejects_other_lengths(self):
         """CCR_HASH_WIDTHS must NOT accept arbitrary lengths."""
         for bad_len in [8, 10, 16, 20, 32, 50]:
-            assert bad_len not in CCR_HASH_WIDTHS, (
-                f"CCR_HASH_WIDTHS should not contain {bad_len}"
-            )
+            assert bad_len not in CCR_HASH_WIDTHS, f"CCR_HASH_WIDTHS should not contain {bad_len}"
 
 
 class TestScanForMarkersSmartCrusher:
@@ -75,14 +71,11 @@ class TestScanForMarkersSmartCrusher:
     def test_scan_detects_smartcrusher_row_drop_marker(self):
         """scan_for_markers detects <<ccr:HASH N_rows_offloaded>> with 12-char hash."""
         marker = f"<<ccr:{SMARTCRUSHER_HASH} 42_rows_offloaded>>"
-        message = self._make_tool_result_message(
-            f"Here is some output: {marker} check this"
-        )
+        message = self._make_tool_result_message(f"Here is some output: {marker} check this")
         injector = CCRToolInjector()
         detected = injector.scan_for_markers([message])
         assert SMARTCRUSHER_HASH in detected, (
-            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in detected hashes, "
-            f"got: {detected}"
+            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in detected hashes, got: {detected}"
         )
 
     def test_scan_detects_smartcrusher_bare_marker(self):
@@ -92,8 +85,7 @@ class TestScanForMarkersSmartCrusher:
         injector = CCRToolInjector()
         detected = injector.scan_for_markers([message])
         assert SMARTCRUSHER_HASH in detected, (
-            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in bare marker, "
-            f"got: {detected}"
+            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in bare marker, got: {detected}"
         )
 
     def test_scan_detects_smartcrusher_opaque_marker(self):
@@ -103,8 +95,7 @@ class TestScanForMarkersSmartCrusher:
         injector = CCRToolInjector()
         detected = injector.scan_for_markers([message])
         assert SMARTCRUSHER_HASH in detected, (
-            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in opaque marker, "
-            f"got: {detected}"
+            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in opaque marker, got: {detected}"
         )
 
     def test_scan_detects_smartcrusher_rows_index_marker(self):
@@ -114,8 +105,7 @@ class TestScanForMarkersSmartCrusher:
         injector = CCRToolInjector()
         detected = injector.scan_for_markers([message])
         assert SMARTCRUSHER_HASH in detected, (
-            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in rows index marker, "
-            f"got: {detected}"
+            f"Expected 12-char hash '{SMARTCRUSHER_HASH}' in rows index marker, got: {detected}"
         )
 
     def test_scan_still_detects_canonical_24char_hash(self):
@@ -156,9 +146,7 @@ class TestScanForMarkersSmartCrusher:
         message = {"role": "user", "content": text}
         injector = CCRToolInjector()
         detected = injector.scan_for_markers([message])
-        assert bracket_hash in detected, (
-            f"Bracket-form hash not detected. Got: {detected}"
-        )
+        assert bracket_hash in detected, f"Bracket-form hash not detected. Got: {detected}"
 
 
 class TestToolInjectionWithSmartCrusherMarkers:
@@ -243,9 +231,7 @@ class TestParseToolCallSmartCrusherHash:
         """parse_tool_call returns (hash, query) for a valid 12-char hash."""
         tool_call = self._make_anthropic_tool_call(SMARTCRUSHER_HASH, "error logs")
         hash_key, query = parse_tool_call(tool_call, provider="anthropic")
-        assert hash_key == SMARTCRUSHER_HASH, (
-            f"Expected '{SMARTCRUSHER_HASH}', got '{hash_key}'"
-        )
+        assert hash_key == SMARTCRUSHER_HASH, f"Expected '{SMARTCRUSHER_HASH}', got '{hash_key}'"
         assert query == "error logs"
 
     def test_parse_12char_hash_no_query(self):

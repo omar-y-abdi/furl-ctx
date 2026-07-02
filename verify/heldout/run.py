@@ -66,7 +66,7 @@ DEV_CLAIMS = {
 # Round-3 reduction claims keyed by (family, tier). Flagged if NOT replicated.
 ROUND3_REDUCTION_CLAIMS = {
     ("search", "high"): 0.936,  # 36.1% erratic -> 93.6% reliable (±0.1pp)
-    ("logs", "high"): 0.824,    # 80.2% -> 82.4%
+    ("logs", "high"): 0.824,  # 80.2% -> 82.4%
 }
 # Round-3 reliability claim: search@90 high spread must be tight (±~0.1pp ->
 # we allow a generous 5pp band as "reliable" vs the old "erratic 24-94%").
@@ -149,9 +149,7 @@ def run_group(family: str, n: int, tier: str, *, needles: bool) -> dict:
     # with-needles observation for transparency.
     enc_seeds = [detect_encodings(family, n, tier, seed, False) for seed in SEEDS]
     enc_seeds_with_needles = (
-        [detect_encodings(family, n, tier, seed, True) for seed in SEEDS]
-        if needles
-        else enc_seeds
+        [detect_encodings(family, n, tier, seed, True) for seed in SEEDS] if needles else enc_seeds
     )
 
     token_red = [c["token_reduction"] for c in per_seed]
@@ -185,9 +183,7 @@ def run_group(family: str, n: int, tier: str, *, needles: bool) -> dict:
         }
 
     # Encoding-fire counts across seeds (how many of N seeds fired each fold).
-    enc_counts = {
-        k: sum(1 for e in enc_seeds if e.get(k)) for k in ENCODING_MARKERS
-    }
+    enc_counts = {k: sum(1 for e in enc_seeds if e.get(k)) for k in ENCODING_MARKERS}
     enc_counts_with_needles = {
         k: sum(1 for e in enc_seeds_with_needles if e.get(k)) for k in ENCODING_MARKERS
     }
@@ -235,7 +231,7 @@ def no_structure_control() -> dict:
         reset_compression_store()
         rng = random.Random(seed)
 
-        def h() -> str:
+        def h(rng: random.Random = rng) -> str:
             return hashlib.sha1(rng.randbytes(20)).hexdigest()
 
         rows = [{"a": h(), "b": h(), "c": h()} for _ in range(90)]
@@ -286,13 +282,13 @@ def probe_result_cache_ccr_divergence() -> dict:
     check whether the served sentinel still resolves. A FIXED engine re-mirrors
     on the cache hit so the second drop stays backed (no silent loss).
     """
+    from headroom import compress
+    from headroom.cache.compression_store import reset_compression_store
     from verify.measure import (
         _emitted_drop_hashes,
         _retrieve_originals,
         _stringify,
     )
-    from headroom import compress
-    from headroom.cache.compression_store import reset_compression_store
 
     trials: list[dict] = []
     for seed in (2000, 2211, 2422):
@@ -455,14 +451,15 @@ def main() -> int:
                 nd = g["needles"]
                 ndtxt = (
                     f"needle[vis={nd['visible']}/sig={nd['signalled']}/silent={nd['silent_loss']}]"
-                    if nd else ""
+                    if nd
+                    else ""
                 )
                 enc = g["encodings_fired_count"]
                 print(
                     f"{g['case_id']:18s} {tier:8s} "
-                    f"red={g['token_reduction']['mean']*100:6.1f}% "
-                    f"[{g['token_reduction']['min']*100:5.1f}-{g['token_reduction']['max']*100:5.1f}] "
-                    f"retain={g['information_retention']['mean']*100:6.1f}% "
+                    f"red={g['token_reduction']['mean'] * 100:6.1f}% "
+                    f"[{g['token_reduction']['min'] * 100:5.1f}-{g['token_reduction']['max'] * 100:5.1f}] "
+                    f"retain={g['information_retention']['mean'] * 100:6.1f}% "
                     f"be={str(g['hash_byte_exact_all']):5s} "
                     f"drop={g['n_dropped']['mean']:6.1f} "
                     f"enc[af={enc['affix']}/hd={enc['head']}/dc={enc['dict']}] {ndtxt}"
@@ -510,9 +507,9 @@ def main() -> int:
                     "size": g["size"],
                     "byte_exact_count": g["hash_byte_exact_count"],
                     "n_seeds": g["n_seeds"],
-                    "missing_examples": [
-                        ex for c in g["per_seed"] for ex in c["missing_examples"]
-                    ][:5],
+                    "missing_examples": [ex for c in g["per_seed"] for ex in c["missing_examples"]][
+                        :5
+                    ],
                 }
             )
 
@@ -570,7 +567,9 @@ def main() -> int:
         "default_params_confirmed": all_defaults,
         "routing_policy_default": "min-tokens (MinTokens)",
         "dev_claims_under_test": DEV_CLAIMS,
-        "round3_reduction_claims": {f"{k[0]}@90 {k[1]}": v for k, v in ROUND3_REDUCTION_CLAIMS.items()},
+        "round3_reduction_claims": {
+            f"{k[0]}@90 {k[1]}": v for k, v in ROUND3_REDUCTION_CLAIMS.items()
+        },
         "groups": groups,
         "no_structure_control": control,
         "result_cache_ccr_divergence_probe": inproc,

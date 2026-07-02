@@ -394,9 +394,7 @@ class CrossMessageDeduper(Transform):
 
         # Kept verbatim — register as a reference source.
         if first is None:
-            state.seen[ccr_hash] = _FirstOccurrence(
-                message_index=message_index, content=content
-            )
+            state.seen[ccr_hash] = _FirstOccurrence(message_index=message_index, content=content)
         if rows is not None:
             state.array_sources.append(
                 _ArraySource(
@@ -416,9 +414,7 @@ class CrossMessageDeduper(Transform):
         tool_name: str | None,
     ) -> str | None:
         """Exact tier: full replacement by the duplicate sentinel."""
-        sentinel = duplicate_sentinel(
-            ccr_hash, len(content.encode("utf-8")), first.message_index
-        )
+        sentinel = duplicate_sentinel(ccr_hash, len(content.encode("utf-8")), first.message_index)
         if not self._persist_original(
             content,
             sentinel,
@@ -459,9 +455,7 @@ class CrossMessageDeduper(Transform):
             return None
 
         shared_bytes = sum(
-            len(sig.encode("utf-8"))
-            for sig in signatures
-            if sig in best.row_signatures
+            len(sig.encode("utf-8")) for sig in signatures if sig in best.row_signatures
         )
         total_bytes = len(content.encode("utf-8"))
         if shared_bytes < NEAR_DUP_MIN_SHARED_BYTES:
@@ -469,11 +463,7 @@ class CrossMessageDeduper(Transform):
         if shared_bytes / total_bytes < NEAR_DUP_MIN_SHARED_FRACTION:
             return None
 
-        changed_rows = [
-            row
-            for row, sig in zip(rows, signatures)
-            if sig not in best.row_signatures
-        ]
+        changed_rows = [row for row, sig in zip(rows, signatures) if sig not in best.row_signatures]
         rendering = near_duplicate_rendering(
             changed_rows,
             ccr_hash=ccr_hash,

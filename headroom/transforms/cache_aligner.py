@@ -319,8 +319,7 @@ class CacheAligner(Transform):
         ]
         system_text = "\n---\n".join(system_contents)
         framed = b"".join(
-            f"{len(b := c.encode('utf-8'))}:".encode("ascii") + b
-            for c in system_contents
+            f"{len(b := c.encode('utf-8'))}:".encode("ascii") + b for c in system_contents
         )
         stable_hash = compute_short_hash(framed)
         prefix_bytes = len(system_text.encode("utf-8"))

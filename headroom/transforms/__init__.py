@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     # Expose concrete types to static analysis while keeping runtime imports lazy.
     from headroom.transforms.base import Transform  # noqa: F401
     from headroom.transforms.cache_aligner import CacheAligner  # noqa: F401
-    from headroom.transforms.cross_message_dedup import CrossMessageDeduper  # noqa: F401
     from headroom.transforms.content_detector import (  # noqa: F401
         ContentType,
         DetectionResult,
@@ -22,6 +21,7 @@ if TYPE_CHECKING:
         ContentRouterConfig,
         RouterCompressionResult,
     )
+    from headroom.transforms.cross_message_dedup import CrossMessageDeduper  # noqa: F401
     from headroom.transforms.diff_compressor import (  # noqa: F401
         DiffCompressionResult,
         DiffCompressor,

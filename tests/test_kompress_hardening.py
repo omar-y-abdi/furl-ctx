@@ -8,6 +8,7 @@ Plan items:
   K-chunk: chunk-offset exact output (kills wid+chunk_start mutations).
   K-bnd:  n_words < 10 short-input boundary (compress passthrough at 9 vs 10).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -262,7 +263,7 @@ class _SelectiveKeepModel:
 class _ChunkAwareTokenizer:
     """One token per word. chunk_words slicing gives offset-aware word_ids [0..N-1]."""
 
-    def __call__(self, words, **kwargs) -> "_ChunkEncoding":
+    def __call__(self, words, **kwargs) -> _ChunkEncoding:
         n = len(words)
         return _ChunkEncoding(n)
 
@@ -307,7 +308,9 @@ def test_k_chunk_offset_exact_output(monkeypatch) -> None:
     output would be 'zero two zero two zero two' (wrong globals).
     """
     words = "zero one two three four five six seven eight nine ten"
-    monkeypatch.setattr(kc, "_load_kompress", lambda mid, dev: (_KeepEvenModel(), _ChunkAwareTokenizer(), "onnx"))
+    monkeypatch.setattr(
+        kc, "_load_kompress", lambda mid, dev: (_KeepEvenModel(), _ChunkAwareTokenizer(), "onnx")
+    )
     comp = KompressCompressor(KompressConfig(chunk_words=4, enable_ccr=False))
     result = comp.compress(words)
     assert result.compressed == "zero two four six eight ten", (
@@ -323,20 +326,22 @@ def test_k_chunk_offset_exact_output(monkeypatch) -> None:
 def test_k_bnd_nine_words_passthrough(monkeypatch) -> None:
     """9 words: below the n_words < 10 threshold → passthrough (not attempted)."""
     content = " ".join(f"w{i}" for i in range(9))
-    monkeypatch.setattr(kc, "_load_kompress", lambda mid, dev: (_KeepEvenModel(), _ChunkAwareTokenizer(), "onnx"))
+    monkeypatch.setattr(
+        kc, "_load_kompress", lambda mid, dev: (_KeepEvenModel(), _ChunkAwareTokenizer(), "onnx")
+    )
     comp = KompressCompressor(KompressConfig(chunk_words=350, enable_ccr=False))
     result = comp.compress(content)
     # Short inputs pass through unchanged
-    assert result.compressed == content, (
-        f"9 words must passthrough; got {result.compressed!r}"
-    )
+    assert result.compressed == content, f"9 words must passthrough; got {result.compressed!r}"
     assert result.compression_ratio == 1.0
 
 
 def test_k_bnd_ten_words_compressed(monkeypatch) -> None:
     """10 words: AT the threshold → compression is attempted."""
     content = " ".join(f"w{i}" for i in range(10))
-    monkeypatch.setattr(kc, "_load_kompress", lambda mid, dev: (_KeepEvenModel(), _ChunkAwareTokenizer(), "onnx"))
+    monkeypatch.setattr(
+        kc, "_load_kompress", lambda mid, dev: (_KeepEvenModel(), _ChunkAwareTokenizer(), "onnx")
+    )
     comp = KompressCompressor(KompressConfig(chunk_words=350, enable_ccr=False))
     result = comp.compress(content)
     # KeepEvenModel keeps even words (0,2,4,6,8) → 5 words out of 10

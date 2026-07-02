@@ -11,6 +11,7 @@ harness but NOT here, the harness's substring fallback is inflating recovery.
 
 Usage: python -m verify.independent_recheck '<json-spec>'
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -23,7 +24,6 @@ from headroom.cache.compression_store import (
     reset_compression_store,
 )
 from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
-
 from verify.worker import build_case
 
 CCR_PREFIX = "<<ccr:"
@@ -169,11 +169,15 @@ def recheck(spec: dict) -> dict:
         oh = _multiset_sha(orig)
         rh = _multiset_sha(recon)
         return {
-            "spec": spec, "family": "code",
-            "original_sha": oh, "reconstructed_sha": rh,
+            "spec": spec,
+            "family": "code",
+            "original_sha": oh,
+            "reconstructed_sha": rh,
             "strict_byte_exact": (oh == rh and not missing),
-            "n_items": len(case.items), "n_missing": len(missing),
-            "emitted_ccr": len(emitted), "ccr_resolved": len(recovered),
+            "n_items": len(case.items),
+            "n_missing": len(missing),
+            "emitted_ccr": len(emitted),
+            "ccr_resolved": len(recovered),
         }
 
     orig = [_canonical(it) for it in case.items]
@@ -186,12 +190,16 @@ def recheck(spec: dict) -> dict:
     oh = _multiset_sha(orig)
     rh = _multiset_sha(recon)
     return {
-        "spec": spec, "family": case.family,
-        "original_sha": oh, "reconstructed_sha": rh,
+        "spec": spec,
+        "family": case.family,
+        "original_sha": oh,
+        "reconstructed_sha": rh,
         "strict_byte_exact": (oh == rh and not missing),
-        "n_items": len(case.items), "n_missing": len(missing),
+        "n_items": len(case.items),
+        "n_missing": len(missing),
         "missing_examples": missing[:3],
-        "emitted_ccr": len(emitted), "ccr_resolved": len(recovered),
+        "emitted_ccr": len(emitted),
+        "ccr_resolved": len(recovered),
         "transforms": list(result.transforms_applied),
     }
 

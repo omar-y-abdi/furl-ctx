@@ -342,9 +342,7 @@ def measure_case(
 
     n_input = len(items)
     lossy_drop_ratio = n_dropped / n_input if n_input else 0.0
-    information_retention = (
-        (n_present + n_recoverable) / n_input if n_input else 1.0
-    )
+    information_retention = (n_present + n_recoverable) / n_input if n_input else 1.0
     took_lossy_path = n_dropped > 0
 
     return CaseMetrics(
@@ -399,10 +397,7 @@ def measure_conversation_case(
         emitted_hashes |= _emitted_ccr_hashes(text)
     recovered = _recovered_originals(emitted_hashes, query)
 
-    views = [
-        (text, _output_row_signatures(text), _decoded_row_signatures(text))
-        for text in texts
-    ]
+    views = [(text, _output_row_signatures(text), _decoded_row_signatures(text)) for text in texts]
     n_present = 0
     n_dropped = 0
     n_recoverable = 0
@@ -416,9 +411,7 @@ def measure_conversation_case(
 
     n_input = len(items)
     lossy_drop_ratio = n_dropped / n_input if n_input else 0.0
-    information_retention = (
-        (n_present + n_recoverable) / n_input if n_input else 1.0
-    )
+    information_retention = (n_present + n_recoverable) / n_input if n_input else 1.0
     took_lossy_path = n_dropped > 0
 
     return CaseMetrics(

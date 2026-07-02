@@ -170,9 +170,7 @@ def test_empty_message_yields_minimal_unknown_block(tokenizer) -> None:
 def test_role_maps_to_block_kind(tokenizer, role: str, expected_kind: str) -> None:
     # parser.py:222-232 — role → kind mapping over plain-string content
     # (user is excluded here: it forks on RAG detection, tested elsewhere).
-    blocks = parse_message_to_blocks(
-        {"role": role, "content": "body text"}, 0, tokenizer
-    )
+    blocks = parse_message_to_blocks({"role": role, "content": "body text"}, 0, tokenizer)
     assert blocks[0].kind == expected_kind
 
 

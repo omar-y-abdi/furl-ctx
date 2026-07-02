@@ -11,12 +11,12 @@ Hardening targets:
   CD-B1c: pin the malformed __affix: current behavior (needs-review / alt-producer only).
   CD-bnd:  boundaries around single-var-col, multi-var-col, and ordinal advancement.
 """
+
 from __future__ import annotations
 
 import pytest
 
 from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
-
 
 # ---------------------------------------------------------------------------
 # CD-B1a  #24 repro — exact literal output for single-var + arith + empty row
@@ -102,7 +102,10 @@ def test_b1a_parametrize_var_col_shapes(text: str, expected: list[dict]) -> None
             [{"x": 5, "seq": 0}, {"x": 5, "seq": 1}, {"x": 5, "seq": 2}],
         ),
         # Mixed: one var col + one const col
-        ("[2]{label:string,cat:string=A}\nalpha\nbeta", [{"label": "alpha", "cat": "A"}, {"label": "beta", "cat": "A"}]),
+        (
+            "[2]{label:string,cat:string=A}\nalpha\nbeta",
+            [{"label": "alpha", "cat": "A"}, {"label": "beta", "cat": "A"}],
+        ),
         # Mixed: one var col + one arith col
         (
             "[2]{msg:string,seq:int=0+1}\nhello\nworld",

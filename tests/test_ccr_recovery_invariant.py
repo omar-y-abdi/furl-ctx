@@ -292,18 +292,45 @@ def test_opaque_blob_recovers_from_output_marker(
 
 _SUBJECT_PREFIXES = ["feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci"]
 _SUBJECT_AREAS = [
-    "crusher", "proxy", "ccr", "router", "bench",
-    "tokenizer", "store", "pipeline", "compaction", "relevance",
+    "crusher",
+    "proxy",
+    "ccr",
+    "router",
+    "bench",
+    "tokenizer",
+    "store",
+    "pipeline",
+    "compaction",
+    "relevance",
 ]
 _SUBJECT_VERBS = [
-    "add", "remove", "rework", "guard", "pin",
-    "extend", "isolate", "deflake", "speed up", "harden",
+    "add",
+    "remove",
+    "rework",
+    "guard",
+    "pin",
+    "extend",
+    "isolate",
+    "deflake",
+    "speed up",
+    "harden",
 ]
 _SUBJECT_THINGS = [
-    "the lossy budget", "novelty fill", "sentinel emission", "marker parsing",
-    "store mirroring", "field-role gates", "ditto marks", "schema folding",
-    "query anchors", "drop accounting", "TTL handling", "thread-local state",
-    "import guards", "error surfaces", "byte parity",
+    "the lossy budget",
+    "novelty fill",
+    "sentinel emission",
+    "marker parsing",
+    "store mirroring",
+    "field-role gates",
+    "ditto marks",
+    "schema folding",
+    "query anchors",
+    "drop accounting",
+    "TTL handling",
+    "thread-local state",
+    "import guards",
+    "error surfaces",
+    "byte parity",
 ]
 
 
@@ -339,9 +366,7 @@ def _log_shaped_rows(n: int = 90) -> list[dict]:
 
 
 @pytest.mark.parametrize("ccr_enabled, ccr_inject_marker", _MARKER_OFF_MATRIX)
-def test_lossy_survivor_table_recovers_100pct(
-    ccr_enabled: bool, ccr_inject_marker: bool
-) -> None:
+def test_lossy_survivor_table_recovers_100pct(ccr_enabled: bool, ccr_inject_marker: bool) -> None:
     # The lossy-survivor CSV rendering (drop + sentinel LINE inside a JSON
     # string) must satisfy the same invariant as every other shape: every
     # distinct dropped row recoverable from the output alone.

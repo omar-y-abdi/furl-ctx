@@ -11,6 +11,7 @@ These tests assert the FIXED behavior (credential absent) and are
 mutation-sensitive: reverting the regex order, or removing any of the
 three redaction passes, makes the corresponding credential reappear.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -46,7 +47,11 @@ _OPAQUE_PW = "hunter2" + "correcthorsebattery"
         # Bare token with no scheme word — secret-key rule grabs it directly.
         ("noscheme", f"Authorization: {_JWT}", _JWT),
         # Basic scheme.
-        ("basic", "Authorization: Basic dXNlcjpwYXNzd29yZGxvbmdlbm91Z2g=", "dXNlcjpwYXNzd29yZGxvbmdlbm91Z2g="),
+        (
+            "basic",
+            "Authorization: Basic dXNlcjpwYXNzd29yZGxvbmdlbm91Z2g=",
+            "dXNlcjpwYXNzd29yZGxvbmdlbm91Z2g=",
+        ),
         # API key in a JSON value.
         ("api_key_json", f'{{"api_key": "{_API_KEY}"}}', _API_KEY),
         # token=<value> key/value form.

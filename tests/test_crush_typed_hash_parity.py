@@ -158,9 +158,7 @@ def test_crush_typed_hash_equals_scrape_and_retrieves(
         f"strategy={r.strategy!r}, head={r.compressed[:120]!r}"
     )
     # (2) Typed set == scraped row-drop set (byte-for-byte parity).
-    assert typed == scraped, (
-        f"{shape}-{seed}: typed {sorted(typed)} != scraped {sorted(scraped)}"
-    )
+    assert typed == scraped, f"{shape}-{seed}: typed {sorted(typed)} != scraped {sorted(scraped)}"
     # (3) Both sources resolve, and to the SAME payload.
     for h in typed:
         typed_payload = crusher._rust.ccr_get(h)
@@ -175,9 +173,7 @@ def test_crush_typed_hash_equals_scrape_and_retrieves(
 
 
 @pytest.mark.parametrize("shape, seed", _ROW_DROP_CASES)
-def test_crush_typed_row_index_equals_scrape(
-    crusher: SmartCrusher, shape: str, seed: int
-) -> None:
+def test_crush_typed_row_index_equals_scrape(crusher: SmartCrusher, shape: str, seed: int) -> None:
     """The granular ``#rows`` index keys recovered from the typed
     ``row_index_markers`` equal the ``#rows`` keys the scrape extracts —
     so proportional retrieval also comes typed, not scraped."""
@@ -187,8 +183,7 @@ def test_crush_typed_row_index_equals_scrape(
     typed_idx = _typed_index_keys(list(r.row_index_markers))
     scraped_idx = _scrape_index_keys(r.compressed)
     assert typed_idx == scraped_idx, (
-        f"{shape}-{seed}: typed index {sorted(typed_idx)} != "
-        f"scraped {sorted(scraped_idx)}"
+        f"{shape}-{seed}: typed index {sorted(typed_idx)} != scraped {sorted(scraped_idx)}"
     )
 
 

@@ -86,6 +86,7 @@ def _safe_decode_for_logging(raw: bytes) -> str:
 # realistic source file or tool output while bounding worst-case allocation.
 _MAX_READ_BYTES = 10 * 1024 * 1024
 
+
 def _describe_arguments_for_log(arguments: dict[str, Any]) -> str:
     """Non-sensitive descriptor of a tool-call ``arguments`` dict for logging.
 
@@ -143,8 +144,7 @@ def _workspace_root() -> Path:
         )
     elif env_value == "~":
         logger.warning(
-            "event=mcp_workspace_root_rejected reason=bare_home_marker "
-            "falling_back_to=cwd"
+            "event=mcp_workspace_root_rejected reason=bare_home_marker falling_back_to=cwd"
         )
     return Path.cwd().resolve()
 
@@ -772,8 +772,7 @@ class HeadroomMCPServer:
         root = _workspace_root()
         if not path.is_relative_to(root):
             logger.warning(
-                "event=mcp_read_path_rejected reason=outside_workspace "
-                "attempted=%s root=%s",
+                "event=mcp_read_path_rejected reason=outside_workspace attempted=%s root=%s",
                 path,
                 root,
             )
@@ -845,8 +844,7 @@ class HeadroomMCPServer:
             # (unlike a symlink), so is_relative_to alone would pass it.
             if st.st_nlink > 1:
                 logger.warning(
-                    "event=mcp_read_rejected reason=multiply_linked_inode "
-                    "nlink=%d root=%s",
+                    "event=mcp_read_rejected reason=multiply_linked_inode nlink=%d root=%s",
                     st.st_nlink,
                     root,
                 )

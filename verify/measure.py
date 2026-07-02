@@ -169,7 +169,7 @@ def _marker_key(marker: str) -> str | None:
     start = marker.find(CCR_PREFIX)
     if start == -1:
         return None
-    rest = marker[start + len(CCR_PREFIX):]
+    rest = marker[start + len(CCR_PREFIX) :]
     end = len(rest)
     for sep in (" ", ",", ">>"):
         pos = rest.find(sep)
@@ -592,9 +592,7 @@ def check_cache_prefix(
         else:
             positions.append(found)
     index0_intact = bool(out_texts) and bool(prefix_texts) and out_texts[0] == prefix_texts[0]
-    reordered = positions != sorted(positions) or (
-        positions and positions[0] != 0
-    )
+    reordered = positions != sorted(positions) or (positions and positions[0] != 0)
     preserved = not dropped and not reordered
     return CachePrefixCheck(
         prefix_len=len(prefix_texts),
@@ -653,15 +651,19 @@ def measure(case: Any) -> CaseResult:
 
     tokens_before = result.tokens_before or tok.count_messages(case.messages)
     tokens_after = result.tokens_after or tok.count_messages(result.messages)
-    token_reduction = (
-        (tokens_before - tokens_after) / tokens_before if tokens_before else 0.0
-    )
+    token_reduction = (tokens_before - tokens_after) / tokens_before if tokens_before else 0.0
 
     if case.family == "code":
-        return _measure_code(case, result, transforms, tokens_before, tokens_after, token_reduction, tok)
+        return _measure_code(
+            case, result, transforms, tokens_before, tokens_after, token_reduction, tok
+        )
     if case.conversation:
-        return _measure_conversation(case, result, transforms, tokens_before, tokens_after, token_reduction, tok)
-    return _measure_structured(case, result, transforms, tokens_before, tokens_after, token_reduction, tok)
+        return _measure_conversation(
+            case, result, transforms, tokens_before, tokens_after, token_reduction, tok
+        )
+    return _measure_structured(
+        case, result, transforms, tokens_before, tokens_after, token_reduction, tok
+    )
 
 
 def _measure_structured(case, result, transforms, tb, ta, tr, tok) -> CaseResult:
@@ -693,9 +695,7 @@ def _measure_structured(case, result, transforms, tb, ta, tr, tok) -> CaseResult
 
     hc = hash_compare_structured(case.items, output_text, recovered)
     chunks = per_row_chunk_tokens(output_text, tok)
-    eff = effective_savings(
-        tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks
-    )
+    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks)
 
     needles: list[dict[str, Any]] = []
     markers = case.meta.get("needle_markers", [])
@@ -755,7 +755,7 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
     for it in case.items:
         sig = _canonical(it)
         seen = False
-        for t, vs, ds in views:
+        for _t, vs, ds in views:
             if vs is not None and sig in vs:
                 seen = True
                 break
@@ -796,13 +796,9 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
         chunks = per_row_chunk_tokens(t, tok)
         if chunks is not None:
             break
-    eff = effective_savings(
-        tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks
-    )
+    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks)
 
-    cp = check_cache_prefix(
-        case.messages, result.messages, case.meta.get("cache_prefix_texts", [])
-    )
+    cp = check_cache_prefix(case.messages, result.messages, case.meta.get("cache_prefix_texts", []))
     cache_prefix = {
         "prefix_len": cp.prefix_len,
         "preserved_in_order": cp.preserved_in_order,

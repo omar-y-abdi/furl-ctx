@@ -11,6 +11,7 @@ as graceful passthrough; let every other exception PROPAGATE so it is loud.
 Mutation-sensitive: reverting to `except Exception` makes the bug-type case pass
 through silently and `test_bug_type_propagates` fails.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -74,9 +75,7 @@ def _compressor(monkeypatch, loader):
 
 def test_bug_type_propagates(monkeypatch) -> None:
     # A model bug (TypeError) must NOT be swallowed into a silent passthrough.
-    comp = _compressor(
-        monkeypatch, lambda mid, dev: (_BuggyModel(), _Tokenizer(), "onnx")
-    )
+    comp = _compressor(monkeypatch, lambda mid, dev: (_BuggyModel(), _Tokenizer(), "onnx"))
     with pytest.raises(TypeError):
         comp.compress(_CONTENT)
 
@@ -106,9 +105,7 @@ def test_import_error_passes_through(monkeypatch) -> None:
 
 def test_batch_bug_type_propagates(monkeypatch) -> None:
     # Same contract on the batched path.
-    comp = _compressor(
-        monkeypatch, lambda mid, dev: (_BuggyModel(), _Tokenizer(), "onnx")
-    )
+    comp = _compressor(monkeypatch, lambda mid, dev: (_BuggyModel(), _Tokenizer(), "onnx"))
     monkeypatch.setattr(comp, "_should_use_sequential_fallback", lambda: False)
     with pytest.raises(TypeError):
         comp.compress_batch([_CONTENT], target_ratio=[None])

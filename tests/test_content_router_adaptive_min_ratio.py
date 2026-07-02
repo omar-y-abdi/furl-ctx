@@ -18,6 +18,7 @@ These assert the FIXED behavior and are mutation-sensitive: reverting the field
 ordering, the interpolation, or the clamp breaks the monotonicity / endpoint /
 acceptance assertions.
 """
+
 from __future__ import annotations
 
 import pytest

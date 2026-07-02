@@ -55,5 +55,3 @@ def _reset_headroom_logger_propagation():
 
     _logging.getLogger("headroom").propagate = True
     yield
-
-

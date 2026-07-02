@@ -404,9 +404,7 @@ class TestCCREdgeCases:
         items = [{"id": i, "score": 100 - i} for i in range(100)]
         content = json.dumps(items)
 
-        config = SmartCrusherConfig(
-            max_items_after_crush=15, routing_policy="lossless-first"
-        )
+        config = SmartCrusherConfig(max_items_after_crush=15, routing_policy="lossless-first")
         ccr_config = CCRConfig(enabled=False)  # Disabled
 
         smart_crush_tool_output(content, config, ccr_config)

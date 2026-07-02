@@ -14,6 +14,7 @@ Usage:
     python .claude/runtime/floor_check.py
     python .claude/runtime/floor_check.py --cur /tmp/my_out/baseline_results.json
 """
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,9 @@ _DEFAULT_CUR: Path = Path(tempfile.gettempdir()) / "headroom_bench" / "baseline_
 def _load_committed() -> dict:
     raw = subprocess.run(
         ["git", "show", f"HEAD:{FLOOR_COMMITTED}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     return json.loads(raw)
 
@@ -59,7 +62,7 @@ def main() -> int:
     if not cur_path.exists():
         print("FLOOR CHECK: FAIL")
         print(f"  - current capture not found: {cur_path}")
-        print(f"    Run `python -m benchmarks.run_bench` first.")
+        print("    Run `python -m benchmarks.run_bench` first.")
         return 1
 
     floor = _load_committed()
@@ -71,8 +74,10 @@ def main() -> int:
     cur_ts = cur.get("captured_at_utc")
     if cur_ts is not None and floor_ts is not None and cur_ts == floor_ts:
         print("FLOOR CHECK: FAIL")
-        print("  - captured_at_utc unchanged: current file is identical to HEAD "
-              "(run_bench did not produce a fresh measurement)")
+        print(
+            "  - captured_at_utc unchanged: current file is identical to HEAD "
+            "(run_bench did not produce a fresh measurement)"
+        )
         return 1
 
     f_sets, c_sets = _by_name(floor), _by_name(cur)
@@ -106,7 +111,9 @@ def main() -> int:
 
     print("FLOOR CHECK: PASS (no compression regression, needle 100%)")
     for name, cd in c_sets.items():
-        print(f"  {name}: lossless={cd['lossless_reduction']:.3f} retain={cd['information_retention']:.3f}")
+        print(
+            f"  {name}: lossless={cd['lossless_reduction']:.3f} retain={cd['information_retention']:.3f}"
+        )
     return 0
 
 

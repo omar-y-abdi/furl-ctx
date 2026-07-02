@@ -94,8 +94,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import pytest
 
@@ -145,6 +145,7 @@ def _union_extract(patterns: list[re.Pattern], text: str) -> list[str]:
             if hash_key and hash_key not in out:
                 out.append(hash_key)
     return out
+
 
 # --------------------------------------------------------------------------- #
 # Hash helpers — mirror the EXACT producer hash functions (verified in source).
@@ -339,24 +340,78 @@ def _build_I(store: CompressionStore) -> tuple[str, str, str]:
 
 
 CASES: list[Case] = [
-    Case("A_rows_offloaded", "12-hex SmartCrusher row-drop sentinel (space)",
-         "format-constructed", True, 12, _build_A),
-    Case("B_rows_index", "12-hex SmartCrusher row-index sentinel (# delimiter)",
-         "format-constructed", True, 12, _build_B),
-    Case("C_opaque_blob", "12-hex opaque-blob sentinel (comma, KIND, SIZE)",
-         "format-constructed", True, 12, _build_C),
-    Case("D_bare", "24-hex bare <<ccr:HASH>> sentinel (>> immediately after hash)",
-         "format-constructed", True, 24, _build_D),
-    Case("E_bytes_duplicate", "24-hex cross-message exact-duplicate note (space sep, like A)",
-         "producer-driven", True, 24, _build_E),
-    Case("F_bytes_near_duplicate", "24-hex cross-message near-duplicate note (space sep)",
-         "producer-driven", True, 24, _build_F),
-    Case("G_diff_retrieve_full", "24-hex MD5 diff marker ('Retrieve full diff:', generic fallback)",
-         "format-constructed", True, 24, _build_G),
-    Case("H_retrieve_more", "24-hex kompress/log/search marker ('Retrieve more:')",
-         "format-constructed", True, 24, _build_H),
-    Case("I_read_stale", "24-hex read_lifecycle stale marker — NOT scanned, direct-store recovery",
-         "format-constructed", False, 24, _build_I),
+    Case(
+        "A_rows_offloaded",
+        "12-hex SmartCrusher row-drop sentinel (space)",
+        "format-constructed",
+        True,
+        12,
+        _build_A,
+    ),
+    Case(
+        "B_rows_index",
+        "12-hex SmartCrusher row-index sentinel (# delimiter)",
+        "format-constructed",
+        True,
+        12,
+        _build_B,
+    ),
+    Case(
+        "C_opaque_blob",
+        "12-hex opaque-blob sentinel (comma, KIND, SIZE)",
+        "format-constructed",
+        True,
+        12,
+        _build_C,
+    ),
+    Case(
+        "D_bare",
+        "24-hex bare <<ccr:HASH>> sentinel (>> immediately after hash)",
+        "format-constructed",
+        True,
+        24,
+        _build_D,
+    ),
+    Case(
+        "E_bytes_duplicate",
+        "24-hex cross-message exact-duplicate note (space sep, like A)",
+        "producer-driven",
+        True,
+        24,
+        _build_E,
+    ),
+    Case(
+        "F_bytes_near_duplicate",
+        "24-hex cross-message near-duplicate note (space sep)",
+        "producer-driven",
+        True,
+        24,
+        _build_F,
+    ),
+    Case(
+        "G_diff_retrieve_full",
+        "24-hex MD5 diff marker ('Retrieve full diff:', generic fallback)",
+        "format-constructed",
+        True,
+        24,
+        _build_G,
+    ),
+    Case(
+        "H_retrieve_more",
+        "24-hex kompress/log/search marker ('Retrieve more:')",
+        "format-constructed",
+        True,
+        24,
+        _build_H,
+    ),
+    Case(
+        "I_read_stale",
+        "24-hex read_lifecycle stale marker — NOT scanned, direct-store recovery",
+        "format-constructed",
+        False,
+        24,
+        _build_I,
+    ),
 ]
 
 
@@ -623,8 +678,7 @@ def test_format_constructed_fixtures_use_owned_grammar_pieces() -> None:
         else:
             # Shape I: not enumerated by any spec pattern (direct-store only).
             assert union == [], (
-                f"{case.shape_id}: expected NO spec match (direct-store recovery), "
-                f"got {union!r}"
+                f"{case.shape_id}: expected NO spec match (direct-store recovery), got {union!r}"
             )
 
 
@@ -641,9 +695,9 @@ def test_double_angle_separators_are_exactly_the_owned_set() -> None:
     # Producer-emitted separators (A space, C comma, B '#', D '>>').
     for marker in (
         f"<<ccr:{h12} 3_rows_offloaded>>",  # space
-        f"<<ccr:{h12},base64,1.1kB>>",      # comma
-        f"<<ccr:{h12}#rows 7_chunks>>",     # '#'
-        f"<<ccr:{h12}>>",                   # bare '>>'
+        f"<<ccr:{h12},base64,1.1kB>>",  # comma
+        f"<<ccr:{h12}#rows 7_chunks>>",  # '#'
+        f"<<ccr:{h12}>>",  # bare '>>'
     ):
         assert inj.scan_for_markers([{"role": "user", "content": marker}]) == [h12], (
             f"owned separator did not surface the hash: {marker!r}"

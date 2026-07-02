@@ -20,6 +20,7 @@ someone "fixes" #8 by falsifying ``compressed_count`` (lowering it below the
 real rows kept), the count-equality assertion fails — guarding the
 TOIN-count-integrity invariant.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,10 +32,7 @@ def _lossless_array(n: int = 60) -> str:
     # Uniform-schema dicts: the analyzer compacts to csv-schema (lossless,
     # row-preserving) rather than dropping rows. Distinct values keep it
     # from collapsing to a row-drop strategy.
-    items = [
-        {"id": i, "status": "ok", "name": f"item_{i:03d}", "score": i * 7}
-        for i in range(n)
-    ]
+    items = [{"id": i, "status": "ok", "name": f"item_{i:03d}", "score": i * 7} for i in range(n)]
     return json.dumps(items)
 
 

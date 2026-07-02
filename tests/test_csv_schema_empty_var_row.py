@@ -14,6 +14,7 @@ the trailing-newline artifact never becomes a phantom row.
 This is a FULL-PIPELINE parity test: real Rust-encode (ContentRouter.compress)
 → Python decode_csv_schema_rows → byte-exact deep equality.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,10 +39,9 @@ def _compress_to_csv_text(items: list[dict]) -> str:
 def test_empty_sole_var_col_row_round_trips_byte_exact() -> None:
     # seq becomes an arith fold (0+1); msg is the sole var column with an
     # empty value at index 1. Pad to 40 rows so the lossless CSV path engages.
-    items = (
-        [{"seq": 0, "msg": "hello"}, {"seq": 1, "msg": ""}, {"seq": 2, "msg": "world"}]
-        + [{"seq": i, "msg": f"m{i}"} for i in range(3, 40)]
-    )
+    items = [{"seq": 0, "msg": "hello"}, {"seq": 1, "msg": ""}, {"seq": 2, "msg": "world"}] + [
+        {"seq": i, "msg": f"m{i}"} for i in range(3, 40)
+    ]
     text = _compress_to_csv_text(items)
     # Confirm we hit the single-var-col + arith-fold shape this bug needs.
     assert text.startswith("[40]{msg:string,seq:int=0+1}"), f"unexpected encoding: {text[:60]!r}"

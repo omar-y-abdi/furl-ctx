@@ -17,18 +17,19 @@ compress() was actually called with. If a worker silently fell back to defaults
 ``RouterRuntime``), ``seen_force`` would be all-False and
 ``test_force_kompress_reaches_worker_threads`` fails.
 """
+
 from __future__ import annotations
 
 import threading
 
 import pytest
 
+from headroom.tokenizers import get_tokenizer
 from headroom.transforms.content_router import (
     ContentRouter,
     ContentRouterConfig,
     RouterRuntime,
 )
-from headroom.tokenizers import get_tokenizer
 
 
 @pytest.fixture
@@ -85,9 +86,7 @@ def test_force_kompress_reaches_worker_threads(monkeypatch, _force_workers) -> N
     )
     # Every worker compression must observe force_kompress=True by value.
     assert seen_force, "force_kompress was never observed"
-    assert all(seen_force), (
-        f"force_kompress dropped before a worker thread: observed {seen_force}"
-    )
+    assert all(seen_force), f"force_kompress dropped before a worker thread: observed {seen_force}"
 
 
 def test_default_options_unchanged_in_workers(monkeypatch, _force_workers) -> None:

@@ -59,7 +59,7 @@ def strategy_from_detection(config: Any, detection: Any) -> CompressionStrategy:
         ContentType.PLAIN_TEXT: CompressionStrategy.TEXT,
     }
 
-    strategy = mapping.get(detection.content_type, config.fallback_strategy)
+    strategy: CompressionStrategy = mapping.get(detection.content_type, config.fallback_strategy)
 
     # Override: prefer CodeAware for code if configured
     if strategy == CompressionStrategy.CODE_AWARE and not config.prefer_code_aware_for_code:
@@ -109,7 +109,7 @@ def adaptive_min_ratio(config: Any, context_pressure: float) -> float:
     Monotone non-decreasing in ``context_pressure``; clamped to
     ``[relaxed, aggressive]``.
     """
-    relaxed = config.min_ratio_relaxed
-    aggressive = config.min_ratio_aggressive
+    relaxed: float = config.min_ratio_relaxed
+    aggressive: float = config.min_ratio_aggressive
     min_ratio = relaxed + (aggressive - relaxed) * context_pressure
     return max(relaxed, min(aggressive, min_ratio))

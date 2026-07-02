@@ -12,6 +12,7 @@ log messages / stack traces under a common prefix).
 This exercises the engine end-to-end (real compaction render -> Python decoder)
 and asserts byte-exact reconstruction, proven by sha256 over the full set.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -47,9 +48,7 @@ def test_affix_column_with_embedded_newline_roundtrips_byte_exact() -> None:
             "file": f"pkg/svc_{i:03d}/handler.go",
             "line": 7 + i,
             "match": (
-                f"panic: nil deref at op_{i}\n"
-                f"\tgoroutine {i} [running]:\n"
-                f"\tmain.handle(0x{i:x})"
+                f"panic: nil deref at op_{i}\n\tgoroutine {i} [running]:\n\tmain.handle(0x{i:x})"
             ),
         }
         for i in range(96)
@@ -79,9 +78,7 @@ def test_affix_quote_chars_do_not_leak_into_value() -> None:
         {"k": "id-2", "v": 'ERR beta\n  at "frame_2"\n  end'},
         {"k": "id-3", "v": 'ERR gamma\n  at "frame_3"\n  end'},
     ]
-    result = ContentRouter(ContentRouterConfig()).compress(
-        json.dumps(items, ensure_ascii=False)
-    )
+    result = ContentRouter(ContentRouterConfig()).compress(json.dumps(items, ensure_ascii=False))
     decoded = _decode_any(result.compressed)
     if decoded is None:
         # Small arrays may pass through untouched; only assert when compacted.
@@ -89,6 +86,4 @@ def test_affix_quote_chars_do_not_leak_into_value() -> None:
     by_k = {r.get("k"): r.get("v") for r in decoded if "k" in r}
     for it in items:
         if it["k"] in by_k:
-            assert by_k[it["k"]] == it["v"], (
-                f"value corrupted: {by_k[it['k']]!r} != {it['v']!r}"
-            )
+            assert by_k[it["k"]] == it["v"], f"value corrupted: {by_k[it['k']]!r} != {it['v']!r}"

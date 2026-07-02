@@ -20,24 +20,23 @@ Three tests:
 from __future__ import annotations
 
 import textwrap
-import unittest.mock as mock
 
 import pytest
 
 from headroom.cache.compression_store import (
     CompressionStore,
-    set_request_compression_store,
     clear_request_compression_store,
+    set_request_compression_store,
 )
 from headroom.transforms.diff_compressor import (
     DiffCompressor,
     DiffCompressorConfig,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_large_diff(n_files: int = 5, hunks_each: int = 20) -> str:
     """Generate a synthetic git diff large enough to trigger CCR emission.
@@ -57,7 +56,7 @@ def _make_large_diff(n_files: int = 5, hunks_each: int = 20) -> str:
         parts.append(header)
         for h in range(hunks_each):
             hunk = textwrap.dedent(f"""\
-                @@ -{h*10+1},{h*10+6} +{h*10+1},{h*10+6} @@
+                @@ -{h * 10 + 1},{h * 10 + 6} +{h * 10 + 1},{h * 10 + 6} @@
                  context line one for file {i} hunk {h}
                  context line two for file {i} hunk {h}
                 -old code line A in file {i} hunk {h}
@@ -87,6 +86,7 @@ def _make_tiny_diff() -> str:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def isolated_store():
     """Give each test its own fresh CompressionStore via the request-scoped
@@ -101,6 +101,7 @@ def isolated_store():
 # ---------------------------------------------------------------------------
 # Test 1 — PRIMARY (RED → GREEN): sidecar must persist under cache_key
 # ---------------------------------------------------------------------------
+
 
 class TestCompressWithStatsPersistsToStore:
     """compress_with_stats must write the original content into the Python CCR
@@ -167,6 +168,7 @@ class TestCompressWithStatsPersistsToStore:
 # Test 2 — NO-OP: tiny diff produces no cache_key → no store write, no error
 # ---------------------------------------------------------------------------
 
+
 class TestCompressWithStatsNoOpSmallDiff:
     """When CCR does not fire (diff below threshold), compress_with_stats
     must not write to the store and must not raise any exception."""
@@ -179,12 +181,11 @@ class TestCompressWithStatsNoOpSmallDiff:
         result, _stats = compressor.compress_with_stats(diff)
 
         # No cache_key should be emitted for a tiny diff.
-        assert result.cache_key is None, (
-            "Expected no cache_key for a tiny diff below CCR threshold"
-        )
+        assert result.cache_key is None, "Expected no cache_key for a tiny diff below CCR threshold"
         # The store must remain empty.
         # We can verify this by checking that retrieval of a synthetic key fails.
         import hashlib
+
         synthetic = hashlib.sha256(diff.encode()).hexdigest()[:24]
         assert isolated_store.retrieve(synthetic) is None
 
@@ -203,6 +204,7 @@ class TestCompressWithStatsNoOpSmallDiff:
 # ---------------------------------------------------------------------------
 # Test 3 — PARITY: compress() and compress_with_stats() use the same key
 # ---------------------------------------------------------------------------
+
 
 class TestCompressAndSidecarSameCacheKey:
     """compress_with_stats and compress (the main path) must persist under

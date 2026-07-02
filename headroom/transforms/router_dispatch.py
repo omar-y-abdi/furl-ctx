@@ -124,9 +124,7 @@ class StrategyDispatcher:
                 # falls through to Kompress (source code keeps routing there).
                 if compressed is None:
                     # Fallback to Kompress
-                    compressed, compressed_tokens = try_kompress(
-                        content, context, question
-                    )
+                    compressed, compressed_tokens = try_kompress(content, context, question)
                     strategy = CompressionStrategy.KOMPRESS  # Update for TOIN
                     actual_strategy = strategy
                     compressor_name = "KompressCompressor"
@@ -246,9 +244,7 @@ class StrategyDispatcher:
             fallback_no_savings = compressed == content or compressed_tokens >= original_tokens
             if fallback_eligible_strategy and fallback_no_savings:
                 strategy_chain.append(CompressionStrategy.KOMPRESS.value)
-                fallback_compressed, fallback_tokens = try_kompress(
-                    content, context, question
-                )
+                fallback_compressed, fallback_tokens = try_kompress(content, context, question)
                 if fallback_tokens < compressed_tokens:
                     compressed = fallback_compressed
                     compressed_tokens = fallback_tokens

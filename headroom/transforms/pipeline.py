@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from ..config import (
     CompressRequest,
@@ -27,6 +27,18 @@ from .cross_message_dedup import CrossMessageDeduper
 logger = logging.getLogger(__name__)
 
 _N = TypeVar("_N", int, float)
+
+
+class _ProviderLike(Protocol):
+    """Minimal structural interface for provider objects.
+
+    Only ``get_token_counter`` is accessed on the provider inside
+    ``TransformPipeline``; keeping the protocol minimal avoids coupling
+    this module to any concrete provider class.
+    """
+
+    def get_token_counter(self, model: str) -> Any:
+        """Return a token-counting callable for *model*."""
 
 
 def _breaker_env(name: str, default: _N, cast: Callable[[str], _N]) -> _N:
@@ -64,7 +76,7 @@ class TransformPipeline:
         self,
         config: HeadroomConfig | None = None,
         transforms: list[Transform] | None = None,
-        provider: object | None = None,
+        provider: _ProviderLike | None = None,
     ):
         """
         Initialize pipeline.
@@ -318,9 +330,7 @@ class TransformPipeline:
                     duration_ms,
                 )
             else:
-                logger.debug(
-                    "Transform %s: no changes [%.1fms]", transform.name, duration_ms
-                )
+                logger.debug("Transform %s: no changes [%.1fms]", transform.name, duration_ms)
 
             # Record diff if enabled
             if generate_diff:

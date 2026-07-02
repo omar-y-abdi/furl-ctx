@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 
 from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
-
 from tests.test_ccr_recovery_invariant import _decode_csv_schema, _repr
 
 # These tests assert the LOSSLESS CSV-schema rendering directly (every
@@ -111,9 +110,9 @@ def test_ditto_marks_round_trip_consecutive_repeats() -> None:
     body = text.split("\n")[1:]
 
     # Runs of the same path render as ditto cells after the first row.
-    assert any(
-        line.startswith("=,") or ",=," in line or line.endswith(",=") for line in body
-    ), f"expected ditto marks in rows; first rows: {body[:3]}"
+    assert any(line.startswith("=,") or ",=," in line or line.endswith(",=") for line in body), (
+        f"expected ditto marks in rows; first rows: {body[:3]}"
+    )
     # Each distinct path appears exactly once (first row of its run).
     for d in runs:
         assert text.count(d) == 1
@@ -126,10 +125,7 @@ def test_ditto_marks_round_trip_consecutive_repeats() -> None:
 def test_literal_equals_sign_cell_is_not_mistaken_for_ditto() -> None:
     # A real data cell whose value is exactly "=" must render CSV-quoted
     # so bare `=` stays unambiguous, and must round-trip as the literal.
-    items = [
-        {"id": i, "op": "=" if i % 2 == 0 else f"op-{i}", "v": f"val-{i}"}
-        for i in range(40)
-    ]
+    items = [{"id": i, "op": "=" if i % 2 == 0 else f"op-{i}", "v": f"val-{i}"} for i in range(40)]
     text = _compress_to_text(items)
     assert '"="' in text, f"literal '=' cell must be quoted: {text.split(chr(10))[:4]}"
 
@@ -171,8 +167,7 @@ def test_arith_fold_monotone_counter_round_trips() -> None:
     # The counter column is folded: no bare counter cells in the rows.
     body_lines = text.split("\n")[1:]
     assert all("," not in line for line in body_lines if line), (
-        "rows must carry only the latency cell after const + arith folds: "
-        f"{body_lines[:3]}"
+        f"rows must carry only the latency cell after const + arith folds: {body_lines[:3]}"
     )
 
     recovered = _reconstruct(text)
@@ -273,10 +268,8 @@ def test_dict_encoding_low_cardinality_column_round_trips() -> None:
 def test_dict_encoding_values_with_commas_round_trip() -> None:
     # Dictionary values are CSV-escaped in the preamble line; commas and
     # quotes inside a value must survive reconstruction exactly.
-    names = ['Smith, John', 'O"Hara, Anne', "plain name"]
-    items = [
-        {"name": names[(i * 2) % 3], "event": f"login attempt {i}"} for i in range(45)
-    ]
+    names = ["Smith, John", 'O"Hara, Anne', "plain name"]
+    items = [{"name": names[(i * 2) % 3], "event": f"login attempt {i}"} for i in range(45)]
     text = _compress_to_text(items)
     assert "__dict:name=" in text, text.split("\n")[:3]
 
@@ -292,8 +285,7 @@ def test_all_distinct_string_column_never_dict_encodes() -> None:
     # structure, which the engine may fold losslessly; the honest gate is
     # "no dictionary encoding" + exact round-trip.
     items = [
-        {"path": f"src/pkg_{i}/module_{i}.py", "match": f"def handler_{i}():"}
-        for i in range(40)
+        {"path": f"src/pkg_{i}/module_{i}.py", "match": f"def handler_{i}():"} for i in range(40)
     ]
     text = _compress_to_text(items)
     assert "__dict:" not in text, "all-distinct column must not dict-encode"
@@ -333,9 +325,7 @@ def test_decimal_scale_fold_round_trips() -> None:
 def test_arith_fold_negative_step_round_trips() -> None:
     # Descending counters (e.g. remaining-retries) fold with a negative
     # step and reconstruct exactly.
-    items = [
-        {"remaining": 500 - 5 * i, "event": f"attempt-{i}-of-100"} for i in range(40)
-    ]
+    items = [{"remaining": 500 - 5 * i, "event": f"attempt-{i}-of-100"} for i in range(40)]
     text = _compress_to_text(items)
     decl = text.split("\n", 1)[0]
     assert "remaining:int=500+-5" in decl, decl

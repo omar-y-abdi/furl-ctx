@@ -110,7 +110,9 @@ class NeedleResult:
     n_visible_rows: int  # how many distinct rows survived visibly
 
 
-def _inject(rows: list[dict[str, Any]], needle: dict[str, Any], position: str) -> list[dict[str, Any]]:
+def _inject(
+    rows: list[dict[str, Any]], needle: dict[str, Any], position: str
+) -> list[dict[str, Any]]:
     """Return a NEW array with ``needle`` inserted at ``position``.
 
     Immutable: the input ``rows`` list is not mutated.

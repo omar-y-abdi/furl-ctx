@@ -11,6 +11,7 @@ No production change here — this only adds the missing coverage. Tests are
 mutation-sensitive: they pin the exact sentinel KEY and the filter behavior so
 changing either is caught.
 """
+
 from __future__ import annotations
 
 import pytest

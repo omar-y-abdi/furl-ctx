@@ -20,7 +20,6 @@ import sys
 
 from headroom import compress
 from headroom.cache.compression_store import reset_compression_store
-
 from verify.heldout import generators as gen
 
 MARKERS = {

@@ -11,6 +11,7 @@ output is unaffected (this is diagnostics/parsing).
 
 Mutation-sensitive: reverting to ``.get("text", "")`` re-raises TypeError.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -31,9 +32,7 @@ def test_extract_tool_result_text_handles_none() -> None:
 
 def test_get_message_content_text_handles_none() -> None:
     # site :444
-    out = get_message_content_text(
-        {"role": "user", "content": [{"type": "text", "text": None}]}
-    )
+    out = get_message_content_text({"role": "user", "content": [{"type": "text", "text": None}]})
     assert out == ""
 
 
@@ -51,10 +50,10 @@ def test_parse_message_to_blocks_handles_none() -> None:
 @pytest.mark.parametrize(
     "block,expected",
     [
-        ({"type": "text", "text": None}, ""),       # explicit None
-        ({"type": "text", "text": ""}, ""),          # empty string preserved
+        ({"type": "text", "text": None}, ""),  # explicit None
+        ({"type": "text", "text": ""}, ""),  # empty string preserved
         ({"type": "text", "text": "hello"}, "hello"),  # normal value preserved
-        ({"type": "text"}, ""),                      # absent key
+        ({"type": "text"}, ""),  # absent key
     ],
 )
 def test_text_coercion_matrix(block: dict, expected: str) -> None:

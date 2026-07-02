@@ -85,9 +85,7 @@ def _compress_to_text(items: list) -> str:
     (when the array is too small to compress).  In the latter case we fall
     through and return the raw rendered string so callers can introspect.
     """
-    result = ContentRouter(_LOSSLESS_FIRST).compress(
-        json.dumps(items, ensure_ascii=False)
-    )
+    result = ContentRouter(_LOSSLESS_FIRST).compress(json.dumps(items, ensure_ascii=False))
     rendered = result.compressed
     try:
         parsed = json.loads(rendered)
@@ -257,11 +255,13 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
         #   - ``path``: head-dict column (few ``<root>/`` heads, unique tails)
         #     whose tails carry a comma AND a double-quote, so every encoded
         #     ``<idx><delim><tail>`` row cell ships CSV-quoted.
-        rows.append({
-            **row,
-            "banner": BANNER,
-            "path": f'{HEAD_ROOTS[i % len(HEAD_ROOTS)]}/job {i}, "part {i % 4}".log',
-        })
+        rows.append(
+            {
+                **row,
+                "banner": BANNER,
+                "path": f'{HEAD_ROOTS[i % len(HEAD_ROOTS)]}/job {i}, "part {i % 4}".log',
+            }
+        )
     return rows
 
 
@@ -286,8 +286,7 @@ def test_split_logical_lines_matches_plain_split_on_unquoted_text() -> None:
     ]
     for s in cases:
         assert _split_logical_lines(s) == s.split("\n"), (
-            f"mismatch for {s!r}: "
-            f"got {_split_logical_lines(s)!r}, expected {s.split(chr(10))!r}"
+            f"mismatch for {s!r}: got {_split_logical_lines(s)!r}, expected {s.split(chr(10))!r}"
         )
 
 
@@ -304,9 +303,7 @@ def test_split_logical_lines_keeps_embedded_newline_inside_quoted_field() -> Non
     ]
     for text, expected in cases:
         result = _split_logical_lines(text)
-        assert result == expected, (
-            f"Input {text!r}: got {result!r}, expected {expected!r}"
-        )
+        assert result == expected, f"Input {text!r}: got {result!r}, expected {expected!r}"
 
 
 # ──────────────────── Test #1 — Cluster-A targeted regression ─────────────────
@@ -384,11 +381,7 @@ def test_embedded_newline_multi_line_stack_trace_round_trips() -> None:
     items = [
         {
             "id": i,
-            "trace": (
-                f"Traceback:\n"
-                f"  File test.py, line {i * 3 + 1}\n"
-                f"ValueError: row {i}"
-            ),
+            "trace": (f"Traceback:\n  File test.py, line {i * 3 + 1}\nValueError: row {i}"),
             "level": "ERROR" if i % 2 == 0 else "WARN",
         }
         for i in range(60)
@@ -403,17 +396,13 @@ def test_embedded_newline_multi_line_stack_trace_round_trips() -> None:
     expected = {_repr(it) for it in items}
     missing = expected - recovered
     assert not missing, (
-        f"{len(missing)}/{len(items)} row(s) lost.\n"
-        f"First missing: {sorted(missing)[:1]}"
+        f"{len(missing)}/{len(items)} row(s) lost.\nFirst missing: {sorted(missing)[:1]}"
     )
 
 
 def test_comma_in_cell_round_trips_lossless() -> None:
     """A string cell containing a literal comma must round-trip correctly."""
-    items = [
-        {"id": i, "msg": f"step {i}: collect, process, store", "ok": True}
-        for i in range(60)
-    ]
+    items = [{"id": i, "msg": f"step {i}: collect, process, store", "ok": True} for i in range(60)]
 
     text = _compress_csv(items)
     rows = decode_csv_schema_rows(text)
@@ -426,10 +415,7 @@ def test_comma_in_cell_round_trips_lossless() -> None:
 
 def test_embedded_double_quote_in_cell_round_trips_lossless() -> None:
     """A string cell containing a double-quote must round-trip correctly."""
-    items = [
-        {"id": i, "msg": f'He said "hello {i}" clearly', "tag": "quote"}
-        for i in range(60)
-    ]
+    items = [{"id": i, "msg": f'He said "hello {i}" clearly', "tag": "quote"} for i in range(60)]
 
     text = _compress_csv(items)
     rows = decode_csv_schema_rows(text)
@@ -466,11 +452,11 @@ def test_null_missing_empty_string_are_distinct_on_lossless_path() -> None:
     for i in range(60):
         shape = i % 3
         if shape == 0:
-            items.append({"a": None, "b": f"v{i}"})       # JSON null
+            items.append({"a": None, "b": f"v{i}"})  # JSON null
         elif shape == 1:
-            items.append({"b": f"v{i}"})                    # key "a" absent
+            items.append({"b": f"v{i}"})  # key "a" absent
         else:
-            items.append({"a": "", "b": f"v{i}"})          # empty string
+            items.append({"a": "", "b": f"v{i}"})  # empty string
 
     text = _compress_csv(items)
     rows = decode_csv_schema_rows(text)
@@ -502,7 +488,7 @@ def test_literal_sentinel_string_value_round_trips_as_string() -> None:
     for i in range(60):
         shape = i % 3
         if shape == 0:
-            items.append({"a": "__null__", "b": f"v{i}"})     # literal sentinel
+            items.append({"a": "__null__", "b": f"v{i}"})  # literal sentinel
         elif shape == 1:
             items.append({"a": "__missing__", "b": f"v{i}"})  # literal sentinel
         else:
@@ -538,10 +524,7 @@ def test_multiline_string_constant_column_round_trips_lossless() -> None:
     ``decode_csv_schema_rows`` returned ``None`` — 100% silent,
     unrecoverable loss with no CCR sentinel.
     """
-    items = [
-        {"id": i, "msg": f"event {i} ok", "note": "line1\nline2"}
-        for i in range(60)
-    ]
+    items = [{"id": i, "msg": f"event {i} ok", "note": "line1\nline2"} for i in range(60)]
 
     text = _compress_to_text(items)
     # The trigger shape: the declaration itself carries the quoted newline
@@ -558,9 +541,7 @@ def test_multiline_string_constant_column_round_trips_lossless() -> None:
         "did not match a declaration containing a CSV-quoted newline.\n"
         f"First physical line: {header_physical!r}"
     )
-    assert len(rows) == len(items), (
-        f"{len(items) - len(rows)}/{len(items)} row(s) lost"
-    )
+    assert len(rows) == len(items), f"{len(items) - len(rows)}/{len(items)} row(s) lost"
     assert rows == items, "reconstructed rows are not byte-exact"
 
 
@@ -575,8 +556,7 @@ def test_head_dict_cell_with_csv_quoted_tail_round_trips_lossless() -> None:
     such row was skipped: 0 rows recovered, silently, with no CCR sentinel.
     """
     items = [
-        {"id": i, "path": f"{'src' if i % 2 == 0 else 'lib'}/file {i}, part.rs"}
-        for i in range(20)
+        {"id": i, "path": f"{'src' if i % 2 == 0 else 'lib'}/file {i}, part.rs"} for i in range(20)
     ]
 
     text = _compress_to_text(items)
@@ -621,8 +601,7 @@ def test_fuzz_adversarial_cases_zero_silent_loss() -> None:
     # No invented data: every decoded row must match an input row.
     invented = recovered - expected
     assert not invented, (
-        f"Decoder invented {len(invented)} row(s) not in input: "
-        f"{sorted(invented)[:2]}"
+        f"Decoder invented {len(invented)} row(s) not in input: {sorted(invented)[:2]}"
     )
 
     # Zero silent loss on lossless path.
@@ -704,8 +683,7 @@ def test_fuzz_adversarial_cases_min_tokens_policy_zero_silent_loss() -> None:
         # MinTokens kept all rows inline (array below threshold) or
         # partially dropped rows with sentinels.
         sentinel_rows = [
-            row for row in parsed
-            if isinstance(row, dict) and _CCR_SENTINEL_KEY in row
+            row for row in parsed if isinstance(row, dict) and _CCR_SENTINEL_KEY in row
         ]
 
         if sentinel_rows:
@@ -714,8 +692,7 @@ def test_fuzz_adversarial_cases_min_tokens_policy_zero_silent_loss() -> None:
                 assert _CCR_SENTINEL_KEY in sentinel, f"Missing sentinel key: {sentinel}"
             # Rows that were not dropped must match the input (after stripping).
             non_sentinel = [
-                row for row in parsed
-                if isinstance(row, dict) and _CCR_SENTINEL_KEY not in row
+                row for row in parsed if isinstance(row, dict) and _CCR_SENTINEL_KEY not in row
             ]
             for row in non_sentinel:
                 stripped = _strip_engine(row)
@@ -763,9 +740,7 @@ def test_fuzz_decoder_never_invents_data() -> None:
 
     expected = {_repr(it) for it in items}
     for row in rows:
-        assert _repr(row) in expected, (
-            f"Decoder invented a row not present in the input: {row!r}"
-        )
+        assert _repr(row) in expected, f"Decoder invented a row not present in the input: {row!r}"
 
 
 def test_fuzz_embedded_newline_rows_never_split() -> None:

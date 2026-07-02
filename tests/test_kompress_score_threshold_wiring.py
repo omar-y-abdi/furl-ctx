@@ -14,6 +14,7 @@ the compression floor is byte-identical at the default value).
 Mutation-sensitive: reverting the call site to drop the threshold argument
 makes the model receive the 0.5 default instead of the configured 0.7.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -42,9 +43,7 @@ class _IdMatrix:
 class _Encoding:
     def __init__(self, word_lists):
         max_len = max(len(w) for w in word_lists)
-        self._batch = [
-            list(range(len(wl))) + [None] * (max_len - len(wl)) for wl in word_lists
-        ]
+        self._batch = [list(range(len(wl))) + [None] * (max_len - len(wl)) for wl in word_lists]
         self._ids = _IdMatrix(len(word_lists), max_len)
 
     def __getitem__(self, key):
@@ -82,12 +81,8 @@ _CONTENT = " ".join(f"w{i:02d}" for i in range(20))
 
 def _comp(monkeypatch, *, score_threshold: float):
     model = _ThresholdCapturingModel()
-    monkeypatch.setattr(
-        kc, "_load_kompress", lambda mid, dev: (model, _Tokenizer(), "onnx")
-    )
-    comp = KompressCompressor(
-        KompressConfig(score_threshold=score_threshold, enable_ccr=False)
-    )
+    monkeypatch.setattr(kc, "_load_kompress", lambda mid, dev: (model, _Tokenizer(), "onnx"))
+    comp = KompressCompressor(KompressConfig(score_threshold=score_threshold, enable_ccr=False))
     return comp, model
 
 

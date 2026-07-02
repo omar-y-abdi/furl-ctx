@@ -38,10 +38,11 @@ import hashlib
 import json
 import random
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -204,9 +205,7 @@ def gen_logs(seed: int, n: int, tier: str, *, repeated: bool = False) -> Case:
     subjects = _real_commit_subjects()
     real_hashes = _real_commit_hashes()
     levels = _real_log_levels()
-    base = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
-        seconds=rng.randint(0, 10_000_000)
-    )
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=rng.randint(0, 10_000_000))
 
     eff_tier = "low" if repeated else tier
     items: list[dict[str, Any]] = []
@@ -426,9 +425,7 @@ def gen_multiturn(seed: int, n: int, tier: str) -> Case:
     turn_msgs: list[dict[str, Any]] = []
     row_id = 0
     for t in range(n_turns):
-        turn_msgs.append(
-            {"role": "user", "content": f"Turn {t}: analyze the latest batch."}
-        )
+        turn_msgs.append({"role": "user", "content": f"Turn {t}: analyze the latest batch."})
         rows: list[dict[str, Any]] = []
         for _ in range(per_turn):
             if tier == "low":
@@ -479,12 +476,8 @@ def gen_multiturn(seed: int, n: int, tier: str) -> Case:
             rows.append(row)
             items.append(row)
             row_id += 1
-        turn_msgs.append(
-            {"role": "tool", "content": json.dumps(rows, ensure_ascii=False)}
-        )
-        turn_msgs.append(
-            {"role": "assistant", "content": f"Analyzed turn {t}; {len(rows)} rows."}
-        )
+        turn_msgs.append({"role": "tool", "content": json.dumps(rows, ensure_ascii=False)})
+        turn_msgs.append({"role": "assistant", "content": f"Analyzed turn {t}; {len(rows)} rows."})
 
     messages = cache_prefix_msgs + turn_msgs
     query = "Summarize all ERROR rows across the whole conversation"
@@ -552,7 +545,7 @@ def gen_disk(seed: int, n: int, tier: str) -> Case:
             row = {
                 "perms": rng.choice(perms_pool),
                 "links": rng.randint(1, 64),
-                "owner": f"u{rng.randint(0,999)}",
+                "owner": f"u{rng.randint(0, 999)}",
                 "group": _fresh_hash(rng, 6),
                 "size": rng.randint(0, 9_000_000),
                 "mtime": _iso_z(base + timedelta(seconds=rng.randint(0, 9_000_000))),
@@ -563,7 +556,7 @@ def gen_disk(seed: int, n: int, tier: str) -> Case:
             row = {
                 "perms": rng.choice(perms_pool),
                 "links": rng.randint(1, 64),
-                "owner": f"u{rng.randint(0,999)}",
+                "owner": f"u{rng.randint(0, 999)}",
                 "group": _fresh_hash(rng, 6),
                 "size": rng.randint(0, 9_000_000),
                 "mtime": _iso_z(base + timedelta(seconds=rng.randint(0, 9_000_000))),
@@ -640,7 +633,7 @@ def plant_needles(case: Case, seed: int, k: int = 3) -> Case:
         messages=messages,
         conversation=False,
         needle_indices=tuple(needle_indices),
-        meta={"needle_markers": [nd for nd in needles]},
+        meta={"needle_markers": list(needles)},
     )
 
 

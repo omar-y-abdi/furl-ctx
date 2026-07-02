@@ -30,10 +30,11 @@ import hashlib
 import json
 import random
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 HELDOUT_DATA_DIR = Path(__file__).resolve().parent / "heldout" / "data"
@@ -201,9 +202,7 @@ def gen_logs(seed: int, n: int, tier: str, *, repeated: bool = False) -> Case:
     authors = _real_authors()
     subjects = _real_commit_subjects()
     levels = _real_log_levels()
-    base = datetime(2025, 1, 1, tzinfo=timezone.utc) + timedelta(
-        seconds=rng.randint(0, 10_000_000)
-    )
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=rng.randint(0, 10_000_000))
 
     eff_tier = "low" if repeated else tier
     items: list[dict[str, Any]] = []
@@ -364,7 +363,7 @@ def gen_code(seed: int, n: int, tier: str) -> Case:
     # read N files). Default config skips user messages; tool/assistant
     # content is the compression target.
     messages = [{"role": "user", "content": query}]
-    for i, blob in enumerate(items):
+    for _i, blob in enumerate(items):
         messages.append({"role": "tool", "content": blob})
     return Case(
         family="code",
@@ -417,9 +416,7 @@ def gen_multiturn(seed: int, n: int, tier: str) -> Case:
     turn_msgs: list[dict[str, Any]] = []
     row_id = 0
     for t in range(n_turns):
-        turn_msgs.append(
-            {"role": "user", "content": f"Turn {t}: analyze the latest batch."}
-        )
+        turn_msgs.append({"role": "user", "content": f"Turn {t}: analyze the latest batch."})
         rows: list[dict[str, Any]] = []
         for _ in range(per_turn):
             if tier == "low":
@@ -451,12 +448,8 @@ def gen_multiturn(seed: int, n: int, tier: str) -> Case:
             rows.append(row)
             items.append(row)
             row_id += 1
-        turn_msgs.append(
-            {"role": "tool", "content": json.dumps(rows, ensure_ascii=False)}
-        )
-        turn_msgs.append(
-            {"role": "assistant", "content": f"Analyzed turn {t}; {len(rows)} rows."}
-        )
+        turn_msgs.append({"role": "tool", "content": json.dumps(rows, ensure_ascii=False)})
+        turn_msgs.append({"role": "assistant", "content": f"Analyzed turn {t}; {len(rows)} rows."})
 
     messages = cache_prefix_msgs + turn_msgs
     query = "Summarize all ERROR rows across the whole conversation"
@@ -489,7 +482,7 @@ def gen_disk(seed: int, n: int, tier: str) -> Case:
     rng = random.Random(seed)
     lock = _load_json("threejs_devtools_package-lock.json")
     pkgs = list((lock.get("packages") or {}).keys()) or ["node_modules/x"]
-    real_names = [p for p in pkgs if p][:max(50, n)] or ["node_modules/x"]
+    real_names = [p for p in pkgs if p][: max(50, n)] or ["node_modules/x"]
 
     perms_pool = ["drwxr-xr-x", "-rw-r--r--", "-rwxr-xr-x", "lrwxr-xr-x"]
     base = datetime(2025, 2, 1, tzinfo=timezone.utc)
@@ -520,7 +513,7 @@ def gen_disk(seed: int, n: int, tier: str) -> Case:
             row = {
                 "perms": rng.choice(perms_pool),
                 "links": rng.randint(1, 64),
-                "owner": f"u{rng.randint(0,999)}",
+                "owner": f"u{rng.randint(0, 999)}",
                 "group": _fresh_hash(rng, 6),
                 "size": rng.randint(0, 9_000_000),
                 "mtime": _iso_z(base + timedelta(seconds=rng.randint(0, 9_000_000))),
@@ -551,9 +544,7 @@ def gen_disk(seed: int, n: int, tier: str) -> Case:
 # ---------------------------------------------------------------------------
 
 
-def plant_needles(
-    case: Case, seed: int, k: int = 3
-) -> Case:
+def plant_needles(case: Case, seed: int, k: int = 3) -> Case:
     """Insert K unique 'needle' rows at start / middle / end of the items.
 
     Needles are maximally distinctive (a magic marker + fresh uuid) so a
@@ -610,7 +601,7 @@ def plant_needles(
         messages=messages,
         conversation=False,
         needle_indices=tuple(needle_indices),
-        meta={"needle_markers": [nd for nd in needles]},
+        meta={"needle_markers": list(needles)},
     )
 
 

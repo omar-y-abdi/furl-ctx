@@ -16,12 +16,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import pytest
-
 from headroom.cache.compression_store import CompressionStore
 from headroom.config import ReadLifecycleConfig
-from headroom.transforms.read_lifecycle import ReadLifecycleManager, ReadState
-
+from headroom.transforms.read_lifecycle import ReadLifecycleManager
 
 # Detect the phantom pattern: "Retrieve original: hash=<something>"
 _PHANTOM_HASH_RE = re.compile(r"Retrieve original:\s*hash=")
@@ -380,8 +377,8 @@ class TestStoreConfiguredBackedMarkerUnchanged:
         # If no substitution occurred (correct behavior), ccr_hashes is empty
         # If substitution occurred with phantom hash, ccr_hashes would be non-empty
         # Either way, any hashes in ccr_hashes should be backed:
-        for h in result.ccr_hashes:
+        if result.ccr_hashes:
             # With store=None there's nowhere to back a hash — so none should exist
-            assert False, (
+            raise AssertionError(
                 f"With store=None, result.ccr_hashes must be empty but got: {result.ccr_hashes}"
             )

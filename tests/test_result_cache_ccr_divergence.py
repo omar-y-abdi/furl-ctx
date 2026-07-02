@@ -86,15 +86,46 @@ def _log_rows(n: int = 90) -> list[dict]:
     reliably lossy so the CCR drop sentinel is emitted.
     """
     _PREFIXES = ["feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci"]
-    _AREAS = ["crusher", "proxy", "ccr", "router", "bench",
-               "tokenizer", "store", "pipeline", "compaction", "relevance"]
-    _VERBS = ["add", "remove", "rework", "guard", "pin",
-               "extend", "isolate", "deflake", "speed up", "harden"]
+    _AREAS = [
+        "crusher",
+        "proxy",
+        "ccr",
+        "router",
+        "bench",
+        "tokenizer",
+        "store",
+        "pipeline",
+        "compaction",
+        "relevance",
+    ]
+    _VERBS = [
+        "add",
+        "remove",
+        "rework",
+        "guard",
+        "pin",
+        "extend",
+        "isolate",
+        "deflake",
+        "speed up",
+        "harden",
+    ]
     _THINGS = [
-        "the lossy budget", "novelty fill", "sentinel emission", "marker parsing",
-        "store mirroring", "field-role gates", "ditto marks", "schema folding",
-        "query anchors", "drop accounting", "TTL handling", "thread-local state",
-        "import guards", "error surfaces", "byte parity",
+        "the lossy budget",
+        "novelty fill",
+        "sentinel emission",
+        "marker parsing",
+        "store mirroring",
+        "field-role gates",
+        "ditto marks",
+        "schema folding",
+        "query anchors",
+        "drop accounting",
+        "TTL handling",
+        "thread-local state",
+        "import guards",
+        "error surfaces",
+        "byte parity",
     ]
     return [
         {
@@ -225,9 +256,7 @@ class TestResultCacheCCRDivergence:
 
         # Confirm wipe cleared every backed entry.
         for h in hashes1:
-            assert py_store.retrieve(h) is None, (
-                f"Store reset did not clear hash {h!r}"
-            )
+            assert py_store.retrieve(h) is None, f"Store reset did not clear hash {h!r}"
 
         # --- Second apply: must be a Tier-2 result-cache HIT ---
         r2 = router.apply(messages, tokenizer)

@@ -46,8 +46,7 @@ def test_pinned_vectors_match_the_rust_literals() -> None:
     in either side's literal, or a hashing/truncation change, fails here."""
     for items, expected in _VECTORS:
         assert _hash_canonical(items) == expected, (
-            f"canonical {_canonical(items)!r} → {_hash_canonical(items)} "
-            f"≠ pinned {expected}"
+            f"canonical {_canonical(items)!r} → {_hash_canonical(items)} ≠ pinned {expected}"
         )
 
 

@@ -7,6 +7,7 @@ no existing test imported it). This minimal pass covers:
 
 Mutation-sensitive: any default value change flips a pin test.
 """
+
 from __future__ import annotations
 
 import pytest

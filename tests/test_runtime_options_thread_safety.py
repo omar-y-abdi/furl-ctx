@@ -185,8 +185,7 @@ class TestCompressConcurrentDifferentConfigs:
 
         # Serial baseline: each (config, messages) pair run alone.
         serial = {
-            idx: compress(msgs, **cases[case_i]).messages
-            for idx, (case_i, msgs) in enumerate(work)
+            idx: compress(msgs, **cases[case_i]).messages for idx, (case_i, msgs) in enumerate(work)
         }
 
         # Concurrent run on the same shared pipeline.
