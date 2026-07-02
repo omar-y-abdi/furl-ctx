@@ -255,10 +255,7 @@ class TestDiffCompressor:
         compressor output silently dropped the binary marker line.
         """
         config = DiffCompressorConfig(min_lines_for_ccr=1, enable_ccr=False)
-        diff = (
-            "diff --git a/img.png b/img.png\n"
-            "Binary files a/img.png and b/img.png differ\n"
-        )
+        diff = "diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n"
 
         compressor = DiffCompressor(config=config)
         first = compressor.compress(diff)
@@ -271,10 +268,7 @@ class TestDiffCompressor:
         """fixed_in_cor27: a trailing `\\r` (CRLF input) must not defeat
         the binary-marker match."""
         config = DiffCompressorConfig(min_lines_for_ccr=1, enable_ccr=False)
-        diff = (
-            "diff --git a/img.png b/img.png\r\n"
-            "Binary files a/img.png and b/img.png differ\r\n"
-        )
+        diff = "diff --git a/img.png b/img.png\r\nBinary files a/img.png and b/img.png differ\r\n"
 
         compressor = DiffCompressor(config=config)
         result = compressor.compress(diff)

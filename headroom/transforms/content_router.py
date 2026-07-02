@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from ..telemetry.models import ToolSignature
     from .kompress_compressor import KompressCompressor
 
+from ..ccr import marker_grammar
 from ..config import (
     DEFAULT_EXCLUDE_TOOLS,
     CompressRequest,
@@ -88,6 +90,52 @@ from .router_split import (
 )
 
 logger = logging.getLogger(__name__)
+
+# CCR-offload fallback shape. Trigger: content at least _OFFLOAD_MIN_CHARS
+# whose final ratio is >= _OFFLOAD_TRIGGER_RATIO (nothing meaningfully
+# compressed). The preview constants are display budgets only — recovery is
+# always the byte-exact original in the CCR store.
+_OFFLOAD_MIN_CHARS = 4000
+_OFFLOAD_TRIGGER_RATIO = 0.9
+_OFFLOAD_PREVIEW_MAX_ROWS = 20
+_OFFLOAD_PREVIEW_FIELD_CHARS = 120
+_OFFLOAD_PREVIEW_HEAD_LINES = 12
+_OFFLOAD_PREVIEW_TAIL_LINES = 4
+
+# Engine-emitted retrieval hints always carry a real 12/24-hex hash; content
+# that merely talks about the grammar (docs, this repo's own source read back
+# as tool output) uses placeholders and never matches.
+_RETRIEVE_HINT_PATTERN = re.compile(
+    r"Retrieve (?:more|original): hash=[0-9a-fA-F]{12}(?:[0-9a-fA-F]{12})?(?![0-9a-fA-F])"
+)
+
+
+def _is_unstructured_error_output(content: str) -> bool:
+    """True when *content* is a raw error dump that must ship verbatim.
+
+    Structured JSON is never a traceback: rows that merely mention errors
+    (git logs full of ``fix:`` subjects) route to SmartCrusher, whose
+    error-keyword preservation keeps genuine error rows visible.
+    """
+    if not content_has_strong_error_indicators(content):
+        return False
+    if content.lstrip()[:1] in ("[", "{"):
+        try:
+            json.loads(content)
+            return False
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return True
+
+
+def _looks_like_ccr_output(content: str) -> bool:
+    """True when *content* carries a real engine-emitted CCR marker (strict
+    grammar — content that merely mentions the marker text stays
+    compressible)."""
+    return bool(
+        _RETRIEVE_HINT_PATTERN.search(content)
+        or marker_grammar.DOUBLE_ANGLE_PATTERN.search(content)
+    )
 
 
 @dataclass(frozen=True)
@@ -515,6 +563,12 @@ class ContentRouterConfig:
     # the legacy lossless-wins-on-byte-ratio behavior.
     smart_crusher_routing_policy: str = "min-tokens"
 
+    # Last-resort reversible offload: large content no compressor could
+    # shrink is stored byte-exact in the CCR store and ships as an identity
+    # preview + retrieval marker (see _ccr_offload). Requires ccr_enabled —
+    # offloading without the recovery plane would be silent loss.
+    ccr_offload_fallback: bool = True
+
     # Tag protection: preserve custom/workflow XML tags from text compression.
     # When False (default), entire <custom-tag>content</custom-tag> blocks are
     # protected verbatim.  When True, only the tag markers are protected and
@@ -899,6 +953,12 @@ class ContentRouter(Transform):
                 for decision in result.routing_log
             ]
 
+        # Last-resort reversible offload for content nothing above could shrink.
+        if self._should_ccr_offload(content, result):
+            offloaded = self._ccr_offload(content, context, result)
+            if offloaded is not None:
+                result = offloaded
+
         # One observer call per routing decision; the observer is the
         # forcing function for catching strategy-level regressions.
         # Empty routing_log (passthrough fast path) → no calls.
@@ -949,6 +1009,124 @@ class ContentRouter(Transform):
                 )
             except Exception as e:  # pragma: no cover - defensive
                 logger.debug("CompressionObserver raised (non-fatal): %s", e)
+
+    def _should_ccr_offload(self, content: str, result: RouterCompressionResult) -> bool:
+        """Offload only large content the strategy chain left essentially
+        uncompressed, when the CCR recovery plane is on, and never for
+        content that already carries a real marker (its producer owns
+        recovery)."""
+        cfg = self.config
+        return (
+            cfg.ccr_offload_fallback
+            and cfg.ccr_enabled
+            and cfg.ccr_inject_marker
+            and len(content) >= _OFFLOAD_MIN_CHARS
+            and result.compression_ratio >= _OFFLOAD_TRIGGER_RATIO
+            and not _looks_like_ccr_output(content)
+        )
+
+    def _ccr_offload(
+        self, content: str, context: str, prior: RouterCompressionResult
+    ) -> RouterCompressionResult | None:
+        """Store *content* byte-exact in the CCR compression store and ship
+        an identity preview + ``{"_ccr_dropped": "<<ccr:HASH>>"}`` sentinel +
+        ``Retrieve more`` marker instead.
+
+        Fail-open: returns ``None`` (caller keeps the uncompressed result)
+        unless a verified store round-trip guarantees byte-exact recovery —
+        the marker is never emitted for content the store cannot reproduce.
+        """
+        rows, n_items = self._build_offload_preview(content)
+        preview = json.dumps(rows, ensure_ascii=False) if isinstance(rows, list) else rows
+        try:
+            from ..cache.compression_store import get_compression_store
+
+            store = get_compression_store()
+            ccr_hash = store.store(
+                original=content,
+                compressed=preview,
+                original_tokens=len(content.split()),
+                compressed_tokens=len(preview.split()),
+                original_item_count=n_items,
+                query_context=context or None,
+                compression_strategy=CompressionStrategy.CCR_OFFLOAD.value,
+            )
+            entry = store.retrieve(ccr_hash)
+            if entry is None or entry.original_content != content:
+                logger.warning("ccr_offload: round-trip failed for %s; keeping original", ccr_hash)
+                return None
+        except Exception:
+            logger.warning("ccr_offload: store unavailable; keeping original", exc_info=True)
+            return None
+
+        # Both marker grammars: the <<ccr:HASH>> pointer every CCR consumer
+        # walks, and the bracket form tool-injection describes to the LLM —
+        # which also pins this output against recompression on later turns.
+        sentinel = {
+            "_ccr_dropped": (
+                f"{marker_grammar.CCR_PREFIX}{ccr_hash}>> "
+                f"[{n_items} items compressed to 0. Retrieve more: hash={ccr_hash}]"
+            )
+        }
+        if isinstance(rows, list):
+            compressed = json.dumps([*rows, sentinel], ensure_ascii=False)
+        else:
+            compressed = preview + "\n" + json.dumps(sentinel, ensure_ascii=False)
+
+        logger.info(
+            "ccr_offload: %d chars (%d items) stored as %s", len(content), n_items, ccr_hash
+        )
+        return RouterCompressionResult(
+            compressed=compressed,
+            original=content,
+            strategy_used=CompressionStrategy.CCR_OFFLOAD,
+            strategy_chain=[*prior.strategy_chain, CompressionStrategy.CCR_OFFLOAD.value],
+            routing_log=[
+                RoutingDecision(
+                    content_type=self._content_type_from_strategy(prior.strategy_used),
+                    strategy=CompressionStrategy.CCR_OFFLOAD,
+                    original_tokens=len(content.split()),
+                    compressed_tokens=len(compressed.split()),
+                )
+            ],
+        )
+
+    @staticmethod
+    def _build_offload_preview(content: str) -> tuple[list[Any] | str, int]:
+        """Identity preview of *content*: for a JSON array of objects, the
+        leading rows with long string fields truncated (paths/ids stay
+        verbatim); otherwise the head/tail lines. Returns ``(rows | text,
+        n_items)``. Never reversible — recovery is the stored original."""
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list) and parsed and all(isinstance(item, dict) for item in parsed):
+            rows: list[Any] = []
+            for item in parsed[:_OFFLOAD_PREVIEW_MAX_ROWS]:
+                row: dict[str, Any] = {}
+                for k, v in item.items():
+                    if isinstance(v, str) and len(v) > _OFFLOAD_PREVIEW_FIELD_CHARS:
+                        row[k] = v[:_OFFLOAD_PREVIEW_FIELD_CHARS] + f"… [{len(v)} chars, in CCR]"
+                    elif isinstance(v, (str, int, float, bool)) or v is None:
+                        row[k] = v
+                    else:
+                        row[k] = f"[{type(v).__name__} omitted, in CCR]"
+                rows.append(row)
+            if len(parsed) > len(rows):
+                rows.append({"_preview": f"first {len(rows)} of {len(parsed)} rows"})
+            return rows, len(parsed)
+
+        lines = content.splitlines()
+        head, tail = _OFFLOAD_PREVIEW_HEAD_LINES, _OFFLOAD_PREVIEW_TAIL_LINES
+        if len(lines) <= head + tail:
+            return content, 1
+        return (
+            "\n".join(lines[:head])
+            + f"\n… [{len(lines) - head - tail} lines omitted, in CCR] …\n"
+            + "\n".join(lines[-tail:]),
+            1,
+        )
 
     def _determine_strategy(self, content: str) -> CompressionStrategy:
         """Determine the compression strategy from content analysis.
@@ -1683,7 +1861,7 @@ class ContentRouter(Transform):
                 self.config.protect_error_outputs
                 and role == "tool"
                 and len(content) <= self.config.error_protection_max_chars
-                and content_has_strong_error_indicators(content)
+                and _is_unstructured_error_output(content)
             ):
                 result_slots[i] = message
                 transforms_applied.append("router:protected:error_output")
@@ -1711,10 +1889,14 @@ class ContentRouter(Transform):
                 continue
 
             # Compression pinning: if this message was already compressed
-            # (contains a CCR retrieval marker), skip recompression.
-            # Recompressing would change byte content and break provider
-            # prefix caching with no meaningful further reduction.
-            if "Retrieve more: hash=" in content or "Retrieve original: hash=" in content:
+            # (carries a real engine-emitted CCR retrieval marker), skip
+            # recompression. Recompressing would change byte content and
+            # break provider prefix caching with no meaningful further
+            # reduction. Strict grammar match — raw content that merely
+            # MENTIONS the marker text (docs, or this engine's own source
+            # read back as a tool output) is not pinned and stays
+            # compressible.
+            if _looks_like_ccr_output(content):
                 result_slots[i] = message
                 route_counts.setdefault("already_compressed", 0)
                 route_counts["already_compressed"] += 1
@@ -2183,7 +2365,8 @@ class ContentRouter(Transform):
                 # `is_error` is Anthropic's explicit failure
                 # flag and suffices alone; the indicator scan catches error
                 # text without the flag but requires >=2 distinct keywords
-                # so benign outputs mentioning errors don't skip compression.
+                # AND an unstructured (non-JSON) shape, so benign row data
+                # mentioning errors doesn't skip compression.
                 # Above the size cap, fall through — LogCompressor preserves
                 # error lines in big logs.
                 if (
@@ -2191,8 +2374,7 @@ class ContentRouter(Transform):
                     and isinstance(tool_content, str)
                     and len(tool_content) <= self.config.error_protection_max_chars
                     and (
-                        block.get("is_error") is True
-                        or content_has_strong_error_indicators(tool_content)
+                        block.get("is_error") is True or _is_unstructured_error_output(tool_content)
                     )
                 ):
                     new_blocks.append(block)
@@ -2205,10 +2387,8 @@ class ContentRouter(Transform):
                 # Only process string content
                 if isinstance(tool_content, str) and len(tool_content) > min_chars:
                     # Compression pinning: skip already-compressed content
-                    if (
-                        "Retrieve more: hash=" in tool_content
-                        or "Retrieve original: hash=" in tool_content
-                    ):
+                    # (strict marker grammar — see _looks_like_ccr_output).
+                    if _looks_like_ccr_output(tool_content):
                         new_blocks.append(block)
                         if route_counts is not None:
                             route_counts.setdefault("already_compressed", 0)

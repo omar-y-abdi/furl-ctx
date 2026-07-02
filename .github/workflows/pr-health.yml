@@ -14,6 +14,9 @@ permissions:
   pull-requests: write
   checks: read
   statuses: read
+  # The status-check GraphQL rollup traverses checkSuite.workflowRun; without
+  # actions:read every run dies with "Resource not accessible by integration".
+  actions: read
 
 concurrency:
   group: pr-health-${{ github.event.pull_request.number || github.ref }}

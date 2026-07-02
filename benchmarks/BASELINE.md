@@ -1,9 +1,9 @@
 # BASELINE — Imp3 Honest Benchmark (Phase-2 current engine)
 
-- Captured: `2026-07-02T00:32:27.026888+00:00`
-- Commit: `566f34490e2207877c9086a227eab4ba14d9d434`
+- Captured: `2026-07-02T06:34:52.143428+00:00`
+- Commit: `cace67e0865a3295f1c3d4df54138e7f4ef8b19c`
 - Token model: `gpt-4o` (real tiktoken BPE via the engine's tokenizer registry)
-- Python: `3.14.2`  Platform: `macOS-15.7.6-x86_64-i386-64bit-Mach-O`
+- Python: `3.11.15`  Platform: `Linux-6.18.5-x86_64-with-glibc2.39`
 
 All numbers come from REAL captured data (no synthetic low-entropy
 inputs). Token counts use the SAME tokenizer the engine uses
@@ -23,12 +23,12 @@ inputs). Token counts use the SAME tokenizer the engine uses
 
 | dataset | items | tok before | tok after | lossless reduction | lossy drop ratio | info retention | path |
 |---|---:|---:|---:|---:|---:|---:|---|
-| code@7 | 7 | 41025 | 41025 | 0.0% | 0.0% | 100.0% | lossless |
+| code@7 | 7 | 41025 | 471 | 98.9% | 100.0% | 100.0% | LOSSY |
 | logs@90 | 90 | 8595 | 619 | 92.8% | 91.1% | 100.0% | LOSSY |
 | search@90 | 90 | 4102 | 318 | 92.2% | 85.6% | 100.0% | LOSSY |
-| repeated_logs@90 | 90 | 3621 | 131 | 96.4% | 98.9% | 100.0% | LOSSY |
+| repeated_logs@90 | 90 | 3621 | 120 | 96.7% | 95.6% | 100.0% | LOSSY |
 | disk@9 | 9 | 694 | 347 | 50.0% | 0.0% | 100.0% | lossless |
-| multiturn@135 | 135 | 14866 | 4369 | 70.6% | 49.6% | 100.0% | LOSSY |
+| multiturn@135 | 135 | 14866 | 2009 | 86.5% | 66.7% | 100.0% | LOSSY |
 
 ## Needle-recall
 

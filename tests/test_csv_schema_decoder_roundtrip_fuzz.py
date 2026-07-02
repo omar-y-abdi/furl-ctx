@@ -681,12 +681,8 @@ def _assert_decoded_exact_or_declined(items: list) -> str:
         parsed = None
     inline: set[str] = set()
     if isinstance(parsed, list):
-        inline = {
-            _repr(row) for row in parsed if not _has_json_ccr_sentinel(row)
-        }
-    recovered = inline | _ccr_recover_from_output(
-        items, ccr_enabled=True, ccr_inject_marker=True
-    )
+        inline = {_repr(row) for row in parsed if not _has_json_ccr_sentinel(row)}
+    recovered = inline | _ccr_recover_from_output(items, ccr_enabled=True, ccr_inject_marker=True)
     missing = expected - recovered
     assert not missing, (
         f"shape was declined from the lossless tier but "
@@ -799,8 +795,7 @@ def test_json_tagged_object_and_array_cells_round_trip_byte_exact() -> None:
     # The trigger shape must actually be on the wire: at least one
     # CSV-quoted JSON object cell and one quoted JSON array cell.
     assert '"{' in text and '"[' in text, (
-        f"expected CSV-quoted JSON container cells in the render; "
-        f"got:\n{text[:300]}"
+        f"expected CSV-quoted JSON container cells in the render; got:\n{text[:300]}"
     )
 
     rows = decode_csv_schema_rows(text)

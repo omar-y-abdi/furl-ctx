@@ -114,9 +114,7 @@ def test_fail_open_still_reraises_keyboard_interrupt(monkeypatch) -> None:
         def apply(self, **kwargs):  # noqa: ANN003, ANN201
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(
-        compress_module, "_get_pipeline", lambda: _InterruptingPipeline()
-    )
+    monkeypatch.setattr(compress_module, "_get_pipeline", lambda: _InterruptingPipeline())
 
     with pytest.raises(KeyboardInterrupt):
         compress(_messages(), model="gpt-4o")
@@ -206,9 +204,7 @@ def test_panic_at_bridge_propagates_through_pipeline_to_fail_open(monkeypatch) -
         "a bridge panic let lossy output stand — it was swallowed mid-pipeline "
         "or escaped compress() instead of reverting (silent loss / host crash)"
     )
-    assert "<<ccr:" not in json.dumps(result.messages), (
-        "lossy CCR marker survived a bridge panic"
-    )
+    assert "<<ccr:" not in json.dumps(result.messages), "lossy CCR marker survived a bridge panic"
     # The failure is surfaced, not masked as a benign no-op.
     assert result.error is not None, "fail-open did not fire; the panic was swallowed"
     assert "simulated Rust panic" in result.error
