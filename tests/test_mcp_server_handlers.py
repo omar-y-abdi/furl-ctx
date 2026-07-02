@@ -20,8 +20,10 @@ where ``mcp`` is installed.
 
 from __future__ import annotations
 
+import importlib
 import json
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -30,7 +32,10 @@ pytest.importorskip("mcp")
 
 import mcp.types as mt  # noqa: E402
 
-from headroom.cache.compression_store import reset_compression_store  # noqa: E402
+from headroom.cache.compression_store import (  # noqa: E402
+    get_compression_store,
+    reset_compression_store,
+)
 from headroom.ccr import mcp_server  # noqa: E402
 from headroom.ccr.mcp_server import (  # noqa: E402
     CCR_TOOL_NAME,
@@ -305,3 +310,96 @@ def test_read_tool_name_is_distinct_constant() -> None:
     # would silently misroute call_tool).
     names = {COMPRESS_TOOL_NAME, CCR_TOOL_NAME, STATS_TOOL_NAME, READ_TOOL_NAME}
     assert len(names) == 4
+
+
+# ─── COR-32 / COR-51 / COR-54 — retrieve-plane data-integrity regressions ───
+
+
+@pytest.mark.parametrize("case_fn", [str.upper, str.title], ids=["upper", "title"])
+async def test_retrieve_case_variant_hash_hits_lowercase_store_key(server, case_fn) -> None:
+    """COR-32: ``is_valid_ccr_hash`` is case-insensitive but store keys are
+    lowercase — an upper/title-cased hash passed the format guard then MISSED
+    in the store with a confusing eviction-style error. Ingress normalizes."""
+    h = "abcdef123456"
+    store = server._get_local_store()
+    store.store(original='[{"id": 7, "v": "needle"}]', compressed=f"<<ccr:{h}>>", explicit_hash=h)
+
+    env = _envelope(await server._handle_retrieve({"hash": case_fn(h)}))
+
+    assert "error" not in env, f"case-variant hash missed: {env}"
+    assert env["hash"] == h  # response reports the normalized store key
+    assert "needle" in env["original_content"]
+
+
+def test_local_store_singleton_carries_session_ttl(server) -> None:
+    """COR-51: the MCP process's store singleton is configured with the
+    session TTL on first init, and it IS the process singleton the pipeline's
+    own no-arg ``get_compression_store()`` call resolves to."""
+    store = server._get_local_store()
+    assert store.default_ttl_seconds == mcp_server.MCP_SESSION_TTL
+    assert get_compression_store() is store
+
+
+def test_pipeline_marker_rows_carry_session_ttl(server, monkeypatch) -> None:
+    """COR-51: the pipeline inside ``_compress_content`` persists dropped rows
+    under the marker hash embedded in the compressed text WITHOUT an explicit
+    ttl. Those rows must inherit MCP_SESSION_TTL, not the stock 300 s default
+    — otherwise granular retrieval via the embedded marker missed after five
+    minutes while the wrapper hash advertised session persistence. This also
+    pins ordering: the singleton must be configured BEFORE compress() runs its
+    own config-on-first-init ``get_compression_store()`` call."""
+    # headroom/__init__.py re-exports the compress FUNCTION, shadowing the
+    # submodule attribute — resolve the real module for patching.
+    compress_mod = importlib.import_module("headroom.compress")
+
+    marker_hash = "abc123def456"
+
+    def fake_compress(messages, **kwargs):
+        # Mimic the pipeline: persist dropped rows through the process
+        # singleton with NO explicit ttl (the default-TTL path), then embed
+        # the marker in the compressed text.
+        get_compression_store().store(
+            original='[{"id": 1, "v": "dropped row"}]',
+            compressed=f"<<ccr:{marker_hash}>>",
+            explicit_hash=marker_hash,
+        )
+        return types.SimpleNamespace(
+            messages=[{"role": "tool", "content": f"crushed <<ccr:{marker_hash}>>"}],
+            tokens_before=100,
+            tokens_after=10,
+            transforms_applied=["smart_crusher"],
+        )
+
+    monkeypatch.setattr(compress_mod, "compress", fake_compress)
+    result = server._compress_content("row " * 200)
+
+    store = get_compression_store()
+    marker_entry = store.retrieve(marker_hash)
+    assert marker_entry is not None, "embedded marker hash must resolve"
+    assert marker_entry.ttl == mcp_server.MCP_SESSION_TTL
+    wrapper_entry = store.retrieve(result["hash"])
+    assert wrapper_entry is not None
+    assert wrapper_entry.ttl == mcp_server.MCP_SESSION_TTL
+
+
+async def test_query_response_with_infinity_falls_back_to_byte_exact(server, monkeypatch) -> None:
+    """COR-54 backstop: if a query-path result somehow materializes float
+    inf/nan past the store's numeric-fidelity fallback, ``_handle_retrieve``
+    must not emit RFC-invalid bare ``Infinity`` — it returns the byte-exact
+    no-query response instead."""
+    h = "abcdef123456"
+    raw = '[{"reading": 1e400, "note": "needle"}]'
+    store = server._get_local_store()
+    store.store(original=raw, compressed=f"<<ccr:{h}>>", explicit_hash=h)
+    # Force the (normally unreachable) lossy search result past the store's
+    # numeric-fidelity fallback.
+    monkeypatch.setattr(store, "search", lambda hk, q, **kw: [{"reading": float("inf")}])
+
+    result = await server._handle_retrieve({"hash": h, "query": "reading"})
+
+    text = result[0].text
+    env = json.loads(
+        text,
+        parse_constant=lambda name: pytest.fail(f"bare {name} in MCP response"),
+    )
+    assert env["original_content"] == raw  # byte-exact no-query fallback

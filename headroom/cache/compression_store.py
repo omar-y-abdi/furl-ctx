@@ -37,10 +37,12 @@ Usage:
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 import heapq
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -359,7 +361,11 @@ class CompressionStore:
                 returns 404 even though the data is present.
 
         Returns:
-            Hash key for retrieving this content.
+            Hash key for retrieving this content. On a true hash collision
+            (same key, different live content) the store KEEPS the first
+            binding and refuses the overwrite — the returned key then
+            resolves to the earlier content and the refusal is logged at
+            ERROR.
         """
         # Reject a non-positive TTL loudly. ttl=0 (or negative) produces an
         # entry that is_expired() immediately (time.time()-created_at > 0), so it
@@ -439,27 +445,34 @@ class CompressionStore:
         with self._lock:
             self._evict_if_needed()
 
-            # CRITICAL FIX: Hash collision detection
-            # If hash already exists with DIFFERENT content, log a warning.
-            # This indicates either a hash collision or duplicate store calls.
+            # Hash collision handling. If the key already exists with
+            # DIFFERENT content it is a true hash collision (astronomically
+            # rare at 96-/48-bit keys) — KEEP-FIRST: refuse the overwrite.
+            # Rebinding would silently corrupt the already-emitted marker that
+            # points at the existing entry; refusing means the NEW caller's
+            # marker dangles instead, and dangles LOUDLY (error log here,
+            # cause-honest miss on retrieval of the changed content) rather
+            # than resolving old markers to foreign content. An expired
+            # same-key entry never reaches this branch: _evict_if_needed()
+            # above already reaped it, so a dead binding cannot wedge its key.
             existing = self._backend.get(hash_key)
             if existing is not None:
                 if existing.original_content != original:
-                    # True hash collision - different content, same hash
-                    # This is extremely rare with SHA256[:24] but should be logged
-                    logger.warning(
-                        "Hash collision detected: hash=%s tool=%s (existing_len=%d, new_len=%d)",
+                    logger.error(
+                        "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
+                        "new_len=%d) — keeping first binding, refusing overwrite; "
+                        "the new content is NOT stored and its marker will miss",
                         hash_key,
                         tool_name,
                         len(existing.original_content),
                         len(original),
                     )
-                else:
-                    # Same content being stored again - this is fine, just update
-                    logger.debug(
-                        "Duplicate store for hash=%s, updating entry",
-                        hash_key,
-                    )
+                    return hash_key
+                # Same content being stored again - this is fine, just update
+                logger.debug(
+                    "Duplicate store for hash=%s, updating entry",
+                    hash_key,
+                )
                 # Mark old heap entry as stale since we're replacing
                 self._stale_heap_entries += 1
 
@@ -690,12 +703,26 @@ class CompressionStore:
         Search should work for all of them. Preserve the legacy JSON-array
         result shape, but fall back to structured text chunks for everything
         else so `headroom_retrieve(hash, query=...)` can find plain-text
-        originals.
+        originals — and for canonicals whose numeric literals a Python float
+        round-trip would corrupt, so query results carry the exact source
+        bytes.
         """
 
         try:
-            parsed = json.loads(original_content)
+            parsed, numerics_lossy = self._loads_detecting_numeric_loss(original_content)
         except json.JSONDecodeError:
+            return self._plain_text_search_items(original_content)
+
+        if numerics_lossy:
+            # Numeric-fidelity fallback: the canonical parses, but at least
+            # one numeric literal cannot survive Python's float round-trip —
+            # e.g. 1e400 overflows to inf (re-emitted by json.dumps as the
+            # RFC-invalid bare Infinity) and >17-significant-digit decimals
+            # collapse. The engine's serde is configured with
+            # arbitrary_precision precisely to preserve these, and the
+            # no-query path returns verbatim bytes; serve text chunks sliced
+            # from the verbatim original instead of silently-corrupted
+            # re-parsed numbers.
             return self._plain_text_search_items(original_content)
 
         if isinstance(parsed, list):
@@ -707,6 +734,42 @@ class CompressionStore:
         if parsed is None:
             return []
         return [{"type": "json_scalar", "value": parsed}]
+
+    @staticmethod
+    def _loads_detecting_numeric_loss(original_content: str) -> tuple[Any, bool]:
+        """Parse JSON, flagging numeric literals a float round-trip corrupts.
+
+        Returns ``(parsed, lossy)`` where ``lossy`` is True when any float
+        literal overflows (``1e400`` → ``inf``), carries more precision than
+        a Python float can represent, or is a bare ``Infinity``/``NaN``
+        constant (parseable by Python, RFC-invalid to re-emit). The check is
+        value-level, not textual: ``1e3`` and ``1000.0`` denote the same
+        number, so they are NOT lossy. Integers are exempt — Python ints are
+        arbitrary-precision and re-serialize exactly. Raises
+        ``json.JSONDecodeError`` exactly like ``json.loads``.
+        """
+        lossy = False
+
+        def parse_float(literal: str) -> float:
+            nonlocal lossy
+            value = float(literal)
+            if not math.isfinite(value):
+                lossy = True
+            elif repr(value) != literal and decimal.Decimal(literal) != decimal.Decimal(
+                repr(value)
+            ):
+                lossy = True
+            return value
+
+        def parse_constant(name: str) -> float:
+            nonlocal lossy
+            lossy = True
+            return float(name)
+
+        parsed = json.loads(
+            original_content, parse_float=parse_float, parse_constant=parse_constant
+        )
+        return parsed, lossy
 
     def _json_object_search_items(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         """Return searchable leaf records for a JSON object."""

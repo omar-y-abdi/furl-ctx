@@ -331,14 +331,21 @@ class HeadroomMCPServer:
         """Get the shared compression store singleton (lazy init).
 
         Returns the same instance the compress path uses so retrieval can
-        see content compressed in-process. Called with no args to keep one
-        shared config; the compress path passes its own per-entry ``ttl``
-        at store time.
+        see content compressed in-process. The singleton's config is fixed on
+        FIRST init, so this passes ``default_ttl=MCP_SESSION_TTL``: the
+        pipeline run inside ``_compress_content`` persists dropped rows under
+        the marker hash embedded in the compressed text WITHOUT an explicit
+        ttl, and under the store's stock 300 s default those rows expired
+        after 5 minutes while the wrapper hash (stored with
+        ``ttl=MCP_SESSION_TTL``) advertised session persistence. Sharing the
+        session TTL as the store default keeps both retrieval surfaces alive
+        for the same window. The compress path still passes its own
+        per-entry ``ttl`` at store time.
         """
         if self._local_store is None:
             from headroom.cache.compression_store import get_compression_store
 
-            self._local_store = get_compression_store()
+            self._local_store = get_compression_store(default_ttl=MCP_SESSION_TTL)
         return self._local_store
 
     def _compress_content(self, content: str) -> dict[str, Any]:
@@ -347,6 +354,15 @@ class HeadroomMCPServer:
         Returns dict with compressed text, token counts, hash, etc.
         """
         from headroom.compress import compress
+
+        # Acquire (and thereby configure) the store singleton BEFORE running
+        # the pipeline: compress() persists marker-hash dropped rows through
+        # its own no-arg get_compression_store() call, and the singleton's
+        # default TTL is fixed on first init. Initializing here first
+        # guarantees those embedded-marker entries carry MCP_SESSION_TTL
+        # rather than the 300 s pipeline default, which would silently expire
+        # granular retrieval 5 minutes into a session-long window.
+        store = self._get_local_store()
 
         # Wrap content as a tool message (most common compression target)
         messages = [{"role": "tool", "content": content}]
@@ -358,7 +374,6 @@ class HeadroomMCPServer:
         output_tokens = result.tokens_after
 
         # Store original in local store for later retrieval
-        store = self._get_local_store()
         hash_key = store.store(
             original=content,
             compressed=compressed_content
@@ -679,6 +694,13 @@ class HeadroomMCPServer:
                 )
             ]
 
+        # Store keys are always lowercase (SHA-256 hexdigest output; store()
+        # lowercases explicit hashes) while the format guard above is
+        # case-insensitive — normalize at ingress so an upper/title-cased echo
+        # of a marker hash HITS instead of missing with a confusing
+        # "evicted/never stored" error.
+        hash_key = hash_key.lower()
+
         query = arguments.get("query")
         # INFO: the hash is a content-address (validated 12/24-hex above), safe
         # to log; the query is a user-supplied search string and the result can
@@ -692,6 +714,18 @@ class HeadroomMCPServer:
             len(query) if isinstance(query, str) else 0,
         )
         result = await self._retrieve_content(hash_key, query)
+        try:
+            response_text = json.dumps(result, indent=2, allow_nan=False)
+        except ValueError:
+            # The query path re-serializes parsed items, and a stored numeric
+            # that materialized as float inf/nan (e.g. 1e400) would be emitted
+            # as bare Infinity — RFC-invalid JSON a strict host rejects. The
+            # store's numeric-fidelity fallback (text chunks for lossy
+            # canonicals) makes this unreachable in normal operation; as a
+            # backstop, return the byte-exact no-query response — the original
+            # ships verbatim inside a JSON string — instead of corrupt numbers.
+            result = await self._retrieve_content(hash_key, None)
+            response_text = json.dumps(result, indent=2, allow_nan=False)
         # INFO: outcome — hash, whether the entry resolved, and the result size.
         # ``original_content`` (when present) must never reach the log; report a
         # boolean hit/miss and a char count instead of the payload.
@@ -704,7 +738,7 @@ class HeadroomMCPServer:
             result_chars,
         )
 
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        return [TextContent(type="text", text=response_text)]
 
     async def _handle_stats(self) -> list[TextContent]:
         """Handle headroom_stats tool call."""
