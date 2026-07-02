@@ -3126,7 +3126,10 @@ mod tests {
         assert_eq!(row_hashes.len(), 3, "index holds dropped rows only");
         for (rh, &orig_idx) in row_hashes.iter().zip(dropped_indices.iter()) {
             let payload = store.get(rh).expect("dropped-row chunk resolves");
-            assert_eq!(payload, canonical_array_json(std::slice::from_ref(&items[orig_idx])));
+            assert_eq!(
+                payload,
+                canonical_array_json(std::slice::from_ref(&items[orig_idx]))
+            );
         }
 
         // Kept rows are NOT in the store under their per-row hashes.
@@ -3196,7 +3199,10 @@ mod tests {
         assert_eq!(dropped_indices_from_kept(&[0, 2, 4], 5), vec![1, 3]);
         assert_eq!(dropped_indices_from_kept(&[], 3), vec![0, 1, 2]);
         assert_eq!(dropped_indices_from_kept(&[0, 0, 99], 3), vec![1, 2]);
-        assert_eq!(dropped_indices_from_kept(&[0, 1, 2], 3), Vec::<usize>::new());
+        assert_eq!(
+            dropped_indices_from_kept(&[0, 1, 2], 3),
+            Vec::<usize>::new()
+        );
 
         // Non-dict paths: multiset diff on values. Duplicates consume
         // one-for-one; synthesized kept items consume nothing.
