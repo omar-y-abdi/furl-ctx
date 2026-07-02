@@ -45,7 +45,11 @@
 //! call dropping more rows than `capacity` cannot keep every sentinel backed.
 //! The generation scheme makes eviction order well-defined and re-insert-safe;
 //! callers relying on the full sentinel window must configure a larger
-//! `capacity`. This is the only CCR backend — recovery is intentionally
+//! `capacity`. The SmartCrusher additionally bounds itself at the producer
+//! side (COR-4): it chunks only DROPPED rows and skips granular chunking
+//! entirely when a drop exceeds `capacity() / 4`, so a single document's
+//! persists can no longer evict blobs its own markers still reference.
+//! This is the only CCR backend — recovery is intentionally
 //! request-window-scoped (see `CCR-RETENTION.md`), not a durable store.
 
 use std::collections::VecDeque;
@@ -282,6 +286,10 @@ impl CcrStore for InMemoryCcrStore {
 
     fn len(&self) -> usize {
         self.map.len()
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 

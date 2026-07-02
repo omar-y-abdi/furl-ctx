@@ -169,8 +169,8 @@ fn distinct_inputs_produce_distinct_store_entries() {
     let ra = crusher.crush_array(&a, "", 1.0);
     let rb = crusher.crush_array(&b, "", 1.0);
 
-    let ha = ra.ccr_hash.unwrap();
-    let hb = rb.ccr_hash.unwrap();
+    let ha = ra.ccr_hash.clone().unwrap();
+    let hb = rb.ccr_hash.clone().unwrap();
     assert_ne!(ha, hb);
 
     // Both whole-blob originals retrievable (the byte-stable recovery
@@ -183,30 +183,42 @@ fn distinct_inputs_produce_distinct_store_entries() {
     // Granular model: besides the two distinct whole-blobs, each crush
     // also stores PER-ROW chunks (so a single retrieve fetches one row,
     // not the whole blob) plus a `{hash}#rows` index. The store therefore
-    // grows by 2 whole-blobs + 2 row indexes + the distinct per-row
-    // chunks across both inputs — not just 2. Pin the proportional-
-    // retrieval contract directly: every row of each input resolves to
-    // EXACTLY that one row via its own hash, addressed through the index.
-    for (blob_hash, original) in [(&ha, &a), (&hb, &b)] {
+    // grows by 2 whole-blobs + 2 row indexes + the per-row chunks across
+    // both inputs — not just 2. Pin the proportional-retrieval contract
+    // directly: the index holds one hash per DROPPED row (kept rows are
+    // visible in the output and are never written — COR-4), each
+    // resolving to EXACTLY that one original row, in original order.
+    for (result, blob_hash, original) in [(&ra, &ha, &a), (&rb, &hb, &b)] {
         let index_raw = store
             .get(&format!("{blob_hash}#rows"))
             .expect("row index must be stored under {hash}#rows");
         let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
+        let dropped = original.len() - result.items.len();
+        assert!(dropped > 0, "the lossy path must actually drop rows");
         assert_eq!(
             row_hashes.len(),
-            original.len(),
-            "row index must hold one hash per original row"
+            dropped,
+            "row index must hold one hash per DROPPED row (kept rows never chunked)"
         );
-        for (i, rh) in row_hashes.iter().enumerate() {
+        // Each chunk is one original row; together they preserve the
+        // original relative order (strictly increasing source indices —
+        // the rows here are all distinct, so the mapping is unambiguous).
+        let mut last_idx: Option<usize> = None;
+        for rh in &row_hashes {
             let row_payload = store
                 .get(rh)
                 .expect("each per-row chunk must resolve individually");
             let row_arr: Vec<Value> = serde_json::from_str(&row_payload).unwrap();
-            assert_eq!(
-                row_arr,
-                vec![original[i].clone()],
-                "retrieving one row hash returns exactly that one row"
+            assert_eq!(row_arr.len(), 1, "a row chunk holds exactly one row");
+            let idx = original
+                .iter()
+                .position(|orig| *orig == row_arr[0])
+                .expect("every chunk must be byte-exactly one ORIGINAL row");
+            assert!(
+                last_idx.is_none_or(|prev| idx > prev),
+                "chunks must preserve the original row order"
             );
+            last_idx = Some(idx);
         }
     }
 
@@ -426,6 +438,144 @@ fn document_walker_with_store_roundtrips_opaque_blob() {
 
     let h = extract_inner_hash(blob).unwrap();
     assert_eq!(store.get(&h).unwrap(), big);
+}
+
+// ─── COR-4: one document must never dangle its own markers ─────────
+//
+// The recovery invariant's hardest edge: `persist_dropped` writes into a
+// BOUNDED FIFO store (default 1000 entries). If one document's persists
+// flood the store, entries a marker in that SAME document still points
+// at get evicted before the consumer (the Python mirror, which runs
+// AFTER `crush()` returns) can read them — the surfaced `<<ccr:HASH>>`
+// dangles and the drop becomes silent loss. These tests pin the fix:
+// a single document's own markers always resolve.
+
+/// Extract the sentinel object (`{"_ccr_dropped": ..}`) appended to the
+/// array at `key` in the crushed document.
+fn sentinel_for_array<'a>(parsed: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
+    parsed
+        .get(key)
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.last())
+        .and_then(|last| last.as_object())
+        .filter(|obj| obj.contains_key("_ccr_dropped"))
+        .unwrap_or_else(|| panic!("array {key:?} must carry a `_ccr_dropped` sentinel"))
+}
+
+#[test]
+fn two_large_arrays_in_one_document_keep_every_marker_resolvable() {
+    // COR-4 reproduction (two-array flavour): a document with TWO large
+    // droppable arrays. Before the fix, `persist_dropped` wrote one
+    // store entry per ORIGINAL row (kept rows included), so the second
+    // array's ~1000-row chunk flood evicted the first array's
+    // whole-blob out of the 1000-entry store — the first `_ccr_dropped`
+    // marker dangled and the mirror (which reads the store only after
+    // `crush()` returns) recovered nothing. RED before the fix; GREEN
+    // after (oversized drops persist the whole-blob only).
+    let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+    let crusher = SmartCrusherBuilder::new(SmartCrusherConfig::default())
+        .with_default_oss_setup()
+        .with_default_compaction()
+        .with_ccr_store(store.clone())
+        .build();
+
+    let arr_a: Vec<Value> = (0..1000)
+        .map(|i| json!(format!("alpha-log-line-{i}-payload")))
+        .collect();
+    let arr_b: Vec<Value> = (0..1000)
+        .map(|i| json!(format!("beta-event-line-{i}-payload")))
+        .collect();
+    let doc = json!({"alpha": arr_a.clone(), "beta": arr_b.clone()});
+
+    let result = crusher.crush(&doc.to_string(), "", 1.0);
+    let parsed: Value = serde_json::from_str(&result.compressed).unwrap();
+
+    for (key, original) in [("alpha", &arr_a), ("beta", &arr_b)] {
+        let sentinel = sentinel_for_array(&parsed, key);
+        let marker = sentinel
+            .get("_ccr_dropped")
+            .and_then(|v| v.as_str())
+            .expect("sentinel carries the whole-blob pointer");
+        let hash = extract_hash_from_marker(marker).expect("marker embeds a hash");
+
+        // THE invariant: a marker surfaced by this very document must
+        // resolve — the second array's persist must not have evicted
+        // the first array's whole-blob.
+        let payload = store.get(&hash).unwrap_or_else(|| {
+            panic!(
+                "array {key:?}'s `<<ccr:{hash}>>` marker DANGLES — its \
+                 whole-blob was evicted by the same document's later \
+                 persists (COR-4 silent loss)"
+            )
+        });
+        let restored: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            restored,
+            Value::Array(original.clone()),
+            "array {key:?}'s blob must recover the original rows byte-exactly"
+        );
+    }
+}
+
+#[test]
+fn single_oversized_array_never_advertises_unresolvable_chunks() {
+    // COR-4 reproduction (single-array flavour): one array with more
+    // droppable rows than the store's capacity. Before the fix, the
+    // per-row chunk flood self-evicted its own earliest chunks, so the
+    // surfaced `_ccr_rows` index advertised row hashes that no longer
+    // resolved. RED before the fix; GREEN after (granular chunking is
+    // skipped for oversized drops — whole-blob only, nothing dangles).
+    let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+    let crusher = SmartCrusherBuilder::new(SmartCrusherConfig::default())
+        .with_default_oss_setup()
+        .with_default_compaction()
+        .with_ccr_store(store.clone())
+        .build();
+
+    let items: Vec<Value> = (0..1100)
+        .map(|i| json!(format!("oversized-log-line-{i}-payload")))
+        .collect();
+    let doc = json!({ "logs": items.clone() });
+
+    let result = crusher.crush(&doc.to_string(), "", 1.0);
+    let parsed: Value = serde_json::from_str(&result.compressed).unwrap();
+    let sentinel = sentinel_for_array(&parsed, "logs");
+
+    // Whole-blob pointer resolves byte-exactly — the fallback contract.
+    let marker = sentinel
+        .get("_ccr_dropped")
+        .and_then(|v| v.as_str())
+        .expect("sentinel carries the whole-blob pointer");
+    let hash = extract_hash_from_marker(marker).expect("marker embeds a hash");
+    let payload = store
+        .get(&hash)
+        .expect("the whole-blob recovery key must survive the document's own persists");
+    let restored: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(restored, Value::Array(items.clone()));
+
+    // IF a granular `_ccr_rows` index is advertised, then EVERY row hash
+    // it lists must resolve — the output must never advertise retrievals
+    // the store cannot honor. (After the fix, oversized drops advertise
+    // no index at all, making this vacuously green; before the fix the
+    // index was surfaced with its earliest chunks already self-evicted.)
+    if let Some(idx_marker) = sentinel.get("_ccr_rows").and_then(|v| v.as_str()) {
+        let index_key = extract_hash_from_marker(idx_marker).expect("index marker embeds a key");
+        let index_raw = store
+            .get(&index_key)
+            .expect("an advertised `_ccr_rows` index must itself resolve");
+        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
+        let dangling: Vec<&String> = row_hashes
+            .iter()
+            .filter(|rh| store.get(rh).is_none())
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "{} of {} advertised row chunks DANGLE (self-eviction; COR-4); first: {:?}",
+            dangling.len(),
+            row_hashes.len(),
+            dangling.first()
+        );
+    }
 }
 
 // ─── helpers ──────────────────────────────────────────────────────

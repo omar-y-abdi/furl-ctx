@@ -773,10 +773,16 @@ def test_producer_driven_B_row_index_binds_to_production_consumer() -> None:
     A producer-side change to the ``#`` separator (``markers.rs
     marker_for_row_index``) that the consumer no longer treats as a delimiter
     fails HERE — either by surfacing a wrong-width hash or none at all.
+
+    Fixture sizing: the DROPPED count must stay within the granular chunk
+    budget (``store.capacity() / 4`` = 250 on the default 1000-entry store) —
+    an oversized drop persists the whole-blob only and emits NO ``#rows``
+    marker (COR-4 store-flood gate), so 200 rows (~193 dropped) keeps the
+    granular producer firing.
     """
     from headroom.transforms.content_router import ContentRouter
 
-    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(500)]
+    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(200)]
     router = ContentRouter()
     output = router.compress(json.dumps(items)).compressed
     if "#rows" not in output:
@@ -893,22 +899,27 @@ def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> 
 
 
 def test_fixture_actually_fires_row_index_path() -> None:
-    """Prove that the 500-item fixture produces a granular ``#rows`` marker.
+    """Prove that the 200-item fixture produces a granular ``#rows`` marker.
 
     ``test_producer_driven_B_row_index_binds_to_production_consumer`` skips
     when ``#rows`` is absent in the output (labelled "environment gap").
     This companion asserts the skip precondition never silently hides a gap:
     if the engine stops emitting ``#rows`` markers for this fixture, THIS
     test fails loudly instead of the main test going green-via-skip.
+
+    The fixture is 200 rows (not the historical 500): drops bigger than the
+    granular chunk budget (``capacity / 4`` = 250) intentionally emit no
+    ``#rows`` marker (COR-4 store-flood gate), so the fixture's dropped
+    count (~193) must stay under the budget for the producer to fire.
     """
     import json as _json
 
     from headroom.transforms.content_router import ContentRouter
 
-    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(500)]
+    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(200)]
     router = ContentRouter()
     output = router.compress(_json.dumps(items)).compressed
     assert "#rows" in output, (
-        "500-item fixture did not produce a granular '#rows' CCR marker; "
+        "200-item fixture did not produce a granular '#rows' CCR marker; "
         "the row-index grammar test will skip silently — fix the fixture size"
     )

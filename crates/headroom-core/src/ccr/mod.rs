@@ -49,6 +49,14 @@ pub trait CcrStore: Send + Sync {
     /// return 0 — see backend-specific docs.
     fn len(&self) -> usize;
 
+    /// Capacity bound of the backend — the maximum number of live
+    /// entries before eviction kicks in. Producers use this to bound
+    /// how many entries a single persist may write: the SmartCrusher
+    /// skips per-row granular chunking when the chunk count would flood
+    /// the store and evict whole-blob entries the SAME document's
+    /// markers still reference (silent-loss class COR-4).
+    fn capacity(&self) -> usize;
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }

@@ -647,9 +647,8 @@ impl SmartCrusher {
                             // silently lost. Store write is unconditional
                             // (inside `persist_dropped`); the sentinel TEXT
                             // is gated by `enable_ccr_marker`.
-                            let dropped_count = n.saturating_sub(crushed_values.len());
                             if let Some(sentinel) =
-                                self.ccr_dropped_sentinel_collecting(arr, dropped_count, dropped)
+                                self.ccr_dropped_sentinel_collecting(arr, &crushed_values, dropped)
                             {
                                 crushed_values.push(sentinel);
                             }
@@ -661,9 +660,8 @@ impl SmartCrusher {
                             let mut crushed = crushed;
                             // 1A (non-dict path): same guarantee as the
                             // string branch — persist + sentinel on drop.
-                            let dropped_count = n.saturating_sub(crushed.len());
                             if let Some(sentinel) =
-                                self.ccr_dropped_sentinel_collecting(arr, dropped_count, dropped)
+                                self.ccr_dropped_sentinel_collecting(arr, &crushed, dropped)
                             {
                                 crushed.push(sentinel);
                             }
@@ -680,9 +678,8 @@ impl SmartCrusher {
                             // Persist the full original + sentinel here so
                             // every dropped item across all subgroups is
                             // recoverable.
-                            let dropped_count = n.saturating_sub(crushed.len());
                             if let Some(sentinel) =
-                                self.ccr_dropped_sentinel_collecting(arr, dropped_count, dropped)
+                                self.ccr_dropped_sentinel_collecting(arr, &crushed, dropped)
                             {
                                 crushed.push(sentinel);
                             }
@@ -1159,10 +1156,14 @@ impl SmartCrusher {
         // cornerstone of CCR's no-data-loss guarantee:** whenever rows
         // are dropped we hash the full original and stash it in the
         // configured store so a dropped needle is *always* recoverable
-        // — never silently lost.
+        // — never silently lost. The plan's `keep_indices` name the
+        // surviving rows, so their complement is EXACTLY the dropped
+        // set — threaded through so only dropped rows get granular
+        // chunks (COR-4: kept rows must never flood the bounded store).
         let dropped_count = items.len().saturating_sub(result.len());
+        let dropped_indices = dropped_indices_from_kept(&plan.keep_indices, items.len());
         let (ccr_hash, dropped_summary, row_index_marker) =
-            match self.persist_dropped(items, dropped_count) {
+            match self.persist_dropped(items, dropped_count, &dropped_indices) {
                 Some(persisted) => (
                     Some(persisted.hash),
                     persisted.marker,
@@ -1287,10 +1288,20 @@ impl SmartCrusher {
     /// and hash scheme byte-identical across all callers — the dict path
     /// behavior is unchanged, and the non-dict paths now inherit the
     /// exact same contract.
+    ///
+    /// `dropped_count` drives the whole-blob marker text (the byte-stable
+    /// `{n}_rows_offloaded` arithmetic every caller already computed as
+    /// `original - kept`); `dropped_indices` names exactly WHICH original
+    /// rows left the visible output and therefore get granular per-row
+    /// chunks. The two agree on every path; they can diverge only when a
+    /// crusher synthesizes non-original output items (mixed-path
+    /// summaries), in which case the index simply covers every original
+    /// row not visible verbatim — a safe superset for recovery.
     fn persist_dropped(
         &self,
         original_items: &[Value],
         dropped_count: usize,
+        dropped_indices: &[usize],
     ) -> Option<DroppedPersist> {
         if dropped_count == 0 {
             return None;
@@ -1309,17 +1320,29 @@ impl SmartCrusher {
         // WHOLE payload — a single `<<ccr:HASH>>` retrieve returns every
         // dropped row at once, so effective savings can go NEGATIVE the
         // moment the model retrieves anything (logs@90 high: +55.7% @25%
-        // → −10.3% worst-case). Fix: ALSO stash each original row under
+        // → −10.3% worst-case). Fix: ALSO stash each DROPPED row under
         // its own canonical 1-element hash so retrieving ONE row fetches
         // exactly one row, not the whole blob.
         //
-        // Storing EVERY row (not only the dropped ones) is intentional:
-        // `persist_dropped` is told only `dropped_count`, not which rows
-        // survived, and a kept row hashed here is harmless (it's already
-        // visible). It guarantees that ANY row the model later asks for
-        // — dropped or not — resolves to just that single row. Each
-        // per-row entry is keyed by `hash_canonical` over the 1-element
-        // canonical array, so `ccr_get(row_hash)` returns exactly `[row]`.
+        // Only the DROPPED rows are chunked (COR-4). Kept rows are
+        // already visible in the output — a per-row chunk for them buys
+        // nothing, and writing one store entry per ORIGINAL row let a
+        // single large array (or two arrays in one document) flood the
+        // bounded FIFO store and evict whole-blob entries the SAME
+        // document's markers still referenced — a dangling `<<ccr:HASH>>`
+        // is silent loss. Each per-row entry is keyed by `hash_canonical`
+        // over the 1-element canonical array, so `ccr_get(row_hash)`
+        // returns exactly `[row]`.
+        //
+        // ── Store-flood gate (COR-4, oversized drops) ──
+        // Even dropped-only chunking can flood the store: a drop bigger
+        // than the store's capacity would self-evict its own earliest
+        // chunks. When the chunk count exceeds `capacity /
+        // GRANULAR_CHUNK_CAPACITY_DIVISOR`, skip granular chunking
+        // entirely and persist the whole-blob only (`row_index_marker:
+        // None` — an already-supported sentinel shape). Proportional
+        // retrieval degrades to whole-blob retrieval for oversized
+        // arrays; recovery never degrades.
         //
         // The per-row hashes are NOT inlined into the prompt (that would
         // add O(n) pointer strings, bloat the lossy render, and flip the
@@ -1339,20 +1362,29 @@ impl SmartCrusher {
         // never worse than the pre-change single-blob guarantee.
         let mut row_index_marker: Option<String> = None;
         if let Some(store) = &self.ccr_store {
-            let mut row_hashes: Vec<String> = Vec::with_capacity(original_items.len());
-            for item in original_items {
-                let row_canonical = canonical_array_json(std::slice::from_ref(item));
-                let row_hash = hash_canonical(&row_canonical);
-                store.put(&row_hash, &row_canonical);
-                row_hashes.push(row_hash);
+            let granular_budget = store.capacity() / GRANULAR_CHUNK_CAPACITY_DIVISOR;
+            if !dropped_indices.is_empty() && dropped_indices.len() <= granular_budget {
+                let mut row_hashes: Vec<String> = Vec::with_capacity(dropped_indices.len());
+                for &idx in dropped_indices {
+                    let Some(item) = original_items.get(idx) else {
+                        continue; // out-of-range index: nothing to chunk
+                    };
+                    let row_canonical = canonical_array_json(std::slice::from_ref(item));
+                    let row_hash = hash_canonical(&row_canonical);
+                    store.put(&row_hash, &row_canonical);
+                    row_hashes.push(row_hash);
+                }
+                // Row index: `{hash}#rows` → ["rowhash0", "rowhash1", ...].
+                // Stored as a JSON array of strings so the retrieval layer can
+                // parse it and address each dropped row independently. The
+                // marker advertises `row_hashes.len()` — EXACTLY the number
+                // of chunks the index holds (COR-20: it previously claimed
+                // `dropped_count` chunks over an every-original-row index).
+                let index_key = format!("{hash}#rows");
+                let index_payload = serde_json::to_string(&row_hashes).unwrap_or_default();
+                store.put(&index_key, &index_payload);
+                row_index_marker = Some(marker_for_row_index(&hash, row_hashes.len()));
             }
-            // Row index: `{hash}#rows` → ["rowhash0", "rowhash1", ...].
-            // Stored as a JSON array of strings so the retrieval layer can
-            // parse it and address each row independently.
-            let index_key = format!("{hash}#rows");
-            let index_payload = serde_json::to_string(&row_hashes).unwrap_or_default();
-            store.put(&index_key, &index_payload);
-            row_index_marker = Some(marker_for_row_index(&hash, dropped_count));
         }
 
         // ── Unconditional whole-blob persist (1A) — written LAST ──
@@ -1403,13 +1435,21 @@ impl SmartCrusher {
     /// non-dict (string/number/mixed) row-drop is surfaced for direct
     /// mirroring — parity with the dict path. Side effect only: the
     /// returned `Value` is byte-identical to the pre-collection behavior.
+    ///
+    /// `kept_items` is the crushed output BEFORE the sentinel is pushed.
+    /// The whole-blob marker keeps the callers' historical arithmetic
+    /// (`original - kept`); the dropped-row set for granular chunking is
+    /// derived by multiset diff, since the non-dict crushers return kept
+    /// VALUES, not kept indices (COR-4: kept rows are never chunked).
     fn ccr_dropped_sentinel_collecting(
         &self,
         original_items: &[Value],
-        dropped_count: usize,
+        kept_items: &[Value],
         dropped: &mut Vec<DroppedRef>,
     ) -> Option<Value> {
-        let persisted = self.persist_dropped(original_items, dropped_count)?;
+        let dropped_count = original_items.len().saturating_sub(kept_items.len());
+        let dropped_indices = dropped_indices_by_multiset_diff(original_items, kept_items);
+        let persisted = self.persist_dropped(original_items, dropped_count, &dropped_indices)?;
         dropped.push(DroppedRef {
             hash: persisted.hash.clone(),
             row_index_marker: persisted.row_index_marker.clone(),
@@ -1682,6 +1722,14 @@ const CCR_BACKED_KEEP_DIVISOR: usize = 2;
 /// sample never shrinks below it.
 const CCR_BACKED_KEEP_FLOOR: usize = 5;
 
+/// Store-flood gate for granular per-row chunking (COR-4). One drop
+/// writes `chunks + index + whole-blob` entries into a bounded FIFO
+/// store; capping the chunk count at `capacity / 4` leaves room for
+/// several drops in one document (each ≤ ~capacity/4 + 2 entries)
+/// before anything a live marker references can be evicted. Drops
+/// bigger than the budget persist the whole-blob only.
+const GRANULAR_CHUNK_CAPACITY_DIVISOR: usize = 4;
+
 /// Minimum ABSOLUTE byte saving required before the lossy path ships
 /// its survivors as a CSV-schema rendering instead of a JSON array.
 /// Same churn-protection rationale as the small-array gate: re-encoding
@@ -1772,6 +1820,59 @@ fn estimate_array_bytes(item_strings: &[String]) -> usize {
 /// requires. Used by both the hash (input) and the store payload (write).
 fn canonical_array_json(items: &[Value]) -> String {
     serde_json::to_string(items).unwrap_or_default()
+}
+
+/// Complement of `keep_indices` over `0..len`: the original-array
+/// indices of the rows a plan DROPS, ascending. Out-of-range keep
+/// indices are ignored (mirroring `execute_plan`'s bounds filter) and
+/// duplicates collapse via the mask, so the result length always equals
+/// `len - |kept ∩ 0..len|`. Feeds `persist_dropped`'s dropped-rows-only
+/// granular chunking on the dict path (COR-4).
+fn dropped_indices_from_kept(keep_indices: &[usize], len: usize) -> Vec<usize> {
+    let mut kept = vec![false; len];
+    for &idx in keep_indices {
+        if idx < len {
+            kept[idx] = true;
+        }
+    }
+    kept.iter()
+        .enumerate()
+        .filter_map(|(i, &k)| (!k).then_some(i))
+        .collect()
+}
+
+/// Original-array indices whose rows do NOT appear in `kept`, ascending
+/// (multiset semantics: each kept occurrence consumes ONE matching
+/// original). Matching is on the same per-row canonical bytes the
+/// granular chunks are keyed by (`canonical_array_json` of the
+/// 1-element slice), so "kept" means byte-identical to a visible output
+/// row. A synthesized kept item (e.g. a mixed-path summary) matches no
+/// original and consumes nothing — the result can only ever
+/// OVER-approximate the dropped set, never miss a genuinely dropped
+/// row. Feeds `persist_dropped` on the string/number/mixed paths, whose
+/// crushers return kept VALUES rather than kept indices (COR-4).
+fn dropped_indices_by_multiset_diff(original: &[Value], kept: &[Value]) -> Vec<usize> {
+    use std::collections::HashMap;
+    let mut kept_counts: HashMap<String, usize> = HashMap::with_capacity(kept.len());
+    for item in kept {
+        *kept_counts
+            .entry(canonical_array_json(std::slice::from_ref(item)))
+            .or_insert(0) += 1;
+    }
+    original
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let key = canonical_array_json(std::slice::from_ref(item));
+            match kept_counts.get_mut(&key) {
+                Some(count) if *count > 0 => {
+                    *count -= 1;
+                    None
+                }
+                _ => Some(i),
+            }
+        })
+        .collect()
 }
 
 /// 12-char SHA-256 hex prefix of an already-serialized canonical JSON
@@ -2976,7 +3077,7 @@ mod tests {
         let (c, _store) = crusher_with_store();
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i})).collect();
         let persisted = c
-            .persist_dropped(&items, 5)
+            .persist_dropped(&items, 5, &[25, 26, 27, 28, 29])
             .expect("dropped_count>0 → Some");
         let expected = hash_canonical(&canonical_array_json(&items));
         assert_eq!(persisted.hash, expected, "hash scheme must be unchanged");
@@ -2985,7 +3086,131 @@ mod tests {
             .marker
             .contains(&format!("<<ccr:{expected} 5_rows_offloaded>>")));
         // Zero dropped → None (no hash, no marker, no store write).
-        assert!(c.persist_dropped(&items, 0).is_none());
+        assert!(c.persist_dropped(&items, 0, &[]).is_none());
+    }
+
+    // ---------- COR-4 / COR-20: dropped-rows-only granular persist ----------
+
+    #[test]
+    fn persist_dropped_chunks_only_dropped_rows_and_marker_counts_them() {
+        // COR-4: kept rows must NEVER be written to the store — one
+        // granular chunk per DROPPED row, nothing else. COR-20: the
+        // `_ccr_rows` marker advertises EXACTLY the number of chunks the
+        // index holds (it previously claimed `dropped_count` chunks over
+        // an every-original-row index — "keep 7 of 60" rendered
+        // `53_chunks` over a 60-entry index, a model-visible lie).
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..10).map(|i| json!({"id": i})).collect();
+        // Keep rows 0..7, drop rows 7, 8, 9.
+        let dropped_indices = [7usize, 8, 9];
+        let persisted = c
+            .persist_dropped(&items, 3, &dropped_indices)
+            .expect("drop → Some");
+
+        // Marker advertises exactly the chunks the index holds (COR-20).
+        let idx_marker = persisted
+            .row_index_marker
+            .as_ref()
+            .expect("granular index fires for a small drop");
+        assert!(
+            idx_marker.contains("#rows 3_chunks>>"),
+            "marker must advertise the 3 dropped-row chunks, got: {idx_marker}"
+        );
+
+        // The index holds one hash per DROPPED row, in original order,
+        // each resolving to exactly `[row]`.
+        let index_raw = store
+            .get(&format!("{}#rows", persisted.hash))
+            .expect("row index stored");
+        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
+        assert_eq!(row_hashes.len(), 3, "index holds dropped rows only");
+        for (rh, &orig_idx) in row_hashes.iter().zip(dropped_indices.iter()) {
+            let payload = store.get(rh).expect("dropped-row chunk resolves");
+            assert_eq!(payload, canonical_array_json(std::slice::from_ref(&items[orig_idx])));
+        }
+
+        // Kept rows are NOT in the store under their per-row hashes.
+        for kept in &items[..7] {
+            let kept_canonical = canonical_array_json(std::slice::from_ref(kept));
+            let kept_hash = hash_canonical(&kept_canonical);
+            assert!(
+                store.get(&kept_hash).is_none(),
+                "kept row {kept} must never be written to the store (COR-4)"
+            );
+        }
+
+        // Store contents: 3 chunks + 1 index + 1 whole-blob, nothing more.
+        assert_eq!(store.len(), 5, "3 chunks + index + whole-blob exactly");
+    }
+
+    #[test]
+    fn persist_dropped_skips_granular_chunking_for_oversized_drops() {
+        // COR-4 store-flood gate: when the dropped-row count exceeds
+        // `store.capacity() / 4`, granular chunking stands down entirely
+        // — whole-blob only, `row_index_marker: None` — so a single big
+        // array can never self-evict its own chunks (and two big arrays
+        // in one document can never evict each other's whole-blobs).
+        let (c, store) = crusher_with_store();
+        let budget = store.capacity() / GRANULAR_CHUNK_CAPACITY_DIVISOR;
+
+        // One past the budget → granular skipped, whole-blob only.
+        let n_over = budget + 8;
+        let items: Vec<Value> = (0..n_over).map(|i| json!({"id": i})).collect();
+        let dropped_indices: Vec<usize> = (0..=budget).collect(); // budget+1 dropped
+        let persisted = c
+            .persist_dropped(&items, dropped_indices.len(), &dropped_indices)
+            .expect("drop → Some");
+        assert!(
+            persisted.row_index_marker.is_none(),
+            "oversized drop must not advertise a granular index"
+        );
+        assert_eq!(
+            store.len(),
+            1,
+            "oversized drop persists the whole-blob ONLY (no chunk flood)"
+        );
+        let payload = store.get(&persisted.hash).expect("whole-blob resolves");
+        assert_eq!(payload, canonical_array_json(&items));
+
+        // Exactly AT the budget → granular still fires (inclusive bound).
+        let (c2, store2) = crusher_with_store();
+        let at_budget: Vec<usize> = (0..budget).collect();
+        let persisted2 = c2
+            .persist_dropped(&items, at_budget.len(), &at_budget)
+            .expect("drop → Some");
+        assert!(
+            persisted2.row_index_marker.is_some(),
+            "a drop at the budget keeps proportional retrieval"
+        );
+        assert_eq!(
+            store2.len(),
+            budget + 2,
+            "chunks + index + whole-blob at the budget"
+        );
+    }
+
+    #[test]
+    fn dropped_indices_helpers_cover_complement_and_multiset_diff() {
+        // Dict path: complement of the plan's keep set, out-of-range
+        // keeps ignored, duplicates collapsed.
+        assert_eq!(dropped_indices_from_kept(&[0, 2, 4], 5), vec![1, 3]);
+        assert_eq!(dropped_indices_from_kept(&[], 3), vec![0, 1, 2]);
+        assert_eq!(dropped_indices_from_kept(&[0, 0, 99], 3), vec![1, 2]);
+        assert_eq!(dropped_indices_from_kept(&[0, 1, 2], 3), Vec::<usize>::new());
+
+        // Non-dict paths: multiset diff on values. Duplicates consume
+        // one-for-one; synthesized kept items consume nothing.
+        let original = vec![json!("a"), json!("a"), json!("b"), json!("c")];
+        let kept = vec![json!("a"), json!("c"), json!("<summary>")];
+        assert_eq!(
+            dropped_indices_by_multiset_diff(&original, &kept),
+            vec![1, 2],
+            "one 'a' kept consumes index 0; 'b' and the second 'a' dropped"
+        );
+        assert_eq!(
+            dropped_indices_by_multiset_diff(&original, &original),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -3405,8 +3630,11 @@ mod tests {
     #[test]
     fn crush_surfaces_typed_row_drop_hash_matching_embedded_marker() {
         let (c, _store) = lossy_crusher_with_store();
-        // Single droppable dict array.
-        let items: Vec<Value> = (0..400)
+        // Single droppable dict array. Sized so the DROPPED count stays
+        // within the granular chunk budget (`capacity / 4` = 250 for the
+        // default store) — an oversized drop persists the whole-blob
+        // only (COR-4) and would surface no row-index marker to pin.
+        let items: Vec<Value> = (0..200)
             .map(|i| json!({"id": i, "status": "ok", "svc": "api"}))
             .collect();
         let content = serde_json::to_string(&items).unwrap();

@@ -8,11 +8,21 @@ for the entire offloaded payload — effective savings can go NEGATIVE
 (``logs@90 high``: ``+55.7% @25% retrieval -> -10.3%`` worst case, i.e.
 MORE tokens than uncompressed).
 
-The granular model fixes this: every original row is also stored as its
+The granular model fixes this: every DROPPED row is also stored as its
 own individually-addressable chunk (``ccr_get(row_hash)`` returns exactly
 ``[row]``), addressed through a per-blob row index. Retrieving one needed
 row now costs ONE row, not the whole blob — so effective savings stay
 PROPORTIONAL to what is actually retrieved.
+
+Two boundaries of the granular contract (COR-4 / COR-20):
+
+* only DROPPED rows are chunked — kept rows are visible in the output and
+  are never written to the store, so one document's persists cannot flood
+  the bounded store and evict blobs its own markers still reference; and
+* when the dropped count exceeds the store's granular chunk budget
+  (``capacity / 4``), chunking is skipped entirely (no ``_ccr_rows``
+  index) and the whole-blob remains the sole — still byte-exact —
+  recovery key, so a huge array can never self-evict its own chunks.
 
 This test reproduces the audit's effective-savings model on a real-shaped,
 deterministically-generated high-entropy logs array (no committed fixture,
@@ -34,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 
 import pytest
 
@@ -97,6 +108,28 @@ def _hash_from_marker(marker: str) -> str:
     rest = marker[start:]
     end = rest.index(" ")
     return rest[:end]
+
+
+def _count_from_marker(marker: str, suffix: str) -> int:
+    """Parse ``N`` out of ``<<ccr:KEY N_{suffix}>>`` (e.g. the dropped
+    count from ``..._rows_offloaded`` or the chunk count from
+    ``..._chunks``)."""
+    m = re.search(rf" (\d+)_{re.escape(suffix)}>>", marker)
+    assert m is not None, f"marker {marker!r} does not advertise a {suffix} count"
+    return int(m.group(1))
+
+
+def _is_ordered_subsequence(sub: list, full: list) -> bool:
+    """True iff ``sub``'s elements appear in ``full`` in the same relative
+    order (byte-exact equality, two-pointer walk)."""
+    pos = 0
+    for row in sub:
+        while pos < len(full) and full[pos] != row:
+            pos += 1
+        if pos == len(full):
+            return False
+        pos += 1
+    return True
 
 
 def _sentinel_from_output(compressed: str) -> dict | None:
@@ -183,13 +216,27 @@ def test_granular_retrieval_stays_positive(retrieval_fraction: float) -> None:
     index_raw = crusher.ccr_get(index_key)
     assert index_raw is not None, "row index must resolve"
     row_hashes = json.loads(index_raw)
-    assert len(row_hashes) == len(items), "one chunk per original row"
-    # The granular contract is not just "a chunk exists per row" — each chunk
-    # must resolve to its OWN single original row, in order. Reconstruct every
-    # per-row chunk and pin it to the original array; this catches a corrupted
-    # or mis-indexed chunk that the count check and `is not None` would miss.
+    # Dropped-rows-only persist (COR-4): the index holds one chunk per
+    # DROPPED row — kept rows stay visible in the output and are never
+    # written to the store. Cross-check the count against the INDEPENDENT
+    # source: the dropped count the `_ccr_dropped` marker advertises.
+    n_dropped = _count_from_marker(sentinel["_ccr_dropped"], "rows_offloaded")
+    assert 0 < n_dropped < len(items), "a lossy drop must keep a visible sample"
+    assert len(row_hashes) == n_dropped, "one chunk per DROPPED row (kept rows never chunked)"
+    # COR-20: the `_ccr_rows` marker advertises EXACTLY the number of
+    # chunks the index holds — no model-visible lie.
+    n_chunks = _count_from_marker(sentinel["_ccr_rows"], "chunks")
+    assert n_chunks == len(row_hashes), (
+        f"marker advertises {n_chunks} chunks but the index holds {len(row_hashes)}"
+    )
+    # The granular contract is not just "a chunk exists per dropped row" —
+    # each chunk must resolve to its OWN single original row, byte-exact,
+    # preserving the original relative order. This catches a corrupted or
+    # mis-indexed chunk that the count check and `is not None` would miss.
     reconstructed = [json.loads(crusher.ccr_get(rh))[0] for rh in row_hashes]
-    assert reconstructed == items, "per-row chunks must recover the original rows exactly, in order"
+    assert _is_ordered_subsequence(reconstructed, items), (
+        "per-row chunks must recover their original rows exactly, in original order"
+    )
 
     # Number of rows the model needs to pull back.
     k = math.ceil(retrieval_fraction * len(items))
@@ -275,3 +322,31 @@ def test_whole_blob_model_reproduces_audit_negative() -> None:
     )
     # Granular must be strictly, materially better than whole-blob here.
     assert eff_granular > eff_whole + 0.10
+
+
+def test_oversized_array_skips_granular_index_but_recovers_whole_blob() -> None:
+    """COR-4 store-flood gate: an array whose DROPPED count exceeds the
+    store's granular chunk budget (``capacity / 4`` = 250 on the default
+    1000-entry store) skips per-row chunking entirely — no ``_ccr_rows``
+    index is advertised. This is what keeps one document's markers
+    honest: a huge array's chunk flood used to evict its OWN earliest
+    chunks (and a second array's flood evicted the FIRST array's
+    whole-blob), leaving surfaced ``<<ccr:HASH>>`` pointers that resolved
+    to nothing. Proportional retrieval intentionally degrades to
+    whole-blob retrieval here; recovery does not degrade at all."""
+    items = _high_entropy_logs(1100, seed=2001)
+    _compressed, crusher, sentinel = _compress(items)
+
+    # No granular index for oversized drops — the corrected contract.
+    assert "_ccr_rows" not in sentinel, (
+        "an oversized drop must not advertise a granular row index; the chunk "
+        "flood would evict entries this document's own markers reference"
+    )
+
+    # The whole-blob pointer remains and recovers byte-exactly.
+    blob_hash = _hash_from_marker(sentinel["_ccr_dropped"])
+    blob_payload = crusher.ccr_get(blob_hash)
+    assert blob_payload is not None, "whole-blob must resolve for oversized drops"
+    assert json.loads(blob_payload) == items, (
+        "whole-blob must recover the original rows byte-exactly"
+    )
