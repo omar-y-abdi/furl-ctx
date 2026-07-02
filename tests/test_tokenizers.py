@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-import types
-
-import pytest
-
 from headroom.tokenizers import (
     BaseTokenizer,
     CharacterCounter,
@@ -14,9 +9,7 @@ from headroom.tokenizers import (
     TiktokenCounter,
     TokenCounter,
     TokenizerRegistry,
-    get_mistral_tokenizer,
     get_tokenizer,
-    is_mistral_tokenizer_available,
     list_supported_models,
     register_tokenizer,
 )
@@ -294,6 +287,24 @@ class TestTokenizerRegistry:
         tokenizer = get_tokenizer("unknown-model-xyz")
         assert isinstance(tokenizer, EstimatingTokenCounter)
 
+    def test_removed_backend_models_fall_back_to_estimation(self):
+        """Llama/Mistral-family names resolve via the estimation fallback.
+
+        The HuggingFace and Mistral tokenizer backends were removed
+        (tiktoken-only). Their model names must keep resolving to a working
+        EstimatingTokenCounter -- the same result their missing-dependency
+        fallback produced before the removal -- and must never error.
+        """
+        for model in ("llama-3", "meta-llama/Llama-3.1-8B", "mistral-large", "mixtral-8x7b"):
+            tokenizer = get_tokenizer(model)
+            assert isinstance(tokenizer, EstimatingTokenCounter)
+            assert tokenizer.count_text("hello world") >= 1
+
+        # Totality: these names route to the estimation backend directly,
+        # so resolution succeeds even with fallback=False.
+        strict = get_tokenizer("llama-3", fallback=False)
+        assert isinstance(strict, EstimatingTokenCounter)
+
     def test_get_with_specific_backend(self):
         """Test forcing specific backend."""
         tokenizer = get_tokenizer("any-model", backend="estimation")
@@ -350,111 +361,6 @@ class TestTokenizerRegistry:
         assert second._fixed_ratio == 2.0  # the real (retried) tokenizer
 
 
-def _fake_transformers_module(from_pretrained) -> types.ModuleType:
-    """Build a stand-in `transformers` module for loader-failure tests.
-
-    The real package is an optional dependency and must not be required
-    to test the loader's failure/recovery behavior.
-    """
-    module = types.ModuleType("transformers")
-    # Class bodies skip enclosing-function scope for names they also assign,
-    # so bind the parameter to a differently-named local first.
-    loader = from_pretrained
-
-    class AutoTokenizer:
-        from_pretrained = staticmethod(loader)
-
-    module.AutoTokenizer = AutoTokenizer
-    return module
-
-
-class _FakeHFTokenizer:
-    """Minimal tokenizer double: one token per whitespace-separated word."""
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [0] * len(text.split())
-
-
-class TestHuggingFaceLoadFailureRecovery:
-    """A transient tokenizer-load failure must not poison later loads.
-
-    Regression: three stacked permanent negative caches (lru_cache on the
-    None from a load exception, the instance `_tokenizer = False` latch,
-    and the registry counter cache) meant one transient network failure
-    degraded counting to estimation for the whole process lifetime.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _isolated_loader_state(self):
-        """Reset module-level loader caches around each test."""
-        import headroom.tokenizers.huggingface as hf
-
-        hf._load_tokenizer_cached.cache_clear()
-        yield
-        hf._load_tokenizer_cached.cache_clear()
-
-    def test_transient_failure_does_not_poison_later_success(self, monkeypatch):
-        """First load fails, second succeeds: the failure must not be latched."""
-        import headroom.tokenizers.huggingface as hf
-
-        calls = {"n": 0}
-
-        def flaky_from_pretrained(name: str, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise OSError("simulated transient network failure")
-            return _FakeHFTokenizer()
-
-        monkeypatch.setitem(
-            sys.modules, "transformers", _fake_transformers_module(flaky_from_pretrained)
-        )
-        monkeypatch.setattr(hf, "_failed_loads", {})
-
-        counter = hf.HuggingFaceTokenizer("llama-3-8b")
-
-        # First access fails -> estimation fallback, no exception. Within
-        # the TTL the failure is negative-cached, so repeated accesses do
-        # not hammer the loader.
-        assert counter.tokenizer is None
-        assert counter._use_fallback() is True
-        assert calls["n"] == 1
-
-        # Simulate the TTL elapsing.
-        hf._failed_loads.clear()
-
-        # The next access retries and succeeds -- neither the instance nor
-        # the module-level cache may have latched the earlier failure.
-        assert counter.tokenizer is not None
-        assert calls["n"] == 2
-        assert counter._use_fallback() is False
-        assert counter.count_text("hello world") == 2
-
-        # The success is cached: further loads do not hit the loader again.
-        assert hf.HuggingFaceTokenizer("llama-3-8b").tokenizer is not None
-        assert calls["n"] == 2
-
-    def test_failure_negative_cached_within_ttl(self, monkeypatch):
-        """Within the TTL a known-failed load is not re-attempted (no hammering)."""
-        import headroom.tokenizers.huggingface as hf
-
-        calls = {"n": 0}
-
-        def always_failing_from_pretrained(name: str, **kwargs):
-            calls["n"] += 1
-            raise OSError("simulated persistent failure")
-
-        monkeypatch.setitem(
-            sys.modules,
-            "transformers",
-            _fake_transformers_module(always_failing_from_pretrained),
-        )
-        monkeypatch.setattr(hf, "_failed_loads", {})
-
-        assert hf._load_tokenizer("some/flaky-tokenizer") is None
-        assert hf._load_tokenizer("some/flaky-tokenizer") is None
-        assert calls["n"] == 1  # second lookup served from the negative cache
-
-
 class TestTokenCounterProtocol:
     """Tests for TokenCounter protocol."""
 
@@ -484,170 +390,3 @@ class TestBaseTokenizer:
     def test_reply_overhead_constant(self):
         """Test reply overhead constant."""
         assert BaseTokenizer.REPLY_OVERHEAD == 3
-
-
-class TestMistralTokenizer:
-    """Tests for Mistral tokenizer using official mistral-common."""
-
-    def test_is_available(self):
-        """Test availability check."""
-        result = is_mistral_tokenizer_available()
-        assert isinstance(result, bool)
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_get_mistral_tokenizer_class(self):
-        """Test getting MistralTokenizer class."""
-        MistralTokenizer = get_mistral_tokenizer()
-        assert MistralTokenizer is not None
-        assert hasattr(MistralTokenizer, "count_text")
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_init_default_model(self):
-        """Test initialization with default model."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        assert counter.model == "mistral-large"
-        assert counter.version == "v3"
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_init_mixtral_model(self):
-        """Test initialization with Mixtral model (uses v1)."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer("mixtral-8x7b")
-        assert counter.version == "v1"
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_count_text_empty(self):
-        """Test counting empty text."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        assert counter.count_text("") == 0
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_count_text_simple(self):
-        """Test counting simple text."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        count = counter.count_text("Hello, world!")
-        assert count > 0
-        assert count < 10
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_count_text_unicode(self):
-        """Test counting text with unicode."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        count = counter.count_text("Hello, 世界!")
-        assert count > 0
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_count_messages(self):
-        """Test counting messages."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        messages = [
-            {"role": "user", "content": "Hello!"},
-            {"role": "assistant", "content": "Hi there!"},
-        ]
-        count = counter.count_messages(messages)
-        assert count > 0
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_count_messages_with_system(self):
-        """Test counting messages with system prompt."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Hello!"},
-        ]
-        count = counter.count_messages(messages)
-        assert count > 0
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_encode_decode_roundtrip(self):
-        """Test encode/decode roundtrip."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        text = "Hello, world!"
-        tokens = counter.encode(text)
-        decoded = counter.decode(tokens)
-        assert decoded == text
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_implements_protocol(self):
-        """Test MistralTokenizer implements TokenCounter protocol."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer()
-        assert isinstance(counter, TokenCounter)
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_repr(self):
-        """Test string representation."""
-        MistralTokenizer = get_mistral_tokenizer()
-        counter = MistralTokenizer("mistral-large")
-        assert "MistralTokenizer" in repr(counter)
-        assert "mistral-large" in repr(counter)
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_registry_returns_mistral_for_mistral_models(self):
-        """Test registry returns Mistral tokenizer for Mistral models."""
-        tokenizer = get_tokenizer("mistral-large")
-        MistralTokenizer = get_mistral_tokenizer()
-        assert isinstance(tokenizer, MistralTokenizer)
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_registry_returns_mistral_for_mixtral(self):
-        """Test registry returns Mistral tokenizer for Mixtral models."""
-        tokenizer = get_tokenizer("mixtral-8x7b")
-        MistralTokenizer = get_mistral_tokenizer()
-        assert isinstance(tokenizer, MistralTokenizer)
-
-    @pytest.mark.skipif(
-        not is_mistral_tokenizer_available(),
-        reason="mistral-common not installed",
-    )
-    def test_registry_returns_mistral_for_codestral(self):
-        """Test registry returns Mistral tokenizer for Codestral models."""
-        tokenizer = get_tokenizer("codestral")
-        MistralTokenizer = get_mistral_tokenizer()
-        assert isinstance(tokenizer, MistralTokenizer)

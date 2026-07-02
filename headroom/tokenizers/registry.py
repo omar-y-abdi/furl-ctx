@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 # Model pattern matching for tokenizer selection
 # Order matters - more specific patterns first
+# Models that match no pattern here fall back to the "estimation" backend
+# (EstimatingTokenCounter). This includes Llama/Mistral/Qwen and other open
+# models: their HuggingFace/Mistral tokenizer backends were removed
+# (tiktoken-only), and estimation is exactly what their missing-dependency
+# fallback produced before the removal.
 MODEL_PATTERNS: list[tuple[str, str]] = [
     # OpenAI models -> tiktoken
     (r"^gpt-4o", "tiktoken"),
@@ -38,30 +43,11 @@ MODEL_PATTERNS: list[tuple[str, str]] = [
     (r"^ada", "tiktoken"),
     # Anthropic models -> estimation (Claude uses custom tokenizer)
     (r"^claude-", "anthropic"),
-    # Llama family -> huggingface (when available)
-    (r"^llama", "huggingface"),
-    (r"^meta-llama", "huggingface"),
-    (r"^codellama", "huggingface"),
-    # Mistral family -> official mistral tokenizer
-    (r"^mistral", "mistral"),
-    (r"^mixtral", "mistral"),
-    (r"^codestral", "mistral"),
-    (r"^ministral", "mistral"),
-    (r"^pixtral", "mistral"),
     # Google models -> estimation (Gemini uses SentencePiece)
     (r"^gemini", "google"),
     (r"^palm", "google"),
     # Cohere models -> estimation
     (r"^command", "cohere"),
-    # Open models commonly served via OpenAI-compatible APIs
-    (r"^phi-", "huggingface"),
-    (r"^qwen", "huggingface"),
-    (r"^deepseek", "huggingface"),
-    (r"^yi-", "huggingface"),
-    (r"^falcon", "huggingface"),
-    (r"^mpt-", "huggingface"),
-    (r"^starcoder", "huggingface"),
-    (r"^codegen", "huggingface"),
 ]
 
 
@@ -71,7 +57,7 @@ class TokenizerRegistry:
     Supports:
     - Automatic tokenizer selection based on model name
     - Custom tokenizer registration
-    - Multiple backends (tiktoken, huggingface, estimation)
+    - Multiple backends (tiktoken, estimation)
     - Lazy loading of tokenizer dependencies
 
     Example:
@@ -82,7 +68,7 @@ class TokenizerRegistry:
         TokenizerRegistry.register("my-model", my_tokenizer)
 
         # Use specific backend
-        tokenizer = TokenizerRegistry.get("llama-3", backend="huggingface")
+        tokenizer = TokenizerRegistry.get("gpt-4", backend="tiktoken")
     """
 
     # Singleton registry instance
@@ -108,11 +94,9 @@ class TokenizerRegistry:
         """Initialize default tokenizer factories."""
         self._factories = {
             "tiktoken": self._create_tiktoken,
-            "huggingface": self._create_huggingface,
             "anthropic": self._create_anthropic,
             "google": self._create_google,
             "cohere": self._create_cohere,
-            "mistral": self._create_mistral,
             "estimation": self._create_estimation,
         }
 
@@ -127,7 +111,7 @@ class TokenizerRegistry:
 
         Args:
             model: Model name (e.g., 'gpt-4o', 'claude-3-sonnet').
-            backend: Force specific backend ('tiktoken', 'huggingface', etc.).
+            backend: Force specific backend ('tiktoken', 'estimation', etc.).
                     If None, auto-detects based on model name.
             fallback: If True, fall back to estimation on errors.
 
@@ -253,22 +237,6 @@ class TokenizerRegistry:
 
         return factory(model)
 
-    def _create_mistral(self, model: str) -> TokenCounter:
-        """Create Mistral tokenizer using official mistral-common."""
-        try:
-            from .mistral import MistralTokenizer, is_mistral_available
-
-            if is_mistral_available():
-                return MistralTokenizer(model)
-        except ImportError:
-            pass
-
-        logger.warning(
-            "mistral-common not installed for Mistral tokenizer. "
-            "Install with: pip install mistral-common"
-        )
-        return EstimatingTokenCounter()
-
     def _detect_backend(self, model: str) -> str:
         """Detect best backend for model.
 
@@ -295,22 +263,6 @@ class TokenizerRegistry:
             return TiktokenCounter(model)
         except ImportError:
             logger.warning("tiktoken not installed. Install with: pip install tiktoken")
-            return EstimatingTokenCounter()
-
-    def _create_huggingface(self, model: str) -> TokenCounter:
-        """Create HuggingFace-based tokenizer."""
-        try:
-            from .huggingface import HuggingFaceTokenizer
-
-            return HuggingFaceTokenizer(model)
-        except ImportError:
-            logger.warning(
-                "transformers not installed for HuggingFace tokenizer. "
-                "Install with: pip install transformers"
-            )
-            return EstimatingTokenCounter()
-        except Exception as e:
-            logger.warning(f"Failed to load HuggingFace tokenizer for {model}: {e}")
             return EstimatingTokenCounter()
 
     def _create_anthropic(self, model: str) -> TokenCounter:
@@ -355,7 +307,7 @@ def get_tokenizer(
 
     Args:
         model: Model name (e.g., 'gpt-4o', 'claude-3-sonnet').
-        backend: Force specific backend ('tiktoken', 'huggingface', etc.).
+        backend: Force specific backend ('tiktoken', 'estimation', etc.).
         fallback: If True, fall back to estimation on errors.
 
     Returns:
