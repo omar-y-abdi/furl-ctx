@@ -426,17 +426,21 @@ class SmartCrusher(Transform):
         # This retires the row-drop half of the scrape: row-drop recovery no
         # longer DEPENDS on substring-scanning `<<ccr:HASH>>` out of
         # `r.compressed`. The A1 fail-safe is preserved — these are the very
-        # methods that raise `CcrMirrorError` on a store failure, propagating
-        # up through this `crush()` call to ContentRouter's fail-open boundary
-        # (the `crush()` call site is `content_router.py:1043`, caught by the
-        # `except` at `:1118`), which reverts to the ORIGINAL uncompressed
-        # content so the lossy drop never stands without a recovery copy.
+        # methods that raise `CcrMirrorError` on a store failure (and, with
+        # `typed=True`, on a Rust store MISS — COR-5: the engine knows it
+        # dropped these rows, so a missing entry is a dangling marker, not a
+        # foreign one), propagating up through this `crush()` call to
+        # ContentRouter's fail-open boundary (the `crush()` call site is
+        # `content_router.py:1043`, caught by the `except` at `:1118`), which
+        # reverts to the ORIGINAL uncompressed content so the lossy drop
+        # never stands without a recovery copy.
         for ccr_hash in r.ccr_hashes:
             self._mirror_single_hash_to_python_store(
                 ccr_hash,
                 strategy="smart_crusher_row_drop",
                 query_context=query,
                 tool_name=None,
+                typed=True,
             )
         # Granular per-blob row index → per-row chunks, for proportional
         # retrieval. Each typed marker carries one `HASH#rows` key; expand it.
@@ -446,6 +450,7 @@ class SmartCrusher(Transform):
                 strategy="smart_crusher_row_drop",
                 query_context=query,
                 tool_name=None,
+                typed=True,
             )
         # ── OPAQUE-blob markers stay on the scrape (both paths; 1b) ──
         #
@@ -516,6 +521,9 @@ class SmartCrusher(Transform):
                 strategy=str(result.get("strategy_info") or "smart_crusher_row_drop"),
                 query_context=query,
                 tool_name=None,
+                # `ccr_hash` is a TYPED Rust field — a store miss is a
+                # dangling marker, never a foreign one (COR-5).
+                typed=True,
             )
         # Opaque-blob substitutions inside the kept items also produce
         # markers. Walk the rendered shape to bridge those too.
@@ -942,9 +950,18 @@ class SmartCrusher(Transform):
         strategy: str,
         query_context: str,
         tool_name: str | None,
+        typed: bool = False,
     ) -> None:
         """Mirror a single Rust-stored CCR entry into the Python
-        compression_store, keyed by `ccr_hash`. Best-effort.
+        compression_store, keyed by `ccr_hash`.
+
+        ``typed=True`` marks a hash the ENGINE ITSELF surfaced as a typed
+        Rust field (``CrushResult.ccr_hashes`` / ``crush_array_json``'s
+        ``ccr_hash``) — the engine KNOWS it dropped those rows, so a Rust
+        store miss is a dangling marker, not a foreign marker, and the
+        mirror raises ``CcrMirrorError`` (COR-5). Scraped hashes (the
+        default) keep the graceful debug-skip: a hash substring-scanned out
+        of rendered text may genuinely belong to another transform.
 
         GRANULAR row-index keys (``HASH#rows``) are expanded: the index
         (a JSON array of per-row hashes) is fetched from Rust and EACH
@@ -960,13 +977,31 @@ class SmartCrusher(Transform):
                 strategy=strategy,
                 query_context=query_context,
                 tool_name=tool_name,
+                typed=typed,
             )
             return
         canonical = self._rust.ccr_get(ccr_hash)
         if canonical is None:
-            # Rust store doesn't have it — either the marker came from
-            # somewhere else (defensive: another transform's marker
-            # leaked into our input), or the entry expired between
+            if typed:
+                # COR-5: for a TYPED hash the "marker leaked from
+                # elsewhere" excuse is impossible — the engine reported
+                # this exact drop, so a miss means the entry was already
+                # evicted/expired (COR-4 bounds the chunk flood at the
+                # producer, but in_memory.rs documents the window "cannot
+                # be fully eliminated"). The surfaced `<<ccr:HASH>>`
+                # marker dangles and the dropped rows are UNRECOVERABLE —
+                # the silent loss the store contract forbids, and Python
+                # is the last place to catch it. Raise so compress()'s
+                # fail-open boundary (compress.py:386) discards the lossy
+                # output and returns the ORIGINAL messages.
+                raise CcrMirrorError(
+                    f"CCR mirror: typed row-drop hash {ccr_hash} missing "
+                    f"from the Rust store; its <<ccr:{ccr_hash}>> marker "
+                    f"dangles and the dropped rows would be unrecoverable"
+                )
+            # SCRAPED hash the Rust store doesn't have — either the marker
+            # came from somewhere else (defensive: another transform's
+            # marker leaked into our input), or the entry expired between
             # emission and mirror. Either way, nothing to mirror.
             logger.debug(
                 "CCR mirror: hash %s not in Rust store (skipped)",
@@ -1043,6 +1078,7 @@ class SmartCrusher(Transform):
         strategy: str,
         query_context: str,
         tool_name: str | None,
+        typed: bool = False,
     ) -> None:
         """Expand a granular row-index key (``HASH#rows``) and mirror each
         per-row chunk into the Python compression_store under its own hex
@@ -1051,13 +1087,33 @@ class SmartCrusher(Transform):
         whole offloaded blob. Best-effort — a missing index or chunk just
         leaves the whole-blob fallback (mirrored from ``_ccr_dropped``)
         in place.
+
+        ``typed=True`` marks an index key carried by a typed
+        ``CrushResult.row_index_markers`` entry. An index miss stays
+        graceful IFF the whole-blob still resolves; when the blob is ALSO
+        gone, a typed index marker is the same dangling-marker loss class
+        as a typed row-drop hash and raises ``CcrMirrorError`` (COR-5).
         """
         index_raw = self._rust.ccr_get(index_key)
         if index_raw is None:
-            # GRACEFUL DEGRADATION, not loss: the per-row index is missing,
-            # but the whole-blob entry (mirrored from `_ccr_dropped`) still
-            # recovers the data — just coarser (the full blob instead of one
-            # row). Warn for visibility; do NOT raise.
+            # The per-row index is missing. GRACEFUL DEGRADATION iff the
+            # whole-blob entry (mirrored from `_ccr_dropped`) still
+            # resolves: it recovers the data — just coarser (the full blob
+            # instead of one row). That state is by design: FIFO eviction
+            # sheds the redundant chunks/index BEFORE the whole-blob
+            # (persist_dropped's write order), and post-COR-4 an OVERSIZED
+            # drop (> capacity/4) never writes an index at all. Warn for
+            # visibility; do NOT raise.
+            if typed and self._rust.ccr_get(index_key.removesuffix("#rows")) is None:
+                # TYPED index marker with the whole-blob backstop ALSO
+                # gone: nothing recovers the drop — same dangling-marker
+                # silent-loss class as a typed blob miss (COR-5). Raise so
+                # compress()'s fail-open reverts to the originals.
+                raise CcrMirrorError(
+                    f"CCR mirror: typed row index {index_key} AND its "
+                    f"whole-blob entry are missing from the Rust store; "
+                    f"the dropped rows would be unrecoverable"
+                )
             logger.warning("CCR mirror: row index %s not in Rust store", index_key)
             return
         try:

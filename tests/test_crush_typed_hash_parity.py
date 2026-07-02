@@ -71,6 +71,14 @@ def _typed_index_keys(row_index_markers: list[str]) -> set[str]:
 # Each must take the lossy row-drop path under the default config so a
 # `<<ccr:HASH N_rows_offloaded>>` marker is emitted. Built large + low
 # uniqueness (or numeric/string) so the analyzer crushes rather than keeps.
+#
+# SIZE CEILING (COR-4): every case must ALSO keep its dropped-row count
+# UNDER the granular budget (store capacity / 4 = 250 under the default
+# 1000-entry store) — an oversized drop persists the whole-blob ONLY and
+# emits NO `#rows` index marker, which would turn the row-index parity
+# test into an empty-vs-empty no-op. Dozens of rows are plenty to trigger
+# the drop while staying far below the budget; the ≥1-marker floor in
+# `test_crush_typed_row_index_equals_scrape` enforces this.
 
 
 def _dict_case(seed: int) -> list[dict]:
@@ -82,7 +90,7 @@ def _dict_case(seed: int) -> list[dict]:
     # (``smart_sample+compact:table``), exercising the survivor-compacted
     # DICT drop arm specifically.
     rows: list[dict] = []
-    for i in range(400):
+    for i in range(60):
         h = hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()
         rows.append(
             {
@@ -97,15 +105,15 @@ def _dict_case(seed: int) -> list[dict]:
 
 
 def _string_case(seed: int) -> list[str]:
-    return [f"log-line-{seed}-payload" for _ in range(600)]
+    return [f"log-line-{seed}-payload" for _ in range(80)]
 
 
 def _number_case(seed: int) -> list[int]:
-    return [seed for _ in range(600)]
+    return [seed for _ in range(80)]
 
 
 def _mixed_case(seed: int) -> list:
-    return [f"event-{seed}" if i % 2 == 0 else (seed + i) for i in range(700)]
+    return [f"event-{seed}" if i % 2 == 0 else (seed + i) for i in range(100)]
 
 
 _BUILDERS = {
@@ -182,6 +190,15 @@ def test_crush_typed_row_index_equals_scrape(crusher: SmartCrusher, shape: str, 
 
     typed_idx = _typed_index_keys(list(r.row_index_markers))
     scraped_idx = _scrape_index_keys(r.compressed)
+    # Non-vacuity guard (COR-4): an oversized drop (> capacity/4) emits NO
+    # granular index at all — typed and scraped would both be empty and the
+    # parity assertion below would pass without testing anything. The
+    # fixtures are sized to keep every drop under the granular budget; this
+    # ≥1-marker floor keeps the parity check honest if they ever regress.
+    assert typed_idx, (
+        f"{shape}-{seed}: no #rows index marker emitted — the drop exceeds "
+        f"the granular budget (capacity/4), so row-index parity is vacuous"
+    )
     assert typed_idx == scraped_idx, (
         f"{shape}-{seed}: typed index {sorted(typed_idx)} != scraped {sorted(scraped_idx)}"
     )
