@@ -98,9 +98,19 @@ Exec steps (advisor-refined) — extraction DONE `92088258`:
 - `4ffd2541` bench — TEST-4 (run_bench `--out`→tempdir so default run never clobbers committed baseline; floor_check dual-path git-show-floor vs tempdir-capture, G5 preserved; run_final multiturn scorer + loud missing-snapshot)
 - `88f0e578` tests — TEST-5 (20+ skip-sites→hard asserts + 3 loud `fixture_actually_fires` companions for genuinely build-dependent skips) + TEST-6 (real `missing = expected − CCR-recovered` check; killed the dead `if lossy in strategy` vacuous guard). 74 passed, 0 skips.
 
-**Phase 0 — wave 2b RUNNING [sonnet]:** TEST-27 lint gate — pin ruff/mypy across ci.yml+pre-commit+pyproject, `ruff --fix`/`format` sweep, fix 5 mypy errors (csv_schema_decoder:566 / router_policy:68,82,115 / pipeline:136), wire ci-precheck-python.
-**Phase 0 — wave 2c NEXT:** 0.4 re-baseline (regen BASELINE.md+baseline_results.json via `run_bench --out benchmarks`; README Proof-table update **SURFACED TO USER** per advisor — outward-facing, arbitrated ≥3×; investigate if numbers move wildly = lossy-search trap).
-**THEN Phase 1** (invariant gaps COR-4/5/6/7/8 + COR-20, Rust+Python, `maturin develop` before pytest), then §5 owner decisions batched to user at Phase-1→2 boundary, then the 2 refactors → fable.
+**Phase 0 — COMPLETE + pushed (origin/main `d773285b`):**
+- `566f3449` TEST-27 lint — pin ruff 0.15.19 + mypy 1.14.1 (ci.yml+pre-commit+pyproject), format sweep (79 files), fix 4 mypy errs (mypy 1.14.1 flags 4 not the finding's 5), wire ci-precheck-python, exclude untracked .claude tooling.
+- `590391a4` 0.4 re-baseline — search 40%→92% / logs 85%→93% etc. are LOSSY-drop via the near-dup dedup feature (357dbad8), 100% CCR-recoverable + 100% needle recall; benchmark input unchanged (pure engine behavior). Honest 6-dataset floor.
+- `d773285b` honest README Proof table (user chose full-6-dataset framing; regime column: lossless vs lossy-CCR).
+Substrate honest, gates trustworthy — "everything depends on it" foundation laid.
+
+**Phase 1 — invariant gaps (RUNNING). Constraint: Rust items share the maturin `.so` → serialize Rust, no concurrent rebuilds; `maturin develop` before pytest. Waves:**
+- **1.1 [opus, Rust] RUNNING** — COR-4 CCR chunk-flood (persist only DROPPED rows + skip granular chunking when n>capacity/4; add `CcrStore::capacity()`) + COR-20 marker-count lie (same commit, re-pin grammar characterization test). FOUNDATIONAL: 1.2 + §4.2 depend on the settled persist shape.
+- **1.2 [sonnet, Py]** COR-5 typed-hash store-miss → `CcrMirrorError` fail-open (after 1.1). **1.3 [sonnet, Py]** COR-6 Kompress veto→passthrough + COR-11 onnx_coreml startswith + COR-12 mid-batch KeyError guard. (1.2+1.3 parallel-safe: Python-only, disjoint files smart_crusher.py vs kompress_compressor.py.)
+- **1.4 [opus, Rust]** COR-7 panic containment (catch_unwind→PyRuntimeError on hot bridge methods + PanicException fail-open in compress(), one commit + Cargo comment). **1.5 [sonnet, Rust]** COR-8 tag_protector marker-mode stack over-pop (delete pop) + COR-9 unquoted-attr `/` lookahead. **1.7 [sonnet, Rust]** COR-19 ccr_store dual-field. (Rust → serial.)
+- **1.6 [sonnet]** COR-13 decoder Buckets/Nested/json-cell coverage + gate lossless-accept to Table-only + COR-15 decline compaction on special-char column names (fail-closed). **COR-14 flatten_uniform_nested = §5 OWNER CALL — batch to user, do NOT auto-fix.**
+
+**§5 owner decisions** batched to user at the Phase-1→2 boundary (COR-14 dotted-flatten, TOIN delete-vs-shrink, Bash COR-10/EFF-1, code strategy, etc.). Then Phase 2 (security), Phase 3 (Great Excision, needs 4 decisions), §4.2 + §4.1 refactors → **fable**, Phases 6-8.
 
 **Still-open:** §5's 15 owner decisions — surface as a batch before Phase 3 Excision. User chose "full zero-material" (DO-everything); HOW is open (delete-vs-shrink TOIN, restore-AST-vs-accept-0%-code, etc.).
 
@@ -142,4 +152,4 @@ Batch-fix plan: mechanical/clear-cut (M1,M2,M6,M7,M8,N1,N2,N3) fix autonomously.
 `92088258` site-3 extraction · `0844692f` format guards · `1d8a69e9` ML→Kompress rename · `e64602e2` round-3 doc-integrity batch · `7fc45aaa` round-3 reconcile · `c7693fa7` round-4 doc-integrity + config batch · `aa89cf6d` round-5 stamp-highs 4/5 (docs #3/#4 + security #2/#5) · `3403a4a8` round-5 high #1 CSV true-lossless sentinels · (+ PLAN.md checkpoints cbda82af/5477ebfc/bf9234d0/e021bb3c)
 
 ## Fable-recon campaign commit ledger (Phase 0)
-`c5b58ca8` gate honesty + FABLE-RECON-PLAN.md · `f1c44778` COR-1/COR-2 lossless-decoder data-loss fix · `7988bb5c` COR-3+TEST-26 verify substrate · `4ffd2541` TEST-4 bench-out isolation · `88f0e578` TEST-5/6 test anti-vacuity
+`c5b58ca8` gate honesty + FABLE-RECON-PLAN.md · `f1c44778` COR-1/COR-2 lossless-decoder data-loss fix · `7988bb5c` COR-3+TEST-26 verify substrate · `4ffd2541` TEST-4 bench-out isolation · `88f0e578` TEST-5/6 test anti-vacuity · `566f3449` TEST-27 lint pin+sweep · `590391a4` 0.4 re-baseline (6-dataset honest floor) · `d773285b` honest README Proof table — **PHASE 0 COMPLETE**
