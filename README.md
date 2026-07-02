@@ -238,10 +238,6 @@ pip install -e ".[dev]" && pytest
 
 A devcontainer ships in `.devcontainer/`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Community
-
-- **[Discord](https://discord.gg/yRmaUNpsPJ)** — questions, feedback, war stories.
-
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
