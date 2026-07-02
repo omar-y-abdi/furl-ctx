@@ -12,15 +12,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tiktoken-rs = "0.11"
-# `tokenizers` is the HuggingFace pure-Rust tokenizer crate. Default features
-# pull in `onig` for the BPE pre-tokenizer regex; that vendors oniguruma so it
-# builds without a system dep on macOS/Linux.
-tokenizers = "0.22"
-# `hf-hub` is the HuggingFace Hub client. We use the blocking `ureq` transport
-# with `rustls` (no system OpenSSL dep — keeps the binary static-linkable for
-# AWS deploys). `from_pretrained` is called once at startup, so blocking is
-# fine; if a tokio caller needs it later we can wrap in `spawn_blocking`.
-hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
 # `md5` for the CCR cache_key. Python's compression_store hashes the original
 # diff with MD5 truncated to 24 hex chars; we must match byte-for-byte.
 md-5 = "0.10"
@@ -33,8 +24,7 @@ sha2 = "0.10"
 # concurrent multi-threaded load doesn't queue on a single Mutex. Lock-free
 # reads inside each shard via RwLock semantics.
 dashmap = "6"
-# `regex` is already a transitive dep of tokenizers; depend on it directly so
-# our hunk-header parser and priority-pattern matcher have a stable surface.
+# `regex` powers the hunk-header parser and priority-pattern matcher.
 regex = "1"
 # `flate2` for `_validate_with_zlib` in `adaptive_sizer`. Python's adaptive
 # sizing pipeline uses `zlib.compress(..., level=1)` to validate the chosen

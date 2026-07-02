@@ -31,8 +31,7 @@ use headroom_core::transforms::tag_protector::{
     protect_tags as rust_protect_tags, restore_tags as rust_restore_tags,
 };
 use headroom_core::transforms::{
-    detect as rust_detect_chain, is_json_array_of_dicts as rust_is_json_array_of_dicts,
-    ContentType as RustContentType, DetectionResult as RustDetectionResult, DiffCompressionResult,
+    detect as rust_detect_chain, DetectionResult as RustDetectionResult, DiffCompressionResult,
     DiffCompressor, DiffCompressorConfig, DiffCompressorStats,
     LogCompressionResult as RustLogResult, LogCompressor as RustLogCompressor,
     LogCompressorConfig as RustLogConfig, LogCompressorStats as RustLogStats,
@@ -511,8 +510,6 @@ impl PySmartCrusherConfig {
         preserve_change_points = true,
         factor_out_constants = false,
         include_summaries = false,
-        use_feedback_hints = true,
-        toin_confidence_threshold = 0.5,
         dedup_identical_items = true,
         first_fraction = 0.3,
         last_fraction = 0.15,
@@ -533,8 +530,6 @@ impl PySmartCrusherConfig {
         preserve_change_points: bool,
         factor_out_constants: bool,
         include_summaries: bool,
-        use_feedback_hints: bool,
-        toin_confidence_threshold: f64,
         dedup_identical_items: bool,
         first_fraction: f64,
         last_fraction: f64,
@@ -563,8 +558,6 @@ impl PySmartCrusherConfig {
                 preserve_change_points,
                 factor_out_constants,
                 include_summaries,
-                use_feedback_hints,
-                toin_confidence_threshold,
                 dedup_identical_items,
                 first_fraction,
                 last_fraction,
@@ -621,14 +614,6 @@ impl PySmartCrusherConfig {
     #[getter]
     fn include_summaries(&self) -> bool {
         self.inner.include_summaries
-    }
-    #[getter]
-    fn use_feedback_hints(&self) -> bool {
-        self.inner.use_feedback_hints
-    }
-    #[getter]
-    fn toin_confidence_threshold(&self) -> f64 {
-        self.inner.toin_confidence_threshold
     }
     #[getter]
     fn dedup_identical_items(&self) -> bool {
@@ -1093,13 +1078,13 @@ impl PyDetectionResult {
 /// Detect the type of `content`. Returns a `DetectionResult` with the
 /// same field surface as Python's dataclass.
 ///
-/// This runs through the unidiff→PlainText detection chain — the
-/// regex `content_detector` is no longer on the Rust production path.
-/// The chain returns a `ContentType` only;
-/// we synthesize the legacy `DetectionResult` shape here with
-/// `confidence = 1.0` (the chain doesn't surface a probabilistic
-/// score) and an empty metadata bag (no production caller reads
-/// metadata from this binding today — see audit notes in
+/// This runs through the unidiff→PlainText detection chain (the Rust
+/// byte-parity port of the regex `content_detector` was removed — it
+/// was never on the Rust production path). The chain returns a
+/// `ContentType` only; we synthesize the legacy `DetectionResult`
+/// shape here with `confidence = 1.0` (the chain doesn't surface a
+/// probabilistic score) and an empty metadata bag (no production
+/// caller reads metadata from this binding today — see audit notes in
 /// `headroom/transforms/content_router.py`).
 ///
 /// Releases the GIL while detecting — unidiff parsing can be
@@ -1117,20 +1102,6 @@ fn detect_content_type(py: Python<'_>, content: &str) -> PyDetectionResult {
         },
     }
 }
-
-/// Quick check: is `content` a JSON array of dictionaries (the format
-/// `SmartCrusher` natively handles)?
-#[pyfunction]
-fn is_json_array_of_dicts(py: Python<'_>, content: &str) -> bool {
-    let owned = content.to_string();
-    py.allow_threads(move || rust_is_json_array_of_dicts(&owned))
-}
-
-// Suppress unused-import warning when ContentType isn't referenced
-// directly — `as_str()` is the public surface.
-const _: fn() = || {
-    let _ = RustContentType::PlainText;
-};
 
 // ─── signals: line-importance detector bridge ────────────────────────────
 //
@@ -1692,7 +1663,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_html_tag, m)?)?;
     m.add_function(wrap_pyfunction!(known_html_tag_names, m)?)?;
     m.add_function(wrap_pyfunction!(detect_content_type, m)?)?;
-    m.add_function(wrap_pyfunction!(is_json_array_of_dicts, m)?)?;
     m.add_function(wrap_pyfunction!(score_line, m)?)?;
     m.add_function(wrap_pyfunction!(content_has_error_indicators, m)?)?;
     m.add_function(wrap_pyfunction!(keyword_registry_snapshot, m)?)?;

@@ -9,12 +9,12 @@
 //!
 //! # Why a parser, not another regex
 //!
-//! The retired Python detector and the still-on-main regex
-//! [`crate::transforms::content_detector`] use a hand-rolled
-//! `DIFF_HEADER_PATTERN` regex. That works for the canonical shapes
-//! but is brittle around the edges (combined-merge headers, naked
-//! hunks, truncated outputs). The Rust side has no regex tier — we use
-//! a real grammar oracle (the [`unidiff::PatchSet`] parser) instead.
+//! The Python regex detector (and the retired Rust byte-parity port of
+//! it) use a hand-rolled `DIFF_HEADER_PATTERN` regex. That works for
+//! the canonical shapes but is brittle around the edges (combined-merge
+//! headers, naked hunks, truncated outputs). The Rust side has no regex
+//! tier — we use a real grammar oracle (the [`unidiff::PatchSet`]
+//! parser) instead.
 //!
 //! # Scope
 //!
@@ -30,14 +30,14 @@
 //! # Known gaps (deliberately punted)
 //!
 //! - **Combined-merge diffs** (`@@@ ... @@@`) — `unidiff`'s hunk-header
-//!   regex is for plain `@@`, not `@@@`. The router could fall back
-//!   to the regex content_detector for these specifically, but in
-//!   practice they're rare.
+//!   regex is for plain `@@`, not `@@@`. The Python regex backstop in
+//!   `content_router.py` can still catch these; in practice they're
+//!   rare.
 //! - **Multi-byte line ending shapes** — the parser walks
 //!   `input.lines()`, which strips `\r` only when paired with `\n`.
 //!   Pathological CRLF-stripped inputs could miss; we accept the gap.
 
-use crate::transforms::content_detector::ContentType;
+use crate::transforms::detection::ContentType;
 use unidiff::PatchSet;
 
 /// Boolean predicate: does `content` parse as a unified diff with

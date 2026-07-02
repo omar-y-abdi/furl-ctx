@@ -14,16 +14,18 @@
 //! 3. **Error keywords** — preservation guarantee.
 //! 4. **Query anchors** (deterministic exact match) and **relevance
 //!    scoring** (probabilistic) — both gated on `query_context`.
-//! 5. **TOIN preserve_fields** — items where a query token matches a
-//!    learned-important field's value.
+//! 5. **preserve_fields** — items where a query token matches a
+//!    caller-supplied preserve-field's value.
 //! 6. **Prioritize** — dedup + fill + over-budget pruning.
 //!
-//! # TOIN preserve_fields surface
+//! # preserve_fields surface
 //!
-//! TOIN itself isn't ported yet, so callers always pass
-//! `preserve_fields = None` for now. The `item_has_preserve_field_match`
-//! helper exists with the full semantics so it works the moment a real
-//! TOIN list arrives.
+//! The retired learning system was the intended supplier of
+//! `preserve_fields`; today no caller supplies them, so the production
+//! path always passes `preserve_fields = None`. The
+//! `item_has_preserve_field_match` helper keeps the full semantics
+//! (SHA256[:8]-hashed field names) for callers that pass their own
+//! list.
 
 use md5::{Digest, Md5};
 use serde_json::Value;
@@ -234,7 +236,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         let query_pinned =
             self.apply_query_signals(items, query_context, item_strings, &mut keep, false);
 
-        // TOIN preserve_fields.
+        // preserve_fields (caller-supplied; None on the production path).
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep = prioritize_indices(PrioritizeParams {
@@ -431,7 +433,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         let query_pinned =
             self.apply_query_signals(items, query_context, item_strings, &mut keep, false);
 
-        // TOIN preserve_fields.
+        // preserve_fields (caller-supplied; None on the production path).
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep = prioritize_indices(PrioritizeParams {
@@ -493,7 +495,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         let query_pinned =
             self.apply_query_signals(items, query_context, item_strings, &mut keep, false);
 
-        // TOIN preserve_fields.
+        // preserve_fields (caller-supplied; None on the production path).
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep = prioritize_indices(PrioritizeParams {

@@ -20,23 +20,15 @@
 //!
 //! # What is here
 //! - [`TiktokenCounter`] — OpenAI / o-series, byte-equal to Python `tiktoken`.
-//! - [`HfTokenizer`] — any model with a public `tokenizer.json` (Cohere
-//!   `command-*`, Llama-3.x, Mistral, Qwen, BERT, T5, …). Construct it from
-//!   bytes or a file path; register it via [`register_hf`] to make it the
-//!   default for a given model-name prefix.
 //! - [`EstimatingCounter`] — last-resort `chars / cpt` fallback for Anthropic
 //!   and Gemini, calibrated to match the Python implementation.
 
 mod estimator;
-mod hf_impl;
 mod registry;
 mod tiktoken_impl;
 
 pub use estimator::EstimatingCounter;
-pub use hf_impl::{HfTokenizer, HfTokenizerError};
-pub use registry::{
-    clear_hf_registrations, detect_backend, get_tokenizer, register_hf, try_register_hf, Backend,
-};
+pub use registry::{detect_backend, get_tokenizer, Backend};
 pub use tiktoken_impl::{TiktokenCounter, TiktokenError};
 
 /// Counts tokens. Implementations must be thread-safe (`Send + Sync`).

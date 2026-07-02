@@ -11,11 +11,13 @@
 //!
 //! # Why no regex tier
 //!
-//! User-locked decision (2026-04-25): the Rust side does not run the
-//! regex-based [`crate::transforms::content_detector`] in production
-//! detection. The regex path stays in tree as a comparison oracle for
-//! parity testing and as an opt-in escape hatch, but the dispatch is
-//! the unidiff parser + fallthrough only.
+//! User-locked decision (2026-04-25): the Rust side does not run a
+//! regex-based content detector in production detection. (The
+//! byte-parity Rust port of Python's regex `content_detector` was
+//! removed after Chunk 2 confirmed the production chain never
+//! consumed it; the Python regex detector remains the Stage-2
+//! backstop in `headroom/transforms/content_router.py`.) The dispatch
+//! is the unidiff parser + fallthrough only.
 //!
 //! # SearchResults / BuildOutput
 //!
@@ -27,8 +29,51 @@
 //! compression loss on grep/build outputs, we add a focused detector
 //! for those specifically; not preemptively.
 
-use crate::transforms::content_detector::ContentType;
+use serde_json::{Map, Value};
+
 use crate::transforms::unidiff_detector::is_diff;
+
+/// Content types recognized by detection. String tags match Python's
+/// `ContentType` enum values 1:1 (`headroom/transforms/content_detector.py`);
+/// the PyO3 boundary ships the tag and the Python wrapper rebuilds its
+/// enum from it. The Rust chain itself only ever produces
+/// [`ContentType::GitDiff`] or [`ContentType::PlainText`]; the other
+/// variants exist to keep the cross-language tag contract total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContentType {
+    JsonArray,
+    SourceCode,
+    SearchResults,
+    BuildOutput,
+    GitDiff,
+    PlainText,
+}
+
+impl ContentType {
+    /// Stable string tag — matches Python's `ContentType.<NAME>.value`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContentType::JsonArray => "json_array",
+            ContentType::SourceCode => "source_code",
+            ContentType::SearchResults => "search",
+            ContentType::BuildOutput => "build",
+            ContentType::GitDiff => "diff",
+            ContentType::PlainText => "text",
+        }
+    }
+}
+
+/// Detection result shipped across the PyO3 boundary. Mirrors the field
+/// surface of Python's `DetectionResult` dataclass (`content_type`,
+/// `confidence`, `metadata`) so the Python `ContentRouter` can consume
+/// it unchanged. `metadata` uses `serde_json::Map` so PyO3 can convert
+/// it to a Python dict on the boundary without losing type fidelity.
+#[derive(Debug, Clone)]
+pub struct DetectionResult {
+    pub content_type: ContentType,
+    pub confidence: f64,
+    pub metadata: Map<String, Value>,
+}
 
 /// Run the detection chain on `content` and return the chosen
 /// [`ContentType`].

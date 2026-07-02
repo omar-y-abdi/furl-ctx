@@ -97,11 +97,6 @@ pub struct SmartCrusherConfig {
     /// Include generated text summaries in output. Default false (disabled
     /// — no generated text).
     pub include_summaries: bool,
-    /// Use feedback hints to adjust compression aggressiveness. Default true.
-    pub use_feedback_hints: bool,
-    /// Minimum confidence required to apply TOIN recommendations.
-    /// Default 0.5.
-    pub toin_confidence_threshold: f64,
     /// Drop content-identical items before sampling. Default true.
     pub dedup_identical_items: bool,
     /// Fraction of K to allocate to the start of the array. Default 0.3.
@@ -196,8 +191,6 @@ impl Default for SmartCrusherConfig {
             preserve_change_points: true,
             factor_out_constants: false,
             include_summaries: false,
-            use_feedback_hints: true,
-            toin_confidence_threshold: 0.5,
             dedup_identical_items: true,
             first_fraction: 0.3,
             last_fraction: 0.15,
@@ -230,8 +223,6 @@ mod tests {
         assert!(c.preserve_change_points);
         assert!(!c.factor_out_constants);
         assert!(!c.include_summaries);
-        assert!(c.use_feedback_hints);
-        assert_eq!(c.toin_confidence_threshold, 0.5);
         assert!(c.dedup_identical_items);
         assert_eq!(c.first_fraction, 0.3);
         assert_eq!(c.last_fraction, 0.15);

@@ -47,3 +47,18 @@
 
 ## 6. Settings note (2026-07-02)
 Global `~/.claude/settings.json`: auto-compact key is **`autoCompactWindow`** (int 100k-1M) + `autoCompactEnabled` — NOT `autoCompact`/`autoCompactThreshold` (invalid, silently rejected). Set to `autoCompactWindow: 600000`.
+
+## 7. LIFTED EXCLUSION + GREAT EXCISION IN PROGRESS (2026-07-02 latest — SUPERSEDES §2 exclusion + §5 resume)
+- **🔓 SECURITY-EXCLUSION LIFTED (user):** fable survived MCP/store (security-adjacent) where sonnet×2+opus stream-idle-DIED. **fable = DEFAULT for ALL tough jobs** (SEC cluster, security-adjacent COR, excision, PERF/ARCH). **opus = FALLBACK ONLY if fable safeguard-FLAGS** (NOT for timeouts → re-dispatch/foreground). Reuse running fable via SendMessage before respawn. No more pre-filtering security from fable.
+- **Liveness:** output-file mtime is NOT a liveness signal (fable ran 137k tokens w/ "stale" mtime). Trust ONLY the completion/timeout notification.
+- **DONE this session (gate G1-G5 green + pushed):** Wave-1 COR-40/44/46/49/50 (`18da4e93`/`ced9aa6a`/`9b907ba6`) · Wave-2 content_router COR-17/18/30/31/39/47/48 (`2ae3f6a2`) · MCP/store COR-32/51/54/56 (`f9e8d5be`).
+- **🔥 GREAT EXCISION (MAXIMAL-LEAN/SEMI-NUCLEAR).** RULE = delete anything whose removal keeps {6-dataset floor + needle-100% + recovery-23 + MCP-hook smoke} GREEN; used⇒stays; uncertain⇒keep+flag. Per-chunk fable→gate→commit:
+  - ✅ C1 Kompress ML `096eee54` (-1.7k; +RouterRuntime/kompress_model/target_ratio removed)
+  - ✅ C2 HTML `5d408305` (COR-38 moot)
+  - ✅ C3 Telemetry/TOIN/feedback `5922be28` (-5285; SEC-2/3+PERF-9/10+COR-37/41-TOIN moot; KEPT local mcp stats = COR-36)
+  - ✅ C4 Tokenizers→tiktoken-only `01826d63` (-967; huggingface.py+mistral.py)
+  - ⏭ **C5 Rust dead-weight (RUNNING):** content_detector.rs parity mirror (SIMP-6) + Rust HF tokenizer (tokenizer/hf_impl.rs/registry.rs + tokenizers/hf-hub Cargo deps) + inert Rust TOIN fields (config.rs/hashing.rs/error_keywords.rs, FFI: pyo3 lib.rs:514 kwargs). cargo test+maturin+parity.
+  - ⏭ C6 ast-grep (code-path + `ast-grep-cli` dep, accept 0% code). C7 semi-nuclear sweep (signals/relevance if dead, tag_protector.py orphan [wraps live Rust — verify], archive/). C8 doc/CI honesty (README Kompress/HTML, llms.txt HEADROOM_TELEMETRY, conftest HF).
+- **ciFix agent** (sonnet, running): fixing failing "Release Please" GH workflow (spamming user) + dead ci.yml HF prefetch, .github-scoped.
+- **Remaining COR after excision (→fable):** COR-16 (analysis-intent keyword trim), COR-21 (router_cache DoS), COR-36 (mcp local-stats result.error honesty). Then SEC §3.2 + PERF/ARCH/TEST/DOC/API/SIMP.
+- **Owner-Q resolved by excision:** Q1/Q3/Q4/Q6. QUESTIONS-FOR-USER.md remaining: Q2/5/7/8/9/10/11/12/13/14.

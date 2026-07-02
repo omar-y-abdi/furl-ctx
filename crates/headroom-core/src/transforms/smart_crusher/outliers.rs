@@ -4,9 +4,9 @@
 //! and `_detect_error_items_for_preservation` from
 //! `smart_crusher.py:606-748`.
 //!
-//! `_detect_items_by_learned_semantics` is deferred to a later commit
-//! because it depends on the TOIN `FieldSemantics` type, which isn't
-//! ported yet.
+//! Python's `_detect_items_by_learned_semantics` was not ported — it
+//! depended on the retired cross-user learning system's
+//! `FieldSemantics` type, which was removed along with that system.
 //!
 //! # Bug #3 fix — `detect_rare_status_values`
 //!

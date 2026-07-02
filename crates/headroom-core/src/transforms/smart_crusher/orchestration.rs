@@ -18,14 +18,14 @@
 //! `compute_item_hash` from `anchor_selector` so the same item collapses
 //! to the same hash in both languages.
 //!
-//! # TOIN field-semantics — currently stubbed
+//! # Learned field-semantics — not supported
 //!
-//! Python's `_prioritize_indices` accepts an optional `field_semantics`
-//! map and calls `_detect_items_by_learned_semantics` to find items
-//! with values in TOIN-learned important fields. TOIN isn't ported
-//! yet; we mirror the Python "no field_semantics provided" branch
-//! (returns no learned-important indices). When TOIN lands, we'll add
-//! that argument back to the public surface.
+//! Python's `_prioritize_indices` used to accept an optional
+//! `field_semantics` map (from the retired cross-user learning
+//! system) and pin items with values in learned-important fields.
+//! That system was removed; this port permanently mirrors the
+//! "no field_semantics provided" branch (no learned-important
+//! indices).
 
 use md5::{Digest, Md5};
 use serde_json::Value;
@@ -227,17 +227,12 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
     // Numeric anomalies (>variance_threshold σ from per-field mean).
     let anomaly_indices = numeric_anomaly_indices(config, items, analysis);
 
-    // TOIN learned-important indices: empty until TOIN is ported.
-    let learned_indices: BTreeSet<usize> = BTreeSet::new();
-
     let mut prioritized: BTreeSet<usize> = BTreeSet::new();
 
-    // Error-keyword and TOIN-learned pins are SEMANTIC needles (an
-    // "ERROR"/"panic" token, a learned-important field value) — they are
-    // meaningful regardless of how many rows carry them, so they pin
-    // unconditionally.
+    // Error-keyword pins are SEMANTIC needles (an "ERROR"/"panic"
+    // token) — they are meaningful regardless of how many rows carry
+    // them, so they pin unconditionally.
     prioritized.extend(&error_indices);
-    prioritized.extend(&learned_indices);
 
     // DEGENERACY GATE (rarity-class pins). Structural outliers (rare
     // fields / rare statuses) and numeric anomalies (>variance_threshold σ)

@@ -12,8 +12,8 @@
 //! summary objects sneak in.
 //!
 //! `_crush_array` (the dict-array orchestrator) and `_crush_mixed_array`
-//! (the type-grouped fallback) live in a later commit because they pull
-//! in the planning + execution + TOIN/CCR scaffolding.
+//! (the type-grouped fallback) live in `crusher.rs` because they pull
+//! in the planning + execution + CCR scaffolding.
 //!
 //! # BUG #1 — percentile off-by-one in `crush_number_array`
 //!

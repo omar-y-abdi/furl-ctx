@@ -13,25 +13,24 @@
 //!
 //! # Stubs that match Python's "everything-disabled" path
 //!
-//! Python's `_crush_array` calls into TOIN (cross-user pattern
-//! learning), feedback (per-tool compression hints), CCR (compress-
-//! cache-retrieve store), and telemetry. All four are large separate
-//! systems with their own state. For the like-for-like port at Stage
-//! 3c.1, we mirror Python's behavior **when those subsystems are
-//! disabled**:
+//! Python's `_crush_array` historically called into cross-user pattern
+//! learning, per-tool feedback hints, CCR (compress-cache-retrieve
+//! store), and telemetry. The learning/feedback/telemetry systems have
+//! since been deleted from the Python side; CCR is the one that
+//! remains live. The like-for-like port at Stage 3c.1 mirrored
+//! Python's behavior **with those subsystems disabled**, which is now
+//! simply the behavior:
 //!
-//! - **TOIN**: never produces a recommendation, never overrides
-//!   `effective_max_items`, never injects preserve_fields/strategy/level.
-//! - **Feedback**: never produces hints; default `effective_max_items`.
-//! - **CCR**: `enabled=false`; result has `ccr_hash = None`.
-//! - **Telemetry**: no-op.
+//! - **Learned recommendations**: never produced; nothing overrides
+//!   `effective_max_items` or injects preserve_fields/strategy/level.
+//! - **Feedback hints**: never produced; default `effective_max_items`.
+//! - **CCR**: wired separately (live) — see `ccr_store()`.
 //! - **`_compress_text_within_items`**: pass-through (returns input
 //!   unchanged) since text compression has its own port pipeline.
 //! - **`summarize_dropped_items`**: empty string.
 //!
-//! Parity fixtures are recorded with all four disabled on the
-//! Python side, locking byte-equal output. The TOIN/CCR/feedback
-//! integration ports are handled separately.
+//! Parity fixtures were recorded with those subsystems disabled on the
+//! Python side, locking byte-equal output.
 
 use std::sync::Arc;
 
@@ -829,9 +828,9 @@ impl SmartCrusher {
     /// Compress an array of dict items.
     ///
     /// Direct port of `_crush_array` (Python line 2400-2687) with the
-    /// optional subsystems (TOIN / CCR / feedback / telemetry) wired
-    /// in their disabled-by-default behavior. See module-level docs
-    /// for the rationale.
+    /// retired optional subsystems (learning / feedback / telemetry)
+    /// in their disabled behavior and CCR wired live. See module-level
+    /// docs for the rationale.
     ///
     /// # Pipeline
     ///
@@ -1188,7 +1187,7 @@ impl SmartCrusher {
             &analysis,
             items,
             query_context,
-            None, // preserve_fields (TOIN — stubbed)
+            None, // preserve_fields — no production caller supplies these
             Some(effective_max_items),
             Some(item_strings),
         );

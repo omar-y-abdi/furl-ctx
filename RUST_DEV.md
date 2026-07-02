@@ -136,7 +136,7 @@ boundary** — is captured in issue #315 and
 ### Watch list (potential regressions, not yet audited)
 
 - `CCRConfig.enabled=False` end-to-end — **closed 2026-04-29**. Both `enabled=False` and `inject_retrieval_marker=False` collapse to the same Rust `enable_ccr_marker=False` gate (no marker, no store write). See the SmartCrusher table above.
-- `SmartCrusherConfig.use_feedback_hints=False` — config field is forwarded to Rust but its honoring inside the Rust crusher hasn't been verified for the disabled path.
+- `SmartCrusherConfig.use_feedback_hints=False` — **closed**: the field (and `toin_confidence_threshold`) was removed from both the Rust config struct and the pyo3 constructor after the Python feedback/TOIN system was deleted; nothing forwards or honors it anymore.
 
 When any item above changes, update both this section and the test file. The shim's docstring also references this section — keep them aligned.
 
