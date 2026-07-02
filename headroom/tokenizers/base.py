@@ -20,7 +20,7 @@ class TokenCounter(Protocol):
 
     Any class implementing this protocol can be used with Headroom
     for token counting. This allows integration with various
-    tokenizer backends (tiktoken, HuggingFace, custom, etc.).
+    tokenizer backends (tiktoken, estimation, custom, etc.).
     """
 
     def count_text(self, text: str) -> int:

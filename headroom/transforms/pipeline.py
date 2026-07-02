@@ -143,8 +143,7 @@ class TransformPipeline:
         the tokenizer registry which auto-detects the best backend per model:
         - OpenAI models: tiktoken (exact)
         - Anthropic models: calibrated estimation (~3.5 chars/token)
-        - Open models: HuggingFace tokenizer (if installed)
-        - Unknown models: character-based estimation
+        - Open/unknown models: character-based estimation
         """
         if self._provider is not None:
             token_counter = self._provider.get_token_counter(model)
