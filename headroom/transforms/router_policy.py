@@ -36,6 +36,8 @@ class CompressionStrategy(Enum):
     HTML = "html"
     MIXED = "mixed"
     PASSTHROUGH = "passthrough"
+    # Reversible last-resort offload to the CCR store (ContentRouter fallback).
+    CCR_OFFLOAD = "ccr_offload"
 
 
 def strategy_from_detection(config: Any, detection: Any) -> CompressionStrategy:
@@ -94,6 +96,7 @@ def content_type_from_strategy(strategy: CompressionStrategy) -> ContentType:
         CompressionStrategy.TEXT: ContentType.PLAIN_TEXT,
         CompressionStrategy.KOMPRESS: ContentType.PLAIN_TEXT,
         CompressionStrategy.PASSTHROUGH: ContentType.PLAIN_TEXT,
+        CompressionStrategy.CCR_OFFLOAD: ContentType.PLAIN_TEXT,
     }
     return mapping.get(strategy, ContentType.PLAIN_TEXT)
 

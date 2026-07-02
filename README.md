@@ -99,16 +99,16 @@ Granular extras: `[mcp]`, `[ml]` (Kompress-v2-base), `[html]`, `[dev]`. Requires
 
 | Dataset       | Items | Before | After  | Reduction | Regime      | Info retention |
 |---------------|------:|-------:|-------:|----------:|-------------|---------------:|
-| code          |     7 | 41,025 | 41,025 |        0% | lossless    |           100% |
+| code          |     7 | 41,025 |    471 |       99% | lossy (CCR) |           100% |
 | disk          |     9 |    694 |    347 |       50% | lossless    |           100% |
-| multiturn     |   135 | 14,866 |  4,369 |       71% | lossy (CCR) |           100% |
+| multiturn     |   135 | 14,866 |  2,009 |       87% | lossy (CCR) |           100% |
 | logs          |    90 |  8,595 |    619 |       93% | lossy (CCR) |           100% |
 | search        |    90 |  4,102 |    318 |       92% | lossy (CCR) |           100% |
-| repeated logs |    90 |  3,621 |    131 |       96% | lossy (CCR) |           100% |
+| repeated logs |    90 |  3,621 |    120 |       97% | lossy (CCR) |           100% |
 
-<sub>**Regime** — *lossless*: the compressed output is self-contained (zero rows dropped). *lossy (CCR)*: near-duplicate or low-signal rows are offloaded to the local CCR store and replaced with `<<ccr:HASH>>` markers — smaller output, and **every dropped row is byte-exactly recoverable on demand** (100% info retention, within the configured TTL). `code` is large distinct source files that don't compress, so Headroom passes them through untouched.</sub>
+<sub>**Regime** — *lossless*: the compressed output is self-contained (zero rows dropped). *lossy (CCR)*: rows are offloaded to the local CCR store and replaced with `<<ccr:HASH>>` markers — smaller output, and **every dropped row is byte-exactly recoverable on demand** (100% info retention, within the configured TTL). `code` (large distinct source files that no compressor can shrink) takes the reversible CCR-offload fallback: an identity preview (paths + first lines) plus a retrieval marker ships in place of the full files.</sub>
 
-These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). The **60–95%** headline is this table's lossy-CCR range (search/logs/repeated-logs land 92–96%); full methodology and the 6-seed adversarial sweep live in [BENCHMARKS.md](BENCHMARKS.md).
+These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). Across the whole corpus the table sums to **95% fewer tokens** (72,903 → 3,884) at 100% information retention; the **60–95%** headline maps to this table's lossy-CCR range. Full methodology and the 6-seed adversarial sweep live in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## When to use · When to skip
 

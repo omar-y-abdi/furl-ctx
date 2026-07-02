@@ -48,6 +48,12 @@ against `verify/run.py`.)
 | multiturn@90 | 70.8% (@low/135) | **39.0%** medium | **28.3%** high [22.9–32.5] | yes | heldout |
 | code@7 | 0% (passthrough) | 0% | 0% (66% only when blobs are byte-identical → dedup) | yes | verify |
 
+> **Update (CCR-offload fallback):** the rows above predate the router's
+> reversible CCR-offload fallback: `code@7` no longer passes through at 0%
+> but offloads to the CCR store (**98.9%**, retention 100%), and multiturn
+> rose 70.6% → **86.5%** (structured-JSON error-protection fix). Current
+> capture: `benchmarks/BASELINE.md`; the tables below are dated records.
+
 **Honest reading of the degradations** (vs the dev headline, the POINT of
 the audits):
 
