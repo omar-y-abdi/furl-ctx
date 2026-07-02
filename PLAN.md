@@ -108,7 +108,13 @@ Substrate honest, gates trustworthy — "everything depends on it" foundation la
 
 **Phase 1 — invariant gaps. Rust items share maturin `.so` → serialize Rust; `maturin develop` before pytest.**
 - **1.1 DONE `a6344a2f` [fable]** — COR-4 CCR chunk-flood (persist only dropped rows + capacity/4 granular gate + `CcrStore::capacity()`; whole-blob backstop unconditional/last) + COR-20 honest marker count. Gate G1-G5 green, 2 breach-repro tests (two-large-arrays, single-oversized), design verified (whole-blob=recovery backstop, chunks=proportional-retrieval optimization; multiset-diff over-approximates, never misses).
-- **COR BATCH 1 → fable [RUNNING]** — Phase-1 correctness, all pure/zero-security: COR-5 (typed-hash fail-open), COR-6 (Kompress store-fail→passthrough), COR-8/9 (tag_protector stack over-pop / unquoted-`/` lookahead), COR-11/12 (kompress onnx_coreml / mid-batch KeyError), COR-13/15 (decoder json-cell + Table-only gate / special-char cols, fail-closed), COR-19 (ccr_store dual-field) + fix the `test_crush_typed_hash_parity` vacuity 1.1 introduced. PM verifies→gates→commits-in-groups→pushes.
+- **COR BATCH 1 (Phase-1 correctness) — split into connected sub-groups, FRESH fable per group** (the reused session bloated to ~1M tok → escalating stream-idle-timeouts; fresh context runs clean). Each gate G1-G5 green, pushed:
+  - ✓ COR-8/9 `3457b905` (tag_protector balanced nested close / unquoted-`/` lookahead)
+  - ✓ COR-19 `7e22da05` (single ccr_store field — walk_array opaque cells persist)
+  - ✓ COR-6/11/12 `65a9aeeb` (+dedup `42e3476c`) (kompress store-fail veto / onnx_coreml / mid-batch KeyError)
+  - ✓ COR-15 `ba3e954b` (+fmt `a11167de`) (decline compaction on grammar-breaking column keys, fail-closed)
+  - ✓ COR-13 `4f622cd6` (gate lossless-accept to `is_decoder_verifiable` — Table-no-Nested; json-cell decode; bench **+0.0000** all 6 datasets). **FOLLOW-UPS (noted, non-blocking):** full Buckets/Nested wire coverage (needs formatter+decoder lockstep — the "1-day" option); `walker.rs:126` (compact_document_json) 4th accept site still ships Buckets/Nested (not labeled lossless — PM decision whether to adopt the predicate).
+  - COR-5 (typed-hash store-miss → CcrMirrorError fail-open) + `test_crush_typed_hash_parity` vacuity fix — RUNNING [cor5].
 - **COR-7 → opus [separate]** — panic containment (catch_unwind→PyRuntimeError + PanicException fail-open). Excluded from fable (DoS-adjacent).
 - **COR BATCH 2 → fable [pending PM security-vetting]** — Phase-6 + second-pass correctness: COR-16/17/18 (bench-gated efficacy), COR-22/25/26/27/28/29, §7.1 COR-42/44/45/46/49 etc. COR-21 (router-cache thread-safety/leak) → opus (DoS-adjacent).
 
