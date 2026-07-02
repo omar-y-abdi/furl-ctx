@@ -570,6 +570,31 @@ pub(super) fn csv_render_str(s: &str) -> String {
     }
 }
 
+/// True when a column name cannot be emitted RAW into the `[N]{...}`
+/// declaration (or referenced from a `__dict:`/`__affix:`/`__head:`
+/// preamble line) without corrupting the wire grammar. Column names are
+/// NEVER quoted on this pre-existing wire format — only cells are — so
+/// the compactor DECLINES compaction for such keys (COR-15, fail-closed
+/// like every stamp gate) instead of shipping a silently mis-keying
+/// table:
+/// - `:` mis-splits the `name:type` header (the reference decoder
+///   splits on the FIRST colon) and desynchronizes the preamble lines
+///   (values lose their affix, arith folds shift by a row);
+/// - `=` mis-splits the `name=payload` preamble lines and the
+///   `name:type=CONST` declaration;
+/// - `,` `{` `}` and CR/LF break the declaration/preamble/row line
+///   structure;
+/// - `"` flips the decoder's CSV quote state mid-header;
+/// - a `__` prefix collides with the reserved marker namespace
+///   (`__dict:` / `__affix:` / `__head:` / `__buckets:` / `__key:` /
+///   `__dropped:` / `__null__` / `__missing__`).
+///
+/// Shared with the compactor's table-compaction decision so the gate
+/// declines EXACTLY the names this formatter cannot ship safely.
+pub(super) fn column_name_breaks_grammar(name: &str) -> bool {
+    name.starts_with("__") || name.contains([':', ',', '{', '}', '=', '"', '\n', '\r'])
+}
+
 fn format_cell(c: &CellValue) -> String {
     match c {
         CellValue::Missing => MISSING_SENTINEL.to_string(),
@@ -1675,6 +1700,31 @@ mod tests {
     }
 
     #[test]
+    fn csv_grammar_breaking_column_name_ships_verbatim_json() {
+        // COR-15: the CSV formatter never quotes COLUMN NAMES (only
+        // cells), so the compactor declines these arrays — the rendering
+        // is the verbatim JSON array (byte-exact round-trip), with no
+        // `[N]{...}` declaration to mis-key.
+        for key in ["meta:region", "a,b", "x{y"] {
+            let items: Vec<Value> = (0..5)
+                .map(|i| json!({"id": i, key: format!("srv-{i:03}.internal.example.com")}))
+                .collect();
+            let c = compact(&items, &cfg());
+            let out = CsvSchemaFormatter::new().format(&c);
+            assert!(
+                !out.contains("]{"),
+                "no `[N]{{...}}` declaration for key {key:?}: {out}"
+            );
+            let parsed: Value = serde_json::from_str(&out).expect("verbatim JSON array");
+            assert_eq!(
+                parsed,
+                Value::Array(items),
+                "byte-exact round-trip for {key:?}"
+            );
+        }
+    }
+
+    #[test]
     fn json_formatter_unchanged_by_dict_encoding() {
         let items: Vec<Value> = (0..10)
             .map(|i| json!({"level": if i % 2 == 0 { "information" } else { "warning-level" }, "n": i}))
@@ -1846,11 +1896,42 @@ mod tests {
         // A newline in a key would inject fake row lines; ": " in a key
         // would split read-back at the wrong colon. Both get JSON-quoted
         // in the declaration and in every row line.
-        let items = vec![
-            json!({"bad\nkey": 1, "note: extra": "x"}),
-            json!({"bad\nkey": 2, "note: extra": "y"}),
+        //
+        // The COR-15 gate makes `compact()` decline such keys upstream,
+        // so this drives the KV formatter directly with a hand-built
+        // Table: `kv_field_name` stays the last line of defense for
+        // producers that construct the IR themselves.
+        let fields = vec![
+            super::super::ir::FieldSpec {
+                name: "bad\nkey".into(),
+                type_tag: "int".into(),
+                nullable: false,
+                const_value: None,
+                encoding: None,
+            },
+            super::super::ir::FieldSpec {
+                name: "note: extra".into(),
+                type_tag: "string".into(),
+                nullable: false,
+                const_value: None,
+                encoding: None,
+            },
         ];
-        let c = compact(&items, &cfg());
+        let rows = vec![
+            Row::new(vec![
+                CellValue::Scalar(json!(1)),
+                CellValue::Scalar(json!("x")),
+            ]),
+            Row::new(vec![
+                CellValue::Scalar(json!(2)),
+                CellValue::Scalar(json!("y")),
+            ]),
+        ];
+        let c = Compaction::Table {
+            schema: Schema { fields },
+            rows,
+            original_count: 2,
+        };
         let out = MarkdownKvFormatter::new().format(&c);
         assert!(!out.contains("bad\nkey"), "raw newline key leaked: {out}");
         assert!(out.contains(r#""bad\nkey""#), "got: {out}");

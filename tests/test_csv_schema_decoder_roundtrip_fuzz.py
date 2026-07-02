@@ -19,12 +19,16 @@ Two test families:
    ``null`` / absent-key / ``""`` are kept distinct via the reserved
    ``__null__`` / ``__missing__`` cell sentinels.
 
-Note on "colons-in-keys": the Rust formatter CSV-quotes column names
-containing special characters into the ``[N]{...}`` declaration, but
-the current decoder cannot reconstruct a key whose name contains a
-literal colon (the header grammar ``name:type`` splits on the FIRST
-colon).  This is a pre-existing limitation — not the defect this unit
-fixes — so the fuzz generator uses colon in VALUES instead.
+Note on "colons-in-keys": the CSV-schema formatter never quotes COLUMN
+NAMES — only cells (the ``kv_field_name`` quoting belongs to the
+Markdown-KV formatter).  A key containing ``:`` ``,`` ``{`` ``}`` ``=``
+``"`` or CR/LF — or starting with the reserved ``__`` marker prefix —
+cannot be emitted raw without corrupting the ``name:type`` header /
+preamble grammar, so the Rust compactor DECLINES compaction for such
+arrays (COR-15, fail-closed): they ship as verbatim JSON instead of a
+silently mis-keyed table.  The fuzz generator therefore keeps colons in
+VALUES; grammar-breaking KEYS are covered by the targeted COR-15 test
+(``test_grammar_breaking_column_key_declines_compaction``).
 
 Acceptance criteria:
   - Every embedded-newline/comma-in-cell row reconstructs to deep equality.
@@ -144,7 +148,7 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
     Adversarial shapes per the task spec:
       - Embedded newlines in VALUES (not keys — see module docstring)
       - Commas inside cells
-      - Colons inside VALUES (avoid colon in key names; pre-existing limit)
+      - Colons inside VALUES (a colon in a KEY declines compaction — COR-15)
       - Embedded double-quotes in values
       - Empty strings
       - JSON ``null`` values (the ``__null__`` sentinel path)
@@ -197,7 +201,7 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
                 "tag": f"tag-{i % 5}",
             }
         elif choice == 2:
-            # Colon inside a VALUE (not a key — pre-existing header limit).
+            # Colon inside a VALUE (a colon KEY declines compaction — COR-15).
             row = {
                 "id": i,
                 "msg": f"namespace:value for row {i}",
@@ -575,6 +579,52 @@ def test_head_dict_cell_with_csv_quoted_tail_round_trips_lossless() -> None:
         f"(quoted cell not unquoted before the head-index digit scan)"
     )
     assert rows == items, "reconstructed rows are not byte-exact"
+
+
+# ────────────── Test #1d — COR-15 grammar-breaking column keys ────────────────
+
+
+def test_grammar_breaking_column_key_declines_compaction() -> None:
+    """COR-15: a key the ``[N]{...}`` grammar cannot carry must fail closed.
+
+    Column names are emitted RAW into the declaration and the
+    ``__dict:``/``__affix:``/``__head:`` preamble lines (the CSV formatter
+    quotes only cells, never names).  Before the fix a key like
+    ``meta:region`` shipped anyway: ``_parse_header_segment`` split the
+    name at the FIRST colon, silently mis-keying every decoded row, and
+    the mismatched ``__affix:`` preamble name desynchronized the preamble
+    scan — values lost their affix prefix and arith-fold values shifted
+    by one row.  The Rust compactor now DECLINES compaction for such keys
+    (``Untouched``): the array ships as verbatim JSON — byte-exact — and
+    merely skips the lossless tier.
+
+    8 rows: enough for the small-array lossless look to ship CSV for the
+    safe-key control, small enough that a declined array stays on the
+    verbatim passthrough for EVERY key shape (larger arrays fall to the
+    recoverable lossy tier, which is orthogonal to this gate).
+    """
+    values = [f"srv-{i:03d}.internal.example.com" for i in range(8)]
+
+    # Control: the SAME shape under a safe key takes the lossless CSV path
+    # and round-trips exactly — proving the declines below are key-driven,
+    # not shape-driven.
+    control = [{"id": i, "meta_region": v, "status": "ok"} for i, v in enumerate(values)]
+    control_rows = decode_csv_schema_rows(_compress_csv(control))
+    assert control_rows == control, "control shape must round-trip via the CSV path"
+
+    for key in ("meta:region", "a,b", "x{y", "a=b"):
+        items = [{"id": i, key: v, "status": "ok"} for i, v in enumerate(values)]
+        text = _compress_to_text(items)
+        rows = decode_csv_schema_rows(text)
+        assert rows is None, (
+            f"key {key!r} must decline the CSV-schema path (fail-closed), "
+            f"but a decodable table shipped.  First decoded rows: {rows[:2]}\n"
+            f"Rendered (first 200): {text[:200]}"
+        )
+        assert json.loads(text) == items, (
+            f"declined array for key {key!r} must ship verbatim "
+            f"(byte-exact round-trip).\nRendered (first 300): {text[:300]}"
+        )
 
 
 # ───────────────────────── Test #2 — Property / fuzz ──────────────────────────

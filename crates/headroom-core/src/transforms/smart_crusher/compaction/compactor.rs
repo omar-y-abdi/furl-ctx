@@ -129,6 +129,8 @@ impl Default for CompactConfig {
 
 /// Top-level compaction entry point.
 pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
+    use super::formatter::column_name_breaks_grammar;
+
     if items.len() < cfg.min_items {
         return Compaction::Untouched(Value::Array(items.to_vec()));
     }
@@ -137,6 +139,16 @@ pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
     }
 
     let key_freqs = compute_key_freqs(items);
+
+    // COR-15 fail-closed gate: column names ship RAW in the `[N]{...}`
+    // declaration and the preamble lines (nothing quotes them), so a key
+    // like `meta:region` silently mis-keys every decoded row AND
+    // desynchronizes the `__affix:` preamble (values lose their affix,
+    // arith folds shift by a row). Decline compaction — the array keeps
+    // its verbatim JSON shape and merely skips the lossless tier.
+    if key_freqs.keys().any(|k| column_name_breaks_grammar(k)) {
+        return Compaction::Untouched(Value::Array(items.to_vec()));
+    }
     let total = items.len();
     let core_threshold = (total as f64 * cfg.core_field_fraction).ceil() as usize;
     let core_count = key_freqs.values().filter(|&&f| f >= core_threshold).count();
@@ -290,10 +302,22 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
 /// set into dotted columns. Bounded by `cfg.max_flatten_inner_keys` so
 /// a 50-key inner schema doesn't blow up the table width.
 fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &CompactConfig) {
+    use super::formatter::column_name_breaks_grammar;
+
     let mut i = 0;
     while i < specs.len() {
         let inner_keys = match uniform_object_keys(specs, rows, i) {
-            Some(keys) if !keys.is_empty() && keys.len() <= cfg.max_flatten_inner_keys => keys,
+            // COR-15: a flattened `parent.inner` column name ships RAW in
+            // the declaration too — an inner key carrying grammar chars
+            // would corrupt it the same way, so the column stays a nested
+            // object cell (CSV-quoted JSON) instead of flattening.
+            Some(keys)
+                if !keys.is_empty()
+                    && keys.len() <= cfg.max_flatten_inner_keys
+                    && !keys.iter().any(|k| column_name_breaks_grammar(k)) =>
+            {
+                keys
+            }
             _ => {
                 i += 1;
                 continue;
@@ -1212,6 +1236,58 @@ mod tests {
                 // No flatten — all-different key sets per row
                 assert!(names.contains(&"meta"));
                 assert!(!names.iter().any(|n| n.starts_with("meta.")));
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grammar_breaking_key_declines_compaction() {
+        // COR-15: column names ship RAW in the `[N]{...}` declaration and
+        // the `__dict:`/`__affix:`/`__head:` preamble lines — nothing
+        // quotes them. A key carrying a grammar char (or the reserved
+        // `__` marker prefix) must DECLINE compaction (Untouched, array
+        // verbatim), never ship a silently mis-keying table.
+        for key in [
+            "meta:region",
+            "a,b",
+            "x{y",
+            "x}y",
+            "a=b",
+            "he\"llo",
+            "a\nb",
+            "a\rb",
+            "__dict",
+        ] {
+            let items: Vec<Value> = (0..5)
+                .map(|i| json!({"id": i, key: format!("val-{i}"), "s": "ok"}))
+                .collect();
+            match compact(&items, &cfg()) {
+                Compaction::Untouched(v) => {
+                    assert_eq!(v, Value::Array(items.clone()), "verbatim for key {key:?}");
+                }
+                other => panic!("key {key:?} must decline compaction, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn grammar_breaking_inner_key_does_not_flatten() {
+        // COR-15 flatten guard: a nested-uniform object whose INNER key
+        // would flatten into a grammar-breaking dotted column name
+        // (`cfg.k:v`) must stay a nested object cell (CSV-quoted JSON)
+        // instead of flattening into a corrupting declaration.
+        let items: Vec<Value> = (0..5)
+            .map(|i| json!({"id": i, "cfg": {"k:v": format!("val-{i}"), "plain": "p"}}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                assert!(names.contains(&"cfg"), "cfg must stay nested: {names:?}");
+                assert!(
+                    names.iter().all(|n| !n.contains(':')),
+                    "no grammar-breaking flattened name may ship: {names:?}"
+                );
             }
             other => panic!("expected Table, got {other:?}"),
         }
