@@ -3,9 +3,8 @@
 Owns the body of :meth:`ContentRouter._apply_strategy_to_content`: the
 per-strategy compressor dispatch (SMART_CRUSHER / SEARCH / LOG / DIFF /
 TEXT / PASSTHROUGH) and the no-savings fallback chain (SMART_CRUSHER -> LOG,
-then passthrough). Strategies with no compressor (CODE_AWARE — the AST
-compressor was retired; TEXT — the ML text compressor was excised) resolve to
-passthrough, so the dispatch stays total.
+then passthrough). Strategies with no compressor (TEXT — the ML text
+compressor was excised) resolve to passthrough, so the dispatch stays total.
 
 This is a TRUE leaf module: it imports nothing from ``content_router`` (so there
 is no import cycle) and never receives the router. Every dependency is injected
@@ -120,10 +119,9 @@ class StrategyDispatcher:
         strategy_chain: list[str] = [strategy.value]
 
         # Compressor exceptions propagate: a bug in a compressor must stay
-        # loud, not degrade into a silent passthrough (#4-upstream). CODE_AWARE
-        # has no branch here — the AST compressor was retired and the ML text
-        # compressor excised — so it falls through to the generic passthrough
-        # fallback at the bottom.
+        # loud, not degrade into a silent passthrough (#4-upstream). Any
+        # strategy without a branch here falls through to the generic
+        # passthrough fallback at the bottom, so the dispatch stays total.
         if strategy == CompressionStrategy.SMART_CRUSHER:
             # The no-savings Log fallback is handled ONCE by the generic
             # post-dispatch fallback below.

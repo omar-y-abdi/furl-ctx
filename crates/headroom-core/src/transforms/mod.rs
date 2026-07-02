@@ -22,7 +22,6 @@ pub mod diff_compressor;
 pub mod log_compressor;
 pub mod search_compressor;
 pub mod smart_crusher;
-pub mod tag_protector;
 pub mod unidiff_detector;
 
 pub use detection::{detect, ContentType, DetectionResult};
@@ -36,5 +35,4 @@ pub use log_compressor::{
 pub use search_compressor::{
     SearchCompressionResult, SearchCompressor, SearchCompressorConfig, SearchCompressorStats,
 };
-pub use tag_protector::{is_known_html_tag, protect_tags, restore_tags};
 pub use unidiff_detector::{detect_diff, is_diff};

@@ -26,7 +26,6 @@ from .content_detector import ContentType
 class CompressionStrategy(Enum):
     """Available compression strategies."""
 
-    CODE_AWARE = "code_aware"
     SMART_CRUSHER = "smart_crusher"
     SEARCH = "search"
     LOG = "log"
@@ -42,37 +41,31 @@ def strategy_from_detection(config: Any, detection: Any) -> CompressionStrategy:
     """Get strategy from content detection result.
 
     Args:
-        config: ContentRouterConfig providing ``fallback_strategy`` and
-            ``prefer_code_aware_for_code``.
+        config: ContentRouterConfig providing ``fallback_strategy``.
         detection: Result from detect_content_type.
 
     Returns:
         Selected strategy.
     """
     mapping = {
-        ContentType.SOURCE_CODE: CompressionStrategy.CODE_AWARE,
+        # Source code ships unmangled. (The retired AST/ML code compressors
+        # used to take this arm; their not-installed behavior was a
+        # passthrough, preserved here directly.)
+        ContentType.SOURCE_CODE: CompressionStrategy.PASSTHROUGH,
         ContentType.JSON_ARRAY: CompressionStrategy.SMART_CRUSHER,
         ContentType.SEARCH_RESULTS: CompressionStrategy.SEARCH,
         ContentType.BUILD_OUTPUT: CompressionStrategy.LOG,
         ContentType.GIT_DIFF: CompressionStrategy.DIFF,
         ContentType.PLAIN_TEXT: CompressionStrategy.TEXT,
     }
-
-    strategy: CompressionStrategy = mapping.get(detection.content_type, config.fallback_strategy)
-
-    # Override: unless CodeAware is explicitly preferred, source code ships
-    # unmangled. (The retired ML text compressor used to take this arm; its
-    # not-installed behavior was a passthrough, preserved here explicitly.)
-    if strategy == CompressionStrategy.CODE_AWARE and not config.prefer_code_aware_for_code:
-        strategy = CompressionStrategy.PASSTHROUGH
-
-    return strategy
+    return mapping.get(detection.content_type, config.fallback_strategy)
 
 
 def strategy_from_detection_type(config: Any, content_type: ContentType) -> CompressionStrategy:
     """Get strategy from ContentType enum."""
     mapping = {
-        ContentType.SOURCE_CODE: CompressionStrategy.CODE_AWARE,
+        # Source code ships unmangled (see strategy_from_detection).
+        ContentType.SOURCE_CODE: CompressionStrategy.PASSTHROUGH,
         ContentType.JSON_ARRAY: CompressionStrategy.SMART_CRUSHER,
         ContentType.SEARCH_RESULTS: CompressionStrategy.SEARCH,
         ContentType.BUILD_OUTPUT: CompressionStrategy.LOG,
@@ -85,7 +78,6 @@ def strategy_from_detection_type(config: Any, content_type: ContentType) -> Comp
 def content_type_from_strategy(strategy: CompressionStrategy) -> ContentType:
     """Get ContentType from strategy."""
     mapping = {
-        CompressionStrategy.CODE_AWARE: ContentType.SOURCE_CODE,
         CompressionStrategy.SMART_CRUSHER: ContentType.JSON_ARRAY,
         CompressionStrategy.SEARCH: ContentType.SEARCH_RESULTS,
         CompressionStrategy.LOG: ContentType.BUILD_OUTPUT,

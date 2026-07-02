@@ -256,8 +256,8 @@ class SmartCrusher(Transform):
         cfg = config or SmartCrusherConfig()
         self.config = cfg
         self._with_compaction = with_compaction
-        # `observer`: see `headroom.transforms.observability`. Callers
-        # that use SmartCrusher.apply() directly (no ContentRouter)
+        # `observer`: duck-typed, must expose `record_compression(...)`.
+        # Callers that use SmartCrusher.apply() directly (no ContentRouter)
         # would, without an observer here, make those compressions
         # invisible to per-strategy metrics — exactly the
         # silent-regression class we're guarding against.
@@ -1054,8 +1054,8 @@ class SmartCrusher(Transform):
         return " ".join(context_parts)
 
     def _notify_observer(self, original_tokens: int, compressed_tokens: int) -> None:
-        """Forward a compression event to the configured
-        `CompressionObserver` (see `headroom.transforms.observability`).
+        """Forward a compression event to the configured observer via
+        its ``record_compression(...)`` method.
         No-op when no observer is set; swallows observer exceptions at
         debug level so a buggy metrics impl doesn't break the
         compression that just succeeded.

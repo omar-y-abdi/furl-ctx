@@ -325,7 +325,7 @@ def test_split_into_sections_keeps_json_array_with_bracket_in_string() -> None:
 
 
 def test_content_router_strategy_and_compress_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    router = ContentRouter(ContentRouterConfig(prefer_code_aware_for_code=False))
+    router = ContentRouter(ContentRouterConfig())
 
     monkeypatch.setattr(content_router_module, "is_mixed_content", lambda content: False)
     monkeypatch.setattr(
@@ -398,7 +398,7 @@ def test_content_router_mixed_pure_apply(monkeypatch: pytest.MonkeyPatch) -> Non
     result = router._compress_mixed(mixed_content, "ctx")
     assert result.strategy_used is CompressionStrategy.MIXED
     assert result.sections_processed == 2
-    assert "```python\ncode_aware:print('x')\n```" in result.compressed
+    assert "```python\npassthrough:print('x')\n```" in result.compressed
 
     monkeypatch.setattr(
         router,

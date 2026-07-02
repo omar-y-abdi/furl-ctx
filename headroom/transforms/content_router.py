@@ -420,7 +420,6 @@ class ContentRouterConfig:
         enable_smart_crusher: Enable JSON array compression.
         enable_search_compressor: Enable search result compression.
         enable_log_compressor: Enable build/test log compression.
-        prefer_code_aware_for_code: Route code to CODE_AWARE instead of passthrough.
         mixed_content_threshold: Min distinct types to consider "mixed".
         min_section_tokens: Minimum tokens for a section to compress.
         fallback_strategy: Strategy when no compressor matches.
@@ -435,7 +434,6 @@ class ContentRouterConfig:
     enable_log_compressor: bool = True
 
     # Routing preferences
-    prefer_code_aware_for_code: bool = False  # Disabled: let code pass through unmangled
     mixed_content_threshold: int = 2  # Min types to consider mixed
     min_section_tokens: int = 20  # Min tokens to compress a section
 
@@ -618,14 +616,12 @@ class ContentRouter(Transform):
 
         Args:
             config: Router configuration. Uses defaults if None.
-            observer: Optional `CompressionObserver` (see
-                `headroom.transforms.observability`) called once per
-                routing decision after `compress()` finishes.
-                `PrometheusMetrics` is the production
-                implementation — it increments per-strategy counters
-                so silent regressions become visible. `None` disables
-                observation; pick one explicitly per the no-fallback
-                rule in the audit doc.
+            observer: Optional duck-typed observer called once per
+                routing decision after `compress()` finishes. Must
+                expose `record_compression(...)` (and may expose
+                `record_router_route_counts(...)`); exceptions it
+                raises are swallowed so a buggy observer can't break
+                compression. `None` disables observation.
         """
         self.config = config or ContentRouterConfig()
         self._observer = observer
