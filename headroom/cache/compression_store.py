@@ -697,7 +697,7 @@ class CompressionStore:
 
         CCR producers store different shapes:
         - SmartCrusher/search-style paths usually store JSON arrays.
-        - Kompress stores the original plain text.
+        - Text producers (e.g. the router's CCR offload) store plain text.
         - Some callers store JSON objects or scalar JSON values.
 
         Search should work for all of them. Preserve the legacy JSON-array
@@ -799,7 +799,7 @@ class CompressionStore:
         """Chunk arbitrary text into searchable records.
 
         Line-aware chunks work well for logs/source. Word-window chunks handle
-        Kompress originals, which are often long single-line text blobs.
+        long single-line text blobs.
         """
 
         if not text or not text.strip():

@@ -30,7 +30,6 @@ class CompressionStrategy(Enum):
     SMART_CRUSHER = "smart_crusher"
     SEARCH = "search"
     LOG = "log"
-    KOMPRESS = "kompress"
     TEXT = "text"
     DIFF = "diff"
     HTML = "html"
@@ -63,9 +62,11 @@ def strategy_from_detection(config: Any, detection: Any) -> CompressionStrategy:
 
     strategy: CompressionStrategy = mapping.get(detection.content_type, config.fallback_strategy)
 
-    # Override: prefer CodeAware for code if configured
+    # Override: unless CodeAware is explicitly preferred, source code ships
+    # unmangled. (The retired ML text compressor used to take this arm; its
+    # not-installed behavior was a passthrough, preserved here explicitly.)
     if strategy == CompressionStrategy.CODE_AWARE and not config.prefer_code_aware_for_code:
-        strategy = CompressionStrategy.KOMPRESS
+        strategy = CompressionStrategy.PASSTHROUGH
 
     return strategy
 
@@ -94,7 +95,6 @@ def content_type_from_strategy(strategy: CompressionStrategy) -> ContentType:
         CompressionStrategy.DIFF: ContentType.GIT_DIFF,
         CompressionStrategy.HTML: ContentType.HTML,
         CompressionStrategy.TEXT: ContentType.PLAIN_TEXT,
-        CompressionStrategy.KOMPRESS: ContentType.PLAIN_TEXT,
         CompressionStrategy.PASSTHROUGH: ContentType.PLAIN_TEXT,
         CompressionStrategy.CCR_OFFLOAD: ContentType.PLAIN_TEXT,
     }

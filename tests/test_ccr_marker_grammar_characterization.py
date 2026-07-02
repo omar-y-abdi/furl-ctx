@@ -29,8 +29,9 @@ THE 9 SHAPES (verified against source — file:line cited per case)
   E  ``<<ccr:HASH N_bytes_duplicate>>``       24-hex  cross_message_dedup.py:164
   F  ``<<ccr:HASH N_bytes_near_duplicate>>``  24-hex  cross_message_dedup.py:188
   G  ``[N lines compressed to M. Retrieve full diff: hash=H]``  24-hex MD5  diff_compressor.rs:479
-  H  ``[N items compressed to M. Retrieve more: hash=H]``       24-hex  kompress_compressor.py:947
-                                                                 (also log/search compressor, Rust)
+  H  ``[N items compressed to M. Retrieve more: hash=H]``       24-hex  markers.rs
+                                                                 marker_for_retrieve_more
+                                                                 (log/search compressors, Rust)
   I  ``[Read content stale: ... Retrieve original: hash=H]``    24-hex  read_lifecycle.py:491
 
 METHOD (per the recon + advisor guidance)
@@ -46,7 +47,7 @@ call that lands in the Python store, we ALSO drive the REAL producer:
   * E / F — call the real ``duplicate_sentinel`` / ``near_duplicate_rendering``
             render functions from ``cross_message_dedup`` (the full emitted JSON
             note, not the bare marker) and explicit-store the original;
-  * H     — use the real kompress emitter format string + store-default hash;
+  * H     — use the emitter's exact format string + store-default hash;
   * I     — store via the global store (as ``read_lifecycle`` does) and build
             the marker with read_lifecycle's exact stale format string.
 
@@ -70,9 +71,10 @@ Two layers of binding now exist:
    C=`,`).
 
    The remaining shapes — D (bare `<<ccr:HASH>>`, the `>>` separator) and H
-   (kompress/log/search `Retrieve more:` form) — are NOT triggerable E2E here:
-   the array-crush path always emits a suffix (never the bare form), and
-   kompress needs onnxruntime/torch (unavailable). They stay format-constructed
+   (log/search `Retrieve more:` form) — are NOT triggerable E2E here:
+   the array-crush path always emits a suffix (never the bare form), and the
+   Rust log/search emitters need non-shrinkable fixtures to fire. They stay
+   format-constructed
    from the producer's exact format string, bound to the OWNED grammar by
    RECOGNITION: ``test_format_constructed_fixtures_use_owned_grammar_pieces``
    and ``test_double_angle_separators_are_exactly_the_owned_set`` assert the
@@ -304,13 +306,14 @@ def _build_G(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_H(store: CompressionStore) -> tuple[str, str, str]:
-    # FORMAT-CONSTRUCTED from kompress_compressor.py:947 ->
+    # FORMAT-CONSTRUCTED from markers.rs marker_for_retrieve_more ->
     #   f"\n[{n_words} items compressed to {compressed_count}. Retrieve more: hash={cache_key}]"
     # cache_key = store-default 24-hex (CompressionStore.store SHA-256[:24]) — we
-    # call store.store() the same way kompress's _store_in_ccr does (:1354), but
-    # we build the marker text ourselves rather than running the kompress model.
-    # Also the canonical "Retrieve more:" form shared by log/search compressors.
-    # Resolves via consumer pattern 1 (standard "Retrieve more:" form).
+    # call store.store() the same way the producers do, but build the marker
+    # text ourselves rather than driving the Rust log/search emitters E2E.
+    # This is the canonical "Retrieve more:" form shared by the log/search
+    # compressors. Resolves via consumer pattern 1 (standard "Retrieve more:"
+    # form).
     original = " ".join(f"word{i}" for i in range(400))
     h = store.store(original=original, compressed="<compressed text>")
     marker = f"\n[400 items compressed to 40. Retrieve more: hash={h}]"
@@ -398,7 +401,7 @@ CASES: list[Case] = [
     ),
     Case(
         "H_retrieve_more",
-        "24-hex kompress/log/search marker ('Retrieve more:')",
+        "24-hex log/search marker ('Retrieve more:')",
         "format-constructed",
         True,
         24,

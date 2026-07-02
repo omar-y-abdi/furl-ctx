@@ -7,7 +7,7 @@ messages were protected, but the misspelled key fell on the floor and the
 default applied. This file pins the strict-rejection contract.
 
 The allow-list (``_APPLY_ALLOWED_KWARGS``) is the union of:
-  1. keys ``apply()`` READS (directly + via ``RouterRuntime.from_kwargs``), and
+  1. keys ``apply()`` READS directly, and
   2. keys a real caller PASSES through the pipeline broadcast but ``apply()``
      never reads (pipeline public surface + sibling transforms + positionals).
 
@@ -50,11 +50,9 @@ _POST_PIPELINE_KWARGS: dict = {
     "biases": None,
     "compress_user_messages": False,
     "compress_system_messages": True,
-    "target_ratio": None,
     "protect_recent": 4,
     "protect_analysis_context": True,
     "min_tokens_to_compress": 250,
-    "kompress_model": None,
     "frozen_message_count": 0,
     "compress_request": None,
 }
@@ -85,12 +83,9 @@ def test_known_good_call_does_not_raise() -> None:
 # Union of EVERY key a real caller passes to ContentRouter.apply(), gathered
 # from grepping every call site in headroom/ AND tests/:
 #   * the production path (``_POST_PIPELINE_KWARGS``, via compress()), plus
-#   * the test-only direct ``router.apply(...)`` call sites, which pass
-#     ``force_kompress`` (test_content_router_worker_options.py),
-#   * plus the keys the pipeline's documented public surface broadcasts
+#   * the keys the pipeline's documented public surface broadcasts
 #     (``request_id`` / ``output_buffer`` / ``tool_profiles`` / ``record_metrics``).
 _REAL_CALLER_KEYS = set(_POST_PIPELINE_KWARGS) | {
-    "force_kompress",
     "request_id",
     "output_buffer",
     "tool_profiles",

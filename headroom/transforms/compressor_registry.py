@@ -7,19 +7,12 @@ HTMLExtractor.
 
 Each factory is a plain lazy-init-and-cache: it reads only from the router's
 ``ContentRouterConfig`` and memoizes the constructed compressor in a private
-slot. None of them touch the router's per-request runtime options (the frozen
-``RouterRuntime`` threaded by argument), which is exactly why they extract
-cleanly out of the router god-object without re-opening the worker-options
-surface.
+slot, which is exactly why they extract cleanly out of the router god-object.
 
 This registry is INTERNAL — it is not part of ``headroom.__all__``. The
 ``ContentRouter`` holds one instance (``self._registry``) and its public
 ``_get_*`` getters delegate to the matching ``get_*`` method here, so every
 existing call site (including the fallback chain) stays byte-unchanged.
-
-The ML text compressors (Kompress / ``_get_kompress``) deliberately stay on the
-router: ``_get_kompress`` takes the per-request ``model_id`` (from
-``runtime.kompress_model``), so it is NOT self-contained and does not belong here.
 """
 
 from __future__ import annotations

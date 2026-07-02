@@ -338,7 +338,7 @@ def test_content_router_strategy_and_compress_paths(monkeypatch: pytest.MonkeyPa
         "_detect_content",
         lambda content: DetectionResult(ContentType.SOURCE_CODE, 1.0, {}),
     )
-    assert router._determine_strategy("code") is CompressionStrategy.KOMPRESS
+    assert router._determine_strategy("code") is CompressionStrategy.PASSTHROUGH
     assert (
         router._strategy_from_detection(DetectionResult(ContentType.SEARCH_RESULTS, 1.0, {}))
         is CompressionStrategy.SEARCH
@@ -460,9 +460,11 @@ def test_content_router_mixed_pure_apply_and_toin(monkeypatch: pytest.MonkeyPatc
     assert len(calls) == 1
 
 
-def test_diff_strategy_does_not_fallback_to_kompress_when_diff_is_noop(
+def test_diff_strategy_has_no_fallback_when_diff_is_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A no-savings DIFF result ships as-is: DIFF is not fallback-eligible,
+    so the chain stays single-entry (no fallback strategies are attempted)."""
     router = ContentRouter()
     diff = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+a"
 
@@ -471,11 +473,6 @@ def test_diff_strategy_does_not_fallback_to_kompress_when_diff_is_noop(
             return SimpleNamespace(compressed=content)
 
     monkeypatch.setattr(router, "_get_diff_compressor", lambda: NoopDiffCompressor())
-
-    def fail_kompress(*_args: object, **_kwargs: object) -> tuple[str, int]:
-        raise AssertionError("Diff compression must not fallback to Kompress")
-
-    monkeypatch.setattr(router, "_try_kompress", fail_kompress)
 
     compressed, compressed_tokens, strategy_chain = router._apply_strategy_to_content(
         diff,
@@ -488,9 +485,11 @@ def test_diff_strategy_does_not_fallback_to_kompress_when_diff_is_noop(
     assert strategy_chain == ["diff"]
 
 
-def test_log_strategy_does_not_fallback_to_kompress_when_log_is_noop(
+def test_log_strategy_has_no_fallback_when_log_is_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A no-savings LOG result ships as-is: LOG is not fallback-eligible,
+    so the chain stays single-entry (no fallback strategies are attempted)."""
     router = ContentRouter()
     log = "ERROR one\nERROR two\nERROR three"
 
@@ -499,11 +498,6 @@ def test_log_strategy_does_not_fallback_to_kompress_when_log_is_noop(
             return SimpleNamespace(compressed=content)
 
     monkeypatch.setattr(router, "_get_log_compressor", lambda: NoopLogCompressor())
-
-    def fail_kompress(*_args: object, **_kwargs: object) -> tuple[str, int]:
-        raise AssertionError("Log compression must not fallback to Kompress")
-
-    monkeypatch.setattr(router, "_try_kompress", fail_kompress)
 
     compressed, compressed_tokens, strategy_chain = router._apply_strategy_to_content(
         log,

@@ -66,7 +66,7 @@ import re
 # - 12: SmartCrusher path — sha256(payload)[:6] → 12 hex chars
 #        (crusher.rs `hash_canonical`, byte-pinned by its parity tests)
 # - 24: diff/log/search compressors — md5(payload)[:24] (md5_hex_24);
-#        cross_message_dedup, kompress, read_lifecycle, and the store
+#        cross_message_dedup, read_lifecycle, and the store
 #        default key — sha256(payload)[:24]. (No central key helper; each
 #        producer owns its algorithm and threads the hash via explicit_hash.)
 # Do NOT add arbitrary lengths — the exact-width check is the spoofing guard.

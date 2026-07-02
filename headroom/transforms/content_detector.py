@@ -249,7 +249,7 @@ def _try_detect_html(content: str) -> DetectionResult | None:
     """Try to detect HTML content.
 
     HTML needs content extraction (removing scripts, styles, nav, etc.),
-    not token-level compression like Kompress.
+    not token-level compression.
     """
     # Check first 3000 chars for HTML indicators
     sample = content[:3000]

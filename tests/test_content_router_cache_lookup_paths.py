@@ -24,10 +24,10 @@ This file closes the remaining two, which had no coverage:
 
 Both are driven through the public ``apply()`` surface with the cache pre-seeded
 via its public API (``mark_skip`` / ``put``). Keys are built with the router's
-own ``_result_cache_key(content, runtime, bias)`` (COR-18: the key carries the
-per-request options and a content-length guard, not ``hash(content)`` alone);
-a no-kwargs ``apply()`` resolves to ``_DEFAULT_RUNTIME`` and bias ``1.0``, so
-``_seed_key(content)`` below is the exact key the lookup uses (stable within a
+own ``_result_cache_key(content, bias)`` (COR-18: the key carries the
+per-request bias and a content-length guard, not ``hash(content)`` alone);
+a no-kwargs ``apply()`` resolves to bias ``1.0``, so ``_seed_key(content)``
+below is the exact key the lookup uses (stable within a
 process). No compression actually runs in either test — the lookup
 short-circuits before ``compress()`` — so these pins are fast and deterministic
 with no domain mocking.
@@ -38,7 +38,6 @@ from __future__ import annotations
 from headroom.tokenizer import Tokenizer
 from headroom.tokenizers import EstimatingTokenCounter
 from headroom.transforms.content_router import (
-    _DEFAULT_RUNTIME,
     ContentRouter,
     ContentRouterConfig,
     Recompute,
@@ -49,9 +48,9 @@ from headroom.transforms.content_router import (
 
 
 def _seed_key(content: str):
-    """The exact key a no-kwargs ``apply()`` builds for *content*: default
-    runtime (no target_ratio/force/model overrides) and neutral bias 1.0."""
-    return _result_cache_key(content, _DEFAULT_RUNTIME, 1.0)
+    """The exact key a no-kwargs ``apply()`` builds for *content*: neutral
+    bias 1.0."""
+    return _result_cache_key(content, 1.0)
 
 
 def _make_tokenizer() -> Tokenizer:
@@ -65,7 +64,7 @@ def _routable_tool_content() -> str:
     error indicators (not error-protected), no ``<<ccr:`` marker (not
     already-compressed pinning), and well over the 50-token raw-``apply()``
     floor — so execution reaches the Tier-1/Tier-2 cache lookup at
-    ``content_key = _result_cache_key(content, runtime, bias)``.
+    ``content_key = _result_cache_key(content, bias)``.
     """
     return " ".join(
         f"Line {i}: the quarterly summary recorded steady throughput and "

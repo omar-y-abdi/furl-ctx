@@ -87,8 +87,8 @@ class TestCompressFunction:
         """kwarg overrides must not mutate the caller's CompressConfig."""
         cfg = CompressConfig()
         messages = [{"role": "user", "content": "hi"}]
-        compress(messages, config=cfg, target_ratio=0.5, protect_recent=0)
-        assert cfg.target_ratio is None
+        compress(messages, config=cfg, compress_user_messages=True, protect_recent=0)
+        assert cfg.compress_user_messages is False
         assert cfg.protect_recent == 4
 
     def test_unknown_kwargs_raise(self):

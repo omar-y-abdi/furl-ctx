@@ -38,8 +38,8 @@ def _empty_output_result(content: str) -> RouterCompressionResult:
     return RouterCompressionResult(
         compressed="",
         original=content,
-        strategy_used=CompressionStrategy.KOMPRESS,
-        routing_log=[RoutingDecision(ContentType.PLAIN_TEXT, CompressionStrategy.KOMPRESS, n, 0)],
+        strategy_used=CompressionStrategy.TEXT,
+        routing_log=[RoutingDecision(ContentType.PLAIN_TEXT, CompressionStrategy.TEXT, n, 0)],
     )
 
 
@@ -72,10 +72,8 @@ def test_real_compression_metrics_unaffected() -> None:
         return RouterCompressionResult(
             compressed="shrunk",
             original=c,
-            strategy_used=CompressionStrategy.KOMPRESS,
-            routing_log=[
-                RoutingDecision(ContentType.PLAIN_TEXT, CompressionStrategy.KOMPRESS, n, 1)
-            ],
+            strategy_used=CompressionStrategy.TEXT,
+            routing_log=[RoutingDecision(ContentType.PLAIN_TEXT, CompressionStrategy.TEXT, n, 1)],
         )
 
     with patch.object(ContentRouter, "_compress_pure", fake_pure):

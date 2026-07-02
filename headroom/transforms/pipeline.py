@@ -66,7 +66,7 @@ class TransformPipeline:
        ``CacheAlignerConfig.enabled``) - detector-only prefix-stability
        warnings; never rewrites messages
     2. Content Router - intelligent content-aware compression (routes to appropriate
-       compressor: Kompress for text and source code, SmartCrusher for JSON, etc.)
+       compressor: SmartCrusher for JSON, log/search/diff/HTML compressors, etc.)
 
     There is no IntelligentContextManager / RollingWindow
     "drop messages from history" stage. Live-zone-only compression is the
@@ -126,8 +126,9 @@ class TransformPipeline:
         # 2. Content-aware Compression
         # ContentRouter handles ALL content types intelligently:
         # - JSON arrays -> SmartCrusher
-        # - Plain text -> Kompress (ML-based) or passthrough
-        # - Code -> Kompress (AST compressor retired; source routes to text)
+        # - Plain text -> passthrough (reversible CCR offload for large
+        #   uncompressible content)
+        # - Code -> passthrough (ships unmangled; AST compressor retired)
         # - Logs -> LogCompressor
         # - Search results -> SearchCompressor
         # - HTML -> HTMLExtractor

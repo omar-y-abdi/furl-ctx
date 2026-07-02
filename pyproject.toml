@@ -52,14 +52,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# ML-based compression with Kompress (ModernBERT). ONNX INT8 runtime keeps
-# this torch-free; transformers supplies the tokenizer only.
-ml = [
-    "onnxruntime>=1.16.0",
-    "transformers>=4.30.0,<6.0",
-    "huggingface-hub>=1.5.0,<2.0",
-    "numpy>=1.24.0",  # kompress ONNX inputs (np.asarray) — kompress_compressor.py
-]
 # MCP server for Claude Code integration (headroom.ccr.mcp_server).
 mcp = [
     "mcp>=1.0.0",
@@ -83,7 +75,7 @@ dev = [
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
-    "headroom-ai[ml,mcp,html]",
+    "headroom-ai[mcp,html]",
 ]
 
 # Maturin builds a single wheel containing both the Python source under

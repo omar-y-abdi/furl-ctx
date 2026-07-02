@@ -209,7 +209,7 @@ class CCRToolInjector:
     # identical to the literals that used to live here; equivalence is pinned
     # in tests/test_ccr_marker_grammar_characterization.py. The three patterns:
     #   1. BRACKET_RETRIEVE (shape H): standard "Retrieve more: hash=xxx" form,
-    #      shared by kompress / log / search compressors (markers.rs
+    #      shared by the log / search compressors (markers.rs
     #      marker_for_retrieve_more). 24-hex.
     #   2. GENERIC_BRACKET (shape G + fallback): any bracket "...compressed...
     #      hash=xxx" form, IGNORECASE. Catches "Retrieve full diff:" (diff

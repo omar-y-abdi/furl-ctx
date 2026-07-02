@@ -100,15 +100,11 @@ class CompressConfig:
         # Coding agent (default — skip user messages, protect recent)
         compress(messages, model="gpt-4o")
 
-        # Financial document (compress everything, keep 50%)
+        # Document pipeline (compress everything)
         compress(messages, model="claude-opus-4-20250514",
             compress_user_messages=True,
-            target_ratio=0.5,
             protect_recent=0,
         )
-
-        # Aggressive (logs, search results)
-        compress(messages, model="gpt-4o", target_ratio=0.2)
     """
 
     # What to compress
@@ -129,24 +125,10 @@ class CompressConfig:
     protect_analysis_context: bool = True
     """Detect 'analyze'/'review' intent and protect code from compression."""
 
-    # How aggressive
-    target_ratio: float | None = None
-    """Keep ratio for Kompress. None = model decides (~15% kept, aggressive).
-    0.5 = keep 50% (safe for documents). 0.7 = keep 70% (conservative).
-    Only affects Kompress (text compression). SmartCrusher (JSON) has its
-    own logic based on array dedup."""
-
     min_tokens_to_compress: int = DEFAULT_MIN_TOKENS_TO_COMPRESS
     """Minimum token count for a message to be compressed.
     Messages shorter than this are left unchanged. Default 250.
     Set lower for voice agents where turns are short."""
-
-    # Model variant
-    kompress_model: str | None = None
-    """Kompress model ID. None = default (chopratejas/kompress-v2-base).
-    Set to a HuggingFace model ID for domain-specific compression.
-    Set to 'disabled' to skip ML compression entirely
-    (only SmartCrusher + CacheAligner will run)."""
 
 
 @dataclass
@@ -379,9 +361,8 @@ def compress(
         hooks: Optional CompressionHooks instance for custom behavior.
         config: Compression options (CompressConfig). Overrides defaults.
         **kwargs: Shorthand for CompressConfig fields. These override config:
-            compress_user_messages, compress_system_messages, target_ratio,
-            protect_recent, protect_analysis_context, min_tokens_to_compress,
-            kompress_model.
+            compress_user_messages, compress_system_messages, protect_recent,
+            protect_analysis_context, min_tokens_to_compress.
 
     Prompt caching (``cache_control``):
         Messages up to and including the HIGHEST message carrying an
@@ -412,10 +393,9 @@ def compress(
         # Default (coding agent)
         result = compress(messages, model="gpt-4o")
 
-        # Financial document (keep 50%, compress everything)
+        # Document pipeline (compress everything)
         result = compress(messages, model="claude-opus-4-20250514",
             compress_user_messages=True,
-            target_ratio=0.5,
             protect_recent=0,
         )
     """
@@ -504,11 +484,9 @@ def compress(
             # Pass CompressConfig options through to transforms
             compress_user_messages=cfg.compress_user_messages,
             compress_system_messages=cfg.compress_system_messages,
-            target_ratio=cfg.target_ratio,
             protect_recent=cfg.protect_recent,
             protect_analysis_context=cfg.protect_analysis_context,
             min_tokens_to_compress=cfg.min_tokens_to_compress,
-            kompress_model=cfg.kompress_model,
             frozen_message_count=frozen,
         )
 
@@ -663,7 +641,8 @@ def _get_pipeline() -> Any:
         # default False): when enabled it runs first and only WARNS about
         # unstable prefixes — detector-only, never rewrites the prompt.
         # ContentRouter: routes to the right compressor per content type
-        #   (SmartCrusher for JSON, Kompress for text and source code)
+        #   (SmartCrusher for JSON; log/search/diff/HTML compressors;
+        #   plain text and source code pass through)
         # There is no trailing context-management stage —
         # live-zone-only compression never drops messages.
         _pipeline = TransformPipeline()
