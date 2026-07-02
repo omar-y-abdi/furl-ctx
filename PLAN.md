@@ -93,12 +93,14 @@ Exec steps (advisor-refined) — extraction DONE `92088258`:
 - `c5b58ca8` — gate honesty: TEST-1 G4 keyed on exit code not grep; TEST-2 G5 captures run_bench exit code + floor_check rejects stale captured_at; portable cd. RED-proofed. (Also bundled FABLE-RECON-PLAN.md.)
 - `f1c44778` — COR-1/COR-2 critical lossless-decoder data-loss (tables decoded to 0 rows; re.DOTALL header + _unq head-dict cell; fuzz generator hardened to stamp both shapes). RED 0/60 → GREEN 60/60, 762 passed, gate G1-G4 green.
 
-**Phase 0 — NEXT waves (per FABLE-RECON-PLAN §2 Phase 0):**
-- TEST-27: lint RED at HEAD — pin ruff/mypy across ci.yml+pre-commit+dev, one `ruff --fix` commit, wire into ci-precheck [sonnet]
-- COR-3: `verify.run` crashes on never-committed `verify/data/slugify_rg.raw.jsonl` — repoint or re-commit [sonnet]
-- TEST-5/TEST-6: anti-vacuity — convert 20+ conditional-skip sites in CCR invariant suites to hard asserts; fix assertion-free MinTokens fuzz [sonnet]
-- TEST-3/0.4: re-baseline after the decoder fix [sonnet]
-- THEN Phase 1 (invariant gaps COR-4/5/6/7/8), the 2 refactors → fable, per roadmap
+**Phase 0 — wave 2a DONE + pushed (origin/main `88f0e578`), gate G1-G5 PASS:**
+- `7988bb5c` verify — COR-3 (repoint search generator to committed `express_rg`; `slugify_rg` was gitignored+never committed → clean-checkout crash) + TEST-26 (DEV_CLAIMS `multiturn@90` auto-flag; degradations 5→7)
+- `4ffd2541` bench — TEST-4 (run_bench `--out`→tempdir so default run never clobbers committed baseline; floor_check dual-path git-show-floor vs tempdir-capture, G5 preserved; run_final multiturn scorer + loud missing-snapshot)
+- `88f0e578` tests — TEST-5 (20+ skip-sites→hard asserts + 3 loud `fixture_actually_fires` companions for genuinely build-dependent skips) + TEST-6 (real `missing = expected − CCR-recovered` check; killed the dead `if lossy in strategy` vacuous guard). 74 passed, 0 skips.
+
+**Phase 0 — wave 2b RUNNING [sonnet]:** TEST-27 lint gate — pin ruff/mypy across ci.yml+pre-commit+pyproject, `ruff --fix`/`format` sweep, fix 5 mypy errors (csv_schema_decoder:566 / router_policy:68,82,115 / pipeline:136), wire ci-precheck-python.
+**Phase 0 — wave 2c NEXT:** 0.4 re-baseline (regen BASELINE.md+baseline_results.json via `run_bench --out benchmarks`; README Proof-table update **SURFACED TO USER** per advisor — outward-facing, arbitrated ≥3×; investigate if numbers move wildly = lossy-search trap).
+**THEN Phase 1** (invariant gaps COR-4/5/6/7/8 + COR-20, Rust+Python, `maturin develop` before pytest), then §5 owner decisions batched to user at Phase-1→2 boundary, then the 2 refactors → fable.
 
 **Still-open:** §5's 15 owner decisions — surface as a batch before Phase 3 Excision. User chose "full zero-material" (DO-everything); HOW is open (delete-vs-shrink TOIN, restore-AST-vs-accept-0%-code, etc.).
 
@@ -140,4 +142,4 @@ Batch-fix plan: mechanical/clear-cut (M1,M2,M6,M7,M8,N1,N2,N3) fix autonomously.
 `92088258` site-3 extraction · `0844692f` format guards · `1d8a69e9` ML→Kompress rename · `e64602e2` round-3 doc-integrity batch · `7fc45aaa` round-3 reconcile · `c7693fa7` round-4 doc-integrity + config batch · `aa89cf6d` round-5 stamp-highs 4/5 (docs #3/#4 + security #2/#5) · `3403a4a8` round-5 high #1 CSV true-lossless sentinels · (+ PLAN.md checkpoints cbda82af/5477ebfc/bf9234d0/e021bb3c)
 
 ## Fable-recon campaign commit ledger (Phase 0)
-`c5b58ca8` gate honesty + FABLE-RECON-PLAN.md · `f1c44778` COR-1/COR-2 lossless-decoder data-loss fix
+`c5b58ca8` gate honesty + FABLE-RECON-PLAN.md · `f1c44778` COR-1/COR-2 lossless-decoder data-loss fix · `7988bb5c` COR-3+TEST-26 verify substrate · `4ffd2541` TEST-4 bench-out isolation · `88f0e578` TEST-5/6 test anti-vacuity
