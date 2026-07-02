@@ -257,3 +257,16 @@ uv.lock
 **/.venv-eval/
 .sccache/
 .claude/worktrees/
+
+# Local working docs — untracked from GitHub, kept on disk only
+/.claude/
+/archive/
+/docs/
+/PLAN.md
+/FABLE-RECON-PLAN.md
+/NAME-IDEAS.md
+/ENGINE-COMPARISON.md
+/finished-fable-work.md
+/recon-findings.md
+/codebase-CRITIQUE.md
+/QUESTIONS-FOR-USER.md
