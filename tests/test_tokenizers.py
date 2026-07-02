@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from headroom.tokenizers import (
@@ -50,6 +53,22 @@ class TestTiktokenCounter:
         assert get_encoding_for_model("gpt-4o-2099-12-31") == "o200k_base"
         # gpt-4-turbo snapshots use cl100k_base.
         assert get_encoding_for_model("gpt-4-turbo-2099") == "cl100k_base"
+
+    def test_title_case_model_resolves_to_o200k(self):
+        """Model-name case must not change the encoding: "GPT-4o" == "gpt-4o".
+
+        Regression: encoding lookup was case-sensitive, so "GPT-4o" silently
+        fell through to the cl100k_base default instead of o200k_base.
+        """
+        assert TiktokenCounter("GPT-4o").encoding_name == "o200k_base"
+        assert TiktokenCounter("GPT-4O-MINI").encoding_name == "o200k_base"
+        assert TiktokenCounter("GPT-4").encoding_name == "cl100k_base"
+
+        # The registry path resolves identically.
+        TokenizerRegistry.clear_cache()
+        tokenizer = get_tokenizer("GPT-4o")
+        assert isinstance(tokenizer, TiktokenCounter)
+        assert tokenizer.encoding_name == "o200k_base"
 
     def test_count_text_empty(self):
         """Test counting empty text."""
@@ -102,6 +121,46 @@ class TestTiktokenCounter:
         ]
         count = counter.count_messages(messages)
         assert count > 0
+
+    def test_anthropic_base64_image_part_uses_fixed_image_cost(self):
+        """A base64 image part costs the fixed image estimate, not text tokens.
+
+        Regression: count_messages stringified part types it didn't
+        special-case, so a ~200KB Anthropic base64 image part was counted
+        as ~100K text tokens (60x the base handler's fixed cost of 1600),
+        inflating routing and context-pressure decisions.
+        """
+        counter = TiktokenCounter()
+        text_part = {"type": "text", "text": "What is in this image?"}
+        image_part = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KGgoAAAANSUhEUg" * 10_000,  # ~220KB of base64
+            },
+        }
+
+        with_image = counter.count_messages([{"role": "user", "content": [text_part, image_part]}])
+        text_only = counter.count_messages([{"role": "user", "content": [text_part]}])
+
+        # The image contributes exactly the base handler's fixed image cost.
+        assert with_image - text_only == 1600
+
+    def test_tool_result_part_counts_content_not_repr(self):
+        """A tool_result part counts its content, not the dict's repr."""
+        counter = TiktokenCounter()
+        result_text = "The weather in Paris is sunny with a high of 24C."
+        tool_result_part = {
+            "type": "tool_result",
+            "tool_use_id": "toolu_01",
+            "content": result_text,
+        }
+
+        with_part = counter.count_messages([{"role": "user", "content": [tool_result_part]}])
+        empty = counter.count_messages([{"role": "user", "content": []}])
+
+        assert with_part - empty == counter.count_text(result_text)
 
     def test_encode_decode_roundtrip(self):
         """Test encode/decode roundtrip."""
@@ -262,6 +321,138 @@ class TestTokenizerRegistry:
         # Should still work after clearing
         tokenizer = get_tokenizer("gpt-4o")
         assert tokenizer is not None
+
+    def test_creation_failure_fallback_not_cached(self):
+        """A failed creation must not pin the model to estimation forever.
+
+        Regression: the fallback EstimatingTokenCounter was written into the
+        registry cache, so a single transient creation failure degraded that
+        model to estimation for the rest of the process lifetime.
+        """
+        calls = {"n": 0}
+
+        def flaky_factory(model: str) -> EstimatingTokenCounter:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated transient failure")
+            return EstimatingTokenCounter(chars_per_token=2.0)
+
+        TokenizerRegistry.register_backend("flaky-test-backend", flaky_factory)
+        TokenizerRegistry.clear_cache()
+
+        first = TokenizerRegistry.get("flaky-model", backend="flaky-test-backend")
+        assert isinstance(first, EstimatingTokenCounter)
+        assert first._fixed_ratio is None  # the generic fallback estimator
+
+        second = TokenizerRegistry.get("flaky-model", backend="flaky-test-backend")
+        assert calls["n"] == 2  # creation was retried, not served from cache
+        assert isinstance(second, EstimatingTokenCounter)
+        assert second._fixed_ratio == 2.0  # the real (retried) tokenizer
+
+
+def _fake_transformers_module(from_pretrained) -> types.ModuleType:
+    """Build a stand-in `transformers` module for loader-failure tests.
+
+    The real package is an optional dependency and must not be required
+    to test the loader's failure/recovery behavior.
+    """
+    module = types.ModuleType("transformers")
+    # Class bodies skip enclosing-function scope for names they also assign,
+    # so bind the parameter to a differently-named local first.
+    loader = from_pretrained
+
+    class AutoTokenizer:
+        from_pretrained = staticmethod(loader)
+
+    module.AutoTokenizer = AutoTokenizer
+    return module
+
+
+class _FakeHFTokenizer:
+    """Minimal tokenizer double: one token per whitespace-separated word."""
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [0] * len(text.split())
+
+
+class TestHuggingFaceLoadFailureRecovery:
+    """A transient tokenizer-load failure must not poison later loads.
+
+    Regression: three stacked permanent negative caches (lru_cache on the
+    None from a load exception, the instance `_tokenizer = False` latch,
+    and the registry counter cache) meant one transient network failure
+    degraded counting to estimation for the whole process lifetime.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_loader_state(self):
+        """Reset module-level loader caches around each test."""
+        import headroom.tokenizers.huggingface as hf
+
+        hf._load_tokenizer_cached.cache_clear()
+        yield
+        hf._load_tokenizer_cached.cache_clear()
+
+    def test_transient_failure_does_not_poison_later_success(self, monkeypatch):
+        """First load fails, second succeeds: the failure must not be latched."""
+        import headroom.tokenizers.huggingface as hf
+
+        calls = {"n": 0}
+
+        def flaky_from_pretrained(name: str, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("simulated transient network failure")
+            return _FakeHFTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules, "transformers", _fake_transformers_module(flaky_from_pretrained)
+        )
+        monkeypatch.setattr(hf, "_failed_loads", {})
+
+        counter = hf.HuggingFaceTokenizer("llama-3-8b")
+
+        # First access fails -> estimation fallback, no exception. Within
+        # the TTL the failure is negative-cached, so repeated accesses do
+        # not hammer the loader.
+        assert counter.tokenizer is None
+        assert counter._use_fallback() is True
+        assert calls["n"] == 1
+
+        # Simulate the TTL elapsing.
+        hf._failed_loads.clear()
+
+        # The next access retries and succeeds -- neither the instance nor
+        # the module-level cache may have latched the earlier failure.
+        assert counter.tokenizer is not None
+        assert calls["n"] == 2
+        assert counter._use_fallback() is False
+        assert counter.count_text("hello world") == 2
+
+        # The success is cached: further loads do not hit the loader again.
+        assert hf.HuggingFaceTokenizer("llama-3-8b").tokenizer is not None
+        assert calls["n"] == 2
+
+    def test_failure_negative_cached_within_ttl(self, monkeypatch):
+        """Within the TTL a known-failed load is not re-attempted (no hammering)."""
+        import headroom.tokenizers.huggingface as hf
+
+        calls = {"n": 0}
+
+        def always_failing_from_pretrained(name: str, **kwargs):
+            calls["n"] += 1
+            raise OSError("simulated persistent failure")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            _fake_transformers_module(always_failing_from_pretrained),
+        )
+        monkeypatch.setattr(hf, "_failed_loads", {})
+
+        assert hf._load_tokenizer("some/flaky-tokenizer") is None
+        assert hf._load_tokenizer("some/flaky-tokenizer") is None
+        assert calls["n"] == 1  # second lookup served from the negative cache
 
 
 class TestTokenCounterProtocol:

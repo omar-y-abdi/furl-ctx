@@ -142,7 +142,9 @@ class TiktokenCounter(BaseTokenizer):
                    Defaults to 'gpt-4o' (o200k_base encoding).
         """
         self.model = model
-        self.encoding_name = get_encoding_for_model(model)
+        # Lowercase once: encoding lookup is case-sensitive, and callers pass
+        # names like "GPT-4o" which must not fall through to the default.
+        self.encoding_name = get_encoding_for_model(model.lower())
         self._encoding = None  # Lazy load
 
     @property
@@ -203,7 +205,13 @@ class TiktokenCounter(BaseTokenizer):
                                     else:
                                         total += 170  # Base for high detail
                                 else:
-                                    total += self.count_text(str(part))
+                                    # Delegate all other part types (Anthropic
+                                    # image/tool_result blocks, Strands SDK parts,
+                                    # audio, documents) to the shared handler.
+                                    # Stringifying them here would count base64
+                                    # payloads as text — a 200KB image part became
+                                    # ~100K tokens instead of the fixed image cost.
+                                    total += self._count_content_parts([part])
                             elif isinstance(part, str):
                                 total += self.count_text(part)
                 elif key == "role":

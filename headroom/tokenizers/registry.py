@@ -159,9 +159,10 @@ class TokenizerRegistry:
                 logger.warning(
                     f"Failed to create tokenizer for {model}: {e}. Falling back to estimation."
                 )
-                tokenizer = EstimatingTokenCounter()
-                registry._cache[cache_key] = tokenizer
-                return tokenizer
+                # Deliberately NOT cached: caching the fallback would pin this
+                # model to estimation for the process lifetime even after a
+                # transient failure resolves. The next get() retries creation.
+                return EstimatingTokenCounter()
             raise ValueError(f"No tokenizer available for {model}: {e}") from e
 
     @classmethod

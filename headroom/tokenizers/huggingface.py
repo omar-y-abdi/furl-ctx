@@ -7,6 +7,7 @@ tokenizers. Requires the `transformers` library.
 from __future__ import annotations
 
 import logging
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -103,9 +104,37 @@ MODEL_TO_TOKENIZER: dict[str, str] = {
 }
 
 
+# How long (seconds) a failed load is remembered before retrying. A transient
+# error (e.g. a network blip while fetching from the Hub) must not degrade
+# token counting to estimation for the lifetime of the process; once the TTL
+# expires the load is attempted again. Successful loads are cached permanently.
+_FAILED_LOAD_TTL_SECONDS = 300.0
+
+# tokenizer_name -> time.monotonic() timestamp of the most recent failed load.
+_failed_loads: dict[str, float] = {}
+
+
 @lru_cache(maxsize=16)
+def _load_tokenizer_cached(tokenizer_name: str):
+    """Load a HuggingFace tokenizer, caching successes only.
+
+    lru_cache never stores a call that raises, so failures propagate to
+    the caller instead of being cached as a permanent negative result.
+    """
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        tokenizer_name,
+        trust_remote_code=True,
+    )
+
+
 def _load_tokenizer(tokenizer_name: str):
     """Load and cache HuggingFace tokenizer.
+
+    Successful loads are cached for the process lifetime. Failed loads are
+    remembered only for ``_FAILED_LOAD_TTL_SECONDS`` so a later retry can
+    succeed once the underlying issue (network, auth) is resolved.
 
     Args:
         tokenizer_name: HuggingFace model/tokenizer name.
@@ -113,16 +142,19 @@ def _load_tokenizer(tokenizer_name: str):
     Returns:
         Loaded tokenizer, or None if unavailable.
     """
-    from transformers import AutoTokenizer
+    failed_at = _failed_loads.get(tokenizer_name)
+    if failed_at is not None and time.monotonic() - failed_at < _FAILED_LOAD_TTL_SECONDS:
+        return None
 
     try:
-        return AutoTokenizer.from_pretrained(
-            tokenizer_name,
-            trust_remote_code=True,
-        )
+        tokenizer = _load_tokenizer_cached(tokenizer_name)
     except Exception as e:
         logger.warning(f"Failed to load tokenizer {tokenizer_name}: {e}")
+        _failed_loads[tokenizer_name] = time.monotonic()
         return None
+
+    _failed_loads.pop(tokenizer_name, None)
+    return tokenizer
 
 
 def get_tokenizer_name(model: str) -> str:
@@ -187,15 +219,16 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     @property
     def tokenizer(self):
-        """Lazy-load the tokenizer."""
+        """Lazy-load the tokenizer.
+
+        A failed load is not latched on the instance: retries go through the
+        module-level loader, whose failure memory expires after a TTL, so a
+        later successful load is picked up instead of estimating forever.
+        Within the TTL the lookup is a cheap dict probe, not a network call.
+        """
         if self._tokenizer is None:
-            loaded = _load_tokenizer(self.tokenizer_name)
-            if loaded is not None:
-                self._tokenizer = loaded
-            else:
-                # Mark as unavailable
-                self._tokenizer = False
-        return self._tokenizer if self._tokenizer is not False else None
+            self._tokenizer = _load_tokenizer(self.tokenizer_name)
+        return self._tokenizer
 
     def _use_fallback(self) -> bool:
         """Check if we need to use fallback estimation."""
