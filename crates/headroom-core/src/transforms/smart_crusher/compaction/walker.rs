@@ -53,10 +53,6 @@ use sha2::{Digest, Sha256};
 pub struct DocumentCompactor {
     pub config: CompactConfig,
     pub formatter: Box<dyn Formatter>,
-    /// Optional CCR store. When set, opaque-string CCR markers also
-    /// stash the original blob keyed by the marker hash, mirroring the
-    /// row-drop CCR contract from `SmartCrusher::crush_array`.
-    pub ccr_store: Option<Arc<dyn CcrStore>>,
 }
 
 impl Default for DocumentCompactor {
@@ -64,7 +60,6 @@ impl Default for DocumentCompactor {
         Self {
             config: CompactConfig::default(),
             formatter: Box::new(CsvSchemaFormatter::new()),
-            ccr_store: None,
         }
     }
 }
@@ -84,8 +79,18 @@ impl DocumentCompactor {
         self
     }
 
+    /// Wire a CCR store so opaque-blob substitutions — on BOTH the
+    /// `walk_string` path and the `walk_array` → `compact` →
+    /// `cell_from_value` path — stash the original under the marker hash.
+    ///
+    /// The store lives on the single `config.ccr_store` field that
+    /// `compact()` already reads (COR-19). A prior version set a sibling
+    /// `DocumentCompactor::ccr_store` field consumed only by
+    /// `walk_string`, leaving `config.ccr_store = None`, so any opaque
+    /// cell reaching `cell_from_value` under a store-configured compactor
+    /// emitted a dangling marker with no stored original.
     pub fn with_ccr_store(mut self, store: Arc<dyn CcrStore>) -> Self {
-        self.ccr_store = Some(store);
+        self.config.ccr_store = Some(store);
         self
     }
 
@@ -141,7 +146,11 @@ fn walk_string(s: String, ctx: &DocumentCompactor) -> Value {
     // original in the store if one is configured, so retrieval works).
     if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.clone()), &ctx.config.classify)
     {
-        return Value::String(emit_opaque_ccr_marker(&s, &kind, ctx.ccr_store.as_ref()));
+        return Value::String(emit_opaque_ccr_marker(
+            &s,
+            &kind,
+            ctx.config.ccr_store.as_ref(),
+        ));
     }
 
     Value::String(s)
@@ -376,5 +385,59 @@ mod tests {
         let doc = json!({"payload": "{not valid json"});
         let out = dc().compact(doc.clone());
         assert_eq!(out, doc);
+    }
+
+    // ── COR-19: with_ccr_store wires the SINGLE config.ccr_store field ──
+
+    #[test]
+    fn with_ccr_store_populates_config_store_for_the_array_compaction_path() {
+        // COR-19 regression. `DocumentCompactor::with_ccr_store` used to
+        // set a SIBLING `ccr_store` field consumed only by `walk_string`,
+        // leaving `config.ccr_store = None` — the field that
+        // `walk_array` → `compact` → `cell_from_value` reads. Any opaque
+        // cell reaching that path emitted a `<<ccr:HASH,...>>` marker with
+        // NO stored original (a dangling marker = silent loss). The fix
+        // routes the store onto the single `config.ccr_store`.
+        //
+        // We drive the EXACT repaired path: the array compactor
+        // (`compact` under the compactor's own config) on a row carrying
+        // an opaque blob cell. Pre-fix `config.ccr_store` was `None`, so
+        // the blob was never stored and `get(hash)` MISSES; post-fix it
+        // resolves byte-exact.
+        use crate::ccr::InMemoryCcrStore;
+        use crate::transforms::smart_crusher::compaction::compactor::compact;
+        use std::sync::Arc;
+
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let dc = DocumentCompactor::new().with_ccr_store(Arc::clone(&store));
+
+        // A long base64-ish blob classifies Opaque in a table cell.
+        let big = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".repeat(8);
+        let rows = vec![
+            json!({"id": 1, "blob": big.clone()}),
+            json!({"id": 2, "blob": big.clone()}),
+        ];
+
+        // The array-compaction path the fix wires: `compact` reads
+        // `config.ccr_store` inside `cell_from_value`'s opaque branch.
+        let c = compact(&rows, &dc.config);
+        assert!(c.was_compacted(), "the two-row table must compact");
+        let rendered = dc.formatter.format(&c);
+        assert!(
+            rendered.contains("<<ccr:"),
+            "the opaque blob must render as a CCR marker: {rendered}"
+        );
+
+        // The store must now hold the original under the marker hash —
+        // the whole point of COR-19. Pull the hash from the marker and
+        // recover byte-exact.
+        let start = rendered.find("<<ccr:").expect("marker present") + "<<ccr:".len();
+        let rest = &rendered[start..];
+        let end = rest.find(',').expect("opaque marker has a comma");
+        let hash = &rest[..end];
+        let recovered = store
+            .get(hash)
+            .expect("COR-19: config.ccr_store must hold the opaque original (dangling marker bug)");
+        assert_eq!(recovered, big, "recovered blob must be byte-exact");
     }
 }
