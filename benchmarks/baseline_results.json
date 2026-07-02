@@ -1,9 +1,9 @@
 {
   "schema": "headroom.imp3.baseline.v1",
-  "captured_at_utc": "2026-06-12T13:15:43.310182+00:00",
-  "git_commit": "0795e63ede835e5398f77c72c7f0be8fdb96ab0a",
+  "captured_at_utc": "2026-07-02T00:32:27.026888+00:00",
+  "git_commit": "566f34490e2207877c9086a227eab4ba14d9d434",
   "engine_model": "gpt-4o",
-  "python": "3.13.12",
+  "python": "3.14.2",
   "platform": "macOS-15.7.6-x86_64-i386-64bit-Mach-O",
   "provenance": [
     {
@@ -26,6 +26,27 @@
       "snapshot_bytes": 379314,
       "n_items_default": 90,
       "provenance": "rg --json 'def ' headroom/ \u2014 match objects parsed to {path,line_number,absolute_offset,lines} rows."
+    },
+    {
+      "dataset": "repeated_logs",
+      "snapshot": "benchmarks/data/repeated_logs.raw.json",
+      "snapshot_bytes": 6242,
+      "n_items_default": 90,
+      "provenance": "ping -c 100 -i 0.01 127.0.0.1 (icmp_seq reply lines) \u2014 real ICMP echo replies. Content {bytes=64, from=127.0.0.1, ttl=64} recurs identically; only the monotone icmp_seq counter (+ real time latency) vary. icmp_seq is the canonical VaryingIdentity field that forces unique whole-item hashes and that the field-aware stable hash excludes."
+    },
+    {
+      "dataset": "disk",
+      "snapshot": "benchmarks/data/disk.raw.json",
+      "snapshot_bytes": 1371,
+      "n_items_default": 9,
+      "provenance": "df -k \u2014 real filesystem table from this machine, header skipped, fields right-split into {filesystem,kbytes,used,avail,capacity,iused,ifree,piused,mounted_on} rows."
+    },
+    {
+      "dataset": "multiturn",
+      "snapshot": "benchmarks/data/multiturn.raw.json",
+      "snapshot_bytes": 958121,
+      "n_items_default": 135,
+      "provenance": "Two real consecutive invocations each of: `rg --json --sort path def  headroom/` (match rows parsed like the search dataset, first 90 rows per run \u2014 byte-identical across the two runs of the unchanged tree), `df -k` (rows parsed like the disk dataset, the two runs spaced ~3s apart like successive agent turns \u2014 free-space/inode cells genuinely drift between runs), and `git log -n 30` viewed one real commit apart (HEAD~1 then HEAD, parsed like the logs dataset \u2014 29/30 rows byte-identical, the canonical post-commit re-check). All six raw captures snapshotted."
     }
   ],
   "datasets": [
@@ -49,26 +70,60 @@
       "name": "logs@90",
       "n_input_items": 90,
       "tokens_before": 8595,
-      "tokens_after": 1332,
-      "lossless_reduction": 0.8450261780104712,
-      "n_present": 15,
-      "n_dropped": 75,
-      "n_recoverable": 75,
-      "lossy_drop_ratio": 0.8333333333333334,
+      "tokens_after": 619,
+      "lossless_reduction": 0.9279813845258872,
+      "n_present": 8,
+      "n_dropped": 82,
+      "n_recoverable": 82,
+      "lossy_drop_ratio": 0.9111111111111111,
       "information_retention": 1.0,
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:mixed:0.09"
+        "router:mixed:0.05"
       ]
     },
     {
       "name": "search@90",
       "n_input_items": 90,
       "tokens_before": 4102,
-      "tokens_after": 2462,
-      "lossless_reduction": 0.39980497318381275,
-      "n_present": 90,
+      "tokens_after": 318,
+      "lossless_reduction": 0.9224768405655778,
+      "n_present": 13,
+      "n_dropped": 77,
+      "n_recoverable": 77,
+      "lossy_drop_ratio": 0.8555555555555555,
+      "information_retention": 1.0,
+      "took_lossy_path": true,
+      "transforms": [
+        "router:protected:user_message",
+        "router:smart_crusher:0.04"
+      ]
+    },
+    {
+      "name": "repeated_logs@90",
+      "n_input_items": 90,
+      "tokens_before": 3621,
+      "tokens_after": 131,
+      "lossless_reduction": 0.963822148577741,
+      "n_present": 1,
+      "n_dropped": 89,
+      "n_recoverable": 89,
+      "lossy_drop_ratio": 0.9888888888888889,
+      "information_retention": 1.0,
+      "took_lossy_path": true,
+      "transforms": [
+        "router:protected:user_message",
+        "router:smart_crusher:0.00"
+      ]
+    },
+    {
+      "name": "disk@9",
+      "n_input_items": 9,
+      "tokens_before": 694,
+      "tokens_after": 347,
+      "lossless_reduction": 0.5,
+      "n_present": 9,
       "n_dropped": 0,
       "n_recoverable": 0,
       "lossy_drop_ratio": 0.0,
@@ -76,13 +131,40 @@
       "took_lossy_path": false,
       "transforms": [
         "router:protected:user_message",
-        "router:smart_crusher:0.35"
+        "router:smart_crusher:0.01"
+      ]
+    },
+    {
+      "name": "multiturn@135",
+      "n_input_items": 135,
+      "tokens_before": 14866,
+      "tokens_after": 4369,
+      "lossless_reduction": 0.7061078972151218,
+      "n_present": 68,
+      "n_dropped": 67,
+      "n_recoverable": 67,
+      "lossy_drop_ratio": 0.4962962962962963,
+      "information_retention": 1.0,
+      "took_lossy_path": true,
+      "transforms": [
+        "cross_message_dedup:exact:1",
+        "cross_message_dedup:near:1",
+        "router:protected:user_message",
+        "router:protected:user_message",
+        "router:protected:user_message",
+        "router:protected:user_message",
+        "router:protected:user_message",
+        "router:protected:error_output",
+        "router:protected:user_message",
+        "router:smart_crusher:0.09",
+        "router:smart_crusher:0.01",
+        "router:smart_crusher:0.01"
       ]
     }
   ],
   "needle_recall": {
     "overall_output_or_ccr": 1.0,
-    "overall_visible_only": 0.7222222222222222,
+    "overall_visible_only": 1.0,
     "by_family": {
       "search": {
         "recall_output_or_ccr": 1.0,
@@ -91,7 +173,7 @@
       },
       "logs": {
         "recall_output_or_ccr": 1.0,
-        "recall_visible_only": 0.4444444444444444,
+        "recall_visible_only": 1.0,
         "trials": 9
       }
     },
@@ -103,7 +185,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 31
+        "n_visible_rows": 7
       },
       {
         "family": "search",
@@ -112,7 +194,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 31
+        "n_visible_rows": 7
       },
       {
         "family": "search",
@@ -121,7 +203,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 31
+        "n_visible_rows": 7
       },
       {
         "family": "search",
@@ -130,7 +212,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 91
+        "n_visible_rows": 9
       },
       {
         "family": "search",
@@ -139,7 +221,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 91
+        "n_visible_rows": 9
       },
       {
         "family": "search",
@@ -148,7 +230,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 91
+        "n_visible_rows": 9
       },
       {
         "family": "search",
@@ -157,7 +239,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 298
+        "n_visible_rows": 7
       },
       {
         "family": "search",
@@ -166,7 +248,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 298
+        "n_visible_rows": 7
       },
       {
         "family": "search",
@@ -175,7 +257,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 298
+        "n_visible_rows": 7
       },
       {
         "family": "logs",
@@ -184,16 +266,16 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 15
+        "n_visible_rows": 7
       },
       {
         "family": "logs",
         "cardinality": 30,
         "position": "middle",
         "recalled": true,
-        "in_output": false,
-        "ccr_recoverable": true,
-        "n_visible_rows": 15
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 7
       },
       {
         "family": "logs",
@@ -202,7 +284,7 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 15
+        "n_visible_rows": 7
       },
       {
         "family": "logs",
@@ -211,16 +293,16 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 15
+        "n_visible_rows": 9
       },
       {
         "family": "logs",
         "cardinality": 90,
         "position": "middle",
         "recalled": true,
-        "in_output": false,
-        "ccr_recoverable": true,
-        "n_visible_rows": 15
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 9
       },
       {
         "family": "logs",
@@ -229,34 +311,34 @@
         "recalled": true,
         "in_output": true,
         "ccr_recoverable": false,
-        "n_visible_rows": 15
+        "n_visible_rows": 9
       },
       {
         "family": "logs",
         "cardinality": 300,
         "position": "start",
         "recalled": true,
-        "in_output": false,
-        "ccr_recoverable": true,
-        "n_visible_rows": 17
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 18
       },
       {
         "family": "logs",
         "cardinality": 300,
         "position": "middle",
         "recalled": true,
-        "in_output": false,
-        "ccr_recoverable": true,
-        "n_visible_rows": 17
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 18
       },
       {
         "family": "logs",
         "cardinality": 300,
         "position": "end",
         "recalled": true,
-        "in_output": false,
-        "ccr_recoverable": true,
-        "n_visible_rows": 17
+        "in_output": true,
+        "ccr_recoverable": false,
+        "n_visible_rows": 18
       }
     ]
   }
