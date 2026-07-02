@@ -237,13 +237,6 @@ class SmartCrusherConfig:
     factor_out_constants: bool = False  # Disabled - preserves original schema
     include_summaries: bool = False  # Disabled - no generated text
 
-    # Feedback loop integration (TOIN - Tool Output Intelligence Network)
-    use_feedback_hints: bool = True  # Use learned patterns to adjust compression
-
-    # TOIN confidence threshold (configurable).
-    # Minimum confidence required to apply TOIN recommendations
-    toin_confidence_threshold: float = 0.3
-
     # Relevance scoring configuration
     relevance: RelevanceScorerConfig = field(default_factory=RelevanceScorerConfig)
 
@@ -286,8 +279,6 @@ class CCRConfig:
 
     Benefits:
     - Zero-risk compression: worst case = LLM retrieves what it needs
-    - Feedback loop: track what gets retrieved to improve compression
-    - Network effect: retrieval patterns improve compression for all users
 
     GOTCHAS:
     - Cache has TTL (default 300 seconds) - retrieval fails after expiration

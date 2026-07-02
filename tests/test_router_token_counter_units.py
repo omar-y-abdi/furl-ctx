@@ -53,7 +53,7 @@ def _dispatcher() -> StrategyDispatcher:
     )
 
 
-def _apply_dispatch(dispatcher, content, strategy, *, crusher=None, token_counter=None, toin=None):
+def _apply_dispatch(dispatcher, content, strategy, *, crusher=None, token_counter=None):
     return dispatcher.apply(
         content,
         strategy,
@@ -62,7 +62,6 @@ def _apply_dispatch(dispatcher, content, strategy, *, crusher=None, token_counte
         get_search_compressor=lambda: None,
         get_log_compressor=lambda: None,
         get_diff_compressor=lambda: None,
-        record_to_toin=(toin if toin is not None else (lambda **kwargs: None)),
         token_counter=token_counter,
     )
 
@@ -89,13 +88,11 @@ class TestDispatcherUnits:
 
     def test_smart_crusher_output_counted_in_gate_units(self):
         """The COR-17 core case: comma-joined compaction output is ONE word
-        but many real tokens — the injected counter must measure it, and the
-        same units must reach TOIN."""
+        but many real tokens — the injected counter must measure it."""
         compacted = "id,path,status,duration\n" + ",".join(str(i) for i in range(40))
         crusher = SimpleNamespace(
             crush=lambda content, query="", bias=1.0: SimpleNamespace(compressed=compacted)
         )
-        recorded: list[dict] = []
 
         compressed, tokens, chain = _apply_dispatch(
             _dispatcher(),
@@ -103,13 +100,10 @@ class TestDispatcherUnits:
             CompressionStrategy.SMART_CRUSHER,
             crusher=crusher,
             token_counter=_CHAR_COUNTER,
-            toin=lambda **kwargs: recorded.append(kwargs),
         )
 
         assert compressed == compacted
         assert tokens == len(compacted)  # char units — words would be 2
-        assert recorded[0]["original_tokens"] == len(self.CONTENT)
-        assert recorded[0]["compressed_tokens"] == len(compacted)
 
 
 class TestCompressPlumbing:

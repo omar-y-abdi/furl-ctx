@@ -13,7 +13,6 @@ from headroom.transforms.content_router import (
     ContentRouterConfig,
     RouterCompressionResult,
     RoutingDecision,
-    _create_content_signature,
     _detect_content,
     _extract_json_block,
     is_mixed_content,
@@ -100,7 +99,7 @@ def test_router_result_helpers_and_summary() -> None:
     assert mixed.summary().startswith("Mixed content: 2 sections, routed to ")
 
 
-def test_content_signature_and_detection_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_detection_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     """`_detect_content` Stage 1: a Rust non-``PLAIN_TEXT`` verdict is
     authoritative and propagates back as the matching Python
     `ContentType`.
@@ -110,10 +109,6 @@ def test_content_signature_and_detection_helpers(monkeypatch: pytest.MonkeyPatch
     Python detector disagrees — is pinned by the parity tests below
     (`test_detect_content_*`).
     """
-    signature = _create_content_signature("search", "file.py:10:match", language="python")
-    assert signature is not None
-    assert len(signature.structure_hash) == 24
-
     # Monkeypatch the Rust binding to return a deterministic fake
     # result; verify _detect_content propagates the content_type
     # tag back as the Python ContentType enum.
@@ -370,7 +365,7 @@ def test_content_router_strategy_and_compress_paths(monkeypatch: pytest.MonkeyPa
     assert router.compress("   ").strategy_used is CompressionStrategy.PASSTHROUGH
 
 
-def test_content_router_mixed_pure_apply_and_toin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_content_router_mixed_pure_apply(monkeypatch: pytest.MonkeyPatch) -> None:
     router = ContentRouter()
     mixed_content = "\n".join(["before", "```python", "print('x')", "```", "after"])
     monkeypatch.setattr(
@@ -418,46 +413,6 @@ def test_content_router_mixed_pure_apply_and_toin(monkeypatch: pytest.MonkeyPatc
     assert pure.routing_log[0].content_type is ContentType.PLAIN_TEXT
     assert pure.total_original_tokens == 3
     assert pure.total_compressed_tokens == 1
-
-    calls: list[dict] = []
-    router._toin = SimpleNamespace(record_compression=lambda **kwargs: calls.append(kwargs))
-    monkeypatch.setattr(content_router_module, "_create_content_signature", lambda **kwargs: "sig")
-    router._record_to_toin(
-        CompressionStrategy.TEXT,
-        "original content",
-        "small",
-        original_tokens=10,
-        compressed_tokens=4,
-        language="python",
-        context="question",
-    )
-    assert calls[0]["tool_signature"] == "sig"
-    assert calls[0]["strategy"] == "text"
-    assert calls[0]["query_context"] == "question"
-
-    router._record_to_toin(
-        CompressionStrategy.SMART_CRUSHER,
-        "x",
-        "x",
-        original_tokens=10,
-        compressed_tokens=4,
-    )
-    router._record_to_toin(
-        CompressionStrategy.TEXT,
-        "x",
-        "x",
-        original_tokens=2,
-        compressed_tokens=2,
-    )
-    monkeypatch.setattr(content_router_module, "_create_content_signature", lambda **kwargs: None)
-    router._record_to_toin(
-        CompressionStrategy.TEXT,
-        "x",
-        "y",
-        original_tokens=5,
-        compressed_tokens=1,
-    )
-    assert len(calls) == 1
 
 
 def test_diff_strategy_has_no_fallback_when_diff_is_noop(

@@ -117,7 +117,6 @@ class CompressionHooks:
           because LLM attention is weakest there)
         - Phase-aware budgets (old exploration messages get lower bias,
           recent execution messages get higher bias)
-        - Per-tool learned biases (from TOIN analysis)
 
         Args:
             messages: The full message list.

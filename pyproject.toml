@@ -45,7 +45,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # Core: lightweight compression (SmartCrusher, ContentRouter, CCR, TOIN)
+    # Core: lightweight compression (SmartCrusher, ContentRouter, CCR)
     "tiktoken>=0.5.0",            # Tokenizer for all compressors
     "ast-grep-cli>=0.30.0",       # AST-aware code slicing (CodeCompressor); binary wheel
     "tomli>=2.0.0; python_version < '3.11'",  # tomllib backport for helper scripts

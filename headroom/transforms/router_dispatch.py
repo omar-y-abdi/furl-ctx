@@ -14,16 +14,12 @@ explicitly:
 * ``config`` and the debug helpers (``log_router_debug`` / ``json_shape``) plus
   the shared ``logger`` come in via the constructor — they are stable for the
   router's lifetime.
-* The compressor getters (``get_smart_crusher`` etc.) and ``record_to_toin``
-  are passed to :meth:`apply` *per call*. The router's thin
+* The compressor getters (``get_smart_crusher`` etc.) are passed to
+  :meth:`apply` *per call*. The router's thin
   ``_apply_strategy_to_content`` delegator resolves them fresh on every
   invocation, so monkeypatching ``router._get_log_compressor`` (as the
   test-suite does) still bites — a construction-time capture would have been
   stale.
-
-TOIN recording (``record_to_toin``) deliberately stays on the router: it
-forwards to a router method the test-suite monkeypatches. The dispatcher only
-ever calls it as an opaque callable.
 """
 
 from __future__ import annotations
@@ -34,9 +30,8 @@ from typing import Any
 
 from .router_policy import CompressionStrategy
 
-# Type aliases for the injected callables (documentation, not enforcement).
+# Type alias for the injected callables (documentation, not enforcement).
 _GetCompressor = Callable[[], Any]
-_RecordToToin = Callable[..., None]
 
 
 def _word_count(text: str) -> int:
@@ -50,8 +45,7 @@ class StrategyDispatcher:
 
     Holds no reference to the :class:`ContentRouter`. Constructed once with the
     router's ``config`` and the (module-level) debug helpers; the per-strategy
-    compressor getters and the two router-bound callables are supplied to
-    :meth:`apply` on each call.
+    compressor getters are supplied to :meth:`apply` on each call.
     """
 
     def __init__(
@@ -80,7 +74,6 @@ class StrategyDispatcher:
         get_search_compressor: _GetCompressor,
         get_log_compressor: _GetCompressor,
         get_diff_compressor: _GetCompressor,
-        record_to_toin: _RecordToToin,
         token_counter: Callable[[str], int] | None = None,
     ) -> tuple[str, int, list[str]]:
         """Apply a compression strategy to content.
@@ -96,7 +89,6 @@ class StrategyDispatcher:
             get_search_compressor: Router getter for the SearchCompressor.
             get_log_compressor: Router getter for the LogCompressor.
             get_diff_compressor: Router getter for the DiffCompressor.
-            record_to_toin: Router-bound TOIN recording callable.
             token_counter: Optional real token counter (COR-17). When set,
                 every token count in this dispatch — original, per-strategy
                 compressed, and the fallback-chain comparisons — is measured
@@ -117,7 +109,7 @@ class StrategyDispatcher:
         """
         logger = self._logger
         count = token_counter or _word_count
-        # Track original tokens for TOIN recording
+        # Original token count — the no-savings comparisons below measure against it.
         original_tokens = count(content)
         compressed: str | None = None
         compressed_tokens: int | None = None
@@ -133,9 +125,8 @@ class StrategyDispatcher:
         # compressor excised — so it falls through to the generic passthrough
         # fallback at the bottom.
         if strategy == CompressionStrategy.SMART_CRUSHER:
-            # SmartCrusher handles its own TOIN recording. The no-savings
-            # Log fallback is handled ONCE by the generic post-dispatch
-            # fallback below.
+            # The no-savings Log fallback is handled ONCE by the generic
+            # post-dispatch fallback below.
             if self.config.enable_smart_crusher:
                 crusher = get_smart_crusher()
                 if crusher:
@@ -203,7 +194,7 @@ class StrategyDispatcher:
             compressor_name = "Passthrough"
             decision_reason = "explicit_passthrough"
 
-        # If compression succeeded, record to TOIN
+        # If compression succeeded, run the no-savings fallback chain
         if compressed is not None and compressed_tokens is not None:
             fallback_no_savings = compressed == content or compressed_tokens >= original_tokens
             if strategy == CompressionStrategy.SMART_CRUSHER and fallback_no_savings:
@@ -265,15 +256,6 @@ class StrategyDispatcher:
                     output=compressed,
                     error=None,
                 )
-            record_to_toin(
-                strategy=strategy,
-                content=content,
-                compressed=compressed,
-                original_tokens=original_tokens,
-                compressed_tokens=compressed_tokens,
-                language=language,
-                context=context,
-            )
             return compressed, compressed_tokens, strategy_chain
 
         # Fallback: return unchanged

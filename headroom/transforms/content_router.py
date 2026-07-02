@@ -33,7 +33,6 @@ Pipeline Usage:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -42,10 +41,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from ..telemetry.models import ToolSignature
+from typing import Any
 
 from ..ccr import marker_grammar
 from ..config import (
@@ -325,55 +321,6 @@ def _detect_content(content: str) -> DetectionResult:
         confidence=rust_result.confidence,
         metadata={},
     )
-
-
-def _create_content_signature(
-    content_type: str,
-    content: str,
-    language: str | None = None,
-) -> ToolSignature | None:
-    """Create a ToolSignature for non-JSON content types.
-
-    This allows TOIN to track compression patterns for code, search results,
-    logs, and text - not just JSON arrays.
-
-    Args:
-        content_type: The type of content (e.g., "code_aware", "search", "log", "text").
-        content: The content being compressed (for structural hints).
-        language: Optional language hint for code.
-
-    Returns:
-        A ToolSignature for TOIN tracking.
-    """
-    try:
-        from ..telemetry.models import ToolSignature
-
-        # Create a deterministic structure hash based on content type
-        # This groups similar content types together for pattern learning
-        if language:
-            hash_input = f"content:{content_type}:{language}"
-        else:
-            hash_input = f"content:{content_type}"
-
-        # Add a structural hint from the content (first 100 chars, hashed)
-        # This helps differentiate tool outputs of the same type
-        content_sample = content[:100] if content else ""
-        structure_hint = hashlib.sha256(content_sample.encode()).hexdigest()[:8]
-        hash_input = f"{hash_input}:{structure_hint}"
-
-        # Keep SHA256: structure_hash feeds into TOIN which persists to disk.
-        # Changing hash function would invalidate all learned patterns.
-        structure_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:24]
-
-        return ToolSignature(
-            structure_hash=structure_hash,
-            field_count=0,  # Not applicable for non-JSON
-            has_nested_objects=False,
-            has_arrays=False,
-            max_depth=0,
-        )
-    except ImportError:
-        return None
 
 
 @dataclass
@@ -691,8 +638,7 @@ class ContentRouter(Transform):
         # to it.
         self._registry = CompressorRegistry(self.config)
         # Per-strategy dispatch + no-savings fallback chain. Holds no router
-        # reference: the compressor getters and the router-bound
-        # ``_record_to_toin`` are passed per-call by the
+        # reference: the compressor getters are passed per-call by the
         # ``_apply_strategy_to_content`` delegator, so monkeypatching those
         # router methods still takes effect. Only the lifetime-stable deps
         # (config + the module-level debug helpers/logger) ride the constructor.
@@ -709,82 +655,7 @@ class ContentRouter(Transform):
         # lifetime-stable ``logger`` rides the constructor.
         self._ccr_mirror = CcrMirror(logger=logger)
 
-        # TOIN integration for cross-strategy learning
-        self._toin: Any = None
-
         self._cache = CompressionCache()
-
-    def _record_to_toin(
-        self,
-        strategy: CompressionStrategy,
-        content: str,
-        compressed: str,
-        original_tokens: int,
-        compressed_tokens: int,
-        language: str | None = None,
-        context: str = "",
-    ) -> None:
-        """Record compression to TOIN for cross-user learning.
-
-        This allows TOIN to track compression patterns for ALL content types,
-        not just JSON arrays. When the LLM retrieves original content via CCR,
-        TOIN learns which compressions users need to expand.
-
-        Args:
-            strategy: The compression strategy used.
-            content: Original content (for signature generation).
-            compressed: Compressed content.
-            original_tokens: Token count before compression.
-            compressed_tokens: Token count after compression.
-            language: Optional language hint for code.
-            context: Query context for pattern learning.
-        """
-        # Skip SmartCrusher - it handles its own TOIN recording
-        if strategy == CompressionStrategy.SMART_CRUSHER:
-            return
-
-        # Skip if no actual compression happened
-        if original_tokens <= compressed_tokens:
-            return
-
-        try:
-            # Lazy load TOIN
-            if self._toin is None:
-                from ..telemetry.toin import get_toin
-
-                self._toin = get_toin()
-
-            # Create a content-type signature
-            signature = _create_content_signature(
-                content_type=strategy.value,
-                content=content,
-                language=language,
-            )
-
-            if signature is None:
-                return
-
-            # Record the compression
-            self._toin.record_compression(
-                tool_signature=signature,
-                original_count=1,  # Single content block
-                compressed_count=1,
-                original_tokens=original_tokens,
-                compressed_tokens=compressed_tokens,
-                strategy=strategy.value,
-                query_context=context if context else None,
-            )
-
-            logger.debug(
-                "TOIN: Recorded %s compression: %d → %d tokens",
-                strategy.value,
-                original_tokens,
-                compressed_tokens,
-            )
-
-        except Exception as e:
-            # TOIN recording should never break compression
-            logger.debug("TOIN recording failed (non-fatal): %s", e)
 
     def _timed_compress(
         self,
@@ -1297,10 +1168,9 @@ class ContentRouter(Transform):
         """Apply a compression strategy to content.
 
         Thin delegator to :meth:`StrategyDispatcher.apply`. The compressor
-        getters and the router-bound ``_record_to_toin`` are resolved fresh
-        here on every call and passed in, so monkeypatching those router
-        methods still takes effect (a construction-time capture in the
-        dispatcher would have been stale).
+        getters are resolved fresh here on every call and passed in, so
+        monkeypatching those router methods still takes effect (a
+        construction-time capture in the dispatcher would have been stale).
 
         Args:
             content: Content to compress.
@@ -1321,10 +1191,6 @@ class ContentRouter(Transform):
             Log readers use this to see *how* we got to the final
             compressor without parsing decision_reason strings.
         """
-
-        def record_to_toin(**kwargs: Any) -> None:
-            self._record_to_toin(**kwargs)
-
         return self._dispatcher.apply(
             content,
             strategy,
@@ -1336,7 +1202,6 @@ class ContentRouter(Transform):
             get_search_compressor=self._get_search_compressor,
             get_log_compressor=self._get_log_compressor,
             get_diff_compressor=self._get_diff_compressor,
-            record_to_toin=record_to_toin,
             token_counter=token_counter,
         )
 

@@ -1,7 +1,7 @@
 """Regression test for #13: strategy_chain double-appended a fallback entry.
 
 When SmartCrusher returned no savings, two code paths each appended the same
-fallback strategy and ran it twice (duplicate CCR/TOIN side effects). The fix
+fallback strategy and ran it twice (duplicate CCR side effects). The fix
 made the generic post-dispatch fallback the single owner: each strategy now
 appears at most once in the chain.
 

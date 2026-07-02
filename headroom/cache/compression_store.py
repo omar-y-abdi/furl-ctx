@@ -13,7 +13,7 @@ durable-retention epic.
 Features:
 - Thread-safe in-memory storage with TTL expiration
 - BM25-based search within cached content
-- Retrieval event tracking for feedback loop
+- Local retrieval event tracking
 - Automatic eviction when capacity is reached
 
 Usage:
@@ -200,12 +200,9 @@ class CompressionEntry:
     created_at: float
     ttl: int = DEFAULT_CCR_TTL_SECONDS
 
-    # TOIN integration: Store the tool signature hash for retrieval correlation
-    # This MUST match the hash used by SmartCrusher when recording compression
-    tool_signature_hash: str | None = None
     compression_strategy: str | None = None  # Strategy used for compression
 
-    # Feedback tracking
+    # Access tracking
     retrieval_count: int = 0
     search_queries: list[str] = field(default_factory=list)
     last_accessed: float | None = None
@@ -215,7 +212,7 @@ class CompressionEntry:
         return time.time() - self.created_at > self.ttl
 
     def record_access(self, query: str | None = None) -> None:
-        """Record an access to this entry for feedback tracking."""
+        """Record an access to this entry for local access tracking."""
         self.retrieval_count += 1
         self.last_accessed = time.time()
         if query and query not in self.search_queries:
@@ -236,7 +233,6 @@ class RetrievalEvent:
     tool_name: str | None
     timestamp: float
     retrieval_type: str  # "full" or "search"
-    tool_signature_hash: str | None = None  # For TOIN correlation
 
 
 class CompressionStore:
@@ -298,10 +294,9 @@ class CompressionStore:
         self._default_ttl = default_ttl
         self._enable_feedback = enable_feedback
 
-        # Feedback tracking
+        # Local retrieval-event tracking
         self._retrieval_events: list[RetrievalEvent] = []
         self._max_events = 1000  # Keep last 1000 events
-        self._pending_feedback_events: list[RetrievalEvent] = []
 
         # Use a min-heap for O(log n) eviction instead of O(n).
         # Heap entries are (created_at, hash_key) tuples
@@ -331,7 +326,6 @@ class CompressionStore:
         tool_name: str | None = None,
         tool_call_id: str | None = None,
         query_context: str | None = None,
-        tool_signature_hash: str | None = None,
         compression_strategy: str | None = None,
         ttl: int | None = None,
         explicit_hash: str | None = None,
@@ -348,7 +342,6 @@ class CompressionStore:
             tool_name: Name of the tool that produced this output.
             tool_call_id: ID of the tool call.
             query_context: User query context for relevance matching.
-            tool_signature_hash: Hash from ToolSignature for TOIN correlation.
             compression_strategy: Strategy used for compression.
             ttl: Custom TTL in seconds (uses default if not specified).
             explicit_hash: Use this exact hex hash as the storage key
@@ -433,14 +426,8 @@ class CompressionStore:
             query_context=query_context,
             created_at=time.time(),
             ttl=ttl if ttl is not None else self._default_ttl,
-            tool_signature_hash=tool_signature_hash,
             compression_strategy=compression_strategy,
         )
-
-        # Process pending feedback BEFORE acquiring lock for eviction.
-        # This ensures feedback from entries about to be evicted is captured.
-        if self._enable_feedback:
-            self.process_pending_feedback()
 
         with self._lock:
             self._evict_if_needed()
@@ -491,7 +478,7 @@ class CompressionStore:
 
         Args:
             hash_key: Hash key returned by store().
-            query: Optional query for feedback tracking.
+            query: Optional query for retrieval-event tracking.
 
         Returns:
             CompressionEntry if found and not expired, ``None`` otherwise.
@@ -514,7 +501,7 @@ class CompressionStore:
                 self._stale_heap_entries += 1
                 return None
 
-            # Track access for feedback
+            # Track access on the entry
             entry.record_access(query)
             # Update the backend with the modified entry
             self._backend.set(hash_key, entry)
@@ -528,7 +515,6 @@ class CompressionStore:
                     total_items=entry.original_item_count,
                     tool_name=entry.tool_name,
                     retrieval_type="full",
-                    tool_signature_hash=entry.tool_signature_hash,
                 )
             self._log_retrieval_payload(
                 hash_key=hash_key,
@@ -544,10 +530,6 @@ class CompressionStore:
             # (entry could be modified/evicted after lock release)
             # The entry contains mutable fields (search_queries list) that must be copied
             result_entry = replace(entry, search_queries=list(entry.search_queries))
-
-        # Process feedback immediately to ensure TOIN learns in real-time
-        if self._enable_feedback:
-            self.process_pending_feedback()
 
         return result_entry
 
@@ -640,10 +622,7 @@ class CompressionStore:
                     total_items=len(items),
                     tool_name=entry.tool_name,
                     retrieval_type="search",
-                    tool_signature_hash=entry.tool_signature_hash,
                 )
-            # Process feedback immediately to ensure TOIN learns in real-time
-            self.process_pending_feedback()
         self._log_retrieval_payload(
             hash_key=hash_key,
             query=query,
@@ -680,7 +659,6 @@ class CompressionStore:
             "tool_name": entry.tool_name,
             "tool_call_id": entry.tool_call_id,
             "compression_strategy": entry.compression_strategy,
-            "tool_signature_hash": entry.tool_signature_hash,
             "original_tokens": entry.original_tokens,
             "compressed_tokens": entry.compressed_tokens,
             "original_item_count": entry.original_item_count,
@@ -1043,7 +1021,6 @@ class CompressionStore:
         with self._lock:
             self._backend.clear()
             self._retrieval_events.clear()
-            self._pending_feedback_events.clear()
             self._eviction_heap.clear()  # Clear heap too
             self._stale_heap_entries = 0  # CRITICAL FIX: Reset stale counter
 
@@ -1078,11 +1055,10 @@ class CompressionStore:
         # Fix: track real progress. Each iteration that fails to evict a real
         # entry while over capacity rebuilds the heap from the LIVE backend
         # (correct timestamps, no ghost refs) so the next pop is guaranteed to
-        # hit a real oldest entry. Eviction stays oldest-first and still routes
-        # every delete through the ``_record_eviction_success`` / loud-miss
-        # accounting (no side-door). Bounded: each rebuild yields a heap of
-        # exactly the live entries, and every subsequent pop removes one, so the
-        # loop terminates in O(live entries).
+        # hit a real oldest entry. Eviction stays oldest-first (no side-door).
+        # Bounded: each rebuild yields a heap of exactly the live entries, and
+        # every subsequent pop removes one, so the loop terminates in
+        # O(live entries).
         rebuilt_since_progress = False
         while self._backend.count() >= self._max_entries:
             if not self._eviction_heap:
@@ -1097,11 +1073,7 @@ class CompressionStore:
             created_at, hash_key = heapq.heappop(self._eviction_heap)
             entry = self._backend.get(hash_key)
             if entry is not None and entry.created_at == created_at:
-                # Real oldest entry — evict it through the normal accounting.
-                if self._enable_feedback and entry.retrieval_count == 0:
-                    # Entry was never retrieved = compression was successful;
-                    # notify feedback so it knows this strategy worked.
-                    self._record_eviction_success(entry)
+                # Real oldest entry — evict it.
                 self._backend.delete(hash_key)
                 rebuilt_since_progress = False  # made progress
             else:
@@ -1141,47 +1113,6 @@ class CompressionStore:
             len(self._eviction_heap),
         )
 
-    def _record_eviction_success(self, entry: CompressionEntry) -> None:
-        """Record successful compression when an entry is evicted without retrieval.
-
-        HIGH FIX: State divergence on eviction
-        When an entry is evicted and was NEVER retrieved, this indicates the
-        compression was fully successful - the LLM never needed the original data.
-        We notify the feedback system so it can learn from this success.
-
-        Must be called with lock held (entry data access).
-        Actual feedback notification happens outside lock.
-
-        Args:
-            entry: The entry being evicted.
-        """
-        # Capture entry data while we have the lock
-        tool_name = entry.tool_name
-        sig_hash = entry.tool_signature_hash
-        strategy = entry.compression_strategy
-
-        # We can't call feedback while holding the lock (would cause deadlock)
-        # Instead, queue this for deferred processing
-        if sig_hash is not None and strategy is not None:
-            # Create a synthetic "success" event that we'll process later
-            # Use a special retrieval type to indicate this was an eviction success
-            success_event = RetrievalEvent(
-                hash=entry.hash,
-                query=None,
-                items_retrieved=0,  # No retrieval happened
-                total_items=entry.original_item_count,
-                tool_name=tool_name,
-                timestamp=time.time(),
-                retrieval_type="eviction_success",  # Special marker
-                tool_signature_hash=sig_hash,
-            )
-            self._pending_feedback_events.append(success_event)
-            logger.debug(
-                "Recorded eviction success: hash=%s strategy=%s",
-                entry.hash[:8],
-                strategy,
-            )
-
     def _log_retrieval(
         self,
         hash_key: str,
@@ -1190,7 +1121,6 @@ class CompressionStore:
         total_items: int,
         tool_name: str | None,
         retrieval_type: str,
-        tool_signature_hash: str | None = None,
     ) -> None:
         """Log a retrieval event. Must be called with lock held."""
         event = RetrievalEvent(
@@ -1201,7 +1131,6 @@ class CompressionStore:
             tool_name=tool_name,
             timestamp=time.time(),
             retrieval_type=retrieval_type,
-            tool_signature_hash=tool_signature_hash,
         )
 
         self._retrieval_events.append(event)
@@ -1209,116 +1138,6 @@ class CompressionStore:
         # Keep only recent events
         if len(self._retrieval_events) > self._max_events:
             self._retrieval_events = self._retrieval_events[-self._max_events :]
-
-        # Queue event for feedback processing (will be processed after lock release)
-        # This is safe because process_pending_feedback() uses the lock to atomically
-        # swap out the pending list before processing
-        self._pending_feedback_events.append(event)
-
-    def process_pending_feedback(self) -> None:
-        """Process pending feedback events.
-
-        Forwards events to:
-        1. CompressionFeedback - for learning compression hints
-        2. TelemetryCollector - for the data flywheel
-        3. TOIN - for cross-user intelligence network
-
-        This is called automatically on each retrieval to ensure the
-        feedback loop operates in real-time.
-        """
-        from ..telemetry import get_telemetry_collector
-        from ..telemetry.toin import get_toin
-        from .compression_feedback import get_compression_feedback
-
-        # Get pending events and related entry data atomically
-        with self._lock:
-            events = self._pending_feedback_events
-            self._pending_feedback_events = []
-
-            # Gather entry data while holding lock to avoid race conditions
-            event_data: list[
-                tuple[RetrievalEvent, str | None, str | None, str | None, str | None]
-            ] = []
-            for event in events:
-                entry = self._backend.get(event.hash)
-                if entry:
-                    # Use the ACTUAL tool_signature_hash stored during compression
-                    # This MUST match the hash used by SmartCrusher
-                    event_data.append(
-                        (
-                            event,
-                            entry.tool_name,
-                            entry.tool_signature_hash,  # The correct hash!
-                            entry.compression_strategy,
-                            entry.compressed_content,  # For TOIN field-level learning
-                        )
-                    )
-                else:
-                    event_data.append((event, None, None, None, None))
-
-        # Process outside lock
-        if event_data:
-            feedback = get_compression_feedback()
-            telemetry = get_telemetry_collector()
-            toin = get_toin()
-
-            for event, _tool_name, sig_hash, strategy, compressed_content in event_data:
-                # Notify feedback system (pass strategy for success rate tracking)
-                feedback.record_retrieval(event, strategy=strategy)
-
-                # Extract query fields if present
-                query_fields = None
-                if event.query:
-                    # Extract field:value patterns
-                    query_fields = re.findall(r"(\w+)[=:]", event.query)
-
-                # Notify telemetry for data flywheel
-                try:
-                    if sig_hash is not None:
-                        telemetry.record_retrieval(
-                            tool_signature_hash=sig_hash,
-                            retrieval_type=event.retrieval_type,
-                            query_fields=query_fields,
-                        )
-                except Exception:
-                    # Telemetry should never break the feedback loop
-                    logger.debug("Telemetry record_retrieval failed", exc_info=True)
-
-                # Parse compressed content to extract items for TOIN field-level learning
-                retrieved_items: list[dict[str, Any]] | None = None
-                if compressed_content:
-                    try:
-                        parsed = json.loads(compressed_content)
-                        # Handle both direct arrays and wrapped arrays
-                        if isinstance(parsed, list):
-                            # Filter to dicts only (field learning needs dict items)
-                            retrieved_items = [item for item in parsed if isinstance(item, dict)]
-                        elif isinstance(parsed, dict):
-                            # Check for common wrapper patterns: {"items": [...], "results": [...]}
-                            for key in ("items", "results", "data", "records"):
-                                if key in parsed and isinstance(parsed[key], list):
-                                    retrieved_items = [
-                                        item for item in parsed[key] if isinstance(item, dict)
-                                    ]
-                                    break
-                    except (json.JSONDecodeError, TypeError):
-                        # Invalid JSON - skip field learning for this retrieval
-                        pass
-
-                # Notify TOIN for cross-user learning
-                try:
-                    if sig_hash is not None:
-                        toin.record_retrieval(
-                            tool_signature_hash=sig_hash,
-                            retrieval_type=event.retrieval_type,
-                            query=event.query,
-                            query_fields=query_fields,
-                            strategy=strategy,  # Pass strategy for success rate tracking
-                            retrieved_items=retrieved_items,  # For field-level learning
-                        )
-                except Exception:
-                    # TOIN should never break the feedback loop
-                    logger.debug("TOIN record_retrieval failed", exc_info=True)
 
 
 # Request-scoped store (for multi-tenant SaaS: one store per request/tenant)
