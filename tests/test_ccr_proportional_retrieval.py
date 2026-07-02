@@ -48,8 +48,8 @@ import re
 
 import pytest
 
-from headroom.cache.compression_store import reset_compression_store
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.cache.compression_store import reset_compression_store
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
 tiktoken = pytest.importorskip("tiktoken")
 _ENC = tiktoken.get_encoding("o200k_base")

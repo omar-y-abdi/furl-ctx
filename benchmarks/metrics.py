@@ -17,7 +17,7 @@ Reported separately (never blended):
    as retained; a dropped-and-unrecoverable item is LOST.
 
 All token counts go through the engine's own tokenizer selection
-(``headroom.tokenizers.get_tokenizer`` wrapped in ``headroom.tokenizer.Tokenizer``)
+(``furl_ctx.tokenizers.get_tokenizer`` wrapped in ``furl_ctx.tokenizer.Tokenizer``)
 so the numbers match what the engine itself measures.
 """
 
@@ -27,12 +27,12 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from headroom import compress
-from headroom.cache.compression_store import get_compression_store
-from headroom.ccr import marker_grammar
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import get_tokenizer
-from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
+from furl_ctx import compress
+from furl_ctx.cache.compression_store import get_compression_store
+from furl_ctx.ccr import marker_grammar
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import get_tokenizer
+from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 # The model used for token counting. gpt-4o resolves to the real tiktoken
 # BPE tokenizer in the engine's registry (genuine token counts, not an

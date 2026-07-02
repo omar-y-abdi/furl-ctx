@@ -44,7 +44,7 @@ Dead `proxy/helpers.py` clusters (720), `conftest.py` 15 dead fixtures incl. non
 |---|---|---:|---|
 | **`live_zone.rs`** whole-request dispatcher | `transforms/live_zone.rs` | 2,899 | hoist its private `AuthMode` enum (≠ canonical `auth_mode.rs`, **keep that**) before delete; lands with the `lib.rs` FFI removal + tests `live_zone_{ccr,dispatch,thresholds,token_validation}.rs` |
 | `recommendations.rs` (PR-F3 never landed) | `transforms/recommendations.rs` | 329 | couples to live_zone `AuthMode`; review together; test `recommendations_loader.rs` |
-| dead FFI glue + re-exports | `headroom-py/lib.rs` (~94) + `mod.rs` (~20) | ~114 | ride with the above |
+| dead FFI glue + re-exports | `furl-py/lib.rs` (~94) + `mod.rs` (~20) | ~114 | ride with the above |
 
 ### Python (~6,600 — from v2 + v1-deferred cluster)
 cache-optimizer cluster (~3.8k: anthropic/openai/google/registry/dynamic_detector/compression_feedback), `relevance/` (1k, unconditional BM25 import), remaining `proxy/helpers.py` (~2.8k SSE-live boundary), `ccr/batch_processor.py` (keep `mcp_server.py` — needed for the planned MCP retrieve plane), `ml_models.py`. Each needs an export/import untangle — see `lazy-dev-AUDIT-v2.md` Tier 2.
@@ -62,7 +62,7 @@ cache-optimizer cluster (~3.8k: anthropic/openai/google/registry/dynamic_detecto
 ---
 
 ## Doc cruft (~2,800 lines — `lazy-dev-AUDIT-v2.md` D1–D15)
-Wiki/README/llms.txt documenting removed `HeadroomClient`/`SharedContext`/`RollingWindow`/CLI; inconsistent savings claims (README 60–95% vs honest BENCHMARKS 0–54%). Note: 6 of 7 ruff ERA001 "commented-out code" hits were **false positives** (comment headers) — the v2 synth correctly kept them.
+Wiki/README/llms.txt documenting removed `FurlClient`/`SharedContext`/`RollingWindow`/CLI; inconsistent savings claims (README 60–95% vs honest BENCHMARKS 0–54%). Note: 6 of 7 ruff ERA001 "commented-out code" hits were **false positives** (comment headers) — the v2 synth correctly kept them.
 
 ## Next step
 Apply via the proven **archive + two-gate test loop** (pytest + surface-walk + CCR recovery + compress() round-trip; restore-on-red). Suggested order: Rust Tier-1 `pipeline/`+`safety.rs` (4.4k, cleanest big win) → Python Tier-1 → then the untangle tiers per-cut. **Report-only until you say go.**

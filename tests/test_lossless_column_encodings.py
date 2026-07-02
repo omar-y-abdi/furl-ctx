@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 from tests.test_ccr_recovery_invariant import _decode_csv_schema, _repr
 
 # These tests assert the LOSSLESS CSV-schema rendering directly (every

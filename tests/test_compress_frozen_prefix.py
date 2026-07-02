@@ -12,7 +12,7 @@ Parity tests (adapter fixtures):
   Feed the same logical bodies to the Python helper and verify the
   Python helper returns the same integer as the Rust test asserts.
   The Rust expected values are taken verbatim from
-  crates/headroom-core/tests/cache_control.rs.
+  crates/furl-core/tests/cache_control.rs.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import uuid
 from typing import Any
 from unittest.mock import patch
 
-from headroom.compress import (
+from furl_ctx.compress import (
     _compute_frozen_message_count,
     _frozen_prefix_warning,
     _frozen_transformed_content_warning,
@@ -205,7 +205,7 @@ class TestParity:
     """Shared fixture parity.
 
     These fixtures are the table-driven cases from
-    crates/headroom-core/tests/cache_control.rs.  Expected values are the
+    crates/furl-core/tests/cache_control.rs.  Expected values are the
     integer literals asserted by the Rust tests.
     """
 
@@ -417,7 +417,7 @@ class TestCompressFrozenPrefixWiring:
             captured_kwargs.update(kwargs)
             return original_apply(**kwargs)
 
-        from headroom.compress import _get_pipeline
+        from furl_ctx.compress import _get_pipeline
 
         pipeline = _get_pipeline()
         original_apply = pipeline.apply
@@ -443,7 +443,7 @@ class TestCompressFrozenPrefixWiring:
 
         captured_kwargs: dict[str, Any] = {}
 
-        from headroom.compress import _get_pipeline
+        from furl_ctx.compress import _get_pipeline
 
         pipeline = _get_pipeline()
         original_apply = pipeline.apply
@@ -740,7 +740,7 @@ class TestTransformWarningsPlumbed:
     floor by compress()."""
 
     def _fake_apply(self, tokens_before: int, tokens_after: int):
-        from headroom.config import TransformResult
+        from furl_ctx.config import TransformResult
 
         def fake_apply(**kwargs: Any) -> TransformResult:
             return TransformResult(
@@ -754,7 +754,7 @@ class TestTransformWarningsPlumbed:
         return fake_apply
 
     def test_transform_warnings_reach_compress_result(self) -> None:
-        from headroom.compress import _get_pipeline
+        from furl_ctx.compress import _get_pipeline
 
         pipeline = _get_pipeline()
         with patch.object(pipeline, "apply", side_effect=self._fake_apply(100, 90)):
@@ -765,7 +765,7 @@ class TestTransformWarningsPlumbed:
 
     def test_warnings_survive_the_inflation_guard_revert(self) -> None:
         """Even when inflated output is reverted, warnings must not be lost."""
-        from headroom.compress import _get_pipeline
+        from furl_ctx.compress import _get_pipeline
 
         pipeline = _get_pipeline()
         with patch.object(pipeline, "apply", side_effect=self._fake_apply(100, 200)):
@@ -790,7 +790,7 @@ def _unique_tool_rows() -> str:
 
 class TestMovingBreakpointOverTransformedTurn:
     """The frozen prefix freezes INPUT bytes, but the provider cached what
-    Headroom SHIPPED last turn. Re-sending original history with the marker
+    Furl SHIPPED last turn. Re-sending original history with the marker
     moved forward past a deduped turn re-ships the ORIGINAL bytes — frozen,
     so uncompressed forever — a guaranteed prefix-cache miss. compress()
     cannot fix this statelessly; it must WARN (COR-50 characterization)."""
@@ -889,7 +889,7 @@ class TestFrozenTransformedContentDetector:
     def test_read_lifecycle_style_entry_warns_without_a_duplicate(self) -> None:
         """read_lifecycle stores ``compressed=""`` — the only writer of empty
         compressed content — so a frozen hit warns even with no frozen twin."""
-        from headroom.cache.compression_store import get_compression_store
+        from furl_ctx.cache.compression_store import get_compression_store
 
         content = self._unique_content()
         get_compression_store().store(
@@ -910,8 +910,8 @@ class TestFrozenTransformedContentDetector:
         """A dedup-registry hit warns only for a LATER byte-identical copy
         inside the frozen prefix — dedup only ever rewrote later copies, so a
         lone frozen occurrence is the always-verbatim first occurrence."""
-        from headroom.cache.compression_store import get_compression_store
-        from headroom.transforms.cross_message_dedup import _content_hash
+        from furl_ctx.cache.compression_store import get_compression_store
+        from furl_ctx.transforms.cross_message_dedup import _content_hash
 
         content = self._unique_content()
         get_compression_store().store(
@@ -934,7 +934,7 @@ class TestFrozenTransformedContentDetector:
         assert "[2]" in warning
 
     def test_anthropic_tool_result_blocks_are_scanned(self) -> None:
-        from headroom.cache.compression_store import get_compression_store
+        from furl_ctx.cache.compression_store import get_compression_store
 
         content = self._unique_content()
         get_compression_store().store(
@@ -968,7 +968,7 @@ class TestFrozenTransformedContentDetector:
     def test_small_units_are_skipped(self) -> None:
         """Units below MIN_DEDUP_CHARS (where well-behaved callers' sentinels
         live) never trigger store lookups or warnings."""
-        from headroom.cache.compression_store import get_compression_store
+        from furl_ctx.cache.compression_store import get_compression_store
 
         content = f"tiny {uuid.uuid4().hex}"  # well under 256 chars
         get_compression_store().store(

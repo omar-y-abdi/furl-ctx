@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.transforms.content_router import CompressionStrategy, ContentRouter
+from furl_ctx.transforms.content_router import CompressionStrategy, ContentRouter
 
 # Mixed content whose reassembly is NOT byte-identical: fence with language,
 # a blank-heavy gap, and a whitespace-only segment the splitter drops.

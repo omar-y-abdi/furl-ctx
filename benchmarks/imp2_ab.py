@@ -36,7 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-import headroom._core as core
+import furl_ctx._core as core
 
 # Engine identity-gate constants, mirrored from field_role.rs.
 IDENTITY_RATIO_THRESHOLD = 0.9  # field_role.rs:45 — near-unique ⇒ identity candidate.

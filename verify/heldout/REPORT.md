@@ -152,7 +152,7 @@ single-tier degradation keying because its claim tier is ambiguous).
 | Cold CCR per case? | **Yes.** Each case in a fresh subprocess → fresh Rust+Python CCR. Controls call `reset_compression_store()` per seed. Verified. |
 | ≥5 seeds, mean±range, no best-of-N? | **Yes.** 6 seeds, mean/min/max/stdev reported; no max selection anywhere. |
 | Default params (MinTokens)? | **Yes.** No `config`/kwargs passed. Engine default is `smart_crusher_routing_policy = "min-tokens"` (content_router.py:522). Independently confirmed. |
-| Engine source touched? | **No.** `git diff/status crates/ headroom/` is empty. |
+| Engine source touched? | **No.** `git diff/status crates/ furl_ctx/` is empty. |
 | Real external data, not fixtures? | **Yes.** Real express git log (dependabot commits/dates/40-char hashes), real rg JSONL, real npm/cli lockfile, GitHub commits API, npm registry, real macOS install log. None under `benchmarks/` or `verify/`. CI-log fallback to local macOS log is disclosed in SOURCES.md. |
 | Spot-recheck reproduces? | **Yes, bit-identical** (see below). |
 

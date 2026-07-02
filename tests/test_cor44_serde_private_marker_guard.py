@@ -12,7 +12,7 @@ divergence visible to Python's ``json.loads``.
 
 Fix
 ---
-A ``has_serde_private_marker`` guard in ``headroom_core::transforms::
+A ``has_serde_private_marker`` guard in ``furl_core::transforms::
 smart_crusher::compaction::walker`` intercepts every path before ``from_str``
 is called.  The two Rust entry points (``try_parse_json_container``,
 ``smart_crush_content_collecting``) are covered by inline Rust tests; this
@@ -26,7 +26,7 @@ import json
 
 import pytest
 
-from headroom.transforms.smart_crusher import SmartCrusher, SmartCrusherConfig
+from furl_ctx.transforms.smart_crusher import SmartCrusher, SmartCrusherConfig
 
 _MAGIC_NUMBER = '{"$serde_json::private::Number":"123"}'
 _MAGIC_RAW = '{"$serde_json::private::RawValue":"true"}'

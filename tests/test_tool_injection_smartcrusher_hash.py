@@ -18,7 +18,7 @@ SmartCrusher sha256[:6] produces 12-char hashes (crusher.rs:1620).
 
 from __future__ import annotations
 
-from headroom.ccr.tool_injection import (
+from furl_ctx.ccr.tool_injection import (
     CCR_HASH_WIDTHS,
     CCR_TOOL_NAME,
     CCRToolInjector,
@@ -150,7 +150,7 @@ class TestScanForMarkersSmartCrusher:
 
 
 class TestToolInjectionWithSmartCrusherMarkers:
-    """Test #2: inject_tool_definition injects headroom_retrieve when only <<ccr:>> markers present."""
+    """Test #2: inject_tool_definition injects furl_retrieve when only <<ccr:>> markers present."""
 
     def test_inject_triggered_by_smartcrusher_marker_only(self):
         """inject_tool_definition injects tool when only <<ccr:HASH>> markers are present (no bracket form)."""
@@ -177,7 +177,7 @@ class TestToolInjectionWithSmartCrusherMarkers:
         tools, was_injected = injector.inject_tool_definition(None)
         assert was_injected, "Tool should have been injected"
         assert any(t.get("name") == CCR_TOOL_NAME for t in tools), (
-            f"headroom_retrieve tool not found in injected tools: {tools}"
+            f"furl_retrieve tool not found in injected tools: {tools}"
         )
 
     def test_no_injection_without_markers(self):

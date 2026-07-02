@@ -2,13 +2,13 @@
 
 EVERY number here is produced by the engine's OWN public surface:
 
-* compression           — ``headroom.compress`` (default config / params).
-* token counting        — ``headroom.tokenizer.Tokenizer`` over
-                          ``headroom.tokenizers.get_tokenizer`` (gpt-4o => real
+* compression           — ``furl_ctx.compress`` (default config / params).
+* token counting        — ``furl_ctx.tokenizer.Tokenizer`` over
+                          ``furl_ctx.tokenizers.get_tokenizer`` (gpt-4o => real
                           tiktoken BPE, the tokenizer the dev numbers used).
-* CSV-schema decode     — ``headroom.transforms.csv_schema_decoder
+* CSV-schema decode     — ``furl_ctx.transforms.csv_schema_decoder
                           .decode_csv_schema_rows`` (the documented decoder).
-* CCR retrieve          — ``headroom.cache.compression_store`` retrieve, keyed
+* CCR retrieve          — ``furl_ctx.cache.compression_store`` retrieve, keyed
                           by the ``<<ccr:HASH>>`` pointer parsed out of the
                           compressed output.
 
@@ -29,14 +29,14 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from headroom import compress
-from headroom.cache.compression_store import (
+from furl_ctx import compress
+from furl_ctx.cache.compression_store import (
     get_compression_store,
     reset_compression_store,
 )
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import get_tokenizer
-from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import get_tokenizer
+from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 # Same tokenizer the dev numbers used.
 BENCH_MODEL = "gpt-4o"
@@ -185,7 +185,7 @@ def _active_crusher() -> Any:
     via the engine's own public ``ccr_get`` is exactly what the engine's
     proportional-retrieval test does. Returns ``None`` if unreachable."""
     try:
-        from headroom.compress import _get_pipeline
+        from furl_ctx.compress import _get_pipeline
 
         pipeline = _get_pipeline()
         for transform in getattr(pipeline, "transforms", []):

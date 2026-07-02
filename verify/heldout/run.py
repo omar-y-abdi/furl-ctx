@@ -223,8 +223,8 @@ def no_structure_control() -> dict:
     fake gain on genuine entropy. Run across the same seeds, in-process is fine
     (we only read the rendered output; CCR is reset per seed).
     """
-    from headroom import compress
-    from headroom.cache.compression_store import reset_compression_store
+    from furl_ctx import compress
+    from furl_ctx.cache.compression_store import reset_compression_store
 
     trials = []
     for seed in SEEDS:
@@ -282,8 +282,8 @@ def probe_result_cache_ccr_divergence() -> dict:
     check whether the served sentinel still resolves. A FIXED engine re-mirrors
     on the cache hit so the second drop stays backed (no silent loss).
     """
-    from headroom import compress
-    from headroom.cache.compression_store import reset_compression_store
+    from furl_ctx import compress
+    from furl_ctx.cache.compression_store import reset_compression_store
     from verify.measure import (
         _emitted_drop_hashes,
         _retrieve_originals,
@@ -554,7 +554,7 @@ def main() -> int:
     all_defaults = all(g["used_default_params"] for g in groups)
 
     payload = {
-        "schema": "headroom.verify.heldout.v1",
+        "schema": "furl_ctx.verify.heldout.v1",
         "run_label": "SECOND held-out verification (express/chalk/npm-cli, seeds 2000+211i)",
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit(),

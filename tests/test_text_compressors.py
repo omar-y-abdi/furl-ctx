@@ -4,7 +4,7 @@ Tests content detection, search compressor, log compressor, and diff
 compressor.
 """
 
-from headroom.transforms import (
+from furl_ctx.transforms import (
     ContentType,
     DiffCompressor,
     DiffCompressorConfig,
@@ -290,8 +290,8 @@ class TestSmartCrusherTextIntegration:
     @staticmethod
     def _get_tokenizer():
         """Get a tokenizer for tests using the tiktoken registry."""
-        from headroom.tokenizer import Tokenizer
-        from headroom.tokenizers import get_tokenizer
+        from furl_ctx.tokenizer import Tokenizer
+        from furl_ctx.tokenizers import get_tokenizer
 
         return Tokenizer(get_tokenizer("gpt-4o"), "gpt-4o")
 
@@ -300,7 +300,7 @@ class TestSmartCrusherTextIntegration:
 
         Applications should use SearchCompressor directly if compression is needed.
         """
-        from headroom.transforms import SmartCrusher, SmartCrusherConfig
+        from furl_ctx.transforms import SmartCrusher, SmartCrusherConfig
 
         # Create search results content
         search_results = "\n".join([f"src/file{i}.py:{i}:def function_{i}():" for i in range(100)])
@@ -324,7 +324,7 @@ class TestSmartCrusherTextIntegration:
 
         Applications should use LogCompressor directly if compression is needed.
         """
-        from headroom.transforms import SmartCrusher, SmartCrusherConfig
+        from furl_ctx.transforms import SmartCrusher, SmartCrusherConfig
 
         # Create log content
         lines = ["INFO: Processing item " + str(i) for i in range(100)]
@@ -393,7 +393,7 @@ class TestSmartCrusherTextIntegration:
         import json
         import re
 
-        from headroom.transforms import SmartCrusher, SmartCrusherConfig
+        from furl_ctx.transforms import SmartCrusher, SmartCrusherConfig
 
         # Create JSON array content with larger items to trigger compression
         items = [

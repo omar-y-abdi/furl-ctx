@@ -10,13 +10,13 @@ A determination lock — no production change in the commit.
 
 from __future__ import annotations
 
-import headroom.cache.compression_store as cs
-from headroom.cache.compression_store import (
+import furl_ctx.cache.compression_store as cs
+from furl_ctx.cache.compression_store import (
     DEFAULT_CCR_TTL_SECONDS,
     _get_env_default_ttl_seconds,
 )
 
-_ENV = "HEADROOM_CCR_TTL_SECONDS"
+_ENV = "FURL_CCR_TTL_SECONDS"
 
 
 # ── #22-env: non-positive / invalid env TTL is already guarded ────────────

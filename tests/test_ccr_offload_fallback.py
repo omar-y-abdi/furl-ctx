@@ -15,14 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from headroom.cache.compression_store import get_compression_store, reset_compression_store
-from headroom.transforms.content_router import (
+from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
+from furl_ctx.transforms.content_router import (
     ContentRouter,
     ContentRouterConfig,
     _is_unstructured_error_output,
     _looks_like_ccr_output,
 )
-from headroom.transforms.router_policy import CompressionStrategy
+from furl_ctx.transforms.router_policy import CompressionStrategy
 
 
 @pytest.fixture(autouse=True)

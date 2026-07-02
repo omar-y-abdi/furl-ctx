@@ -22,14 +22,14 @@ from typing import Any
 
 import pytest
 
-from headroom.cache.compression_store import (
+from furl_ctx.cache.compression_store import (
     CompressionStore,
     clear_request_compression_store,
     set_request_compression_store,
 )
-from headroom.transforms.diff_compressor import DiffCompressor, DiffCompressorConfig
-from headroom.transforms.log_compressor import LogCompressor, LogCompressorConfig
-from headroom.transforms.search_compressor import SearchCompressor, SearchCompressorConfig
+from furl_ctx.transforms.diff_compressor import DiffCompressor, DiffCompressorConfig
+from furl_ctx.transforms.log_compressor import LogCompressor, LogCompressorConfig
+from furl_ctx.transforms.search_compressor import SearchCompressor, SearchCompressorConfig
 
 
 class _FailingStore:

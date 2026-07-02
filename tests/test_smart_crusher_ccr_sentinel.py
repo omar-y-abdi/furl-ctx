@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.transforms.smart_crusher import (
+from furl_ctx.transforms.smart_crusher import (
     CCR_SENTINEL_KEY,
     is_ccr_sentinel,
     strip_ccr_sentinels,

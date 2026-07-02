@@ -22,7 +22,7 @@ import json
 
 import pytest
 
-from headroom.cache.compression_store import CompressionStore
+from furl_ctx.cache.compression_store import CompressionStore
 
 H = "abcdef123456"
 

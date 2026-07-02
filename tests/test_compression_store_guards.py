@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from headroom.cache.compression_store import (
+from furl_ctx.cache.compression_store import (
     CompressionStore,
 )
 

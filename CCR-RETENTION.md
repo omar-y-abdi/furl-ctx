@@ -39,16 +39,16 @@ The "no silent loss" requirement constrains **#2 only**. It never promised
 The **only live model-facing retrieval surface** today is the MCP tool, and it
 misses loudly:
 
-- **MCP tool (live)** — `HeadroomMCPServer._retrieve_content`
-  (`headroom/ccr/mcp_server.py:322`): on a store miss it returns an explicit
+- **MCP tool (live)** — `FurlMCPServer._retrieve_content`
+  (`furl_ctx/ccr/mcp_server.py:322`): on a store miss it returns an explicit
   `error` dict routed through the cause-honest helper
   (`format_retrieval_miss_detail`, `mcp_server.py:388`). This is what the model
-  reaches via the `headroom_retrieve` tool.
+  reaches via the `furl_retrieve` tool.
 - **Proxy / handler (archived, NOT live)** — `CCRResponseHandler._execute_retrieval`
   once provided a second loud surface, calling `store.get_entry_status(...)` and
   returning `success=False` with an explicit `error` payload for the bulk path,
   the search path, AND a real granular `#rows` offload. That module now lives at
-  `archive/headroom/ccr/response_handler.py` and is no longer wired into a live
+  `archive/furl_ctx/ccr/response_handler.py` and is no longer wired into a live
   retrieval path. Kept here only for the historical loud-miss measurement below.
 
 The only other `store.retrieve()` caller, `context_tracker._execute_expansions`,
@@ -115,7 +115,7 @@ trade-offs, ranked by how close they are to a free lunch:
 1. **Durable backend (net-new build — does NOT exist yet).** Today the only
    concrete backend is `InMemoryBackend`; `CompressionStoreBackend` is a Protocol
    with no shipped persistent implementation (no Sqlite/Redis CCR backend, and
-   the `headroom.ccr_backend` entry point is registered nowhere). Building one
+   the `furl_ctx.ccr_backend` entry point is registered nowhere). Building one
    and spilling evicted entries to it would convert "evicted → gone" into
    "evicted from RAM → still on disk." Closest to free in principle: bounded RAM,
    near-unbounded retention, data actually present. But note the store is
@@ -155,11 +155,11 @@ delivered behavior is the window + loud-miss guarantee documented at the top.
 
 ## Cross-references
 - `docs/audits/EVAL-break.md` — Cluster G original finding (row 6) + this reframe.
-- `headroom/ccr/mcp_server.py` — `_retrieve_content` (the live loud-miss surface).
-- `archive/headroom/ccr/response_handler.py` — `_execute_retrieval`; archived,
+- `furl_ctx/ccr/mcp_server.py` — `_retrieve_content` (the live loud-miss surface).
+- `archive/furl_ctx/ccr/response_handler.py` — `_execute_retrieval`; archived,
   no longer a live retrieval surface (kept for the historical loud-miss probe).
-- `headroom/cache/compression_store.py` — `format_retrieval_miss_detail`,
+- `furl_ctx/cache/compression_store.py` — `format_retrieval_miss_detail`,
   `get_entry_status`, and the `CompressionStoreBackend` protocol. Only
-  `InMemoryBackend` (`headroom/cache/backends/memory.py`) is implemented today;
+  `InMemoryBackend` (`furl_ctx/cache/backends/memory.py`) is implemented today;
   there is no Sqlite/Redis CCR backend.
 - `tests/test_ccr_eviction_loud_miss.py` — the locking regression tests.

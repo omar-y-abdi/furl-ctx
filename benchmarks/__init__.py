@@ -1,4 +1,4 @@
-"""Imp3 honest benchmark suite for the Headroom compression engine.
+"""Imp3 honest benchmark suite for the Furl compression engine.
 
 Measures the CURRENT engine on REAL, high-entropy data (no synthetic
 low-entropy inputs). Three metrics, reported separately, per dataset:

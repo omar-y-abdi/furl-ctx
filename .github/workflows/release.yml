@@ -5,14 +5,14 @@ name: Release
 # All values are referenced via ${{ env.VAR }} throughout the workflow.
 env:
   # PyPI
-  PYPI_PACKAGE: headroom-ai
+  PYPI_PACKAGE: furl-ctx
   PYPI_ENVIRONMENT: pypi
 
   # ─── Safety Gates ──────────────────────────────────────────────────────────────
   # Set to 'true' to skip the publish target (e.g., when tokens are not configured).
   # In GitHub: repo Settings → Variables → Actions Variables → New repository variable.
   # Locally via act: pass -e event.yml or set in .actrc.local (see .actrc.example).
-  # SKIPPED: the `headroom-ai` PyPI project is owned by the upstream author; this
+  # SKIPPED: the `furl-ctx` PyPI project is owned by the upstream author; this
   # fork has no PyPI trusted publisher configured, so the publish exchange fails
   # (`invalid-publisher`). Flip to "false" after configuring a trusted publisher
   # under your own PyPI package name.
@@ -32,12 +32,12 @@ on:
   # critical paths so the wheel matrix + smoke-import gate run BEFORE
   # merge — not after the tag is pushed and main is broken. Path
   # filter is deliberately narrow: source-only PRs that don't change
-  # the wheel layout (the single `headroom-ai` wheel built from
-  # `crates/headroom-py`) don't need the dry-run.
+  # the wheel layout (the single `furl-ctx` wheel built from
+  # `crates/furl-py`) don't need the dry-run.
   pull_request:
     paths:
       - ".github/workflows/release.yml"
-      - "crates/headroom-py/**"
+      - "crates/furl-py/**"
       - "pyproject.toml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -103,15 +103,15 @@ jobs:
       - name: Compute semantic version from canonical + release history
         id: ver
         run: |
-          python headroom/release_version.py
+          python furl_ctx/release_version.py
         env:
           MANUAL_VER: ${{ steps.manualver.outputs.value }}
 
   # Cross-platform wheel matrix. Each entry produces wheels for cp310/11/12/13
   # in one maturin invocation (PyO3 ABI3 forward-compat handles 3.14+ until
-  # we bump pyo3 past 0.22). The `headroom-ai` wheel contains the entire
-  # Python source under `headroom/` plus the compiled `headroom/_core.so`
-  # — one atomic install via `pip install headroom-ai`.
+  # we bump pyo3 past 0.22). The `furl-ctx` wheel contains the entire
+  # Python source under `furl_ctx/` plus the compiled `furl_ctx/_core.so`
+  # — one atomic install via `pip install furl-ctx`.
   build-wheels:
     needs: [detect-version]
     # Minimal privilege: this job only checks out source, builds wheels,
@@ -176,7 +176,7 @@ jobs:
           # `ort-download-binaries-rustls-tls` features, which removed
           # `openssl-sys` from our build tree entirely. The wheel build
           # no longer needs system OpenSSL or any perl modules.
-          # `cargo tree -p headroom-py -i openssl-sys` returns "not
+          # `cargo tree -p furl-py -i openssl-sys` returns "not
           # found".
         env:
           # PyO3 0.22 supports up to Python 3.13; allow forward-compat
@@ -309,7 +309,7 @@ jobs:
   #
   # This job spins up a matrix of representative customer environments
   # — the manylinux floor we promise + common older/newer glibc + macOS
-  # native — and runs the actual `import headroom._core` check at
+  # native — and runs the actual `import furl_ctx._core` check at
   # startup. Failure here BLOCKS publish-pypi and create-release. Better
   # to find a broken wheel here than 8 minutes after
   # `pypa/gh-action-pypi-publish` has already pushed it to the world.
@@ -381,8 +381,8 @@ jobs:
         run: |
           cat > "${RUNNER_TEMP}/smoke_import.py" <<'PY'
           import sys
-          import headroom
-          from headroom._core import hello as _rust_hello
+          import furl_ctx
+          from furl_ctx._core import hello as _rust_hello
           print(f"smoke-import OK: python={sys.version_info[:3]} hello={_rust_hello()}")
           PY
 
@@ -455,7 +455,7 @@ jobs:
                 aarch64-unknown-linux-gnu) arch_tag=manylinux_2_28_aarch64 ;;
                 *) echo "ERROR: unknown wheel target $WHEEL_TARGET" >&2; exit 1 ;;
               esac
-              whl=$(find /wheels -maxdepth 1 -type f -name "headroom_ai-*-${py_tag}-${py_tag}-${arch_tag}.whl" -print -quit)
+              whl=$(find /wheels -maxdepth 1 -type f -name "furl_ctx-*-${py_tag}-${py_tag}-${arch_tag}.whl" -print -quit)
               if [ -z "$whl" ]; then
                 # No version-specific wheel — fall back to a stable-ABI
                 # (abi3) wheel. A cp3<floor>-abi3 wheel installs on any
@@ -463,7 +463,7 @@ jobs:
                 # forward-compatible to 3.14+ (Cargo.toml pyo3 abi3-py310).
                 # Pick the abi3 wheel whose floor is <= the interpreter.
                 py_minor=${PYTHON_VERSION#*.}
-                abi3=$(find /wheels -maxdepth 1 -type f -name "headroom_ai-*-abi3-${arch_tag}.whl" -print -quit)
+                abi3=$(find /wheels -maxdepth 1 -type f -name "furl_ctx-*-abi3-${arch_tag}.whl" -print -quit)
                 if [ -n "$abi3" ]; then
                   abi3_base=${abi3##*/}
                   abi3_floor=${abi3_base#*-cp3}
@@ -500,12 +500,12 @@ jobs:
           set -e
           py_tag=cp$(echo "$PYTHON_VERSION" | tr -d .)
           # macOS wheels are tagged macosx_*_arm64 (Apple Silicon only).
-          whl=$(find dist -maxdepth 1 -type f -name "headroom_ai-*-${py_tag}-${py_tag}-macosx_*_arm64.whl" -print -quit)
+          whl=$(find dist -maxdepth 1 -type f -name "furl_ctx-*-${py_tag}-${py_tag}-macosx_*_arm64.whl" -print -quit)
           if [ -z "$whl" ]; then
             # Stable-ABI (abi3) fallback — see the Linux path above. A
             # cp3<floor>-abi3 wheel installs on any CPython >= floor.
             py_minor=${PYTHON_VERSION#*.}
-            abi3=$(find dist -maxdepth 1 -type f -name "headroom_ai-*-abi3-macosx_*_arm64.whl" -print -quit)
+            abi3=$(find dist -maxdepth 1 -type f -name "furl_ctx-*-abi3-macosx_*_arm64.whl" -print -quit)
             if [ -n "$abi3" ]; then
               abi3_base=${abi3##*/}
               abi3_floor=${abi3_base#*-cp3}

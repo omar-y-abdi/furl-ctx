@@ -1,4 +1,4 @@
-# Headroom Rust build targets. `just` is not installed on dev boxes; this
+# Furl Rust build targets. `just` is not installed on dev boxes; this
 # Makefile is the source of truth and is mirrored by .github/workflows/rust.yml.
 
 SHELL := /bin/bash
@@ -9,11 +9,11 @@ PYTHON ?= python3
 .PHONY: help test bench build-wheel fmt fmt-check lint clippy clean ci-precheck ci-precheck-rust ci-precheck-python ci-precheck-commitlint install-git-hooks verify-rust-core
 
 help:
-	@echo "Headroom Rust targets:"
+	@echo "Furl Rust targets:"
 	@echo "  make test               - cargo test --workspace"
 	@echo "  make bench              - cargo bench --workspace"
-	@echo "  make build-wheel        - release wheel for headroom-py"
-	@echo "  make verify-rust-core   - build + install + import-verify headroom._core"
+	@echo "  make build-wheel        - release wheel for furl-py"
+	@echo "  make verify-rust-core   - build + install + import-verify furl_ctx._core"
 	@echo "  make fmt                - cargo fmt --all"
 	@echo "  make fmt-check          - cargo fmt --all -- --check"
 	@echo "  make lint               - cargo clippy --workspace -- -D warnings"
@@ -33,12 +33,12 @@ bench:
 	$(CARGO) bench --workspace
 
 build-wheel:
-	$(MATURIN) build --release -m crates/headroom-py/Cargo.toml
+	$(MATURIN) build --release -m crates/furl-py/Cargo.toml
 
 # maturin-develop + import-verify in one shot. Run this any time you suspect
 # the engine is silently falling back to Python-only mode because the compiled
-# `headroom._core` extension is stale or unbuilt. SmartCrusher and the
-# diff/log/search compressors hard-import `headroom._core`, so a missing
+# `furl_ctx._core` extension is stale or unbuilt. SmartCrusher and the
+# diff/log/search compressors hard-import `furl_ctx._core`, so a missing
 # extension is a hard ImportError, not a silent degrade.
 verify-rust-core:
 	@if [ -z "$$VIRTUAL_ENV" ]; then \
@@ -79,7 +79,7 @@ ci-precheck-rust:
 	$(CARGO) test --workspace
 
 # Builds the Rust extension first because most tests instantiate `SmartCrusher`
-# / the compressors, which hard-import `headroom._core`.
+# / the compressors, which hard-import `furl_ctx._core`.
 ci-precheck-python:
 	@echo "── ci-precheck-python ─────────────────────────────────────────"
 	@if [ -z "$$VIRTUAL_ENV" ]; then \
@@ -88,7 +88,7 @@ ci-precheck-python:
 	fi
 	ruff check .
 	ruff format --check .
-	mypy headroom --ignore-missing-imports
+	mypy furl_ctx --ignore-missing-imports
 	bash scripts/build_rust_extension.sh
 	$(PYTHON) -m pytest tests/ -q
 

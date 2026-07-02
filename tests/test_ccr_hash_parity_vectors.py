@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from headroom.transforms.smart_crusher import SmartCrusher
+from furl_ctx.transforms.smart_crusher import SmartCrusher
 
 # Canonical form = serde_json::to_string(items): compact (no spaces), keys as
 # emitted. For these vectors (empty / scalars / single-key dicts) Python's

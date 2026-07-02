@@ -1,6 +1,6 @@
 # Held-out Verification Data Sources (SECOND run)
 
-This is a **second, held-out** independent verification of Headroom's
+This is a **second, held-out** independent verification of Furl's
 compression claims, fully disjoint from the first run under `verify/`.
 
 The first run seeded from `sindresorhus/slugify`, `sindresorhus/is-plain-obj`,
@@ -80,14 +80,14 @@ captures (sources 1).
 
 ## Engine surface used (no re-implementation)
 
-- Compression: `from headroom import compress` — committed DEFAULT params only
+- Compression: `from furl_ctx import compress` — committed DEFAULT params only
   (no `config`, no kwargs => `CompressConfig` defaults + `RoutingPolicy`
   default `MinTokens`).
-- Token counting: `headroom.tokenizer.Tokenizer` over
-  `headroom.tokenizers.get_tokenizer("gpt-4o")` (real tiktoken BPE).
-- Reconstruction decoder: `headroom.transforms.csv_schema_decoder
+- Token counting: `furl_ctx.tokenizer.Tokenizer` over
+  `furl_ctx.tokenizers.get_tokenizer("gpt-4o")` (real tiktoken BPE).
+- Reconstruction decoder: `furl_ctx.transforms.csv_schema_decoder
   .decode_csv_schema_rows` (the documented reference decoder).
-- CCR retrieve: `headroom.cache.compression_store.get_compression_store()
+- CCR retrieve: `furl_ctx.cache.compression_store.get_compression_store()
   .retrieve(hash)`, keyed by the `<<ccr:HASH>>` pointer parsed out of the
   `{"_ccr_dropped": ...}` sentinel in the compressed output.
 

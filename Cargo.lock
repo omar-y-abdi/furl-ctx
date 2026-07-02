@@ -364,6 +364,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "furl-core"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "criterion",
+ "dashmap",
+ "flate2",
+ "md-5",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tiktoken-rs",
+ "tracing",
+ "unidiff",
+]
+
+[[package]]
+name = "furl-py"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "furl-core",
+ "pyo3",
+ "serde_json",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,37 +460,6 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
-
-[[package]]
-name = "headroom-core"
-version = "0.1.0"
-dependencies = [
- "aho-corasick",
- "criterion",
- "dashmap",
- "flate2",
- "md-5",
- "proptest",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tiktoken-rs",
- "tracing",
- "unidiff",
-]
-
-[[package]]
-name = "headroom-py"
-version = "0.1.0"
-dependencies = [
- "cc",
- "headroom-core",
- "pyo3",
- "serde_json",
-]
 
 [[package]]
 name = "heck"

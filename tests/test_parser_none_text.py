@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.parser import (
+from furl_ctx.parser import (
     _extract_tool_result_text,
     get_message_content_text,
     parse_message_to_blocks,
 )
-from headroom.tokenizers import get_tokenizer
+from furl_ctx.tokenizers import get_tokenizer
 
 
 def test_extract_tool_result_text_handles_none() -> None:

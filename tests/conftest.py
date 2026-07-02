@@ -1,8 +1,8 @@
-"""Shared pytest fixtures for Headroom tests."""
+"""Shared pytest fixtures for Furl tests."""
 
 # Defensive default, set before any imports: silences fork-parallelism warnings
 # from third-party tokenizer libraries if one happens to be installed in the
-# test environment (not a Headroom dependency).
+# test environment (not a Furl dependency).
 import os
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -40,18 +40,18 @@ def pytest_runtest_call(item):
 
 
 @pytest.fixture(autouse=True)
-def _reset_headroom_logger_propagation():
-    """Keep `headroom.*` log records flowing to pytest's caplog handler.
+def _reset_furl_logger_propagation():
+    """Keep `furl_ctx.*` log records flowing to pytest's caplog handler.
 
-    `headroom.proxy.helpers._setup_file_logging` sets
-    ``logging.getLogger("headroom").propagate = False`` once any test
+    `furl_ctx.proxy.helpers._setup_file_logging` sets
+    ``logging.getLogger("furl_ctx").propagate = False`` once any test
     triggers a proxy startup with `--log-file`. After that, every
-    subsequent test's `caplog` fixture stops capturing `headroom.*`
+    subsequent test's `caplog` fixture stops capturing `furl_ctx.*`
     log records (caplog attaches to root, propagation is now blocked
-    at the headroom-logger boundary). Reset before every test so the
+    at the furl_ctx-logger boundary). Reset before every test so the
     capture is deterministic regardless of run order.
     """
     import logging as _logging
 
-    _logging.getLogger("headroom").propagate = True
+    _logging.getLogger("furl_ctx").propagate = True
     yield

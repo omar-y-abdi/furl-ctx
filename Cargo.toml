@@ -1,23 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/headroom-core",
-    "crates/headroom-py",
+    "crates/furl-core",
+    "crates/furl-py",
 ]
-# headroom-py is a Python extension module — it must be built via maturin, not
+# furl-py is a Python extension module — it must be built via maturin, not
 # plain cargo (the "extension-module" feature tells pyo3 not to link libpython,
 # which is required for `import` to work). `cargo build --workspace` without
 # explicit members skips it; `cargo test --workspace` still runs its tests
 # because pyo3 can dynamically link here for the cdylib used by tests.
 default-members = [
-    "crates/headroom-core",
+    "crates/furl-core",
 ]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
-authors = ["Headroom Maintainers"]
+authors = ["Furl Maintainers"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -65,7 +65,7 @@ pyo3 = { version = "0.24", features = ["abi3-py310"] }
 # * Single codegen unit (better inlining + dead-code elim, at the
 #   cost of slightly slower release builds)
 #
-# We deliberately do NOT set ``panic = "abort"``. headroom ships as a
+# We deliberately do NOT set ``panic = "abort"``. Furl ships as a
 # PyO3 extension loaded into a host Python process — panic-abort would
 # tear down the whole interpreter on a single Rust panic. Keeping
 # ``panic = "unwind"`` lets the hot bridge methods wrap their compute in
@@ -75,7 +75,7 @@ pyo3 = { version = "0.24", features = ["abi3-py310"] }
 # (un-caught) PyO3 panic surfaces as ``pyo3_runtime.PanicException``, which is
 # a ``BaseException`` — it would escape ``except Exception`` — which is exactly
 # why the bridge converts it and why the Python fail-open also catches
-# ``BaseException`` (see crates/headroom-py/src/lib.rs, headroom/compress.py).
+# ``BaseException`` (see crates/furl-py/src/lib.rs, furl_ctx/compress.py).
 # Accept the smaller wheel-size savings; keep unwind behaviour.
 #
 # Estimated impact: 213 MB/release → ~130 MB/release. Buys ~30+ more

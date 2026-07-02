@@ -1,4 +1,4 @@
-# BENCHMARKS — Headroom Engine honest benchmarks
+# BENCHMARKS — Furl Engine honest benchmarks
 
 > **Read this header first.** The single percentages in the per-phase dev
 > log below (e.g. "logs@90 = 93%", "multiturn = 70.8%") are **best-case,
@@ -294,7 +294,7 @@ fixtures untouched (`cross_message_dedup_enabled=True` config gate).
   (reference decoder `ad7d2a5a` → arith fold `d3934ba1` → ISO delta
   `17a21efc` → dict encoding `970069d5` → decimal scale-fold `717c0568`).
 - Frontier change: "lossless" is now **exact reconstruction through the
-  documented decoder** (`headroom/transforms/csv_schema_decoder.py`),
+  documented decoder** (`furl_ctx/transforms/csv_schema_decoder.py`),
   NOT verbatim string presence. Retention and needle-visibility on
   columnar renderings are measured by DECODE-AND-COMPARE (canonical-
   signature equality of decoded rows); verbatim substring scanning
@@ -522,7 +522,7 @@ Re-run (deterministic, off the committed snapshots under `benchmarks/data/`):
 |---|---:|---|---|
 | `code` | 7 | read of this repo's own source files | large distinct source files |
 | `logs` | 90 | `git log --pretty=format:'%H<US>%an<US>%ae<US>%aI<US>%s' -n 300` | varying hash+ISO date; **all-distinct subjects** |
-| `search` | 90 | `rg --json 'def ' headroom/` | distinct path/line/offset match objects |
+| `search` | 90 | `rg --json 'def ' furl_ctx/` | distinct path/line/offset match objects |
 | `repeated_logs` | 90 | `ping -c 100 -i 0.01 127.0.0.1` | **recurring content `{bytes,from,ttl}` + monotone `icmp_seq` identity counter** |
 
 `repeated_logs` is the canonical Improvement-2 case: every row's value-bearing

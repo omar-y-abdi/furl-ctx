@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import json
 
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
-from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 _LOSSLESS = ContentRouterConfig(smart_crusher_routing_policy="lossless-first")
 

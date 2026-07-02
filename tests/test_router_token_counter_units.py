@@ -28,14 +28,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.content_router import (
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.content_router import (
     ContentRouter,
     ContentRouterConfig,
 )
-from headroom.transforms.router_dispatch import StrategyDispatcher
-from headroom.transforms.router_policy import CompressionStrategy
+from furl_ctx.transforms.router_dispatch import StrategyDispatcher
+from furl_ctx.transforms.router_policy import CompressionStrategy
 
 _CHAR_COUNTER = len  # a deliberately different unit than words
 

@@ -11,7 +11,7 @@
 <p align="center"><strong>60–95% fewer tokens on redundant workloads · library · MCP · local-first · reversible</strong></p>
 
 <p align="center">
-  <a href="https://pypi.org/project/headroom-ai/"><img src="https://img.shields.io/pypi/v/headroom-ai.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/furl-ctx/"><img src="https://img.shields.io/pypi/v/furl-ctx.svg" alt="PyPI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
 </p>
 
@@ -28,17 +28,17 @@
 
 ---
 
-Headroom compresses everything your AI agent reads — tool outputs, logs, RAG chunks, files, and conversation history — before it reaches the LLM. Same answers, fraction of the tokens.
+Furl compresses everything your AI agent reads — tool outputs, logs, RAG chunks, files, and conversation history — before it reaches the LLM. Same answers, fraction of the tokens.
 
 <p align="center">
-  <img src="HeadroomDemo-Fast.gif" alt="Headroom in action" width="820">
+  <img src="FurlDemo-Fast.gif" alt="Furl in action" width="820">
   <br/><sub>Live: 10,144 → 1,260 tokens — same FATAL found.</sub>
 </p>
 
 ## What it does
 
 - **Library** — `compress(messages)` in Python, inline in any app
-- **MCP server** — `headroom_compress`, `headroom_retrieve`, `headroom_stats` for any MCP client
+- **MCP server** — `furl_compress`, `furl_retrieve`, `furl_stats` for any MCP client
 - **Reversible (CCR)** — originals are cached for retrieval on demand
 
 ## How it works (30 seconds)
@@ -49,7 +49,7 @@ Headroom compresses everything your AI agent reads — tool outputs, logs, RAG c
         │   prompts · tool outputs · logs · RAG results · files
         ▼
     ┌────────────────────────────────────────────────────┐
-    │  Headroom   (runs locally — your data stays here)  │
+    │  Furl   (runs locally — your data stays here)  │
     │  ────────────────────────────────────────────────  │
     │  CacheAligner  →  ContentRouter  →  CCR            │
     │                    ├─ SmartCrusher   (JSON)        │
@@ -66,19 +66,19 @@ Headroom compresses everything your AI agent reads — tool outputs, logs, RAG c
 - **SmartCrusher** — statistical JSON / array compression
 - **Search / Log / Diff compressors** — search results, build logs, diffs
 - **CacheAligner** — stabilizes prefixes so provider KV caches actually hit
-- **CCR** — stores originals locally; LLM calls `headroom_retrieve` if it needs them
+- **CCR** — stores originals locally; LLM calls `furl_retrieve` if it needs them
 
 ## Get started (60 seconds)
 
 ```bash
 # 1 — Install
-pip install "headroom-ai[all]"          # everything
-# or: pip install "headroom-ai[mcp]"     # just the MCP server
+pip install "furl-ctx[all]"          # everything
+# or: pip install "furl-ctx[mcp]"     # just the MCP server
 ```
 
 ```python
 # 2 — Compress inline in any Python app
-from headroom import compress
+from furl_ctx import compress
 
 result = compress(messages, model="claude-sonnet-4")
 # result.messages  → compressed; CCR keeps originals retrievable
@@ -86,7 +86,7 @@ result = compress(messages, model="claude-sonnet-4")
 
 ```bash
 # 3 — Or run the MCP server for Claude Code / Cursor / any MCP host
-python -m headroom.ccr.mcp_server       # exposes headroom_compress / _retrieve / _stats
+python -m furl_ctx.ccr.mcp_server       # exposes furl_compress / _retrieve / _stats
 ```
 
 Granular extras: `[mcp]` (MCP server), `[dev]`. Requires **Python 3.10+**.
@@ -120,12 +120,12 @@ These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). Acr
 - can't run the compression locally in your own process
 
 <details>
-<summary><b>Integrations — drop Headroom into any stack</b></summary>
+<summary><b>Integrations — drop Furl into any stack</b></summary>
 
 | Your setup     | Hook in with                                  |
 |----------------|-----------------------------------------------|
 | Any Python app | `compress(messages, model=…)`                 |
-| MCP clients    | `python -m headroom.ccr.mcp_server`           |
+| MCP clients    | `python -m furl_ctx.ccr.mcp_server`           |
 
 </details>
 
@@ -156,7 +156,7 @@ These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). Acr
 <details>
 <summary><b>Prompt caching (<code>cache_control</code>) — the frozen-prefix contract</b></summary>
 
-Headroom never modifies messages up to and including the highest Anthropic
+Furl never modifies messages up to and including the highest Anthropic
 `cache_control` marker (the **frozen prefix**), so provider prompt caches keep
 hitting. Two rules keep caching and compression compatible:
 
@@ -165,7 +165,7 @@ hitting. Two rules keep caching and compression compatible:
   0 tokens are saved (`error` stays `None`). `compress()` flags this in
   `result.warnings` and logs at WARNING. Either mark the breakpoint before the
   turns you want compressed, or compress before marking.
-- **Pass back what Headroom shipped.** The provider cached the bytes Headroom
+- **Pass back what Furl shipped.** The provider cached the bytes Furl
   *returned* last turn, not your originals. On multi-turn conversations, feed
   the previous `result.messages` back in — or don't move the marker forward
   past turns that already shipped compressed. Re-sending original history with
@@ -179,7 +179,7 @@ hitting. Two rules keep caching and compression compatible:
 ## Install
 
 ```bash
-pip install "headroom-ai[all]"          # everything
+pip install "furl-ctx[all]"          # everything
 ```
 
 Granular extras: `[mcp]` (MCP server), `[dev]`. Requires **Python 3.10+**.
@@ -187,12 +187,12 @@ Granular extras: `[mcp]` (MCP server), `[dev]`. Requires **Python 3.10+**.
 Using `pipx`? Choose a supported interpreter explicitly:
 
 ```bash
-pipx install --python python3.13 "headroom-ai[all]"
+pipx install --python python3.13 "furl-ctx[all]"
 ```
 
 ### Corporate / SSL-inspection environments
 
-If `pip install "headroom-ai[all]"` fails with `CERTIFICATE_VERIFY_FAILED`
+If `pip install "furl-ctx[all]"` fails with `CERTIFICATE_VERIFY_FAILED`
 (`unable to get local issuer certificate`), your network uses **SSL inspection** — a MITM
 proxy presenting a company-issued CA. The build backend (`maturin`) downloads `rustup` over a
 connection your TLS stack doesn't trust. **Install Rust first** so the build doesn't fetch it:
@@ -204,8 +204,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && rustup default
 winget install Rustlang.Rustup && rustup default stable
 ```
 
-Restart your shell, then `pip install "headroom-ai[all]"`. A prebuilt wheel avoids the Rust
-build entirely where available: `pip install --only-binary headroom-ai headroom-ai`.
+Restart your shell, then `pip install "furl-ctx[all]"`. A prebuilt wheel avoids the Rust
+build entirely where available: `pip install --only-binary furl-ctx furl-ctx`.
 
 One runtime asset is fetched over TLS; if it is blocked, trust your corporate CA via
 `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` / `CURL_CA_BUNDLE`:
@@ -216,22 +216,22 @@ One runtime asset is fetched over TLS; if it is blocked, trust your corporate CA
 
 ## Compared to
 
-Headroom runs **locally**, covers **every** content type, and is **reversible**.
+Furl runs **locally**, covers **every** content type, and is **reversible**.
 
 |                                                                              | Scope                                          | Deploy                             | Local | Reversible |
 |------------------------------------------------------------------------------|------------------------------------------------|------------------------------------|:-----:|:----------:|
-| **Headroom**                                                                 | All context — tools, RAG, logs, files, history | library · MCP                      | Yes   | Yes        |
+| **Furl**                                                                 | All context — tools, RAG, logs, files, history | library · MCP                      | Yes   | Yes        |
 | [RTK](https://github.com/rtk-ai/rtk)                                        | CLI command outputs                            | CLI wrapper                        | Yes   | No         |
 | [lean-ctx](https://github.com/yvgude/lean-ctx)                               | CLI commands, MCP tools, editor rules          | CLI wrapper · MCP                  | Yes   | No         |
 | [Compresr](https://compresr.ai), [Token Co.](https://thetokencompany.ai)    | Text sent to their API                         | Hosted API call                    | No    | No         |
 | OpenAI Compaction                                                            | Conversation history                           | Provider-native                    | No    | No         |
 
-> **RTK** ([rtk-ai/rtk](https://github.com/rtk-ai/rtk)) is a complementary CLI-output rewriter — a peer in the table above, **not** bundled with or a dependency of Headroom. If you already use it for shell-output rewriting, Headroom compresses everything downstream; the two compose cleanly. Credit to the RTK team for a great tool.
+> **RTK** ([rtk-ai/rtk](https://github.com/rtk-ai/rtk)) is a complementary CLI-output rewriter — a peer in the table above, **not** bundled with or a dependency of Furl. If you already use it for shell-output rewriting, Furl compresses everything downstream; the two compose cleanly. Credit to the RTK team for a great tool.
 
 ## Contributing
 
 ```bash
-git clone <your-fork-url> && cd headroom
+git clone <your-fork-url> && cd furl
 pip install -e ".[dev]" && pytest
 ```
 

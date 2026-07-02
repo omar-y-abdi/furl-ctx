@@ -11,7 +11,7 @@ Rust crate (`log_compressor.rs` unit tests); the Python shim no longer carries
 those helpers, so this suite exercises them only through `compress()`.
 """
 
-from headroom.transforms.log_compressor import (
+from furl_ctx.transforms.log_compressor import (
     LogCompressionResult,
     LogCompressor,
     LogCompressorConfig,

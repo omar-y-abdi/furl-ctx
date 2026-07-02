@@ -48,9 +48,9 @@ from typing import Any
 
 import pytest
 
-from headroom.cache import compression_store as cs
-from headroom.compress import compress
-from headroom.transforms.smart_crusher import (
+from furl_ctx.cache import compression_store as cs
+from furl_ctx.compress import compress
+from furl_ctx.transforms.smart_crusher import (
     CcrMirrorError,
     SmartCrusher,
     SmartCrusherConfig,
@@ -84,7 +84,7 @@ def store_writes_fail(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
 
     The mirror imports ``get_compression_store`` *inside* the function via
     ``from ..cache.compression_store import get_compression_store``; that name
-    resolves to ``headroom.cache.compression_store.get_compression_store`` at
+    resolves to ``furl_ctx.cache.compression_store.get_compression_store`` at
     call time, so patching the attribute on that module intercepts it. The
     ``calls`` counter lets the test assert the patch actually fired (guards
     against a false GREEN from a wrong patch target).
@@ -208,7 +208,7 @@ def test_mirror_module_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> No
     real_import = builtins.__import__
 
     def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "headroom.cache.compression_store" or name.endswith("cache.compression_store"):
+        if name == "furl_ctx.cache.compression_store" or name.endswith("cache.compression_store"):
             raise ImportError("simulated stripped build")
         return real_import(name, *args, **kwargs)
 

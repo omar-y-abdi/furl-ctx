@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import logging
 
-from headroom.cache.compression_store import CompressionStore
+from furl_ctx.cache.compression_store import CompressionStore
 
 H = "abcdef123456"
-STORE_LOGGER = "headroom.cache.compression_store"
+STORE_LOGGER = "furl_ctx.cache.compression_store"
 
 
 def _collide(store: CompressionStore) -> str:

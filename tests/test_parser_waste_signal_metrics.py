@@ -23,7 +23,7 @@ import json
 
 import pytest
 
-from headroom.parser import detect_waste_signals
+from furl_ctx.parser import detect_waste_signals
 
 
 class _LenTokenizer:

@@ -45,7 +45,7 @@ jobs:
         with:
           filters: |
             code:
-              - 'headroom/**'
+              - 'furl_ctx/**'
               - 'crates/**'
               - '**/*.rs'
               - 'pyproject.toml'
@@ -77,7 +77,7 @@ jobs:
       - name: ruff format --check
         run: ruff format --check .
       - name: mypy
-        run: mypy headroom --ignore-missing-imports
+        run: mypy furl_ctx --ignore-missing-imports
 
   build-wheel:
     needs: changes
@@ -99,7 +99,7 @@ jobs:
           maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
       - uses: actions/upload-artifact@v7
         with:
-          name: headroom-wheel
+          name: furl-wheel
           path: dist/*.whl
           retention-days: 1
 
@@ -128,7 +128,7 @@ jobs:
       - name: Download prebuilt wheel
         uses: actions/download-artifact@v8
         with:
-          name: headroom-wheel
+          name: furl-wheel
           path: dist
 
       - name: Install (prebuilt wheel + dev deps, no cargo rebuild)
@@ -136,11 +136,11 @@ jobs:
           python -m pip install --upgrade pip
           WHEEL="$(ls dist/*.whl)"
           pip install "${WHEEL}[dev]" pytest-split
-          # cwd's ./headroom source tree shadows the installed wheel; copy the
+          # cwd's ./furl_ctx source tree shadows the installed wheel; copy the
           # compiled extension in so tests import it (no second cargo build).
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
-          cp "${SITE}/headroom/"_core*.so headroom/
-          python -c "from headroom._core import DiffCompressor; print('headroom._core OK')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+          python -c "from furl_ctx._core import DiffCompressor; print('furl_ctx._core OK')"
 
       - name: Run test shard ${{ matrix.shard }}/4
         run: |

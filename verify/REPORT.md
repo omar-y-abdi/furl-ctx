@@ -1,10 +1,10 @@
-# Independent Verification Report — Headroom Compression Claims
+# Independent Verification Report — Furl Compression Claims
 
 **Role:** Phase-2 independent verifier (adversarial). Assume reported numbers are
 inflated until proven on freshly-generated, out-of-sample, real-data inputs.
 **Date:** 2026-06-13 (UTC). **Engine commit under test:** `3a507010` (run), audited
 at HEAD `d760d4a4` (the commit that added this harness).
-**Engine source touched:** NONE. `git diff crates/ headroom/` is empty; the
+**Engine source touched:** NONE. `git diff crates/ furl_ctx/` is empty; the
 harness commit `d760d4a4` modified zero engine files. All work is confined to
 `verify/`.
 
@@ -110,7 +110,7 @@ NOT load-bearing.
 
 ### 4.3 Default params — CONFIRMED
 No `config`/kwargs passed to `compress()`. `RoutingPolicy::MinTokens` is the committed
-default (`crates/headroom-core/src/transforms/smart_crusher/config.rs:183`).
+default (`crates/furl-core/src/transforms/smart_crusher/config.rs:183`).
 `default_params_confirmed: true` for all 36 groups. No special-casing/branching on the
 new data was found in the harness.
 

@@ -21,13 +21,13 @@ from __future__ import annotations
 import importlib
 import types
 
-from headroom.ccr.mcp_server import HeadroomMCPServer
-from headroom.compress import CompressResult
+from furl_ctx.ccr.mcp_server import FurlMCPServer
+from furl_ctx.compress import CompressResult
 
-# headroom/__init__.py re-exports the `compress` function, shadowing the
-# submodule attribute, so `import headroom.compress` binds the function.
+# furl_ctx/__init__.py re-exports the `compress` function, shadowing the
+# submodule attribute, so `import furl_ctx.compress` binds the function.
 # Resolve the actual module object to monkeypatch the name on it.
-compress_mod = importlib.import_module("headroom.compress")
+compress_mod = importlib.import_module("furl_ctx.compress")
 
 
 def _stub_server():
@@ -69,7 +69,7 @@ def test_savings_percent_agrees_with_tokens_saved(monkeypatch) -> None:
     # (1 - 0.957) * 100 = 4.3 would report the COMPLEMENT; this asserts the
     # true value, so the reverted formula fails this test.
     _patch_compress(monkeypatch, tokens_before=1000, tokens_after=43)
-    out = HeadroomMCPServer._compress_content(_stub_server(), "irrelevant payload")
+    out = FurlMCPServer._compress_content(_stub_server(), "irrelevant payload")
 
     assert out["original_tokens"] == 1000
     assert out["compressed_tokens"] == 43
@@ -83,7 +83,7 @@ def test_savings_percent_not_the_complement(monkeypatch) -> None:
     # Mutation guard: an asymmetric case (70% reduction) where the old
     # (1 - ratio) formula yields a distinctly different number (30.0).
     _patch_compress(monkeypatch, tokens_before=100, tokens_after=30)
-    out = HeadroomMCPServer._compress_content(_stub_server(), "x")
+    out = FurlMCPServer._compress_content(_stub_server(), "x")
     assert out["savings_percent"] == 70.0
     assert out["savings_percent"] != 30.0  # the inverted value
 
@@ -91,6 +91,6 @@ def test_savings_percent_not_the_complement(monkeypatch) -> None:
 def test_zero_savings_reports_zero(monkeypatch) -> None:
     # Passthrough (no reduction): savings_percent == 0, tokens_saved == 0.
     _patch_compress(monkeypatch, tokens_before=50, tokens_after=50)
-    out = HeadroomMCPServer._compress_content(_stub_server(), "x")
+    out = FurlMCPServer._compress_content(_stub_server(), "x")
     assert out["tokens_saved"] == 0
     assert out["savings_percent"] == 0

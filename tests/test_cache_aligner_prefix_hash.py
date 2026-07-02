@@ -25,10 +25,10 @@ from __future__ import annotations
 
 import logging
 
-from headroom.config import CacheAlignerConfig
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.cache_aligner import CacheAligner, align_for_cache
+from furl_ctx.config import CacheAlignerConfig
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.cache_aligner import CacheAligner, align_for_cache
 
 
 def _aligner(enabled: bool = True) -> CacheAligner:
@@ -122,7 +122,7 @@ def test_warnings_surface_via_exported_class_api() -> None:
 
 def test_warnings_are_logged(caplog) -> None:
     # And they reach the log channel (logger.warning), the second surfacing path.
-    with caplog.at_level(logging.WARNING, logger="headroom.transforms.cache_aligner"):
+    with caplog.at_level(logging.WARNING, logger="furl_ctx.transforms.cache_aligner"):
         _aligner().apply([_sys(_VOLATILE)], _tok())
     assert any("volatile" in rec.getMessage().lower() for rec in caplog.records)
 

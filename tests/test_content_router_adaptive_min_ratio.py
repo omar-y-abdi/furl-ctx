@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
 
 def _router() -> ContentRouter:

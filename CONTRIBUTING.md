@@ -1,4 +1,4 @@
-# Contributing to Headroom
+# Contributing to Furl
 
 Thanks for contributing! Please skim this before opening a PR : the policies exist because we've been burned skipping them, not because we love paperwork.
 
@@ -88,7 +88,7 @@ A human maintainer reviews every dep change. PRs that add or bump a package must
 
 ```bash
 git clone <your-fork-url>
-cd headroom
+cd furl
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest

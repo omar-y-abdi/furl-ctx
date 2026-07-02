@@ -38,7 +38,7 @@ fixture coincidences). So the highest-value work is integrity fixes, not squeezi
    cached prefix → SmartCrusher compresses them → block hash changes → prompt-cache MISS (Contract #2).
    FIX: message-level frozen-count, mirroring the Rust proxy's `compute_frozen_count`.
 
-5. **headroom_retrieve can't retrieve anything.** [break Cluster H + quality #2]
+5. **furl_retrieve can't retrieve anything.** [break Cluster H + quality #2]
    SmartCrusher emits 12-char hashes; the retrieve tool validates exactly 24 → every public-API
    `<<ccr:HASH>>` the model sees is non-retrievable BY THE MODEL. FIX: accept the emitted hash width.
 

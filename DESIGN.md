@@ -1,7 +1,7 @@
-# DESIGN — Headroom Engine Improvements (Phase 2)
+# DESIGN — Furl Engine Improvements (Phase 2)
 
 Grounded in the engine map (`headroom-engine-map` workflow, 5-facet read + synthesis).
-Every claim cites `file:line` in `crates/headroom-core/src/transforms/smart_crusher/` unless noted.
+Every claim cites `file:line` in `crates/furl-core/src/transforms/smart_crusher/` unless noted.
 
 ## How the engine drops data today (the audited reality)
 
@@ -55,7 +55,7 @@ Every claim cites `file:line` in `crates/headroom-core/src/transforms/smart_crus
    - `CONTENT`: everything else (value-bearing).
 2. **`stable_item_hash(item, exclude_set)`** — a NEW hash that serializes only `CONSTANT + CONTENT` fields (filter keys in the walker at anchor_selector.rs:451-475). Thread the `exclude_set` from `create_plan` (holds the analysis) down through `prioritize_indices`/`deduplicate_indices_by_content`/`fill_remaining_slots` (orchestration.rs:152,49,82) — the only callers.
 3. **Result**: 90 rows identical-except-timestamp collapse to one stable hash → dedup + cluster + fill-diversity work as intended → log/structured compression rises from ~30% toward 82-95%. The kept representative carries its real varying values; multiplicity recorded as `_dup_count` (and the varying values can be kept compactly in a sidecar if needed).
-4. **Python parity**: mirror the stable-hash + classifier in `headroom/transforms/smart_crusher.py` (and broaden the log normalizer `log_compressor.py:395-419` / `log_compressor.rs:32-36` to template ISO-8601/UUID/hex runs). The **canonical CCR hash stays full-item**, so the retrieve contract and parity fixtures for CCR are untouched.
+4. **Python parity**: mirror the stable-hash + classifier in `furl_ctx/transforms/smart_crusher.py` (and broaden the log normalizer `log_compressor.py:395-419` / `log_compressor.rs:32-36` to template ISO-8601/UUID/hex runs). The **canonical CCR hash stays full-item**, so the retrieve contract and parity fixtures for CCR are untouched.
 
 ---
 

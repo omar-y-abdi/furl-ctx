@@ -1,4 +1,4 @@
-# Headroom Compression — Next-Steps Action Doc
+# Furl Compression — Next-Steps Action Doc
 
 **Synthesis of 48 measured experiments across 8 rounds. Methodology: every claim below is MEASURED (cited token deltas from the fleet ledger), but ALL measurements are against `benchmarks/run_bench` — the same committed snapshots the 48 agents optimized against. Contract #4 (no overfitting / out-of-sample) is therefore UNVERIFIED for every item. The implementer MUST re-confirm top picks on `verify/run.py` (adversarial 6-seed, cold CCR) before trusting any gain. Baseline verified at HEAD: NO integer-ratio encoding exists in ir.rs/compactor.rs, and NO JSON-array error-gate exemption exists in content_router.py.**
 

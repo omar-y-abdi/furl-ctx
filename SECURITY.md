@@ -15,7 +15,7 @@ We take security vulnerabilities seriously. If you discover a security issue, pl
 
 **Please DO NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email us at: **security@headroom.dev**
+Instead, please email us at: **security@furl_ctx.dev**
 
 Include the following information:
 - Type of vulnerability (e.g., injection, data exposure, authentication bypass)
@@ -34,7 +34,7 @@ Include the following information:
 
 ### Security Best Practices for Users
 
-When using Headroom:
+When using Furl:
 
 1. **API Keys**: Never commit API keys. Use environment variables.
 2. **Log Files**: Be aware that request logs may contain sensitive information
@@ -43,8 +43,8 @@ When using Headroom:
 ### Scope
 
 The following are in scope for security reports:
-- Headroom Python package (`pip install headroom-ai`)
-- Headroom MCP server (`headroom.ccr.mcp_server`)
+- Furl Python package (`pip install furl-ctx`)
+- Furl MCP server (`furl_ctx.ccr.mcp_server`)
 
 The following are out of scope:
 - Third-party integrations not maintained by us
@@ -53,11 +53,11 @@ The following are out of scope:
 
 ## Security Features
 
-Headroom includes several security features:
+Furl includes several security features:
 
-- **Credential redaction in logs**: Retrieval-event logs (the `headroom_retrieve` event, which previews retrieved content and the query) redact known credential formats on a best-effort basis — JSON and `key=value` secrets (`api_key`, `token`, `secret`, `password`, `credential`, `auth`), `Authorization: Bearer`/`Basic` schemes, and provider prefixes (`sk-`, AWS `AKIA…`, GitHub `gh*_…`). Redaction is pattern-based, so a bare high-entropy secret with no recognizable key name or prefix may not be caught; treat logs as potentially sensitive (see "Log Files" above).
+- **Credential redaction in logs**: Retrieval-event logs (the `furl_retrieve` event, which previews retrieved content and the query) redact known credential formats on a best-effort basis — JSON and `key=value` secrets (`api_key`, `token`, `secret`, `password`, `credential`, `auth`), `Authorization: Bearer`/`Basic` schemes, and provider prefixes (`sk-`, AWS `AKIA…`, GitHub `gh*_…`). Redaction is pattern-based, so a bare high-entropy secret with no recognizable key name or prefix may not be caught; treat logs as potentially sensitive (see "Log Files" above).
 - **Passthrough mode**: Sensitive content passes through unchanged by default
 - **Input validation**: All inputs are validated before processing
 - **Safe defaults**: Security-conscious defaults out of the box
 
-Thank you for helping keep Headroom and its users safe!
+Thank you for helping keep Furl and its users safe!

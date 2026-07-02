@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from headroom.compress import CompressConfig, CompressResult, compress
-from headroom.hooks import CompressionHooks
+from furl_ctx.compress import CompressConfig, CompressResult, compress
+from furl_ctx.hooks import CompressionHooks
 
 # =============================================================================
 # Tests: compress() function
@@ -194,9 +194,9 @@ class TestNoneToolCallsRegression:
 
     def test_walkers_tolerate_none_tool_calls_directly(self):
         """All three tool_calls walkers survive the present-but-None shape."""
-        from headroom.config import ReadLifecycleConfig
-        from headroom.transforms.content_router import ContentRouter
-        from headroom.transforms.read_lifecycle import ReadLifecycleManager
+        from furl_ctx.config import ReadLifecycleConfig
+        from furl_ctx.transforms.content_router import ContentRouter
+        from furl_ctx.transforms.read_lifecycle import ReadLifecycleManager
 
         assistant_none = {"role": "assistant", "content": None, "tool_calls": None}
 

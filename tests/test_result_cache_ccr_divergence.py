@@ -29,7 +29,7 @@ Without the fix, step 5 fails: the sentinel is served but unbacked.
 With the fix, step 5 passes: ``_ensure_ccr_backed`` re-mirrored on the hit.
 
 BOTH-EXPIRED hardening (``test_both_stores_expired_*``): the Rust CCR store
-ALSO has a 300 s TTL (``crates/headroom-core/src/ccr/mod.rs`` DEFAULT_TTL),
+ALSO has a 300 s TTL (``crates/furl-core/src/ccr/mod.rs`` DEFAULT_TTL),
 same as the Python store, while the result cache (CompressionCache) has a
 30-min TTL. After ~5 minutes BOTH CCR stores expire but the result cache still
 serves the crushed output → re-mirror finds nothing in the Rust store either →
@@ -49,10 +49,10 @@ import re
 
 import pytest
 
-from headroom.cache.compression_store import get_compression_store, reset_compression_store
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
 # General CCR hash extractor: matches <<ccr:HASH>> and <<ccr:HASH ...>>
 _ANY_CCR_RE = re.compile(r"<<ccr:([a-f0-9]{6,})")

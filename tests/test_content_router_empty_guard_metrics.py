@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from headroom.transforms.content_router import (
+from furl_ctx.transforms.content_router import (
     CompressionStrategy,
     ContentRouter,
     ContentRouterConfig,

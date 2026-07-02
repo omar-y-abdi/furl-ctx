@@ -30,12 +30,12 @@ import hashlib
 import json
 import sys
 
-from headroom import compress
-from headroom.cache.compression_store import (
+from furl_ctx import compress
+from furl_ctx.cache.compression_store import (
     get_compression_store,
     reset_compression_store,
 )
-from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
+from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 from verify.heldout import generators as gen
 
 CCR_PREFIX = "<<ccr:"

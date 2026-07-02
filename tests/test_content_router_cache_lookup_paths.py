@@ -35,9 +35,9 @@ with no domain mocking.
 
 from __future__ import annotations
 
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.content_router import (
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.content_router import (
     ContentRouter,
     ContentRouterConfig,
     Recompute,

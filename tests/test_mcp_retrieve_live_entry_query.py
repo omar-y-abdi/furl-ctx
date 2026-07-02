@@ -21,8 +21,8 @@ import types
 
 import pytest
 
-from headroom.cache.compression_store import get_compression_store, reset_compression_store
-from headroom.ccr.mcp_server import HeadroomMCPServer
+from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
+from furl_ctx.ccr.mcp_server import FurlMCPServer
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +49,7 @@ def _store_live_entry(store, h: str) -> None:
 
 
 def _retrieve(store, h, query):
-    return asyncio.run(HeadroomMCPServer._retrieve_content(_stub_server(store), h, query))
+    return asyncio.run(FurlMCPServer._retrieve_content(_stub_server(store), h, query))
 
 
 def test_nonmatching_query_on_live_entry_is_not_an_eviction_error() -> None:

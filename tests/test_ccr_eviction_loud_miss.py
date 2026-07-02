@@ -4,7 +4,7 @@ The break-eval flagged "FIFO eviction -> unbacked sentinels" as a silent-loss
 defect (Cluster G). Independent verification showed the *eviction* is real
 (concern #1: a 1000-entry-cap overflow drops the oldest whole-blob entry) but
 the *loss is already loud* (concern #2): every model-facing retrieval path runs
-through ``HeadroomMCPServer._retrieve_content``, which calls ``get_entry_status``
+through ``FurlMCPServer._retrieve_content``, which calls ``get_entry_status``
 and returns an explicit ``error`` payload to the model on a miss — never a silent
 empty/None. The "no silent loss" invariant therefore already held; G as a
 *silent*-loss defect does not reproduce.
@@ -30,14 +30,14 @@ import types
 
 import pytest
 
-from headroom.cache.compression_store import (
+from furl_ctx.cache.compression_store import (
     DEFAULT_CCR_TTL_SECONDS,
     format_retrieval_miss_detail,
     get_compression_store,
     reset_compression_store,
 )
-from headroom.ccr.mcp_server import HeadroomMCPServer
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.ccr.mcp_server import FurlMCPServer
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +57,7 @@ def _model_sees(store: object, hash_key: str) -> tuple[bool, dict]:
     by its absence.
     """
     stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
-    payload = asyncio.run(HeadroomMCPServer._retrieve_content(stub, hash_key, None))
+    payload = asyncio.run(FurlMCPServer._retrieve_content(stub, hash_key, None))
     return ("error" not in payload), payload
 
 
@@ -179,7 +179,7 @@ def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
     assert store.retrieve(victim) is None, "precondition: victim evicted"
 
     stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
-    result = asyncio.run(HeadroomMCPServer._retrieve_content(stub, victim, None))
+    result = asyncio.run(FurlMCPServer._retrieve_content(stub, victim, None))
 
     assert "error" in result and result["hash"] == victim, "MCP miss must be loud"
     err = result["error"].lower()

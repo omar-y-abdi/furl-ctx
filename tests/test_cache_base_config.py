@@ -1,4 +1,4 @@
-"""Tests for headroom/cache/base.py — CacheConfig and CacheStrategy.
+"""Tests for furl_ctx/cache/base.py — CacheConfig and CacheStrategy.
 
 CacheConfig had 0% coverage (it's a dataclass — all fields default-initialized;
 no existing test imported it). This minimal pass covers:
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.cache.base import CacheConfig, CacheStrategy
+from furl_ctx.cache.base import CacheConfig, CacheStrategy
 
 # ---------------------------------------------------------------------------
 # CB-B1a  Pin all default field values

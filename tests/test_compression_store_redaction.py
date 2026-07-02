@@ -1,6 +1,6 @@
 """Regression tests for retrieval-log credential redaction (#20).
 
-The ``headroom_retrieve`` log path previews the retrieved payload. Any
+The ``furl_retrieve`` log path previews the retrieved payload. Any
 credential in that preview must be redacted. Bug #20: a plain-text
 ``Authorization: Bearer <JWT>`` header leaked the JWT because the
 secret-key rule consumed the ``Bearer`` scheme word as its value,
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.cache.compression_store import _redact_retrieval_log_payload
+from furl_ctx.cache.compression_store import _redact_retrieval_log_payload
 
 # A structurally-valid JWT (header.payload.signature). Load-bearing literal:
 # the test's whole point is that this exact string never appears in the output.

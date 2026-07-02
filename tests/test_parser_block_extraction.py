@@ -1,4 +1,4 @@
-"""Block-extraction coverage for headroom/parser.py (was 53%).
+"""Block-extraction coverage for furl_ctx/parser.py (was 53%).
 
 Drives the PUBLIC ``parse_message_to_blocks`` over the content-block shapes
 whose branches were uncovered: Anthropic ``tool_result`` blocks, Strands/Bedrock
@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.parser import find_tool_units, get_message_content_text, parse_message_to_blocks
-from headroom.tokenizers import get_tokenizer
+from furl_ctx.parser import find_tool_units, get_message_content_text, parse_message_to_blocks
+from furl_ctx.tokenizers import get_tokenizer
 
 
 @pytest.fixture(scope="module")

@@ -9,7 +9,7 @@ volatile-content detection, and ``get_alignment_score`` were blind the same
 way, and ``ContentRouter._detect_analysis_intent`` never saw analysis keywords
 in block-format user messages.
 
-Fix: the shared ``headroom.utils.concat_text_parts`` helper concatenates the
+Fix: the shared ``furl_ctx.utils.concat_text_parts`` helper concatenates the
 text parts of block-format content. Plain-string content passes through
 unchanged, so existing str-format hashes stay byte-identical — pinned by the
 CA-B1a hash literals in test_cache_aligner_hardening.py.
@@ -24,12 +24,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from headroom.config import CacheAlignerConfig
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.cache_aligner import CacheAligner
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
-from headroom.utils import concat_text_parts
+from furl_ctx.config import CacheAlignerConfig
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.cache_aligner import CacheAligner
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.utils import concat_text_parts
 
 
 def _aligner(enabled: bool = True) -> CacheAligner:
@@ -167,7 +167,7 @@ def test_block_volatile_content_emits_warning(caplog) -> None:
     msgs = [
         _sys_blocks("Session 3fa85f64-5717-4562-b3fc-2c963f66afa6 started at 2024-01-15T10:30:00Z")
     ]
-    with caplog.at_level(logging.WARNING, logger="headroom.transforms.cache_aligner"):
+    with caplog.at_level(logging.WARNING, logger="furl_ctx.transforms.cache_aligner"):
         result = _aligner().apply(msgs, _tok())
     assert result.warnings, "volatile content in block-format prompts must warn"
     assert "uuid" in result.warnings[0]

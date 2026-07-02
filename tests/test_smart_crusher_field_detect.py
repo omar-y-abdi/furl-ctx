@@ -1,9 +1,9 @@
 """COR-24 regression pins: constant bounded columns are not score fields.
 
 The score-field heuristic lives in Rust
-(``crates/headroom-core/src/transforms/smart_crusher/field_detect.rs``);
-the retired pure-Python twin is gone and ``headroom.transforms.smart_crusher``
-delegates to ``headroom._core``. These tests pin the cross-boundary behavior
+(``crates/furl-core/src/transforms/smart_crusher/field_detect.rs``);
+the retired pure-Python twin is gone and ``furl_ctx.transforms.smart_crusher``
+delegates to ``furl_ctx._core``. These tests pin the cross-boundary behavior
 through the public bridge — playing the parity-test role for this heuristic
 now that the recorded parity fixtures (``tests/parity/fixtures/smart_crusher/``)
 were removed along with the Python source.
@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import json
 
-from headroom.transforms.smart_crusher import SmartCrusher, SmartCrusherConfig
+from furl_ctx.transforms.smart_crusher import SmartCrusher, SmartCrusherConfig
 
 # 30 rows: clears min_items_to_analyze (5) and forces real row selection
 # against max_items_after_crush (15). ``msg`` varies so the fixture has

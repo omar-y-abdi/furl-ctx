@@ -24,9 +24,9 @@ import json
 
 import pytest
 
-from headroom.config import CompressRequest
-from headroom.tokenizers import get_tokenizer
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.config import CompressRequest
+from furl_ctx.tokenizers import get_tokenizer
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
 
 def _array(nrows: int) -> str:

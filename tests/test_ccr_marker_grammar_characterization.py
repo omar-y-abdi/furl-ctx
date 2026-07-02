@@ -7,7 +7,7 @@ The CCR retrieval contract has two halves that must agree byte-for-byte:
 * a PRODUCER emits a marker into a tool result, e.g.
   ``<<ccr:HASH N_rows_offloaded>>`` or ``[N lines compressed to M. ... hash=H]``,
   and stores the original under ``HASH`` in the CCR ``CompressionStore``;
-* a CONSUMER (``headroom.ccr.tool_injection.CCRToolInjector.scan_for_markers``)
+* a CONSUMER (``furl_ctx.ccr.tool_injection.CCRToolInjector.scan_for_markers``)
   scans messages, extracts ``HASH``, and the retrieval path resolves
   ``store.retrieve(HASH).original_content`` back to the byte-exact original.
 
@@ -80,7 +80,7 @@ Two layers of binding now exist:
    and ``test_double_angle_separators_are_exactly_the_owned_set`` assert the
    spec patterns match the constructed fixtures and reject un-enumerated
    separators. Producer-side construction drift for D/H is caught upstream by
-   the Rust byte-identity locks in ``crates/headroom-core/src/ccr/markers.rs``
+   the Rust byte-identity locks in ``crates/furl-core/src/ccr/markers.rs``
    (the single construction owner), not by these Python recognition tests.
 
 ★ Shape I matches NO consumer pattern (no ``compressed`` token, no ``<<ccr:``)
@@ -101,14 +101,14 @@ from dataclasses import dataclass
 
 import pytest
 
-from headroom.cache.compression_store import CompressionStore
-from headroom.ccr import marker_grammar
-from headroom.ccr.tool_injection import CCRToolInjector
-from headroom.transforms.cross_message_dedup import (
+from furl_ctx.cache.compression_store import CompressionStore
+from furl_ctx.ccr import marker_grammar
+from furl_ctx.ccr.tool_injection import CCRToolInjector
+from furl_ctx.transforms.cross_message_dedup import (
     duplicate_sentinel,
     near_duplicate_rendering,
 )
-from headroom.transforms.read_lifecycle import ReadState
+from furl_ctx.transforms.read_lifecycle import ReadState
 
 # --------------------------------------------------------------------------- #
 # FROZEN before-image — the ORIGINAL ``_marker_patterns`` literals, copied
@@ -739,7 +739,7 @@ def test_producer_driven_A_rows_offloaded_binds_to_production_consumer() -> None
     A producer-side change (e.g. ``markers.rs`` altering the space separator)
     that the consumer grammar no longer recognizes fails HERE.
     """
-    from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+    from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
     items = [f"log-line-{i}-payload" for i in range(1000)]
     router = ContentRouter(ContentRouterConfig(ccr_enabled=False, ccr_inject_marker=False))
@@ -783,7 +783,7 @@ def test_producer_driven_B_row_index_binds_to_production_consumer() -> None:
     marker (COR-4 store-flood gate), so 200 rows (~193 dropped) keeps the
     granular producer firing.
     """
-    from headroom.transforms.content_router import ContentRouter
+    from furl_ctx.transforms.content_router import ContentRouter
 
     items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(200)]
     router = ContentRouter()
@@ -824,7 +824,7 @@ def test_producer_driven_C_opaque_blob_binds_to_production_consumer() -> None:
     import base64
     import random
 
-    from headroom.transforms.content_router import ContentRouter
+    from furl_ctx.transforms.content_router import ContentRouter
 
     rng = random.Random(0)
     items = [
@@ -864,12 +864,12 @@ def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> 
     A producer-side change to the diff marker (``markers.rs marker_for_diff``)
     that the consumer's generic fallback no longer matches fails HERE.
     """
-    from headroom.cache.compression_store import (
+    from furl_ctx.cache.compression_store import (
         CompressionStore,
         clear_request_compression_store,
         set_request_compression_store,
     )
-    from headroom.transforms.diff_compressor import DiffCompressor, DiffCompressorConfig
+    from furl_ctx.transforms.diff_compressor import DiffCompressor, DiffCompressorConfig
 
     fresh = CompressionStore(max_entries=500, enable_feedback=False)
     set_request_compression_store(fresh)
@@ -917,7 +917,7 @@ def test_fixture_actually_fires_row_index_path() -> None:
     """
     import json as _json
 
-    from headroom.transforms.content_router import ContentRouter
+    from furl_ctx.transforms.content_router import ContentRouter
 
     items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(200)]
     router = ContentRouter()

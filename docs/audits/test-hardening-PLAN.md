@@ -1,6 +1,6 @@
-# Phase-4 Test-Hardening PLAN — Headroom (Python track)
+# Phase-4 Test-Hardening PLAN — Furl (Python track)
 
-> Baseline ref: HEAD `90b1df8a`, branch `verify/phase2-audit-report`. Source of truth: `/Users/k/dev/headroom/.claude/runtime/test-baseline.md`.
+> Baseline ref: HEAD `90b1df8a`, branch `verify/phase2-audit-report`. Source of truth: `/Users/k/dev/furl_ctx/.claude/runtime/test-baseline.md`.
 > **REPORT-ONLY.** The teammate implements this sequentially (single suite, no parallel pytest/git race). Excludes `archive/`, `target/`, `.venv*`.
 
 ## Headline
@@ -48,7 +48,7 @@ This plan is **PYTHON only** (score.py-validated profile, lang=python). **Rust h
 | 17 | `None` text in content block ⇒ `TypeError` (silently disables waste-signals) | parser.py | :167, :70, :443 | `{'type':'text','text':None}` ⇒ TypeError; pipeline ⇒ `waste_signals=None` | `parse_message_to_blocks` total over conformant shapes |
 | 18 | search-no-results ⇒ false eviction error for a LIVE entry | ccr/mcp_server.py | :330-373 | live entry + `query='zzz_nomatch'` ⇒ `error='no longer retrievable'` AND `status='available'` | loud, cause-honest miss; live entry never errors |
 | 19 | `savings_percent` inverted (reports retention) | ccr/mcp_server.py | :308-310 | 65% reduction ⇒ `savings_percent==35` while `tokens_saved==65` | sibling-field self-consistency |
-| 20 | `_redact_retrieval_log_payload` leaks JWT in plain-text `Authorization` header | cache/compression_store.py | :130-132 | `Authorization: Bearer <JWT>` ⇒ token unredacted in log | no credential in `headroom_retrieve` log events |
+| 20 | `_redact_retrieval_log_payload` leaks JWT in plain-text `Authorization` header | cache/compression_store.py | :130-132 | `Authorization: Bearer <JWT>` ⇒ token unredacted in log | no credential in `furl_retrieve` log events |
 | 21 | `store(explicit_hash='a')` (1 char) accepted — no min-length guard | cache/compression_store.py | :322-326 | 1-char hex key stored; collidable / overwrite | explicit_hash entropy vs marker contract |
 | 22 | `store(ttl=0)` ⇒ immediately-expired entry leaks until next `store()` | cache/compression_store.py | :350 | `ttl=0` ⇒ entry in backend+heap, expired, no error | backend must not hold immediately-expired entries |
 | 23 | `_evict_if_needed` may not evict ⇒ store exceeds `max_entries` (stale-heap path) | cache/compression_store.py | :917-936 | stale heap ts + ratio<0.5 ⇒ store at 3 with max=2 | store must never exceed `max_entries` |
@@ -64,7 +64,7 @@ This plan is **PYTHON only** (score.py-validated profile, lang=python). **Rust h
 
 ## NOT-RUN lenses (coverage gap, NOT "clean")
 
-- **`headroom/cache/base.py` (`CacheConfig`)** — baseline high-value target #7, **0% cov**, and ZERO test references confirmed (grep). It received NEITHER a full audit lens NOR a bug entry. This is an un-audited surface, not a verified-clean one. → Add a minimal config-field-affects-behavior + B1 default-value pass (see §9); flag for a future dedicated audit lens.
+- **`furl_ctx/cache/base.py` (`CacheConfig`)** — baseline high-value target #7, **0% cov**, and ZERO test references confirmed (grep). It received NEITHER a full audit lens NOR a bug entry. This is an un-audited surface, not a verified-clean one. → Add a minimal config-field-affects-behavior + B1 default-value pass (see §9); flag for a future dedicated audit lens.
 - **Lens-coverage gap (meta):** a full audit JSON was delivered ONLY for `kompress_compressor.py`. The other 7 modules are **bug-hunt-only** — their contract-violation / boundary-gap inventories were not produced. The per-module plans below for those 7 are **bug-derived + baseline-cov** (not invented audit inventories). A full audit lens on cache_aligner / smart_crusher / content_router / parser / mcp_server / compression_store / csv_schema_decoder remains owed.
 
 ---
@@ -75,7 +75,7 @@ Teammate works this list **TOP-DOWN, iterate-to-plateau per module**. **Gate per
 
 > Ranking rationale: recovery/security/context-safety hitters lead. `parser` has 4 bugs but every one is scoped "compression output unaffected" (metrics/diagnostics only) → ranks BELOW its count.
 
-### 1. `headroom/transforms/csv_schema_decoder.py` — recovery byte-exact (HARDEST invariant) · cov: not captured in baseline (recovery-surface module)
+### 1. `furl_ctx/transforms/csv_schema_decoder.py` — recovery byte-exact (HARDEST invariant) · cov: not captured in baseline (recovery-surface module)
 - **Bugs:** #24 (silent row-drop + arith misalignment), #25 (zero-var-col ⇒ `[]`), needs-review `__affix:` (uncertain).
 - **B1 + boundary FIRST (public path — `decode_csv_schema_rows`, A2-friendly):**
   - **CD-B1a** `@parametrize` pin literal decode outputs: `decode_csv_schema_rows('[3]{seq:int=0+1,msg:string}\nhello\n\nworld')` == `[{'msg':'hello','seq':0},{'msg':'world','seq':1}]` (pins the CURRENT buggy 2-row / shifted-seq output — locks bug #24).
@@ -83,7 +83,7 @@ Teammate works this list **TOP-DOWN, iterate-to-plateau per module**. **Gate per
   - **CD-B1c** needs-review: `[1]{col:string^}\n__affix:col=prefix_only\nactual_row` ⇒ pin current `[{'col':'__affix:col=prefix_only'},{'col':'actual_row'}]`; comment that reference formatter can't emit this (alt-producer only).
 - **est new tests: 6–8** (3 B1 literal blocks + parametrized boundary cases around var/const/arith column-class combinations + empty-line vs malformed-line ordinal-increment edge at :443 vs :447).
 
-### 2. `headroom/cache/compression_store.py` — recovery + SECURITY (JWT) · cov: not captured in baseline (recovery-surface; 21 recovery tests exist)
+### 2. `furl_ctx/cache/compression_store.py` — recovery + SECURITY (JWT) · cov: not captured in baseline (recovery-surface; 21 recovery tests exist)
 - **Bugs:** #20 (JWT leak), #21 (1-char hash), #22 (ttl=0 leak), #23 (over-capacity eviction).
 - **B1 + boundary FIRST (public path — `store()`/`retrieve()`/`_redact_…`; SECURITY literal leads):**
   - **CS-B1a (security)** pin `_redact_retrieval_log_payload('Authorization: Bearer eyJ…sig')` == `'Authorization: [REDACTED] eyJ…sig'` (locks bug #20 current leak; the JWT literal IS load-bearing). Contrast: JSON-quoted header redacts correctly. ★ This is the test the user most wants to see flip the day a fix lands.
@@ -92,7 +92,7 @@ Teammate works this list **TOP-DOWN, iterate-to-plateau per module**. **Gate per
   - **CS-cap** reproduce #23: `max_entries=2`, stale-heap timestamp + stale-ratio < 0.5 ⇒ assert count==3 (current over-capacity behavior). ★ KEEP internal (`_eviction_heap`/`_stale_heap_entries` have no public path — legitimate A2).
 - **est new tests: 7–9** (1 security B1 + parametrized hash-width + ttl boundary + capacity-overflow + a recovery round-trip B1 literal that re-affirms byte-exact `retrieve()`).
 
-### 3. `headroom/transforms/content_router.py` — routes EVERY compress(); context-safety · cov: not captured in baseline (dispatch core)
+### 3. `furl_ctx/transforms/content_router.py` — routes EVERY compress(); context-safety · cov: not captured in baseline (dispatch core)
 - **Bugs:** #10 (TLS worker-thread option drop), #11 (phantom-savings metrics), #12 (inverted `min_ratio` — agent overflows exactly when context tightest), #13 (`strategy_chain` double-append).
 - **B1 + boundary FIRST:**
   - **CR-B1a** pin `compress('[1,2,3]').strategy_chain == ['smart_crusher','kompress','kompress']` (public path; locks #13 current double-append literal).
@@ -101,7 +101,7 @@ Teammate works this list **TOP-DOWN, iterate-to-plateau per module**. **Gate per
   - **CR-tls** ≥2 cache-miss msgs + `force_kompress=True` (and separately `target_ratio=0.5`) ⇒ worker reads default `False`/`None` (locks #10). May need internal property read in worker thread — KEEP if no public observation path; prefer asserting the observable downstream effect (TOIN write occurred despite `toin_read_only=True`) where possible to lower A2.
 - **est new tests: 8–10** (B1 strategy-chain + parametrized min_ratio + empty-guard metrics + TLS-drop across the 4 symptoms).
 
-### 4. `headroom/transforms/kompress_compressor.py` — LIVE default text/code compressor; [0.8,0.9) unrecoverable loss · cov 13% (floor) · audit est 22
+### 4. `furl_ctx/transforms/kompress_compressor.py` — LIVE default text/code compressor; [0.8,0.9) unrecoverable loss · cov 13% (floor) · audit est 22
 - **Bugs:** #1 (dead `score_threshold`), #2 (truncation silent loss [0.8,0.9)), #3 (per-chunk ratio), #4 (blanket-except passthrough). Plus needs-review false-alarm (multi-subword max/OR).
 - **REQUIRED isolation fixture (from audit):** autouse fixture snapshotting/restoring `_kompress_cache` and `_execution_semaphores` module globals per test — without it, injected stubs leak into real-model tests.
 - **B1 FIRST (pure deterministic functions — REPL-pinned literals, A2 internal-but-legitimate / no public path):**
@@ -117,7 +117,7 @@ Teammate works this list **TOP-DOWN, iterate-to-plateau per module**. **Gate per
   - **K-chunk** 3-chunk offset: selective-keep stub ⇒ exact output `'zero two four six eight ten'` (kills `wid+chunk_start` / `sorted(kept_ids)` mutations).
 - **est new tests: 22** (matches audit estimate).
 
-### 5. `headroom/transforms/cache_aligner.py` — cache-prefix ordering invariant · cov 16% (floor)
+### 5. `furl_ctx/transforms/cache_aligner.py` — cache-prefix ordering invariant · cov 16% (floor)
 - **Bugs:** #5 (`stable_prefix_hash` collision), #6 (`align_for_cache` discards warnings).
 - **B1 FIRST (public path — `align_for_cache` / `CacheAligner.apply`, A2-friendly):**
   - **CA-B1a** pin collision literal: `apply([{'system':'a\n---\nb'}]).cache_metrics.stable_prefix_hash == '567988c630975a24'` AND `apply([{'system':'a'},{'system':'b'}])` ⇒ same hash ⇒ `prefix_changed is False` on the structural change (locks #5). The hash literal is load-bearing.
@@ -125,7 +125,7 @@ Teammate works this list **TOP-DOWN, iterate-to-plateau per module**. **Gate per
 - ★ KEEP any prefix-ordering / idx0-never-dropped internal assertions — that invariant has weak public observability and is the module's reason to exist.
 - **est new tests: 5–7** (B1 collision pair + warnings-discard + enabled-flag boundary + an idx0-ordering lock).
 
-### 6. `headroom/transforms/smart_crusher.py` — core engine, TOIN loop · cov 70% (floor — highest, keep it)
+### 6. `furl_ctx/transforms/smart_crusher.py` — core engine, TOIN loop · cov 70% (floor — highest, keep it)
 - **Bugs:** #7 (TLS policy leak), #8 (lossless TOIN count = original), #9 (sentinel API untested).
 - **B1 FIRST (public path — `is_ccr_sentinel`/`strip_ccr_sentinels` are PUBLIC, currently zero tests; A2-friendly):**
   - **SC-B1a** `is_ccr_sentinel({'_ccr_dropped':'<<ccr:abc123 5 rows>>'}) is True`; `is_ccr_sentinel({'id':1}) is False`; `is_ccr_sentinel('contains _ccr_dropped') is False` (kills the dropped-`isinstance` mutation); `len(strip_ccr_sentinels([{'id':1}, sentinel, {'id':2}])) == 2` (locks #9). ★ KEEP `CCR_SENTINEL_KEY` / `<<ccr:HASH>>` sentinel-format checks internal — no public path, legitimate A2.
@@ -133,21 +133,21 @@ Teammate works this list **TOP-DOWN, iterate-to-plateau per module**. **Gate per
   - **SC-7** A/B: fresh crusher `crush(60-item array)` ⇒ TOIN patterns==1; then `apply(read_only)` then `crush()` on same instance ⇒ TOIN patterns==0 (locks #7 stale-policy leak). Assert `_runtime_compression_policy` still set after `apply()` returns — KEEP internal (no public reset hook).
 - **est new tests: 6–8** (sentinel B1 + lossless-count + TLS-leak A/B + a recovery-path sentinel round-trip).
 
-### 7. `headroom/ccr/mcp_server.py` — user's MCP retrieve plane · cov 20% (floor)
+### 7. `furl_ctx/ccr/mcp_server.py` — user's MCP retrieve plane · cov 20% (floor)
 - **Bugs:** #18 (false eviction error for live entry), #19 (`savings_percent` inverted).
 - **B1 FIRST (public path — tool-output dicts, A2-friendly):**
   - **MS-B1a** compress achieving 65% reduction ⇒ tool dict `savings_percent == 35` AND `tokens_saved == 65` in the SAME response (locks #19 inversion + the sibling-field self-contradiction). The `35` literal is load-bearing.
   - **MS-18** store one live entry (ttl=3600), `_retrieve_content(hash, query='zzz_nomatch')` ⇒ response has `status=='available'` AND `error` contains `'no longer retrievable'` (locks #18 contradictory live-entry miss). Boundary: BM25 threshold 0.3 — a matching query returns the entry with no error.
 - **est new tests: 4–6** (B1 savings_percent + parametrized matching-vs-nonmatching query + a clean-hit retrieve B1).
 
-### 8. `headroom/parser.py` — metrics/diagnostics (compression OUTPUT unaffected — ranked below its 4-bug count) · cov 42% (floor)
+### 8. `furl_ctx/parser.py` — metrics/diagnostics (compression OUTPUT unaffected — ranked below its 4-bug count) · cov 42% (floor)
 - **Bugs:** #14 (whitespace always 0), #15 (HTML comment double-count), #16 (JSON gate mismatch + greedy merge), #17 (`None` text ⇒ TypeError disabling diagnostics).
 - **B1 FIRST (public path — `detect_waste_signals` / `parse_message_to_blocks`, A2-friendly):**
   - **PR-B1a** `@parametrize` waste-signal literals against a length-based mock tokenizer: `'a'+' '*20+'b'+' '*15+'c'` ⇒ `whitespace_tokens == 0` (#14); `'Text <!-- simple comment --> end'` ⇒ `html_noise_tokens == 52` (not 26) (#15); 3 sub-threshold JSON objects + prose ⇒ `json_bloat_tokens == 536` (greedy merge) (#16). All pin CURRENT buggy metrics.
   - **PR-17** `parse_message_to_blocks({'role':'user','content':[{'type':'text','text':None}]})` raises `TypeError`; AND via `compress()` pipeline the bare-except at pipeline.py:431 ⇒ result has `waste_signals is None` with `tokens_saved>0` (locks #17 silently-disabled diagnostics). Same pattern parametrized over `_extract_tool_result_text` (:70) and `get_message_content_text` (:443).
 - **est new tests: 6–8** (parametrized 3-metric B1 block + None-text TypeError across 3 call sites + pipeline-swallow assertion).
 
-### 9. `headroom/cache/base.py` (`CacheConfig`) — NOT-RUN, 0% cov (minimal pass)
+### 9. `furl_ctx/cache/base.py` (`CacheConfig`) — NOT-RUN, 0% cov (minimal pass)
 - No bug, no audit lens. Add a thin **config-field-affects-behavior** + **B1 default-value** pass per RULES.md delivery-gate item 6.
 - **CB-B1a** pin each `CacheConfig` default value (literal); for any field claimed to tune behavior, one parametrized test that a changed value changes the observable outcome.
 - **est new tests: 3–5.** Flag for a future dedicated audit lens (this is a coverage gap, not verified-clean).

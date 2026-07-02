@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.config import CacheAlignerConfig
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.cache_aligner import CacheAligner
+from furl_ctx.config import CacheAlignerConfig
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.cache_aligner import CacheAligner
 
 
 def _aligner(enabled: bool = True) -> CacheAligner:

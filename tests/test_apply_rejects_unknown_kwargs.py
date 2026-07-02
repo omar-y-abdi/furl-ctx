@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import pytest
 
-from headroom import compress
-from headroom.tokenizers import get_tokenizer
-from headroom.transforms.content_router import (
+from furl_ctx import compress
+from furl_ctx.tokenizers import get_tokenizer
+from furl_ctx.transforms.content_router import (
     _APPLY_ALLOWED_KWARGS,
     ContentRouter,
     ContentRouterConfig,
@@ -81,7 +81,7 @@ def test_known_good_call_does_not_raise() -> None:
 
 
 # Union of EVERY key a real caller passes to ContentRouter.apply(), gathered
-# from grepping every call site in headroom/ AND tests/:
+# from grepping every call site in furl_ctx/ AND tests/:
 #   * the production path (``_POST_PIPELINE_KWARGS``, via compress()), plus
 #   * the keys the pipeline's documented public surface broadcasts
 #     (``request_id`` / ``output_buffer`` / ``tool_profiles`` / ``record_metrics``).

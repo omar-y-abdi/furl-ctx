@@ -1,6 +1,6 @@
-# Headroom Rust Rewrite — Developer Guide
+# Furl Rust Rewrite — Developer Guide
 
-This document covers the Rust port of Headroom. It is the only new top-level
+This document covers the Rust port of Furl. It is the only new top-level
 doc created in Phase 0; longer-form design/plan writeups live elsewhere and
 are not versioned in this repo.
 
@@ -10,12 +10,12 @@ are not versioned in this repo.
 Cargo.toml                       # workspace root
 rust-toolchain.toml              # pins stable rustc with rustfmt+clippy
 crates/
-  headroom-core/                 # library: shared types + transform trait surface
-  headroom-py/                   # PyO3 cdylib exposing `headroom._core`
+  furl-core/                 # library: shared types + transform trait surface
+  furl-py/                   # PyO3 cdylib exposing `furl_ctx._core`
 ```
 
 `cargo build --workspace` builds every crate. `default-members` drops
-`headroom-py` from `cargo run`/bare-`cargo test` flows so that `cargo test
+`furl-py` from `cargo run`/bare-`cargo test` flows so that `cargo test
 --workspace` does not try to execute the PyO3 cdylib standalone (it can't
 find `libpython` without a Python interpreter hosting it).
 
@@ -28,14 +28,14 @@ exposes the same targets:
 | --- | --- |
 | `make test` | `cargo test --workspace` |
 | `make bench` | `cargo bench --workspace` |
-| `make build-wheel` | `maturin build --release -m crates/headroom-py/Cargo.toml` |
-| `make verify-rust-core` | maturin-develop + import-verify `headroom._core` in one shot |
+| `make build-wheel` | `maturin build --release -m crates/furl-py/Cargo.toml` |
+| `make verify-rust-core` | maturin-develop + import-verify `furl_ctx._core` in one shot |
 | `make fmt` | `cargo fmt --all` |
 | `make fmt-check` | `cargo fmt --check` |
 
 ## Maturin + Python wiring
 
-`headroom-py` is a PyO3 cdylib that exposes `headroom._core` in Python. The
+`furl-py` is a PyO3 cdylib that exposes `furl_ctx._core` in Python. The
 `extension-module` feature is opt-in so plain `cargo build --workspace` does
 not try to link against `libpython` on systems that don't have it.
 
@@ -45,18 +45,18 @@ not try to link against `libpython` on systems that don't have it.
 python3.11 -m venv /tmp/hr-rust-venv
 source /tmp/hr-rust-venv/bin/activate
 pip install maturin
-cd crates/headroom-py
-maturin develop           # editable dev build, installs headroom._core
+cd crates/furl-py
+maturin develop           # editable dev build, installs furl_ctx._core
 cd /tmp                   # IMPORTANT: step out of the repo root first
-python -c "from headroom._core import hello; print(hello())"
-# => headroom-core
+python -c "from furl_ctx._core import hello; print(hello())"
+# => furl-core
 ```
 
-> Why `cd /tmp`? The repo root also contains the Python `headroom/` package.
-> Running the smoke import from the repo root makes Python resolve `headroom`
-> to `./headroom/__init__.py` (the full SDK, which pulls in heavy deps) instead
+> Why `cd /tmp`? The repo root also contains the Python `furl_ctx/` package.
+> Running the smoke import from the repo root makes Python resolve `furl_ctx`
+> to `./furl_ctx/__init__.py` (the full SDK, which pulls in heavy deps) instead
 > of the lightweight namespace package installed by maturin. Tests should
-> either run outside the repo root, or ensure `headroom` is installed into
+> either run outside the repo root, or ensure `furl_ctx` is installed into
 > the same venv (then the maturin-installed `_core.so` lands alongside it and
 > both imports resolve).
 
@@ -83,8 +83,8 @@ so they don't regress further or get forgotten.
 | Subsystem | State | Tracked by |
 |---|---|---|
 | Compression-feedback learning loop | **Deleted with the telemetry/feedback plane (2026-06 excision).** The recorder the 2026-04-28 audit had re-attached (and its per-tool `tool_name` hook) went with the rest of the learning plane; the shim records nothing after a compression. Not a silent gap — the subsystem no longer exists. | — (subsystem and its test file deleted together) |
-| CCR marker emission knob | **Honored end-to-end 2026-04-29.** New `enable_ccr_marker: bool` field on Rust `SmartCrusherConfig`; `crush_array` checks it before emitting the `<<ccr:HASH>>` marker text and the CCR store write. Python shim flips it from `ccr_config.enabled and ccr_config.inject_retrieval_marker` — both flags collapse to the same Rust gate, since storing payloads under either off-switch makes no sense. Scope: gates only the row-drop sentinel path; Stage-3c.2 opaque-string CCR substitutions still emit always (no Python equivalent, no production caller asks for suppression). | `crates/headroom-core/.../crusher.rs::tests::enable_ccr_marker_*` |
-| Custom relevance scorer | **Closed (fail-loud) 2026-04-29.** `relevance_config` and `scorer` constructor args remain in the signature for source compat, but the shim raises `NotImplementedError` when either is non-None — silently dropping a user-supplied scorer is a textbook silent-fallback bug. | fail-loud guard in `headroom/transforms/smart_crusher.py` (its dedicated test was deleted with the feedback-plane test file) |
+| CCR marker emission knob | **Honored end-to-end 2026-04-29.** New `enable_ccr_marker: bool` field on Rust `SmartCrusherConfig`; `crush_array` checks it before emitting the `<<ccr:HASH>>` marker text and the CCR store write. Python shim flips it from `ccr_config.enabled and ccr_config.inject_retrieval_marker` — both flags collapse to the same Rust gate, since storing payloads under either off-switch makes no sense. Scope: gates only the row-drop sentinel path; Stage-3c.2 opaque-string CCR substitutions still emit always (no Python equivalent, no production caller asks for suppression). | `crates/furl-core/.../crusher.rs::tests::enable_ccr_marker_*` |
+| Custom relevance scorer | **Closed (fail-loud) 2026-04-29.** `relevance_config` and `scorer` constructor args remain in the signature for source compat, but the shim raises `NotImplementedError` when either is non-None — silently dropping a user-supplied scorer is a textbook silent-fallback bug. | fail-loud guard in `furl_ctx/transforms/smart_crusher.py` (its dedicated test was deleted with the feedback-plane test file) |
 
 ### DiffCompressor
 
@@ -96,7 +96,7 @@ so they don't regress further or get forgotten.
 ### Phase 3e.1 — `signals/` trait module + KeywordDetector (2026-04-29)
 
 The Python `error_detection.py` regex registry was retired and reborn as a
-trait + tier system in `crates/headroom-core/src/signals/`. See
+trait + tier system in `crates/furl-core/src/signals/`. See
 `signals/README.md` for the full architecture; the highlights:
 
 - **Per-granularity traits.** `LineImportanceDetector` ships today; future
@@ -127,7 +127,7 @@ Strategic decision 2026-04-29: after Phase 3e (compressor ports) and
 Phase 3f (Rust MCP scaffold) wrap, formalize the lossless-then-lossy-
 then-CCR ordering as a cross-cutting `CompressionPipeline` orchestrator
 + `LosslessTransform` / `LossyTransform` traits in
-`crates/headroom-core/src/pipeline/`. The crucial design choice —
+`crates/furl-core/src/pipeline/`. The crucial design choice —
 **parsers for structure, models at the prose/structure boundary** — is
 captured in issue #315.
 
@@ -154,7 +154,7 @@ doesn't rediscover them.
 
 ## CCR storage — process-local, request-window-scoped
 
-The CCR store (`crates/headroom-core/src/ccr/backends/`) ships a single
+The CCR store (`crates/furl-core/src/ccr/backends/`) ships a single
 backend: `InMemoryCcrStore`, a process-local sharded `DashMap` constructed once
 at startup and shared across worker threads behind an `Arc`. Entries are bounded
 (capacity-LRU + TTL, defaults 1000 entries / 300 s) and lost on restart, so
@@ -165,6 +165,6 @@ to round-trip on the model's retrieval call.
 No persistent or cross-process backend ships. Spilling evicted entries to a
 durable store (keyed by session for cleanup) is a deliberately-deferred epic —
 see `CCR-RETENTION.md` for the design and trade-offs. On the Python side,
-`CompressionStore` exposes a `headroom.ccr_backend` setuptools entry point so a
-durable adapter can be registered out-of-tree (`HEADROOM_CCR_BACKEND=<name>`),
+`CompressionStore` exposes a `furl_ctx.ccr_backend` setuptools entry point so a
+durable adapter can be registered out-of-tree (`FURL_CCR_BACKEND=<name>`),
 but none ships by default and the in-memory backend is the only one wired.

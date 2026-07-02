@@ -3,17 +3,17 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "headroom-ai"
+name = "furl-ctx"
 version = "0.26.0"
 description = "The Context Optimization Layer for LLM Applications - Cut costs by 50-90%"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
-    { name = "Headroom Contributors" }
+    { name = "Omar Y. Abdi", email = "omar19970423@gmail.com" }
 ]
 maintainers = [
-    { name = "Headroom Contributors" }
+    { name = "Omar Y. Abdi", email = "omar19970423@gmail.com" }
 ]
 keywords = [
     "llm",
@@ -50,8 +50,13 @@ dependencies = [
     "tomli>=2.0.0; python_version < '3.11'",  # tomllib backport for helper scripts
 ]
 
+[project.urls]
+Homepage = "https://github.com/omar-y-abdi/furl"
+Repository = "https://github.com/omar-y-abdi/furl"
+Issues = "https://github.com/omar-y-abdi/furl/issues"
+
 [project.optional-dependencies]
-# MCP server for Claude Code integration (headroom.ccr.mcp_server).
+# MCP server for Claude Code integration (furl_ctx.ccr.mcp_server).
 mcp = [
     "mcp>=1.0.0",
     "httpx>=0.24.0",
@@ -68,13 +73,13 @@ dev = [
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
-    "headroom-ai[mcp]",
+    "furl-ctx[mcp]",
 ]
 
 # Maturin builds a single wheel containing both the Python source under
-# `headroom/` AND the compiled Rust extension `headroom/_core.so` (cdylib
-# from `crates/headroom-py`). One `pip install headroom-ai` ships everything
-# atomically — no separate `headroom-core-py` package, no chicken-and-egg,
+# `furl_ctx/` AND the compiled Rust extension `furl_ctx/_core.so` (cdylib
+# from `crates/furl-py`). One `pip install furl-ctx` ships everything
+# atomically — no separate `furl-core-py` package, no chicken-and-egg,
 # no PIP_FIND_LINKS plumbing. Phase A0's runtime fail-loud check still
 # exists but only fires if someone forces an sdist install on a platform
 # without a wheel and the rust toolchain isn't available to compile it.
@@ -92,8 +97,8 @@ default = true
 
 [tool.maturin]
 # Where the Python package lives. With `python-source = "."` and the
-# package directory `headroom/` at repo root, maturin includes every file
-# under `headroom/` in the wheel — that picks up the bundled YAML configs.
+# package directory `furl_ctx/` at repo root, maturin includes every file
+# under `furl_ctx/` in the wheel — that picks up the bundled YAML configs.
 # `LICENSE` and `NOTICE` are listed
 # explicitly because maturin sdists do not get the package-directory
 # treatment wheels do, and PEP 639 auto-discovery emits both files into
@@ -105,15 +110,15 @@ include = [
     { path = "NOTICE", format = "sdist" },
 ]
 python-source = "."
-module-name = "headroom._core"
-# The cdylib source lives under `crates/headroom-py`. Maturin invokes
+module-name = "furl_ctx._core"
+# The cdylib source lives under `crates/furl-py`. Maturin invokes
 # `cargo build` with this manifest to produce `_core.cdylib`, then injects
-# the resulting `.so` into the wheel at `headroom/_core.so`.
-manifest-path = "crates/headroom-py/Cargo.toml"
+# the resulting `.so` into the wheel at `furl_ctx/_core.so`.
+manifest-path = "crates/furl-py/Cargo.toml"
 features = ["extension-module"]
 # Forbid building without the cdylib feature — bare `cargo build` won't
 # produce a usable Python extension. Maturin's default `bindings` is "pyo3"
-# which is correct here (see `crates/headroom-py/src/`).
+# which is correct here (see `crates/furl-py/src/`).
 bindings = "pyo3"
 
 [tool.ruff]
@@ -140,7 +145,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["headroom"]
+known-first-party = ["furl_ctx"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -156,13 +161,13 @@ ignore_missing_imports = true
 # Per-module overrides for modules with dynamic typing patterns
 [[tool.mypy.overrides]]
 module = [
-    "headroom.ccr.mcp_server",
+    "furl_ctx.ccr.mcp_server",
 ]
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = [
-    "headroom.tokenizers.*",
+    "furl_ctx.tokenizers.*",
 ]
 disallow_untyped_defs = false
 warn_return_any = false
@@ -191,7 +196,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["headroom"]
+source = ["furl_ctx"]
 branch = true
 omit = [
     "*/tests/*",

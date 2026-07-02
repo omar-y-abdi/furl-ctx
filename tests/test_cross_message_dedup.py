@@ -26,11 +26,11 @@ from typing import Any
 
 import pytest
 
-from headroom import compress
-from headroom.cache.compression_store import get_compression_store
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import get_tokenizer
-from headroom.transforms.cross_message_dedup import (
+from furl_ctx import compress
+from furl_ctx.cache.compression_store import get_compression_store
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import get_tokenizer
+from furl_ctx.transforms.cross_message_dedup import (
     MIN_DEDUP_CHARS,
     CrossMessageDeduper,
 )
@@ -274,7 +274,7 @@ def test_user_assistant_and_error_outputs_untouched() -> None:
 
 
 def test_default_pipeline_orders_dedup_before_router() -> None:
-    from headroom.transforms import TransformPipeline
+    from furl_ctx.transforms import TransformPipeline
 
     names = [t.name for t in TransformPipeline().transforms]
     assert "cross_message_dedup" in names

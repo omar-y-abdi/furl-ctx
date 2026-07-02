@@ -21,9 +21,9 @@ re-checked per hit) — see the helper's docstring.
 
 from __future__ import annotations
 
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.content_router import (
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.content_router import (
     ContentRouter,
     ContentRouterConfig,
     _result_cache_key,

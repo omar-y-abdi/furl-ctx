@@ -18,8 +18,8 @@ from __future__ import annotations
 import json
 import sys
 
-from headroom import compress
-from headroom.cache.compression_store import reset_compression_store
+from furl_ctx import compress
+from furl_ctx.cache.compression_store import reset_compression_store
 from verify.heldout import generators as gen
 
 MARKERS = {

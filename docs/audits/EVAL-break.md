@@ -1,8 +1,8 @@
-# Headroom Compression Engine — Break-Mode Action Doc
+# Furl Compression Engine — Break-Mode Action Doc
 
 ## Summary
 
-A 50-experiment BREAK-mode campaign ran against the Headroom compression engine, hunting for **contract violations**, not compression gains.
+A 50-experiment BREAK-mode campaign ran against the Furl compression engine, hunting for **contract violations**, not compression gains.
 
 **Honesty headline: zero compression improvements were produced.** This is a defects ledger. Of 50 measured experiments:
 - **33 found real defects** (`verdict=defect_found`): **28 break a HARD contract** (`contracts_ok=false`); **5 are quality/recall regressions** where contracts technically hold (`contracts_ok=true`).
@@ -18,7 +18,7 @@ Two further clusters break the **prompt-cache contract** because the public `com
 
 ## Top Recommendation
 
-**Build Cluster A first** — replace `headroom/transforms/csv_schema_decoder.py:325` (`lines = text.split("\n")`) with an RFC-4180 quote-aware line reader. This one fix closes the worst defect in the ledger (`newline-in-lossless-csv-field`, `break-22`, **delta -10, total silent loss, no CCR sentinel**) plus three more total-loss 7s.
+**Build Cluster A first** — replace `furl_ctx/transforms/csv_schema_decoder.py:325` (`lines = text.split("\n")`) with an RFC-4180 quote-aware line reader. This one fix closes the worst defect in the ledger (`newline-in-lossless-csv-field`, `break-22`, **delta -10, total silent loss, no CCR sentinel**) plus three more total-loss 7s.
 
 **Immediately after, land the systemic fix** (Rank 2): a **cross-language round-trip fuzz test** (Rust-compact → Python `decode_csv_schema_rows` → assert deep equality) over adversarial cell shapes. That single test would have caught **every** lossless-corruption defect in this ledger.
 

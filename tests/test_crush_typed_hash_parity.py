@@ -31,7 +31,7 @@ import json
 
 import pytest
 
-from headroom.transforms.smart_crusher import SmartCrusher
+from furl_ctx.transforms.smart_crusher import SmartCrusher
 
 
 def _scrape_row_drop_hashes(rendered: str) -> set[str]:

@@ -31,10 +31,10 @@ import re
 
 import pytest
 
-from headroom.cache.compression_store import get_compression_store
-from headroom.ccr import marker_grammar
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
-from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
+from furl_ctx.cache.compression_store import get_compression_store
+from furl_ctx.ccr import marker_grammar
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 # Recovery-floor parsers. These deliberately use a LOOSER lower bound
 # (``{6,}``) than the strict consumer set ``marker_grammar.HASH_WIDTHS``
@@ -89,7 +89,7 @@ def _repr(x: object) -> str:
 def _decode_csv_schema(text: str, recovered: set[str]) -> None:
     """Decode a lossless CSV-schema body (``[N]{cols}\\n<rows>``) back to
     JSON objects via the documented reference decoder
-    (``headroom.transforms.csv_schema_decoder``). Those rows are exactly
+    (``furl_ctx.transforms.csv_schema_decoder``). Those rows are exactly
     reconstructible from the output — lossless — so they count as
     recovered-from-output-alone.
 
@@ -388,7 +388,7 @@ def test_row_drop_recovers_from_python_store_only() -> None:
     # The either-store helper ``_recover_from_output`` accepts a hit from the
     # Rust store (``crusher.ccr_get``) OR the Python store, so the row-drop
     # tests above pass even if the Python mirror regressed — but production
-    # retrieval (MCP ``headroom_retrieve``, ``ccr/mcp_server.py:362``;
+    # retrieval (MCP ``furl_retrieve``, ``ccr/mcp_server.py:362``;
     # ``compression_store.py:32``) reads ONLY the Python ``CompressionStore``
     # via ``store.retrieve(hash)``. The OPAQUE path already pins this
     # (``test_opaque_blob_recovers_from_output_marker`` asserts

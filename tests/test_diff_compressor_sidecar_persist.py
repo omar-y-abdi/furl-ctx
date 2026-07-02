@@ -23,12 +23,12 @@ import textwrap
 
 import pytest
 
-from headroom.cache.compression_store import (
+from furl_ctx.cache.compression_store import (
     CompressionStore,
     clear_request_compression_store,
     set_request_compression_store,
 )
-from headroom.transforms.diff_compressor import (
+from furl_ctx.transforms.diff_compressor import (
     DiffCompressor,
     DiffCompressorConfig,
 )

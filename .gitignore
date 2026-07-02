@@ -192,10 +192,10 @@ benchmark_results/
 # DeepEval cache
 .deepeval/
 
-# Headroom specific
-.headroom/
-headroom.db
-headroom_*.db
+# Furl specific
+.furl/
+furl_ctx.db
+furl_*.db
 *.jsonl
 !tests/fixtures/*.jsonl
 docker/differential-network-capture/captures/
@@ -230,7 +230,7 @@ CLAUDE.md
 # docs/spec/           (lives in git - git-versioned living specification)
 
 # Managed platform (separate private repo)
-headroom-managed/
+furl-managed/
 
 # Local act testing (never commit test tokens)
 /.env.act
@@ -243,12 +243,12 @@ headroom-managed/
 uv.lock
 
 # Rust extension `.so` symlinks placed by `scripts/build_rust_extension.sh`
-# into the `headroom/` package dir for local development. The real binary
-# lives in `crates/headroom-py/python/headroom/`; this is the dev overlay
-# that lets `import headroom._core` resolve when the source `headroom/`
+# into the `furl_ctx/` package dir for local development. The real binary
+# lives in `crates/furl-py/python/furl_ctx/`; this is the dev overlay
+# that lets `import furl_ctx._core` resolve when the source `furl_ctx/`
 # package shadows the maturin overlay on sys.path.
-/headroom/_core.*.so
-/headroom/_core.so
+/furl_ctx/_core.*.so
+/furl_ctx/_core.so
 
 # Eval/implementation workflow isolation artifacts: per-agent venvs, shared sccache
 # compile cache, throwaway git worktrees. Must be ignored so builder agents' `git add -A`

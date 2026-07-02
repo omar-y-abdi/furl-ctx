@@ -16,9 +16,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from headroom.cache.compression_store import CompressionStore
-from headroom.config import ReadLifecycleConfig
-from headroom.transforms.read_lifecycle import ReadLifecycleManager
+from furl_ctx.cache.compression_store import CompressionStore
+from furl_ctx.config import ReadLifecycleConfig
+from furl_ctx.transforms.read_lifecycle import ReadLifecycleManager
 
 # Detect the phantom pattern: "Retrieve original: hash=<something>"
 _PHANTOM_HASH_RE = re.compile(r"Retrieve original:\s*hash=")

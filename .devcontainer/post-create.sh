@@ -2,12 +2,12 @@
 set -euo pipefail
 
 profile="${1:-default}"
-project_env="${UV_PROJECT_ENVIRONMENT:-/home/vscode/.venvs/headroom}"
+project_env="${UV_PROJECT_ENVIRONMENT:-/home/vscode/.venvs/furl}"
 project_env_root="$(dirname "$project_env")"
 cache_root="${HOME}/.cache"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 workspace_root="$(cd "$script_dir/.." && pwd)"
-git_profile_script="/etc/profile.d/headroom-worktree-git.sh"
+git_profile_script="/etc/profile.d/furl-worktree-git.sh"
 sync_extras=(--extra dev)
 
 cd "$workspace_root"
@@ -68,9 +68,9 @@ else
   echo "Skipping pre-commit install because git metadata is not available inside this container."
 fi
 
-echo "Headroom devcontainer is ready."
+echo "Furl devcontainer is ready."
 echo "Run checks with:"
 echo "  uv run ruff check ."
 echo "  uv run ruff format --check ."
-echo "  uv run mypy headroom --ignore-missing-imports"
+echo "  uv run mypy furl_ctx --ignore-missing-imports"
 echo "  uv run pytest -v --tb=short"

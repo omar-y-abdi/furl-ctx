@@ -11,11 +11,11 @@ reverting to the original messages.
 
 The fix works at both ends (belt-and-braces, one change):
 
-* Rust (``crates/headroom-py/src/lib.rs``): the hot bridge methods wrap their
+* Rust (``crates/furl-py/src/lib.rs``): the hot bridge methods wrap their
   compute in ``std::panic::catch_unwind`` and convert a caught panic into a
   ``PyRuntimeError`` — a normal ``Exception`` on the Python side, which the
   existing fail-open path already handles.
-* Python (``headroom/compress.py``): the fail-open handler catches
+* Python (``furl_ctx/compress.py``): the fail-open handler catches
   ``BaseException`` (re-raising ``KeyboardInterrupt``/``SystemExit`` immediately so
   those are never swallowed), so any panic that still surfaces as
   ``PanicException`` — e.g. from a bridge entry point not on the wrapped list — is
@@ -23,7 +23,7 @@ The fix works at both ends (belt-and-braces, one change):
 
 This test exercises the Python belt directly. ``pyo3_runtime.PanicException`` is
 not importable cold (the abi3 extension registers it lazily, only on the first
-real panic), and the ``headroom-py`` crate disables the cargo test harness
+real panic), and the ``furl-py`` crate disables the cargo test harness
 (``test = false``), so a genuine Rust panic cannot be triggered from Python in a
 unit test. Instead we stand in a ``BaseException`` subclass: catching a panic by
 its ``BaseException`` supertype is a *type* guarantee
@@ -46,8 +46,8 @@ import json
 
 import pytest
 
-import headroom._core as _core
-from headroom.compress import compress
+import furl_ctx._core as _core
+from furl_ctx.compress import compress
 
 
 class SimulatedPanicException(BaseException):
@@ -80,7 +80,7 @@ def test_compress_catches_panic_and_returns_original(monkeypatch) -> None:
 
     RED pre-fix (``except Exception``): the ``BaseException`` escaped ``compress()``.
     GREEN post-fix (``except BaseException``): fail-open reverts to the original."""
-    compress_module = importlib.import_module("headroom.compress")
+    compress_module = importlib.import_module("furl_ctx.compress")
     monkeypatch.setattr(compress_module, "_get_pipeline", lambda: _PanickingPipeline())
 
     messages = _messages()
@@ -92,7 +92,7 @@ def test_compress_catches_panic_and_returns_original(monkeypatch) -> None:
     assert result.messages == messages
     # The failure is surfaced, not swallowed as a benign no-op: honest token
     # count on the untouched input + the panic text in ``error``.
-    from headroom.tokenizers import get_tokenizer
+    from furl_ctx.tokenizers import get_tokenizer
 
     expected_tokens_before = get_tokenizer("gpt-4o").count_messages(messages)
     assert expected_tokens_before > 0
@@ -108,7 +108,7 @@ def test_fail_open_still_reraises_keyboard_interrupt(monkeypatch) -> None:
     """The ``BaseException`` widening must NOT swallow ``KeyboardInterrupt`` or
     ``SystemExit`` — a Ctrl-C or interpreter shutdown during compression must
     still tear down as the operator intended, never be masked as a fail-open."""
-    compress_module = importlib.import_module("headroom.compress")
+    compress_module = importlib.import_module("furl_ctx.compress")
 
     class _InterruptingPipeline:
         def apply(self, **kwargs):  # noqa: ANN003, ANN201
@@ -122,7 +122,7 @@ def test_fail_open_still_reraises_keyboard_interrupt(monkeypatch) -> None:
 
 def test_fail_open_still_reraises_system_exit(monkeypatch) -> None:
     """Companion to the KeyboardInterrupt guard: ``SystemExit`` must propagate."""
-    compress_module = importlib.import_module("headroom.compress")
+    compress_module = importlib.import_module("furl_ctx.compress")
 
     class _ExitingPipeline:
         def apply(self, **kwargs):  # noqa: ANN003, ANN201

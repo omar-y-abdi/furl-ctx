@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
+from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 
 def test_const_plus_arith_zero_var_emits_rows() -> None:

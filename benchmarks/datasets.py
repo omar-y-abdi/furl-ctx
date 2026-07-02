@@ -135,13 +135,13 @@ def _capture(name: str, cmd: list[str], provenance: str, *, refresh: bool) -> st
 # A fixed, committed list of real source files (relative to repo root). These
 # are this repo's own engine source — genuine high-entropy code content.
 CODE_FILES: tuple[str, ...] = (
-    "headroom/compress.py",
-    "headroom/tokenizer.py",
-    "headroom/config.py",
-    "headroom/transforms/smart_crusher.py",
-    "headroom/transforms/search_compressor.py",
-    "headroom/transforms/log_compressor.py",
-    "headroom/cache/compression_store.py",
+    "furl_ctx/compress.py",
+    "furl_ctx/tokenizer.py",
+    "furl_ctx/config.py",
+    "furl_ctx/transforms/smart_crusher.py",
+    "furl_ctx/transforms/search_compressor.py",
+    "furl_ctx/transforms/log_compressor.py",
+    "furl_ctx/cache/compression_store.py",
 )
 
 
@@ -256,7 +256,7 @@ def build_logs_dataset(*, limit: int = 90, refresh: bool = False) -> Dataset:
 # ---------------------------------------------------------------------------
 
 _RG_PATTERN = "def "
-_RG_TARGET = "headroom/"
+_RG_TARGET = "furl_ctx/"
 
 
 def _parse_rg_json(raw: str) -> list[dict[str, Any]]:
@@ -481,7 +481,7 @@ def build_disk_dataset(*, refresh: bool = False) -> Dataset:
 # turn pair): 29 of 30 rows are byte-identical, one row is new and one
 # falls off the window. Both views come from this repo's real history, so
 # a --refresh stays deterministic at any given HEAD.
-_MULTITURN_RG_CMD: tuple[str, ...] = ("rg", "--json", "--sort", "path", "def ", "headroom/")
+_MULTITURN_RG_CMD: tuple[str, ...] = ("rg", "--json", "--sort", "path", "def ", "furl_ctx/")
 _MULTITURN_DF_CMD: tuple[str, ...] = ("df", "-k")
 _MULTITURN_RG_LIMIT = 90
 _MULTITURN_GIT_LOG_N = 30

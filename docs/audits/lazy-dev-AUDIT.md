@@ -41,15 +41,15 @@ The adversarial-verify stage exists to stop confident-wrong "safe to delete" cla
 |------|------|-------|------|-----|----------|
 | 1 | Phase A–I architecture planning & notes **(roadmap docs — archive, don't blind-delete; see note)** | `REALIGNMENT/` | 3,900 | delete | Zero static/lazy/dynamic imports; no entry_points; confirmed no code coupling. BUT cited as the live retirement plan by the `wiki/` refutation. |
 | 2 | SQL schema migrations (proxy telemetry tables, unused) | `sql/` | 476 | delete | No CI deploy scripts; `TelemetryBeacon` never instantiated; only referenced in CHANGELOG. **Verified confirmed.** |
-| 3 | Empty directory | `headroom/integrations/` | 0 | delete | No `__init__.py` or contents. |
-| 4 | Empty directory | `headroom/observability/` | 0 | delete | No `__init__.py` or contents. |
-| 5 | Empty directory | `headroom/storage/` | 0 | delete | No `__init__.py` or contents (referenced only by `cache/backends` import that resolves elsewhere). |
+| 3 | Empty directory | `furl_ctx/integrations/` | 0 | delete | No `__init__.py` or contents. |
+| 4 | Empty directory | `furl_ctx/observability/` | 0 | delete | No `__init__.py` or contents. |
+| 5 | Empty directory | `furl_ctx/storage/` | 0 | delete | No `__init__.py` or contents (referenced only by `cache/backends` import that resolves elsewhere). |
 | 6 | Standalone cache-TTL analysis script (no headroom deps) | `claude_analysis_ttl.py` | 339 | delete | Zero headroom imports; zero referrers. **Verified confirmed.** |
 | 7 | Empty placeholder changelog | `.changelog.md` | 1 | delete | Unused marker file. |
-| 8 | Docker infra (cannot build; `[proxy,code]` extra undefined, no `headroom` script) | `Dockerfile`, `docker-compose.yml`, `docker-bake.hcl`, `docker/`, `.dockerignore` | 380 | delete | **Untangle:** remove the `docker.yml` CI job first (it publishes to GHCR on push). |
+| 8 | Docker infra (cannot build; `[proxy,code]` extra undefined, no `furl_ctx` script) | `Dockerfile`, `docker-compose.yml`, `docker-bake.hcl`, `docker/`, `.dockerignore` | 380 | delete | **Untangle:** remove the `docker.yml` CI job first (it publishes to GHCR on push). |
 | 9 | Internal stale PR template | `PR.md` | 170 | delete | Vestigial; no coupling. |
 | 10 | Broken mkdocs nav reference | `mkdocs.yml` (line 112) | 2 | shrink | Remove non-existent `llmlingua.md` nav entry. |
-| 11 | Stale coverage omit reference | `pyproject.toml` (line 235) | 1 | shrink | Remove `headroom/cli.py` (does not exist). |
+| 11 | Stale coverage omit reference | `pyproject.toml` (line 235) | 1 | shrink | Remove `furl_ctx/cli.py` (does not exist). |
 | 12 | Marketing docs: Copilot subscription test & enterprise stub | `TESTING-copilot-subscription.md`, `ENTERPRISE.md` | 159 | delete | Feature removed with CLI; no code coupling. |
 
 **Subtotal Tier 1: ~5.2k LOC** (~1.3k excluding `REALIGNMENT/`)
@@ -60,17 +60,17 @@ The adversarial-verify stage exists to stop confident-wrong "safe to delete" cla
 
 | Rank | What | Paths | ~LOC | Tag | Untangle Step | Evidence |
 |------|------|-------|------|-----|----------------|----------|
-| 1 | Cache optimizer impls (anthropic, openai, google, registry) | `headroom/cache/{anthropic,openai,google,registry}.py` | 2,089 | delete | (1) Drop from `headroom/__init__.__all__` + `_LAZY_EXPORTS`. (2) Drop from `cache/__init__.__all__` + `_LAZY_EXPORTS`. (3) Confirm zero external consumers. (4) Delete. | Dead; zero live callers. Exported as public API — untangle is dropping `__all__` entries. |
-| 2 | Cache optimizer framework (semantic, dynamic_detector, prefix_tracker, compression_feedback, base) | `headroom/cache/{semantic,dynamic_detector,prefix_tracker,compression_feedback}.py`, `cache/backends/base.py` | 2,349 | delete | Depends on row 1: after cutting optimizers, these have zero callers. `compression_feedback.py` has one live hook at `compression_store.py:1120` (TOIN-internal) → drop that call first. | Framework for the dead optimizer family. |
-| 3 | CCR batch processor & MCP server | `headroom/ccr/batch_processor.py`, `headroom/ccr/mcp_server.py` | 1,912 | delete | (1) Verify `proxy/` does not import `CCRResponseHandler`/`create_ccr_mcp_server`. (2) Verify no external scripts. (3) Drop from `ccr/__init__.__all__`. (4) Delete. | Exported in `ccr/__init__`; zero callers on the `compress()` path. **Note:** if you build the planned MCP retrieve plane, `mcp_server.py` becomes load-bearing — don't cut it if that's next. |
-| 4 | Relevance framework (BM25/embedding/hybrid scorers) | `headroom/relevance/` | 1,017 | delete | `compression_store.py:48` imports `BM25Scorer` **unconditionally** → relevance is LIVE on any CCR write. Unblock: wrap the import in `try/except ImportError` + defer scorer creation to first `search()`. Non-trivial. | Live via `compression_store`; needs lazy-init before it's cuttable. |
-| 5 | Tool-result interceptor framework (proxy opt-in, off by default) | `headroom/proxy/interceptors/` (base 366 + astgrep 290) | 656 | yagni | (1) Remove `intercept_tool_results` from `HeadroomConfig`. (2) Delete the guarded block at `transforms/pipeline.py:112–117`. (3) Delete the dir. | Guarded lazy load; defaults False; never hit by default `compress()`. |
-| 6 | Binary downloader for the interceptor feature | `headroom/binaries.py` | 527 | delete | Only importer is `proxy/interceptors/astgrep.py`. Delete **after** row 5. | **Verified confirmed** (4-vector). Trails interceptors. |
+| 1 | Cache optimizer impls (anthropic, openai, google, registry) | `furl_ctx/cache/{anthropic,openai,google,registry}.py` | 2,089 | delete | (1) Drop from `furl_ctx/__init__.__all__` + `_LAZY_EXPORTS`. (2) Drop from `cache/__init__.__all__` + `_LAZY_EXPORTS`. (3) Confirm zero external consumers. (4) Delete. | Dead; zero live callers. Exported as public API — untangle is dropping `__all__` entries. |
+| 2 | Cache optimizer framework (semantic, dynamic_detector, prefix_tracker, compression_feedback, base) | `furl_ctx/cache/{semantic,dynamic_detector,prefix_tracker,compression_feedback}.py`, `cache/backends/base.py` | 2,349 | delete | Depends on row 1: after cutting optimizers, these have zero callers. `compression_feedback.py` has one live hook at `compression_store.py:1120` (TOIN-internal) → drop that call first. | Framework for the dead optimizer family. |
+| 3 | CCR batch processor & MCP server | `furl_ctx/ccr/batch_processor.py`, `furl_ctx/ccr/mcp_server.py` | 1,912 | delete | (1) Verify `proxy/` does not import `CCRResponseHandler`/`create_ccr_mcp_server`. (2) Verify no external scripts. (3) Drop from `ccr/__init__.__all__`. (4) Delete. | Exported in `ccr/__init__`; zero callers on the `compress()` path. **Note:** if you build the planned MCP retrieve plane, `mcp_server.py` becomes load-bearing — don't cut it if that's next. |
+| 4 | Relevance framework (BM25/embedding/hybrid scorers) | `furl_ctx/relevance/` | 1,017 | delete | `compression_store.py:48` imports `BM25Scorer` **unconditionally** → relevance is LIVE on any CCR write. Unblock: wrap the import in `try/except ImportError` + defer scorer creation to first `search()`. Non-trivial. | Live via `compression_store`; needs lazy-init before it's cuttable. |
+| 5 | Tool-result interceptor framework (proxy opt-in, off by default) | `furl_ctx/proxy/interceptors/` (base 366 + astgrep 290) | 656 | yagni | (1) Remove `intercept_tool_results` from `FurlConfig`. (2) Delete the guarded block at `transforms/pipeline.py:112–117`. (3) Delete the dir. | Guarded lazy load; defaults False; never hit by default `compress()`. |
+| 6 | Binary downloader for the interceptor feature | `furl_ctx/binaries.py` | 527 | delete | Only importer is `proxy/interceptors/astgrep.py`. Delete **after** row 5. | **Verified confirmed** (4-vector). Trails interceptors. |
 | 7 | Deprecated measurement layer (lenient scalar fallback) | `benchmarks/metrics.py` | 432 | delete | Coordinate docs/CI first: `run_bench.py` output must no longer be cited as authoritative; redirect baselines to `verify/`. Then delete + update `run_bench.py:28–32`. | Superseded by `verify/measure.py` (strict hash-compare). |
-| 8 | ML model registry (optional sentence-transformers) | `headroom/models/ml_models.py` | 398 | delete | Reachable only if `cache_aligner.detection_tiers` includes `"ner"`/`"semantic"`; defaults avoid this. Make `dynamic_detector` ner/semantic imports `try/except ImportError`, then delete. | Vestigial under defaults; not an unconditional cut. |
-| 9 | Multi-agent shared-context API | `headroom/shared_context.py` | 219 | delete | Drop `SharedContext` from `headroom/__init__.__all__` + `_LAZY_EXPORTS`, then delete. Public-API removal (document as breaking). | Dead on `compress()` path; `SharedContext` depends on `compress()`, not vice-versa. |
+| 8 | ML model registry (optional sentence-transformers) | `furl_ctx/models/ml_models.py` | 398 | delete | Reachable only if `cache_aligner.detection_tiers` includes `"ner"`/`"semantic"`; defaults avoid this. Make `dynamic_detector` ner/semantic imports `try/except ImportError`, then delete. | Vestigial under defaults; not an unconditional cut. |
+| 9 | Multi-agent shared-context API | `furl_ctx/shared_context.py` | 219 | delete | Drop `SharedContext` from `furl_ctx/__init__.__all__` + `_LAZY_EXPORTS`, then delete. Public-API removal (document as breaking). | Dead on `compress()` path; `SharedContext` depends on `compress()`, not vice-versa. |
 | 10 | Measurement-helper duplication | `verify/heldout/measure.py` | 879 | shrink | Exact byte-dup of `verify/measure.py`. Delete it; point `verify/heldout/{run,worker}.py` at `verify.measure`. Isolation is subprocess-level, not module-level. | Confirmed duplicate. |
-| 11 | `vestigial` proxy SSE/handler logic | `headroom/proxy/helpers.py` | ~2,800 | shrink | **Incomplete untangle — defer.** Extract `parse_sse_events_from_byte_buffer()` + `safe_decode_for_logging()` (~50 LOC, used by CCR) to `ccr/sse_parser.py`; verify `apply_session_sticky_ccr_tool` (live, line 2492) is relocated/kept; then delete the rest. Full deletable scope unclear. | Module is 3.1k; ~50 LOC live, ~2.8k proxy-only — but the sticky-CCR boundary is fuzzy. |
+| 11 | `vestigial` proxy SSE/handler logic | `furl_ctx/proxy/helpers.py` | ~2,800 | shrink | **Incomplete untangle — defer.** Extract `parse_sse_events_from_byte_buffer()` + `safe_decode_for_logging()` (~50 LOC, used by CCR) to `ccr/sse_parser.py`; verify `apply_session_sticky_ccr_tool` (live, line 2492) is relocated/kept; then delete the rest. Full deletable scope unclear. | Module is 3.1k; ~50 LOC live, ~2.8k proxy-only — but the sticky-CCR boundary is fuzzy. |
 
 **Subtotal Tier 2: ~9.3k LOC** (excluding the `helpers.py` caveat; `binaries.py` is contingent on row 5)
 
@@ -80,14 +80,14 @@ The adversarial-verify stage exists to stop confident-wrong "safe to delete" cla
 
 | Rank | What | Paths | ~LOC | Tag | Shrink Action |
 |------|------|-------|------|-----|---------------|
-| 1 | Dead config fields | `headroom/config.py` | 3 | shrink | Remove `default_mode`, `prefix_freeze`, `cache_optimizer` — declared, never read (grep-confirmed). |
-| 2 | Tokenizer delegation functions | `headroom/tokenizer.py` | 30 | yagni | Remove `count_tokens_text()` / `count_tokens_messages()` (one-line delegators); drop from `__all__` + `_LAZY_EXPORTS`. |
-| 3 | `Tokenizer.available` property always True | `headroom/tokenizer.py` | 3 | shrink | `_counter` is non-optional → always True. Dead. |
-| 4 | `TransformPipeline.simulate()` wrapper | `headroom/transforms/pipeline.py` | 18 | yagni | One-liner calling `apply(record_metrics=False)`. Inline at callers. |
-| 5 | `create_pipeline()` factory wrapper | `headroom/transforms/pipeline.py` | 17 | yagni | Only wraps `HeadroomConfig(cache_aligner=...)`. Instantiate directly. |
-| 6 | `__init__.py` `_OPTIONAL_EXPORTS` vestigial infra | `headroom/__init__.py` | 8 | shrink | Empty dict + unreachable `__getattr__` branch ("currently empty after amputation"). |
-| 7 | Stale mypy override | `pyproject.toml` (lines 194–199) | 2 | shrink | Remove `headroom.proxy.helpers` from overrides (proxy is opt-in lazy). |
-| 8 | `CompressionStoreBackend` protocol (speculative plug-in) | `headroom/cache/backends/{base,memory}.py` | 273 | yagni | No entry_points for custom backends exist; only `InMemoryBackend` ever used. Inline it; drop the Protocol. |
+| 1 | Dead config fields | `furl_ctx/config.py` | 3 | shrink | Remove `default_mode`, `prefix_freeze`, `cache_optimizer` — declared, never read (grep-confirmed). |
+| 2 | Tokenizer delegation functions | `furl_ctx/tokenizer.py` | 30 | yagni | Remove `count_tokens_text()` / `count_tokens_messages()` (one-line delegators); drop from `__all__` + `_LAZY_EXPORTS`. |
+| 3 | `Tokenizer.available` property always True | `furl_ctx/tokenizer.py` | 3 | shrink | `_counter` is non-optional → always True. Dead. |
+| 4 | `TransformPipeline.simulate()` wrapper | `furl_ctx/transforms/pipeline.py` | 18 | yagni | One-liner calling `apply(record_metrics=False)`. Inline at callers. |
+| 5 | `create_pipeline()` factory wrapper | `furl_ctx/transforms/pipeline.py` | 17 | yagni | Only wraps `FurlConfig(cache_aligner=...)`. Instantiate directly. |
+| 6 | `__init__.py` `_OPTIONAL_EXPORTS` vestigial infra | `furl_ctx/__init__.py` | 8 | shrink | Empty dict + unreachable `__getattr__` branch ("currently empty after amputation"). |
+| 7 | Stale mypy override | `pyproject.toml` (lines 194–199) | 2 | shrink | Remove `furl_ctx.proxy.helpers` from overrides (proxy is opt-in lazy). |
+| 8 | `CompressionStoreBackend` protocol (speculative plug-in) | `furl_ctx/cache/backends/{base,memory}.py` | 273 | yagni | No entry_points for custom backends exist; only `InMemoryBackend` ever used. Inline it; drop the Protocol. |
 
 **Subtotal Tier 3: ~35 LOC core** (+273 if you also collapse the backend Protocol)
 
@@ -98,12 +98,12 @@ The adversarial-verify stage exists to stop confident-wrong "safe to delete" cla
 Live on `compress()` or protected by project invariants. **Do not cut.**
 
 ### LIVE on the `compress()` path
-- **`headroom/telemetry/` (4001 LOC)** — LIVE via `SmartCrusher.crush() → _record_to_toin()` on every lossy compression. `telemetry/__init__.py` eagerly imports all submodules. **Scout claim was wrong.**
-- **`headroom/onnx_runtime.py` (86 LOC)** — LIVE; imported unconditionally by `kompress_compressor.py`, part of the default pipeline. Cutting the wrapper is yagni, not a win.
+- **`furl_ctx/telemetry/` (4001 LOC)** — LIVE via `SmartCrusher.crush() → _record_to_toin()` on every lossy compression. `telemetry/__init__.py` eagerly imports all submodules. **Scout claim was wrong.**
+- **`furl_ctx/onnx_runtime.py` (86 LOC)** — LIVE; imported unconditionally by `kompress_compressor.py`, part of the default pipeline. Cutting the wrapper is yagni, not a win.
 
 ### Protected by project invariants
-- **`headroom/proxy/auth_mode.py` (262 LOC)** — Py↔Rust parity hard invariant (mirrors `crates/headroom-core/src/auth_mode.rs`; parity test in `tests/test_compression_policy.py`). Excluded by task spec. Keep.
-- **`crates/headroom-core/src/compression_policy.rs` (270 LOC)** — load-bearing for documented Phase F work; parity-tested. Keep unless Phase F is formally abandoned.
+- **`furl_ctx/proxy/auth_mode.py` (262 LOC)** — Py↔Rust parity hard invariant (mirrors `crates/furl-core/src/auth_mode.rs`; parity test in `tests/test_compression_policy.py`). Excluded by task spec. Keep.
+- **`crates/furl-core/src/compression_policy.rs` (270 LOC)** — load-bearing for documented Phase F work; parity-tested. Keep unless Phase F is formally abandoned.
 - **Rust feature flags (`embeddings`, `magika`, `redis`)** — intentional conditional compilation; compile to zero in shipped wheels; mirrored by `[ml]`/`[relevance]`/`[mcp]` Python extras. Correct design, not dead code.
 
 ### Adversarially refuted
@@ -114,7 +114,7 @@ Live on `compress()` or protected by project invariants. **Do not cut.**
 - **Test suite** — all 42 files live; no vestigial scaffolding. Keep all.
 
 ### Incomplete / deferred
-- **`headroom/proxy/helpers.py` (2931 LOC)** — `apply_session_sticky_ccr_tool` (line 2492) is called from proxy handlers; safe-to-delete scope is unclear. **Defer to manual review.**
+- **`furl_ctx/proxy/helpers.py` (2931 LOC)** — `apply_session_sticky_ccr_tool` (line 2492) is called from proxy handlers; safe-to-delete scope is unclear. **Defer to manual review.**
 
 ---
 

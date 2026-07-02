@@ -1,6 +1,6 @@
 # Verification Data Sources
 
-Independent out-of-sample verification of Headroom compression claims. This
+Independent out-of-sample verification of Furl compression claims. This
 harness uses **only** data captured fresh from REAL external sources or
 REAL local-real sources (a different repo on disk, a real package lockfile, a
 real OS log). It does **not** import, re-run, or reuse anything under
@@ -31,7 +31,7 @@ make the source bytes reproducible.
 
 | # | Source | Type | Exact citation | Used for | File |
 |---|--------|------|----------------|----------|------|
-| 5 | `threejs-devtools-mcp/package-lock.json` | real lockfile (a DIFFERENT project on disk, not Headroom) | `cp /Users/k/dev/threejs-devtools-mcp/package-lock.json` → 122,205 bytes | `disk`-case directory-entry vocabulary (real dependency names) | `threejs_devtools_package-lock.json` |
+| 5 | `threejs-devtools-mcp/package-lock.json` | real lockfile (a DIFFERENT project on disk, not Furl) | `cp /Users/k/dev/threejs-devtools-mcp/package-lock.json` → 122,205 bytes | `disk`-case directory-entry vocabulary (real dependency names) | `threejs_devtools_package-lock.json` |
 | 6 | macOS `/var/log/install.log` | real OS log | `tail -c 400000 /var/log/install.log` → 400,000 bytes, 2,796 lines (committed as `.txt` because the repo `.gitignore` excludes `*.log`) | provenance / real-log reference (local-real) | `macos_install.log.txt` |
 
 Sources 5–6 are **local-real**: genuine real-world artifacts that already
@@ -62,14 +62,14 @@ fixtures. They are clearly labelled as such.
 
 ## Engine surface used (no re-implementation)
 
-- Compression: `from headroom import compress` — committed DEFAULT params only
+- Compression: `from furl_ctx import compress` — committed DEFAULT params only
   (no `config`, no kwargs ⇒ `CompressConfig` defaults + `RoutingPolicy`
   default `MinTokens`, confirmed in
-  `crates/headroom-core/src/transforms/smart_crusher/config.rs:183`).
-- Token counting: `headroom.tokenizer.Tokenizer` over
-  `headroom.tokenizers.get_tokenizer("gpt-4o")` (real tiktoken BPE).
-- Reconstruction decoder: `headroom.transforms.csv_schema_decoder
+  `crates/furl-core/src/transforms/smart_crusher/config.rs:183`).
+- Token counting: `furl_ctx.tokenizer.Tokenizer` over
+  `furl_ctx.tokenizers.get_tokenizer("gpt-4o")` (real tiktoken BPE).
+- Reconstruction decoder: `furl_ctx.transforms.csv_schema_decoder
   .decode_csv_schema_rows` (the documented reference decoder).
-- CCR retrieve: `headroom.cache.compression_store.get_compression_store()
+- CCR retrieve: `furl_ctx.cache.compression_store.get_compression_store()
   .retrieve(hash)`, keyed by the `<<ccr:HASH>>` pointer parsed out of the
   `{"_ccr_dropped": ...}` sentinel in the compressed output.

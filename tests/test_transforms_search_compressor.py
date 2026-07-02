@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from headroom.transforms.search_compressor import (
+from furl_ctx.transforms.search_compressor import (
     SearchCompressionResult,
     SearchCompressor,
     SearchCompressorConfig,
@@ -50,7 +50,7 @@ def test_search_compressor_persist_to_python_ccr(monkeypatch: pytest.MonkeyPatch
     seen: dict[str, tuple[str, str, str | None]] = {}
     monkeypatch.setitem(
         __import__("sys").modules,
-        "headroom.cache.compression_store",
+        "furl_ctx.cache.compression_store",
         SimpleNamespace(
             get_compression_store=lambda: SimpleNamespace(
                 store=lambda original, compressed, original_item_count=0, explicit_hash=None: (
@@ -71,7 +71,7 @@ def test_search_compressor_persist_to_python_ccr(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setitem(
         __import__("sys").modules,
-        "headroom.cache.compression_store",
+        "furl_ctx.cache.compression_store",
         SimpleNamespace(get_compression_store=broken_store),
     )
     compressor._persist_to_python_ccr("orig", "comp", "abc123")  # must not raise

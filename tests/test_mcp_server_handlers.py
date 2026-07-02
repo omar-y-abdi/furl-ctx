@@ -1,4 +1,4 @@
-"""Integration tests for the MCP tool-handler plane (headroom/ccr/mcp_server.py).
+"""Integration tests for the MCP tool-handler plane (furl_ctx/ccr/mcp_server.py).
 
 The user-facing handler surface — ``call_tool`` routing plus the four
 ``_handle_*`` entries — was the biggest real coverage hole (28%). These tests
@@ -32,17 +32,17 @@ pytest.importorskip("mcp")
 
 import mcp.types as mt  # noqa: E402
 
-from headroom.cache.compression_store import (  # noqa: E402
+from furl_ctx.cache.compression_store import (  # noqa: E402
     get_compression_store,
     reset_compression_store,
 )
-from headroom.ccr import mcp_server  # noqa: E402
-from headroom.ccr.mcp_server import (  # noqa: E402
+from furl_ctx.ccr import mcp_server  # noqa: E402
+from furl_ctx.ccr.mcp_server import (  # noqa: E402
     CCR_TOOL_NAME,
     COMPRESS_TOOL_NAME,
     READ_TOOL_NAME,
     STATS_TOOL_NAME,
-    HeadroomMCPServer,
+    FurlMCPServer,
 )
 
 
@@ -51,21 +51,21 @@ def _isolate_store(tmp_path, monkeypatch):
     # The CCR store is a process-singleton; reset around every test so a
     # round-trip in one test cannot leak entries into another's stats/retrieve.
     # Also redirect the shared-stats file to a per-test tmp path so
-    # record_compression() never writes to ~/.headroom (keep file mods scoped
+    # record_compression() never writes to ~/.furl (keep file mods scoped
     # to the test sandbox). Stats tests override this with their own path.
     monkeypatch.setattr(mcp_server, "SHARED_STATS_FILE", tmp_path / "shared_stats.jsonl")
-    # headroom_read is jailed to $HEADROOM_WORKSPACE_DIR (default cwd). Point it
+    # furl_read is jailed to $FURL_WORKSPACE_DIR (default cwd). Point it
     # at the per-test sandbox so file-read happy-path tests run inside the jail;
     # out-of-jail rejection is covered explicitly below.
-    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("FURL_WORKSPACE_DIR", str(tmp_path))
     reset_compression_store()
     yield
     reset_compression_store()
 
 
 @pytest.fixture
-def server() -> HeadroomMCPServer:
-    return HeadroomMCPServer()
+def server() -> FurlMCPServer:
+    return FurlMCPServer()
 
 
 def _envelope(result: list[mt.TextContent]) -> dict:
@@ -77,7 +77,7 @@ def _envelope(result: list[mt.TextContent]) -> dict:
     return json.loads(item.text)
 
 
-def _get_call_tool(server: HeadroomMCPServer):
+def _get_call_tool(server: FurlMCPServer):
     """Recover the registered user ``call_tool`` closure (mcp_server.py:500).
 
     The SDK wraps our handler in its own ``handler`` closure under
@@ -138,7 +138,7 @@ async def test_retrieve_malformed_hash_rejected_before_store(server, bad_hash) -
 
 async def test_read_missing_file_path_returns_error_envelope(server) -> None:
     # :638 — `_handle_read` validates file_path itself (independent of the
-    # HEADROOM_MCP_READ routing flag at :514), so a bound call reaches it.
+    # FURL_MCP_READ routing flag at :514), so a bound call reaches it.
     env = _envelope(await server._handle_read({}))
     assert env == {"error": "file_path parameter is required"}
 
@@ -348,9 +348,9 @@ def test_pipeline_marker_rows_carry_session_ttl(server, monkeypatch) -> None:
     minutes while the wrapper hash advertised session persistence. This also
     pins ordering: the singleton must be configured BEFORE compress() runs its
     own config-on-first-init ``get_compression_store()`` call."""
-    # headroom/__init__.py re-exports the compress FUNCTION, shadowing the
+    # furl_ctx/__init__.py re-exports the compress FUNCTION, shadowing the
     # submodule attribute — resolve the real module for patching.
-    compress_mod = importlib.import_module("headroom.compress")
+    compress_mod = importlib.import_module("furl_ctx.compress")
 
     marker_hash = "abc123def456"
 

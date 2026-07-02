@@ -34,7 +34,7 @@ from benchmarks.metrics import (
     _recovered_originals,
     _stringify,
 )
-from headroom import compress
+from furl_ctx import compress
 
 # Two KNOWN, unique needle rows — one per base-row family. Each is distinct,
 # identifiable, and shaped like a real row of its family (so it enters the
@@ -47,7 +47,7 @@ SEARCH_NEEDLE: dict[str, Any] = {
     "path": "NEEDLE/unique_marker_42.py",
     "line_number": 999999,
     "absolute_offset": 424242,
-    "lines": "def __HEADROOM_NEEDLE_DO_NOT_DROP__(): return 0xC0FFEE",
+    "lines": "def __FURL_NEEDLE_DO_NOT_DROP__(): return 0xC0FFEE",
 }
 
 # LOGS needle — shaped like a git-log row (lossy drop regime: varying-field
@@ -58,7 +58,7 @@ LOGS_NEEDLE: dict[str, Any] = {
     "author": "Needle Author",
     "email": "needle@headroom.invalid",
     "date": "2099-12-31T23:59:59+00:00",
-    "subject": "NEEDLE __HEADROOM_NEEDLE_DO_NOT_DROP__ unique commit",
+    "subject": "NEEDLE __FURL_NEEDLE_DO_NOT_DROP__ unique commit",
 }
 
 # Back-compat alias (the search needle is the default probe).
@@ -87,12 +87,12 @@ class NeedleFamily:
 SEARCH_FAMILY = NeedleFamily(
     name="search",
     needle=SEARCH_NEEDLE,
-    query="Find the function named __HEADROOM_NEEDLE_DO_NOT_DROP__.",
+    query="Find the function named __FURL_NEEDLE_DO_NOT_DROP__.",
 )
 LOGS_FAMILY = NeedleFamily(
     name="logs",
     needle=LOGS_NEEDLE,
-    query="Find the commit with subject __HEADROOM_NEEDLE_DO_NOT_DROP__.",
+    query="Find the commit with subject __FURL_NEEDLE_DO_NOT_DROP__.",
 )
 FAMILIES = (SEARCH_FAMILY, LOGS_FAMILY)
 

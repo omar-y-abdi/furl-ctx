@@ -11,6 +11,6 @@ against ``verify/``'s data during round-3 work) provably never saw this data.
 
 Nothing here imports, re-runs, or reuses anything under ``benchmarks/`` or the
 first run's generators/data. The measurement core uses ONLY the engine's own
-public surface (``headroom.compress``, the documented CSV-schema decoder, the
+public surface (``furl_ctx.compress``, the documented CSV-schema decoder, the
 CCR compression store, and the real gpt-4o tiktoken tokenizer).
 """

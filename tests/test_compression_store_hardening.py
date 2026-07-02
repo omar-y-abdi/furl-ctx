@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.cache.compression_store import CompressionStore
+from furl_ctx.cache.compression_store import CompressionStore
 
 # Fixed-width hash literals pinned to the contract (#21: 6 accepted, 5 rejected).
 # Hard-coded (NOT derived from _MIN_EXPLICIT_HASH_LEN) so the test fails loudly if

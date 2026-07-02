@@ -1,0 +1,70 @@
+[package]
+name = "furl-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core Furl types and compression transform traits (Rust)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tiktoken-rs = "0.11"
+# `md5` for the CCR cache_key. Python's compression_store hashes the original
+# diff with MD5 truncated to 24 hex chars; we must match byte-for-byte.
+md-5 = "0.10"
+# `sha2` for `hash_field_name` (SHA256 truncated to 8 hex chars) and the
+# crusher's row hashes (sha256[:6]). Python uses `hashlib.sha256` so we
+# need byte-exact parity.
+sha2 = "0.10"
+# `dashmap` for the CCR storage backend. Concurrent HashMap with sharded
+# locking — distinct keys hashed to different shards never contend, so
+# concurrent multi-threaded load doesn't queue on a single Mutex. Lock-free
+# reads inside each shard via RwLock semantics.
+dashmap = "6"
+# `regex` powers the hunk-header parser and priority-pattern matcher.
+regex = "1"
+# `flate2` for `_validate_with_zlib` in `adaptive_sizer`. Python's adaptive
+# sizing pipeline uses `zlib.compress(..., level=1)` to validate the chosen
+# K against compression-ratio diversity. We use the default `miniz_oxide`
+# backend (pure Rust) which produces DEFLATE output of similar length to
+# CPython's libz at level=1 for typical inputs. The check only triggers on
+# >15% ratio divergence so small per-byte differences don't change the
+# outcome — but if a parity fixture flakes here, swap to
+# `features = ["zlib"]` to link against system libz for byte-equal output.
+flate2 = "1"
+# `unidiff` is the Stage-3d Tier-2 diff detector. We use the parser
+# itself as the "is this a diff?" oracle — anything that successfully
+# parses to ≥1 PatchedFile is a diff. The deterministic parser
+# catches diffs Magika may miss (naked hunks without `diff --git`
+# headers, prose-prefixed diffs, truncated outputs). Default features
+# bring `encoding_rs` for non-UTF8 sniffing — we keep them on for
+# compatibility with arbitrary tool outputs.
+unidiff = "0.4"
+# `aho-corasick` powers the Tier-3 KeywordDetector in `signals/`.
+# A single deterministic-finite-automaton scan finds every keyword
+# in a line in O(n + m) — orders of magnitude faster than running N
+# regex .search() calls and harder to misuse. Word-boundary checks
+# happen as a post-filter on the byte offsets the automaton returns.
+# Default features (std, perf-literal) keep the build small.
+aho-corasick = "1"
+
+[features]
+# The core is ML-free: no ONNX runtime, no `ort`/`ort-sys`, and no feature
+# flags. Every code path compiles and runs without a prebuilt ONNX binary.
+default = []
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "tokenizer"
+harness = false
+
+[[bench]]
+name = "ccr_store"
+harness = false

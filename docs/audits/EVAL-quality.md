@@ -1,4 +1,4 @@
-# Headroom Compression Engine — Next-Action Doc (Synthesis of 48 Measured Experiments)
+# Furl Compression Engine — Next-Action Doc (Synthesis of 48 Measured Experiments)
 
 ## Summary — read this first
 
@@ -25,20 +25,20 @@ The jump is the refreshed snapshot bleeding into their "after" measurement. **Do
 
 ### So what DID the fleet find?
 
-Real value, on a **different axis**: *recoverability (Contract #1)* and *production robustness*. `needle-recall` only measures **direct-store** retrieval against the benchmark datasets — it misses the LLM-facing recovery path and the `store=None` path that Headroom's actual agentic workload uses. Three genuine Contract-#1 / recovery defects were caught and **verified against baseline source**. Those are the wins worth shipping.
+Real value, on a **different axis**: *recoverability (Contract #1)* and *production robustness*. `needle-recall` only measures **direct-store** retrieval against the benchmark datasets — it misses the LLM-facing recovery path and the `store=None` path that Furl's actual agentic workload uses. Three genuine Contract-#1 / recovery defects were caught and **verified against baseline source**. Those are the wins worth shipping.
 
 If the goal is *more compression*, the honest answer is: the fleet exhausted polish, refactor, and coverage without moving the needle. The only untouched territory with compression upside is the **keep/drop policy itself** (`orchestration.rs:158` prioritize_indices, `planning.rs`, `analyzer.rs:421` crushability tree) — but no measured evidence exists for any change there, so it is forward guidance, not a ranked item.
 
 ## Top recommendation
 
-**Ship the read-lifecycle `store=None` phantom-hash fix first.** Verified in baseline source: `headroom/transforms/read_lifecycle.py:485` computes `ccr_hash = sha256(content)[:24]` and emits `Retrieve original: hash={ccr_hash}]` when no CCR store is configured — a sentinel pointing to a hash **stored nowhere**. Sentinel present + original unretrievable = a literal Contract #1 break. ReadLifecycle is **default-enabled** and the public `compress()` path passes **no** store, so this is the default real-world path for agentic Read-tool traffic — exactly the path `needle-recall` (direct-store, benchmark-only) never exercises, which is why it slipped through.
+**Ship the read-lifecycle `store=None` phantom-hash fix first.** Verified in baseline source: `furl_ctx/transforms/read_lifecycle.py:485` computes `ccr_hash = sha256(content)[:24]` and emits `Retrieve original: hash={ccr_hash}]` when no CCR store is configured — a sentinel pointing to a hash **stored nowhere**. Sentinel present + original unretrievable = a literal Contract #1 break. ReadLifecycle is **default-enabled** and the public `compress()` path passes **no** store, so this is the default real-world path for agentic Read-tool traffic — exactly the path `needle-recall` (direct-store, benchmark-only) never exercises, which is why it slipped through.
 
 ## Ranked actions (rank = product value × confidence ÷ effort; every compression delta = 0)
 
 | # | Title | Approach | Evidence (verified) | Value | Effort | Risk |
 |---|---|---|---|---|---|---|
 | 1 | read-lifecycle store=None phantom-hash | `read-lifecycle-coverage-and-contract1-fix` | read_lifecycle.py:485-497 emits unrecoverable sentinel; default-enabled; public path store=None | Closes Contract #1 hole on the default path | Low (~3 LOC + tests) | Low |
-| 2 | Inject `headroom_retrieve` for `<<ccr:HASH>>` | `tool-injection-coverage-and-scanner-fix` | tool_injection.py:209-215 patterns match ONLY bracket form; no `<<ccr:>>` → tool never injected for SmartCrusher | Restores LLM recovery channel for primary compressor | Low (1 regex + tests) | Low-Med |
+| 2 | Inject `furl_retrieve` for `<<ccr:HASH>>` | `tool-injection-coverage-and-scanner-fix` | tool_injection.py:209-215 patterns match ONLY bracket form; no `<<ccr:>>` → tool never injected for SmartCrusher | Restores LLM recovery channel for primary compressor | Low (1 regex + tests) | Low-Med |
 | 3 | Persist cache_key in `compress_with_stats` | `diff-compressor-ccr-persist-fix-and-coverage` | diff_compressor.py:154-175 returns cache_key but never persists; compress() does | Closes Contract #1 gap on diff sidecar API | Very low (3 LOC) | Very low |
 | 4 | CCR store robustness (eviction/capacity/len-TTL) | `ccr-inmemory-generation-eviction-fix` (+sqlite-capacity, len-ttl, throttled-purge) | All delta=0, benchmark byte-identical, recovery 21/21; fixes unbounded growth + stale counts | Long-running proxy hardening | Medium (4 diffs + ~15 tests) | Low |
 | 5 | Public-API hardening (frozen + validation + aliasing) | `compress-api-eager-input-validation` (+freeze, +list-aliasing, +routing-at-correct-layer) | All delta=0, recovery 21/21; eager errors on 50-vs-0.5, list mutation, bad policy | Removes silent public footguns | Low-Med (~68 tests) | Low |
@@ -53,7 +53,7 @@ If the goal is *more compression*, the honest answer is: the fleet exhausted pol
 - **Pure error-type swaps with no test/behavior change** (`approach_id: 29`, dead `ConfigurationError`/`ProviderError` wiring at delta=0) — low value; only pursue if a concrete caller will branch on the new type.
 - **Competing read-lifecycle variant** `read-lifecycle-immutable-dataclass-coverage` — it emits an "Original not stored. Fingerprint:" marker, which STILL substitutes/drops from visible output. Superseded by rank #1 (which preserves the original verbatim).
 - **Python-only adaptive_sizer fix** `adaptive-sizer-coverage-and-max-k-fix` — superseded by the parity variant (#6); diverging Python from Rust would risk Contract #3.
-- **Stale routing-policy validation entries** — `#8` never landed; `numeric-range-validation-config (#16)` targets the DEAD `headroom.config.SmartCrusherConfig` (not used by the engine). Use only `routing-policy-eager-validation-at-correct-layer` (live transforms classes).
+- **Stale routing-policy validation entries** — `#8` never landed; `numeric-range-validation-config (#16)` targets the DEAD `furl_ctx.config.SmartCrusherConfig` (not used by the engine). Use only `routing-policy-eager-validation-at-correct-layer` (live transforms classes).
 - **Running two refactors on the same function** — e.g. both render_result_string entries touch the same code; pick one.
 
 ## Methodology note

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from headroom.transforms.log_compressor import (
+from furl_ctx.transforms.log_compressor import (
     LogCompressor,
     LogCompressorConfig,
     LogFormat,

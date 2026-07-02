@@ -157,7 +157,7 @@ def probe_result_cache_ccr_divergence() -> dict:
     """Document the RESULT-CACHE vs CCR-STORE lifetime-divergence silent loss.
 
     Mechanism (traced to the engine source): the router's Tier-2
-    ``CompressionCache`` (``headroom/transforms/content_router.py`` /
+    ``CompressionCache`` (``furl_ctx/transforms/content_router.py`` /
     ``cache/compression_cache.py``) caches the *crushed output* — including its
     ``{"_ccr_dropped": "<<ccr:HASH ...>>"}`` sentinel — keyed by content. On a
     cache HIT no fresh compression runs, so the CCR Rust→Python mirror
@@ -176,8 +176,8 @@ def probe_result_cache_ccr_divergence() -> dict:
     same crushed bytes, mirror skipped) and checks whether the served sentinel
     still resolves.
     """
-    from headroom import compress
-    from headroom.cache.compression_store import reset_compression_store
+    from furl_ctx import compress
+    from furl_ctx.cache.compression_store import reset_compression_store
     from verify.measure import (  # imported lazily; runs in THIS process
         _emitted_drop_hashes,
         _retrieve_originals,
@@ -345,7 +345,7 @@ def main() -> int:
     all_defaults = all(g["used_default_params"] for g in groups)
 
     payload = {
-        "schema": "headroom.verify.outofsample.v2",
+        "schema": "furl_ctx.verify.outofsample.v2",
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit(),
         "engine_model": "gpt-4o",

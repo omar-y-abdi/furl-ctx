@@ -4,9 +4,9 @@
 
 ---
 
-# Dead-Rust Audit — `headroom-core` / `headroom-py`
+# Dead-Rust Audit — `furl-core` / `furl-py`
 
-> Reachability-verified against `/Users/k/dev/headroom/.claude/runtime/rust-fat-groundtruth.md` and live grep. The 22 findings collapse onto **6 distinct dead targets** (4 lenses re-describe the same modules). All LOC below are **deduplicated per-target** — do **not** sum the 22 raw `est_loc_cut` values (that triple-counts to ~35k, larger than the whole crate).
+> Reachability-verified against `/Users/k/dev/furl_ctx/.claude/runtime/rust-fat-groundtruth.md` and live grep. The 22 findings collapse onto **6 distinct dead targets** (4 lenses re-describe the same modules). All LOC below are **deduplicated per-target** — do **not** sum the 22 raw `est_loc_cut` values (that triple-counts to ~35k, larger than the whole crate).
 
 ## Headline
 
@@ -15,7 +15,7 @@
 | **Total dead Rust (deduplicated)** | **~7,750 LOC** |
 | **Biggest module** | `transforms/pipeline/` subtree — **4,212 LOC** (no external tests; inline `#[cfg(test)]` only) |
 | **Biggest single file** | `transforms/live_zone.rs` — **2,899 LOC** |
-| **Tests that must move with the biggest file** | `live_zone_ccr.rs`, `live_zone_dispatch.rs`, `live_zone_thresholds.rs`, `live_zone_token_validation.rs` (all in `crates/headroom-core/tests/`) |
+| **Tests that must move with the biggest file** | `live_zone_ccr.rs`, `live_zone_dispatch.rs`, `live_zone_thresholds.rs`, `live_zone_token_validation.rs` (all in `crates/furl-core/tests/`) |
 
 ### Dead-LOC breakdown (merged across lenses)
 
@@ -25,7 +25,7 @@
 | `transforms/live_zone.rs` | 2,899 (~2,850 net if AuthMode kept) | dead-proxy-only | **TIER 2 (needs review)** |
 | `transforms/recommendations.rs` | 329 | dead-test-only | **TIER 2 (needs review)** |
 | `transforms/safety.rs` | 215 | dead | **TIER 1 SAFE** |
-| `headroom-py/src/lib.rs` FFI glue (dead pyfn + imports + registration) | ~94 | dead-proxy-only | co-requisite of live_zone |
+| `furl-py/src/lib.rs` FFI glue (dead pyfn + imports + registration) | ~94 | dead-proxy-only | co-requisite of live_zone |
 | `transforms/mod.rs` dead re-exports (6 `pub use` + 4 `pub mod`) | ~20 | dead | prerequisite blocker for all four |
 | **Total** | **~7,750** | | |
 
@@ -38,7 +38,7 @@
 ### 1. `transforms/pipeline/` subtree — 4,212 LOC  *(biggest cut)*
 
 - **Paths:** `pipeline/{orchestrator,config,traits,mod}.rs`, `pipeline/offloads/{mod,diff_noise,diff_offload,json_offload,log_offload,search_offload}.rs`, `pipeline/reformats/{mod,json_minifier,log_template}.rs`
-- **Reachability:** `CompressionPipeline` / `PipelineConfig` / offloads / reformats have **zero** pyo3 bindings (not in `lib.rs`) and **zero** Python callers. `live_zone.rs` imports do **not** reference pipeline. Every `CompressionPipeline::builder().build()` is inside `#[cfg(test)]` (orchestrator.rs:352–829). The would-be consumer crate `crates/headroom-proxy` **does not exist** (only `headroom-core` + `headroom-py` exist).
+- **Reachability:** `CompressionPipeline` / `PipelineConfig` / offloads / reformats have **zero** pyo3 bindings (not in `lib.rs`) and **zero** Python callers. `live_zone.rs` imports do **not** reference pipeline. Every `CompressionPipeline::builder().build()` is inside `#[cfg(test)]` (orchestrator.rs:352–829). The would-be consumer crate `crates/headroom-proxy` **does not exist** (only `furl-core` + `furl-py` exist).
 - **Caveat (honest):** ground-truth shows `offloads/{diff,search,log}_offload.rs` reference the live compressor structs. That is **dead code pointing at live code** — harmless; the compressors survive via their own pyclass bridge (see NON-CUTS). Cutting pipeline/ does not touch them.
 - **Co-requisite:** remove `pub use pipeline::{…}` (`mod.rs:59–63`) and `pub mod pipeline;` (`mod.rs:32`) atomically with the directory.
 - **Rust tests to archive:** **none** (no `tests/pipeline_*.rs`; tests are inline `#[cfg(test)]` and die with the files).
@@ -57,7 +57,7 @@
 
 ### 3. `transforms/live_zone.rs` — 2,899 LOC  *(needs review)*
 
-- **Reachability:** dead-proxy-only. All three entries have **zero Python callers** (verified: `rg live_zone headroom/ --include='*.py'` → empty). Only `compress_openai_responses_live_zone` is even pyo3-registered (`lib.rs:1655`); `compress_openai_chat_live_zone` and `compress_anthropic_live_zone` are **never registered** — dead at the FFI boundary.
+- **Reachability:** dead-proxy-only. All three entries have **zero Python callers** (verified: `rg live_zone furl_ctx/ --include='*.py'` → empty). Only `compress_openai_responses_live_zone` is even pyo3-registered (`lib.rs:1655`); `compress_openai_chat_live_zone` and `compress_anthropic_live_zone` are **never registered** — dead at the FFI boundary.
 - **Why TIER 2, not TIER 1 (honest):** panel votes are **split** — 2 of the 4 lens-copies record a **`refuted`** vote and `needsReview=true`. It does **not** meet the "panel-confirmed" bar. The refutation concerns the **`AuthMode` entanglement**, not the deadness of the dispatcher body.
 - **Prerequisite untangle — `AuthMode` (load-bearing):** `live_zone.rs:198` defines its **own** `pub enum AuthMode`, **distinct** from the canonical `crate::auth_mode::AuthMode` (`auth_mode.rs:41`, Phase-F parity invariant — **DO NOT CUT**). The live_zone `AuthMode` (~50 LOC w/ `as_str` + `From<crate::auth_mode::AuthMode>`) is re-exported and consumed by `recommendations.rs:66` (`pub use super::live_zone::AuthMode`). **Before deleting:** either hoist this enum to a standalone types module / `recommendations.rs`, or archive `recommendations.rs` in the same changeset. Net cut is ~2,850 LOC if the enum is relocated rather than deleted.
 - **Co-requisites:** must land with the `lib.rs` FFI removal (below) or `lib.rs` won't compile; remove the live_zone re-export block `mod.rs:47–52`.
@@ -66,7 +66,7 @@
 
 ### 4. `transforms/recommendations.rs` — 329 LOC  *(needs review)*
 
-- **Reachability:** dead-test-only. No pyo3 binding; zero Python callers (Python `recommendations` hits are the unrelated `headroom/ccr/context_tracker.py`). Module header states PR-F3 wiring "never landed." Sole non-self consumer is `tests/recommendations_loader.rs` + the `mod.rs:64` re-export.
+- **Reachability:** dead-test-only. No pyo3 binding; zero Python callers (Python `recommendations` hits are the unrelated `furl_ctx/ccr/context_tracker.py`). Module header states PR-F3 wiring "never landed." Sole non-self consumer is `tests/recommendations_loader.rs` + the `mod.rs:64` re-export.
 - **Why TIER 2 (honest):** one panel **`refuted`** + one **`uncertain`** vote across copies; `needsReview=true`. Also **couples to the live_zone decision** via `pub use super::live_zone::AuthMode` (`recommendations.rs:66`) — archiving it clears that coupling, so the two should be reviewed together.
 - **Co-requisite:** remove `pub use recommendations::{Recommendation, RecommendationStore, RECOMMENDATIONS_PATH_ENV_VAR};` (`mod.rs:64`) and `pub mod recommendations;` (`mod.rs:33`).
 - **Rust tests to archive:** `recommendations_loader.rs`.
@@ -75,9 +75,9 @@
 
 ## Co-requisite cuts (ride with the modules above — not standalone tier rows)
 
-### `headroom-py/src/lib.rs` — dead `compress_openai_responses_live_zone` FFI glue — ~94 LOC
+### `furl-py/src/lib.rs` — dead `compress_openai_responses_live_zone` FFI glue — ~94 LOC
 
-- **Must land with finding #3** (live_zone). Registered at `lib.rs:1655` but zero Python callers (ground-truth: `LIVE-caller: NONE`). Remove: (a) import block `lib.rs:31–37` (`rust_compress_openai_responses_live_zone`, `summarize_openai_responses_no_change_reason`, `AuthMode as RustLiveZoneAuthMode`, `LiveZoneOutcome`, `BlockAction`, `BlockOutcome`, `CompressionManifest`, `ExclusionReason`, `LiveZoneError`); (b) the pyfn body `lib.rs:1560–~1625`; (c) registration `lib.rs:1655`. `headroom-py` is a cdylib with the default test harness disabled — **no Rust tests to archive.**
+- **Must land with finding #3** (live_zone). Registered at `lib.rs:1655` but zero Python callers (ground-truth: `LIVE-caller: NONE`). Remove: (a) import block `lib.rs:31–37` (`rust_compress_openai_responses_live_zone`, `summarize_openai_responses_no_change_reason`, `AuthMode as RustLiveZoneAuthMode`, `LiveZoneOutcome`, `BlockAction`, `BlockOutcome`, `CompressionManifest`, `ExclusionReason`, `LiveZoneError`); (b) the pyfn body `lib.rs:1560–~1625`; (c) registration `lib.rs:1655`. `furl-py` is a cdylib with the default test harness disabled — **no Rust tests to archive.**
 
 ### `transforms/mod.rs` — dead re-exports — ~20 LOC
 
@@ -96,7 +96,7 @@
 
 ### `transforms/content_detector.rs` — **LIVE** (kept by `is_json_array_of_dicts`)
 
-- Although `detection.rs:18` notes the regex `detect_content_type` "is no longer on the production path," the file stays live: `is_json_array_of_dicts` (pyo3-exported, called by `headroom/transforms/content_detector.py`) calls `detect_content_type` internally, which exercises the full `LazyLock` regex machinery. **Not a cut now.** A future *shrink* (reimplement `is_json_array_of_dicts` as a direct `serde_json` parse) would demote ~180 LOC of regex helpers — but only **after** live_zone deletion removes the other caller of `detect_content_type`.
+- Although `detection.rs:18` notes the regex `detect_content_type` "is no longer on the production path," the file stays live: `is_json_array_of_dicts` (pyo3-exported, called by `furl_ctx/transforms/content_detector.py`) calls `detect_content_type` internally, which exercises the full `LazyLock` regex machinery. **Not a cut now.** A future *shrink* (reimplement `is_json_array_of_dicts` as a direct `serde_json` parse) would demote ~180 LOC of regex helpers — but only **after** live_zone deletion removes the other caller of `detect_content_type`.
 
 ---
 
@@ -105,7 +105,7 @@
 | Dep (Cargo.toml) | Sole consumers | Cut after | Safe now? |
 |---|---|---|---|
 | `rayon = "1"` (`Cargo.toml:97`) | `pipeline/{orchestrator,traits,mod}.rs` only (3 files, all dead) | `pipeline/` removed | No — dropping before the module breaks the build |
-| `toml = "0.8"` (`Cargo.toml:102`) | `pipeline/config.rs` + `recommendations.rs` only (verified `rg toml:: crates/headroom-core/src` → exactly these 2). `anchors.rs`/`magika_detector.rs` "toml" hits are comment/string false-positives; `magika` optional feature unaffected. | **both** `pipeline/` AND `recommendations.rs` archived | No — drop with the last consumer |
+| `toml = "0.8"` (`Cargo.toml:102`) | `pipeline/config.rs` + `recommendations.rs` only (verified `rg toml:: crates/furl-core/src` → exactly these 2). `anchors.rs`/`magika_detector.rs` "toml" hits are comment/string false-positives; `magika` optional feature unaffected. | **both** `pipeline/` AND `recommendations.rs` archived | No — drop with the last consumer |
 
 ---
 

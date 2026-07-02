@@ -181,7 +181,7 @@ def build_results_payload(
         }
 
     return {
-        "schema": "headroom.imp3.baseline.v1",
+        "schema": "furl_ctx.imp3.baseline.v1",
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit(),
         "engine_model": BENCH_MODEL,
@@ -222,7 +222,7 @@ def render_baseline_md(payload: dict[str, object]) -> str:
     a("")
     a("All numbers come from REAL captured data (no synthetic low-entropy")
     a("inputs). Token counts use the SAME tokenizer the engine uses")
-    a("(`headroom.tokenizers.get_tokenizer` -> `Tokenizer`).")
+    a("(`furl_ctx.tokenizers.get_tokenizer` -> `Tokenizer`).")
     a("")
     a("## Metrics (defined)")
     a("")

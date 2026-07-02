@@ -52,8 +52,8 @@ import re
 
 import pytest
 
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
-from headroom.transforms.csv_schema_decoder import (
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.transforms.csv_schema_decoder import (
     _split_logical_lines,  # type: ignore[attr-defined]  # private helper
     decode_csv_schema_rows,
 )

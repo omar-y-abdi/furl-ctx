@@ -1,24 +1,24 @@
-# Headroom
+# Furl
 
 > Context optimization layer for LLM applications. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, 60–95% fewer tokens. Python library and MCP server. Apache 2.0, local-first.
 
-Headroom is shipped as a Python package (`headroom-ai`) with an MCP server (`headroom_compress`, `headroom_retrieve`, `headroom_stats` tools). Both use the same compression pipeline: per-content-type compressors (JSON, search results, logs, diffs) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original whenever it wants.
+Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compress`, `furl_retrieve`, `furl_stats` tools). Both use the same compression pipeline: per-content-type compressors (JSON, search results, logs, diffs) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original whenever it wants.
 
 ## Packages
 
-- [PyPI package](https://pypi.org/project/headroom-ai/): Python install.
+- [PyPI package](https://pypi.org/project/furl-ctx/): Python install.
 
 ## Install (copy-paste-runnable)
 
-- Python: `pip install headroom-ai` (add `[all]` for every optional extra)
-- MCP server: `pip install "headroom-ai[mcp]"` then run `python -m headroom.ccr.mcp_server`
-- Compress in code: `from headroom import compress`
+- Python: `pip install furl-ctx` (add `[all]` for every optional extra)
+- MCP server: `pip install "furl-ctx[mcp]"` then run `python -m furl_ctx.ccr.mcp_server`
+- Compress in code: `from furl_ctx import compress`
 
 ## Entry points
 
 - **Quickstart**: 5-minute end-to-end (install → compress → call the model).
 - **Installation**: All install paths, extras, env vars.
-- **MCP server**: `headroom_compress`, `headroom_retrieve`, `headroom_stats` for Claude Code / Cursor / any MCP host.
+- **MCP server**: `furl_compress`, `furl_retrieve`, `furl_stats` for Claude Code / Cursor / any MCP host.
 - **API reference**: Python `compress()` API.
 
 ## How it works
@@ -34,7 +34,7 @@ Headroom is shipped as a Python package (`headroom-ai`) with an MCP server (`hea
 - **Configuration**: Env vars, config file, per-call overrides.
 - **Benchmarks**: Token-savings numbers across content types.
 - **Troubleshooting**: Common failure modes and fixes.
-- **Limitations**: What Headroom won't do well today.
+- **Limitations**: What Furl won't do well today.
 
 ## Licensing
 

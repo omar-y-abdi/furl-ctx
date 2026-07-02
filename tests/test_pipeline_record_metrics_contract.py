@@ -23,11 +23,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from headroom.config import TransformResult
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.base import Transform
-from headroom.transforms.pipeline import TransformPipeline
+from furl_ctx.config import TransformResult
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.base import Transform
+from furl_ctx.transforms.pipeline import TransformPipeline
 
 _MODEL = "gpt-4o"
 _MODEL_LIMIT = 128_000

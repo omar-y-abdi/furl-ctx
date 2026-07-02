@@ -45,7 +45,7 @@ jobs:
         run: devcontainer up --workspace-folder . --config ${{ matrix.config }} --remove-existing-container
 
       - name: Smoke test ${{ matrix.name }}
-        run: devcontainer exec --workspace-folder . --config ${{ matrix.config }} bash -lc 'git rev-parse --show-toplevel >/dev/null && uv --version && node --version && gh --version >/dev/null && uv run python -c "import headroom; print(\"default smoke test passed\")"'
+        run: devcontainer exec --workspace-folder . --config ${{ matrix.config }} bash -lc 'git rev-parse --show-toplevel >/dev/null && uv --version && node --version && gh --version >/dev/null && uv run python -c "import furl_ctx; print(\"default smoke test passed\")"'
 
   validate-worktree:
     runs-on: ubuntu-latest
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Create linked worktree
-        run: git worktree add "$RUNNER_TEMP/headroom-worktree" HEAD
+        run: git worktree add "$RUNNER_TEMP/furl-worktree" HEAD
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -68,7 +68,7 @@ jobs:
         run: npm install -g @devcontainers/cli@0.85.0
 
       - name: Start linked worktree devcontainer
-        run: devcontainer up --workspace-folder "$RUNNER_TEMP/headroom-worktree" --config "$RUNNER_TEMP/headroom-worktree/.devcontainer/devcontainer.json" --remove-existing-container
+        run: devcontainer up --workspace-folder "$RUNNER_TEMP/furl-worktree" --config "$RUNNER_TEMP/furl-worktree/.devcontainer/devcontainer.json" --remove-existing-container
 
       - name: Smoke test linked worktree
-        run: devcontainer exec --workspace-folder "$RUNNER_TEMP/headroom-worktree" --config "$RUNNER_TEMP/headroom-worktree/.devcontainer/devcontainer.json" bash -lc 'git rev-parse --show-toplevel && uv run python -c "import headroom; print(\"worktree smoke test passed\")"'
+        run: devcontainer exec --workspace-folder "$RUNNER_TEMP/furl-worktree" --config "$RUNNER_TEMP/furl-worktree/.devcontainer/devcontainer.json" bash -lc 'git rev-parse --show-toplevel && uv run python -c "import furl_ctx; print(\"worktree smoke test passed\")"'

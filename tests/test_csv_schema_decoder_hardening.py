@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from headroom.transforms.csv_schema_decoder import decode_csv_schema_rows
+from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
 # ---------------------------------------------------------------------------
 # CD-B1a  #24 repro — exact literal output for single-var + arith + empty row

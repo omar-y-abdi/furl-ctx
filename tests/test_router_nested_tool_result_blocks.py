@@ -26,12 +26,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from headroom.cache.compression_store import get_compression_store
-from headroom.tokenizer import Tokenizer
-from headroom.tokenizers import EstimatingTokenCounter
-from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
-from headroom.transforms.cross_message_dedup import MIN_DEDUP_CHARS, CrossMessageDeduper
-from headroom.transforms.smart_crusher import SmartCrusher
+from furl_ctx.cache.compression_store import get_compression_store
+from furl_ctx.tokenizer import Tokenizer
+from furl_ctx.tokenizers import EstimatingTokenCounter
+from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
+from furl_ctx.transforms.cross_message_dedup import MIN_DEDUP_CHARS, CrossMessageDeduper
+from furl_ctx.transforms.smart_crusher import SmartCrusher
 
 _DEDUP_SENTINEL_RE = re.compile(r"<<ccr:([0-9a-f]{24}) (\d+)_bytes_duplicate>>")
 

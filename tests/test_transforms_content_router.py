@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import headroom.transforms.content_router as content_router_module
-from headroom.transforms.content_detector import ContentType, DetectionResult
-from headroom.transforms.content_router import (
+import furl_ctx.transforms.content_router as content_router_module
+from furl_ctx.transforms.content_detector import ContentType, DetectionResult
+from furl_ctx.transforms.content_router import (
     CompressionCache,
     CompressionStrategy,
     ContentRouter,
@@ -112,7 +112,7 @@ def test_detection_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     # Monkeypatch the Rust binding to return a deterministic fake
     # result; verify _detect_content propagates the content_type
     # tag back as the Python ContentType enum.
-    import headroom._core as _core
+    import furl_ctx._core as _core
 
     fake_rust_result = SimpleNamespace(
         content_type="source_code",
@@ -142,7 +142,7 @@ def test_detect_content_python_backstop_overrides_rust_plaintext(
     Deleting the override branch makes this RED -- the precise regression the
     test exists to catch (a maintainer "cleaning up the dead Python detector").
     """
-    import headroom._core as _core
+    import furl_ctx._core as _core
 
     monkeypatch.setattr(_core, "detect_content_type", lambda content: _fake_rust("text"))
     monkeypatch.setattr(
@@ -160,7 +160,7 @@ def test_detect_content_rust_nonplaintext_is_authoritative(
 ) -> None:
     """Stage-1 primacy: a non-``PLAIN_TEXT`` Rust verdict is authoritative --
     the Python backstop must NOT run and cannot override it."""
-    import headroom._core as _core
+    import furl_ctx._core as _core
 
     monkeypatch.setattr(_core, "detect_content_type", lambda content: _fake_rust("source_code"))
 
@@ -182,7 +182,7 @@ def test_detect_content_both_plaintext_stays_plaintext(
 ) -> None:
     """Stage-2 agreement: Rust ``PLAIN_TEXT`` + Python ``PLAIN_TEXT`` ->
     ``PLAIN_TEXT`` (the backstop is consulted but does not change the verdict)."""
-    import headroom._core as _core
+    import furl_ctx._core as _core
 
     monkeypatch.setattr(_core, "detect_content_type", lambda content: _fake_rust("text"))
     monkeypatch.setattr(
@@ -708,9 +708,9 @@ def test_unknown_rust_content_type_tag_routes_plain_text(
     import logging
 
     fake = SimpleNamespace(content_type="some_future_tag_not_in_enum", confidence=1.0)
-    monkeypatch.setattr("headroom._core.detect_content_type", lambda content: fake)
+    monkeypatch.setattr("furl_ctx._core.detect_content_type", lambda content: fake)
 
-    with caplog.at_level(logging.WARNING, logger="headroom.transforms.content_router"):
+    with caplog.at_level(logging.WARNING, logger="furl_ctx.transforms.content_router"):
         result = _detect_content("just some plain prose, nothing structured here")
 
     assert result.content_type is ContentType.PLAIN_TEXT

@@ -25,7 +25,7 @@ Describe the tests you ran to verify your changes:
 
 - [ ] Unit tests pass (`pytest`)
 - [ ] Linting passes (`ruff check .`)
-- [ ] Type checking passes (`mypy headroom`)
+- [ ] Type checking passes (`mypy furl_ctx`)
 - [ ] New tests added for new functionality
 - [ ] Manual testing performed
 
