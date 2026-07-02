@@ -20,6 +20,11 @@ on:
 
 permissions:
   contents: read
+  # paths-filter (the `changes` gate) and commitlint both read PR metadata
+  # via the API on pull_request events; without this every PR run fails the
+  # gate with "Resource not accessible by integration" and all real jobs
+  # (lint/test/build) are skipped.
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
