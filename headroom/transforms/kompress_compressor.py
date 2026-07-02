@@ -817,11 +817,6 @@ class KompressCompressor(Transform):
             # the PyTorch branch → AttributeError on `_OnnxModel.parameters`,
             # disabling compression for HEADROOM_KOMPRESS_BACKEND=coreml
             # (COR-11; matches `_model_device_type`'s existing intent).
-            # `startswith` so the CoreML loader's `backend="onnx_coreml"` also
-            # takes the ONNX inference path — a bare `== "onnx"` sent it down
-            # the PyTorch branch → AttributeError on `_OnnxModel.parameters`,
-            # disabling compression for HEADROOM_KOMPRESS_BACKEND=coreml
-            # (COR-11; matches `_model_device_type`'s existing intent).
             is_onnx = backend.startswith("onnx")
             device_type = _model_device_type(model, backend)
 
