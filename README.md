@@ -1,12 +1,13 @@
 <div align="center"><pre>
-  ██╗  ██╗███████╗ █████╗ ██████╗ ██████╗  ██████╗  ██████╗ ███╗   ███╗
-  ██║  ██║██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗██╔═══██╗████╗ ████║
-  ███████║█████╗  ███████║██║  ██║██████╔╝██║   ██║██║   ██║██╔████╔██║
-  ██╔══██║██╔══╝  ██╔══██║██║  ██║██╔══██╗██║   ██║██║   ██║██║╚██╔╝██║
-  ██║  ██║███████╗██║  ██║██████╔╝██║  ██║╚██████╔╝╚██████╔╝██║ ╚═╝ ██║
-  ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝
-                  The context compression layer for AI agents
+  ███████╗ ██╗   ██╗ ██████╗  ██╗
+  ██╔════╝ ██║   ██║ ██╔══██╗ ██║
+  █████╗   ██║   ██║ ██████╔╝ ██║
+  ██╔══╝   ██║   ██║ ██╔══██╗ ██║
+   ██║      ╚██████╔╝ ██║  ██║ ███████╗
+   ╚═╝       ╚═════╝  ╚═╝  ╚═╝ ╚══════╝
+ The context compression layer for AI agents
 </pre></div>
+
 
 <p align="center"><strong>60–95% fewer tokens on redundant workloads · library · MCP · local-first · reversible</strong></p>
 
@@ -44,23 +45,21 @@ Furl compresses everything your AI agent reads — tool outputs, logs, RAG chunk
 ## How it works (30 seconds)
 
 ```
- Your agent / app
-   (Claude Code, Cursor, Codex, LangChain, Agno, Strands, your own code…)
-        │   prompts · tool outputs · logs · RAG results · files
-        ▼
-    ┌────────────────────────────────────────────────────┐
-    │  Furl   (runs locally — your data stays here)  │
-    │  ────────────────────────────────────────────────  │
-    │  CacheAligner  →  ContentRouter  →  CCR            │
-    │                    ├─ SmartCrusher   (JSON)        │
-    │                    └─ Search / Log / Diff          │
-    │                                                    │
-    │  Reversible CCR store  ·  MCP server               │
-    └────────────────────────────────────────────────────┘
-        │   compressed prompt  +  retrieval tool
-        ▼
- LLM provider  (Anthropic · OpenAI · Bedrock · …)
+  tool output · logs · diffs · JSON · RAG chunks
+                      │
+                      ▼
+               ┌─────────────┐
+               │    Furl     │ 
+               └──────┬──────┘
+                      │
+            ┌─────────┴─────────┐
+            ▼                   ▼
+     compressed context    CCR store (byte-exact originals)
+            │                    ▲
+            ▼                    │
+          LLM  ──► needs detail? ┘
 ```
+
 
 - **ContentRouter** — detects content type, selects the right compressor
 - **SmartCrusher** — statistical JSON / array compression
@@ -236,10 +235,6 @@ pip install -e ".[dev]" && pytest
 ```
 
 A devcontainer ships in `.devcontainer/`. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Community
-
-- **[Discord](https://discord.gg/yRmaUNpsPJ)** — questions, feedback, war stories.
 
 ## License
 
