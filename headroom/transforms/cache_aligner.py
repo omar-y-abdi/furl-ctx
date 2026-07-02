@@ -7,8 +7,10 @@ prompt and re-inserts it as a context block) violated invariant I2 — the
 cache hot zone (system prompt) must never be mutated. That path has been
 removed. ``CacheAligner`` now exclusively:
 
-1. Detects volatile / dynamic content in the system prompt using
-   structural parsers (no regex):
+1. Detects volatile / dynamic content in the system prompt — both
+   plain-string and block-format content (text parts are concatenated
+   via ``headroom.utils.concat_text_parts``) — using structural parsers
+   (no regex):
    - UUIDs via the stdlib ``uuid`` module
    - ISO 8601 timestamps via ``datetime.fromisoformat``
    - JWTs via shape-only structural checks (three dot-separated
@@ -36,7 +38,7 @@ from typing import Any
 from ..config import CacheAlignerConfig, CachePrefixMetrics, TransformResult
 from ..tokenizer import Tokenizer
 from ..tokenizers import EstimatingTokenCounter
-from ..utils import compute_short_hash, deep_copy_messages
+from ..utils import compute_short_hash, concat_text_parts, deep_copy_messages
 from .base import Transform
 
 logger = logging.getLogger(__name__)
@@ -239,18 +241,18 @@ class CacheAligner(Transform):
         tokenizer: Tokenizer,
         **kwargs: Any,
     ) -> bool:
-        """Return True iff detection is enabled and a system message exists.
+        """Return True iff detection is enabled and a system message carries text.
 
-        Detection is cheap; we run it whenever ``enabled`` is set so the
-        warning log line is emitted on every relevant turn.
+        Both content shapes count: plain-string content and block-format
+        content whose text parts are non-empty (COR-53). Detection is cheap;
+        we run it whenever ``enabled`` is set so the warning log line is
+        emitted on every relevant turn.
         """
         if not self.config.enabled:
             return False
         for msg in messages:
-            if msg.get("role") == "system":
-                content = msg.get("content", "")
-                if isinstance(content, str) and content:
-                    return True
+            if msg.get("role") == "system" and concat_text_parts(msg.get("content", "")):
+                return True
         return False
 
     def apply(
@@ -285,8 +287,10 @@ class CacheAligner(Transform):
                 continue
             if msg.get("role") != "system":
                 continue
-            content = msg.get("content", "")
-            if not isinstance(content, str) or not content:
+            # Block-format prompts are inspected via their concatenated text
+            # parts; plain-string prompts pass through unchanged (COR-53).
+            content = concat_text_parts(msg.get("content", ""))
+            if not content:
                 continue
             findings = detect_volatile_content(content)
             if findings:
@@ -306,16 +310,18 @@ class CacheAligner(Transform):
             logger.warning(msg_text)
 
         # Compute a stable hash of all system messages for observability.
-        # This is just a hash of the (unchanged) bytes — no extraction.
+        # Plain-string content is hashed byte-identically to before;
+        # block-format content contributes its concatenated text parts so two
+        # different block prompts no longer collide on the empty hash (COR-53).
         #
         # Frame each message with its byte length so the serialization is
         # injective: a bare delimiter join lets one message containing the
         # delimiter collide with two separate messages (#5). Length-prefixing
         # makes the hash uniquely identify the ordered system-prompt set.
         system_contents = [
-            (m.get("content") or "")
+            concat_text_parts(m.get("content"))
             for m in result_messages
-            if m.get("role") == "system" and isinstance(m.get("content"), str)
+            if m.get("role") == "system" and isinstance(m.get("content"), (str, list))
         ]
         system_text = "\n---\n".join(system_contents)
         framed = b"".join(
@@ -363,8 +369,8 @@ class CacheAligner(Transform):
         for msg in messages:
             if msg.get("role") != "system":
                 continue
-            content = msg.get("content", "")
-            if not isinstance(content, str) or not content:
+            content = concat_text_parts(msg.get("content", ""))
+            if not content:
                 continue
             findings = detect_volatile_content(content)
             score -= len(findings) * 10

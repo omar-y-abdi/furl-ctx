@@ -455,8 +455,10 @@ def _get_pipeline() -> Any:
 
         from headroom.transforms import TransformPipeline
 
-        # Default pipeline: CacheAligner → ContentRouter
-        # CacheAligner: stabilizes prefix for provider KV cache hits
+        # Default pipeline: CrossMessageDeduper → ContentRouter.
+        # CacheAligner is opt-in (HeadroomConfig.cache_aligner.enabled,
+        # default False): when enabled it runs first and only WARNS about
+        # unstable prefixes — detector-only, never rewrites the prompt.
         # ContentRouter: routes to the right compressor per content type
         #   (SmartCrusher for JSON, Kompress for text and source code)
         # There is no trailing context-management stage —

@@ -44,6 +44,37 @@ def extract_user_query(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def concat_text_parts(content: Any) -> str:
+    """Concatenate the text carried by a message ``content`` field.
+
+    Providers accept two content shapes: a plain string, or a list of typed
+    blocks (Anthropic-style ``{"type": "text", "text": ...}``). Transforms
+    that inspect prompt text (CacheAligner hashing/detection, ContentRouter
+    analysis-intent detection) must see BOTH shapes, or block-format prompts
+    silently vanish from their view (COR-53).
+
+    - ``str`` content is returned unchanged, so callers hashing plain-string
+      prompts stay byte-identical to their pre-helper behavior.
+    - ``list`` content yields the ``text`` of every ``{"type": "text"}`` block
+      whose ``text`` is a string, joined by newlines. Non-text blocks (images,
+      tool_use, ...) and malformed entries contribute nothing.
+    - Any other shape (``None``, dict, int, ...) yields ``""``.
+
+    Total: never raises on untrusted content shapes.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
 def create_marker(marker_type: str, **kwargs: Any) -> str:
     """
     Create a Headroom marker string.

@@ -62,7 +62,9 @@ class TransformPipeline:
     Orchestrates multiple transforms in the correct order.
 
     Transform order:
-    1. Cache Aligner - normalize prefix for cache hits
+    1. Cache Aligner (opt-in — disabled by default via
+       ``CacheAlignerConfig.enabled``) - detector-only prefix-stability
+       warnings; never rewrites messages
     2. Content Router - intelligent content-aware compression (routes to appropriate
        compressor: Kompress for text and source code, SmartCrusher for JSON, etc.)
 

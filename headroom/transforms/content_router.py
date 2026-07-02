@@ -54,6 +54,7 @@ from ..config import (
     TransformResult,
 )
 from ..tokenizer import Tokenizer
+from ..utils import concat_text_parts
 from .base import Transform
 from .compressor_registry import CompressorRegistry
 from .content_detector import ContentType, DetectionResult
@@ -2468,7 +2469,9 @@ class ContentRouter(Transform):
     def _detect_analysis_intent(self, messages: list[dict[str, Any]]) -> bool:
         """Detect if user wants to analyze/review code.
 
-        Looks at the most recent user message for analysis keywords.
+        Looks at the most recent user message for analysis keywords. Both
+        plain-string and block-format user content are scanned (text parts
+        concatenated — COR-53).
 
         Args:
             messages: Conversation messages.
@@ -2506,8 +2509,8 @@ class ContentRouter(Transform):
         # Find most recent user message
         for message in reversed(messages):
             if message.get("role") == "user":
-                content = message.get("content", "")
-                if isinstance(content, str):
+                content = concat_text_parts(message.get("content", ""))
+                if content:
                     content_lower = content.lower()
                     for keyword in analysis_keywords:
                         if keyword in content_lower:
