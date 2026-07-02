@@ -133,11 +133,23 @@ fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor) -> Value {
 fn walk_string(s: String, ctx: &DocumentCompactor) -> Value {
     // Stringified-JSON: parse, recurse, replace.
     if let Some(parsed) = try_parse_json_container(&s) {
-        let recursed = walk(parsed, ctx);
+        let recursed = walk(parsed.clone(), ctx);
+        // No-op guard (COR-45): when the recursion compacted NOTHING,
+        // return the original string byte-identical. Re-emitting through
+        // serde would silently minify Python `json.dumps`-spaced JSON,
+        // collapse duplicate keys ({"a":1,"a":2} → {"a":2}), decode
+        // \uXXXX escapes and rewrite exponent forms — un-gated mutation
+        // of string-leaf DATA at zero declared savings, contradicting
+        // the module contract above ("only bulky leaves get replaced").
+        // Mirrors the crusher twin's `processed != parsed` check in
+        // `SmartCrusher::process_string_collecting`.
+        if recursed == parsed {
+            return Value::String(s);
+        }
         return match recursed {
             // Sub-table won — already a rendered string.
             Value::String(rendered) => Value::String(rendered),
-            // Sub-recursion didn't compact anything; emit compact JSON.
+            // Sub-recursion compacted something deeper; re-emit.
             other => Value::String(serde_json::to_string(&other).unwrap_or(s)),
         };
     }
@@ -385,6 +397,48 @@ mod tests {
         let doc = json!({"payload": "{not valid json"});
         let out = dc().compact(doc.clone());
         assert_eq!(out, doc);
+    }
+
+    // ── COR-45: no-op recursion must not rewrite the string leaf ──
+
+    #[test]
+    fn noop_stringified_json_leaf_survives_byte_identical() {
+        // COR-45 regression. A string leaf holding Python
+        // `json.dumps`-spaced JSON that the recursion cannot compact
+        // (below every threshold) must come back BYTE-IDENTICAL — the
+        // walker used to re-emit it through serde (minified) at zero
+        // declared savings, mutating data the module's own contract
+        // says it leaves alone ("only bulky leaves get replaced").
+        let leaf = r#"{"a": 1, "b": "x"}"#;
+        let doc = json!({"payload": leaf});
+        let out = dc().compact(doc);
+        assert_eq!(
+            out.pointer("/payload").and_then(|v| v.as_str()),
+            Some(leaf),
+            "a no-op walk must return the original string verbatim"
+        );
+    }
+
+    #[test]
+    fn noop_guard_preserves_duplicate_keys_escapes_and_exponents() {
+        // COR-45's worst cases: serde re-serialization collapses
+        // duplicate keys ({"a":1,"a":2} → {"a":2}), decodes \uXXXX
+        // escapes, and rewrites exponent forms — all silent data
+        // mutation when the walk compacted nothing.
+        for leaf in [
+            r#"{"a":1,"a":2}"#,     // duplicate keys must not collapse
+            r#"{"s":"caf\u00e9"}"#, // \uXXXX escapes must not decode
+            r#"{"n":1e5}"#,         // exponent form must not rewrite
+            r#"[1, 2, 3]"#,         // json.dumps-spaced scalar array
+        ] {
+            let doc = json!({"payload": leaf});
+            let out = dc().compact(doc);
+            assert_eq!(
+                out.pointer("/payload").and_then(|v| v.as_str()),
+                Some(leaf),
+                "no-op leaf must survive byte-identical: {leaf}"
+            );
+        }
     }
 
     // ── COR-19: with_ccr_store wires the SINGLE config.ccr_store field ──

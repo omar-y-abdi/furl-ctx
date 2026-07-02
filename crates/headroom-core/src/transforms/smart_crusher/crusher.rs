@@ -839,6 +839,36 @@ impl SmartCrusher {
     /// 7. `execute_plan(plan, items)` → result.
     /// 8. Strategy info = `analysis.recommended_strategy.as_str()`.
     pub fn crush_array(&self, items: &[Value], query_context: &str, bias: f64) -> CrushArrayResult {
+        self.crush_array_inner(items, query_context, bias, true)
+    }
+
+    /// [`SmartCrusher::crush_array`] with the CCR store writes
+    /// switchable (COR-28).
+    ///
+    /// `persist = false` — used by the mixed-array dict arm — runs the
+    /// exact same pipeline and returns a byte-identical result: the
+    /// hash, marker text and therefore the `MinTokens` routing decision
+    /// are all computed as usual; ONLY the store writes are skipped.
+    /// That caller consumes just the kept-items set (plus a PURE
+    /// lossless `compacted` render) and surfaces no marker naming the
+    /// inner hash — its caller appends a whole-mixed-array sentinel of
+    /// its own — so a persisted blob + chunks + index would be orphan
+    /// entries nothing can ever retrieve, burning the COR-4-bounded
+    /// store capacity.
+    ///
+    /// Contract for `persist = false` callers: NEVER surface
+    /// `dropped_summary` / `ccr_hash` / a sentinel-bearing survivor
+    /// `compacted` render from the result — a surfaced pointer to an
+    /// unpersisted hash would dangle (and trip the Python mirror's
+    /// COR-5 fail-open). The pure lossless `compacted` render
+    /// (`dropped_summary` empty) carries no pointer and is safe to ship.
+    fn crush_array_inner(
+        &self,
+        items: &[Value],
+        query_context: &str,
+        bias: f64,
+        persist: bool,
+    ) -> CrushArrayResult {
         let item_strings: Vec<String> = items
             .iter()
             .map(|i| serde_json::to_string(i).unwrap_or_default())
@@ -990,6 +1020,7 @@ impl SmartCrusher {
             &item_strings,
             adaptive_k,
             !lossless_uses_opaque,
+            persist,
         );
 
         // ── Route between the recoverable renders ──
@@ -1053,6 +1084,10 @@ impl SmartCrusher {
         // (a better-suited lossless render — e.g. opaque-blob substitution
         // — exists for this array, so we must not hijack it into a drop).
         allow_skip_override: bool,
+        // When false (COR-28, mixed dict arm), the drop's hash + marker
+        // are computed as usual — routing stays byte-identical — but no
+        // store write happens. See `crush_array_inner` for the contract.
+        persist: bool,
     ) -> LossyOutcome {
         // CCR-BACKED AGGRESSIVE BUDGET: when a CCR store is configured,
         // every dropped row is guaranteed recoverable (unconditional
@@ -1151,17 +1186,25 @@ impl SmartCrusher {
             Some(item_strings),
         );
         let mut result = self.execute_plan(&plan, items);
+        // Computed BEFORE annotation (which only adds keys to kept rows,
+        // never changes the row count) so it can gate the stamping below.
+        let dropped_count = items.len().saturating_sub(result.len());
 
         // Field-aware multiplicity (DESIGN.md Imp2). When rows that are
         // identical-except-identity collapse under the stable-projection
         // hash, the kept representative carries a `_dup_count` so the
-        // model knows N rows existed. This fires ONLY when real
-        // duplication is present (group size > 1); for all-distinct data
-        // (e.g. unique-subject git logs, search results) every group is
-        // size 1, no key is added, and the output bytes are unchanged.
-        let exclude = compute_exclude_set(&analysis.field_stats, items);
-        if !exclude.is_empty() {
-            annotate_dup_counts(&mut result, items, &exclude);
+        // model knows N rows existed. This fires ONLY when the plan
+        // actually dropped rows (COR-33: on a no-drop plan every original
+        // row is already visible, so stamping is token inflation with
+        // zero compression) AND real duplication is present (group size
+        // > 1); for all-distinct data (e.g. unique-subject git logs,
+        // search results) every group is size 1, no key is added, and
+        // the output bytes are unchanged.
+        if dropped_count > 0 {
+            let exclude = compute_exclude_set(&analysis.field_stats, items);
+            if !exclude.is_empty() {
+                annotate_dup_counts(&mut result, items, &exclude);
+            }
         }
 
         // CCR persistence + marker emission. **The store write is the
@@ -1172,10 +1215,9 @@ impl SmartCrusher {
         // surviving rows, so their complement is EXACTLY the dropped
         // set — threaded through so only dropped rows get granular
         // chunks (COR-4: kept rows must never flood the bounded store).
-        let dropped_count = items.len().saturating_sub(result.len());
         let dropped_indices = dropped_indices_from_kept(&plan.keep_indices, items.len());
         let (ccr_hash, dropped_summary, row_index_marker) =
-            match self.persist_dropped(items, dropped_count, &dropped_indices) {
+            match self.persist_dropped(items, dropped_count, &dropped_indices, persist) {
                 Some(persisted) => (
                     Some(persisted.hash),
                     persisted.marker,
@@ -1313,11 +1355,21 @@ impl SmartCrusher {
     /// crusher synthesizes non-original output items (mixed-path
     /// summaries), in which case the index simply covers every original
     /// row not visible verbatim — a safe superset for recovery.
+    ///
+    /// `persist = false` (COR-28, via `crush_array_inner`) computes the
+    /// hash, marker and granular-index decision EXACTLY as above — the
+    /// returned [`DroppedPersist`] is byte-identical, so token routing
+    /// built on it cannot shift — but performs NO store write: the
+    /// caller surfaces no marker naming this hash, so any write would be
+    /// an orphan entry burning COR-4-bounded capacity. The COR-4
+    /// store-flood gate still decides `row_index_marker` the same way in
+    /// both modes.
     fn persist_dropped(
         &self,
         original_items: &[Value],
         dropped_count: usize,
         dropped_indices: &[usize],
+        persist: bool,
     ) -> Option<DroppedPersist> {
         if dropped_count == 0 {
             return None;
@@ -1380,33 +1432,44 @@ impl SmartCrusher {
         if let Some(store) = &self.ccr_store {
             let granular_budget = store.capacity() / GRANULAR_CHUNK_CAPACITY_DIVISOR;
             if !dropped_indices.is_empty() && dropped_indices.len() <= granular_budget {
-                let mut row_hashes: Vec<String> = Vec::with_capacity(dropped_indices.len());
-                for &idx in dropped_indices {
-                    let Some(item) = original_items.get(idx) else {
-                        continue; // out-of-range index: nothing to chunk
-                    };
-                    let row_canonical = canonical_array_json(std::slice::from_ref(item));
-                    let row_hash = hash_canonical(&row_canonical);
-                    store.put(&row_hash, &row_canonical);
-                    row_hashes.push(row_hash);
+                // In-range dropped rows are the chunkable set (out-of-
+                // range indices: nothing to chunk). Resolved up front so
+                // the marker's chunk count stays identical whether or
+                // not the writes below happen (COR-28 persist-skip).
+                let chunk_rows: Vec<&Value> = dropped_indices
+                    .iter()
+                    .filter_map(|&idx| original_items.get(idx))
+                    .collect();
+                if persist {
+                    let mut row_hashes: Vec<String> = Vec::with_capacity(chunk_rows.len());
+                    for item in &chunk_rows {
+                        let row_canonical = canonical_array_json(std::slice::from_ref(*item));
+                        let row_hash = hash_canonical(&row_canonical);
+                        store.put(&row_hash, &row_canonical);
+                        row_hashes.push(row_hash);
+                    }
+                    // Row index: `{hash}#rows` → ["rowhash0", "rowhash1", ...].
+                    // Stored as a JSON array of strings so the retrieval layer can
+                    // parse it and address each dropped row independently. The
+                    // marker advertises `chunk_rows.len()` — EXACTLY the number
+                    // of chunks the index holds (COR-20: it previously claimed
+                    // `dropped_count` chunks over an every-original-row index).
+                    let index_key = format!("{hash}#rows");
+                    let index_payload = serde_json::to_string(&row_hashes).unwrap_or_default();
+                    store.put(&index_key, &index_payload);
                 }
-                // Row index: `{hash}#rows` → ["rowhash0", "rowhash1", ...].
-                // Stored as a JSON array of strings so the retrieval layer can
-                // parse it and address each dropped row independently. The
-                // marker advertises `row_hashes.len()` — EXACTLY the number
-                // of chunks the index holds (COR-20: it previously claimed
-                // `dropped_count` chunks over an every-original-row index).
-                let index_key = format!("{hash}#rows");
-                let index_payload = serde_json::to_string(&row_hashes).unwrap_or_default();
-                store.put(&index_key, &index_payload);
-                row_index_marker = Some(marker_for_row_index(&hash, row_hashes.len()));
+                row_index_marker = Some(marker_for_row_index(&hash, chunk_rows.len()));
             }
         }
 
-        // ── Unconditional whole-blob persist (1A) — written LAST ──
+        // ── Whole-blob persist (1A) — written LAST ──
         // The byte-stable recovery key the invariant + parity depend on.
-        if let Some(store) = &self.ccr_store {
-            store.put(&hash, &canonical);
+        // Unconditional on every persisting path; skipped ONLY for the
+        // surfaced-nowhere mixed-arm inner call (COR-28, persist=false).
+        if persist {
+            if let Some(store) = &self.ccr_store {
+                store.put(&hash, &canonical);
+            }
         }
 
         // ── Unconditional recovery pointer (Defect 1) ──
@@ -1465,7 +1528,8 @@ impl SmartCrusher {
     ) -> Option<Value> {
         let dropped_count = original_items.len().saturating_sub(kept_items.len());
         let dropped_indices = dropped_indices_by_multiset_diff(original_items, kept_items);
-        let persisted = self.persist_dropped(original_items, dropped_count, &dropped_indices)?;
+        let persisted =
+            self.persist_dropped(original_items, dropped_count, &dropped_indices, true)?;
         dropped.push(DroppedRef {
             hash: persisted.hash.clone(),
             row_index_marker: persisted.row_index_marker.clone(),
@@ -1504,6 +1568,10 @@ impl SmartCrusher {
         }
 
         let mut keep_indices: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        // Kept positions whose ORIGINAL item is replaced by a rendered
+        // string (the dict subgroup's lossless table — COR-28b).
+        let mut substitutions: std::collections::BTreeMap<usize, Value> =
+            std::collections::BTreeMap::new();
         let mut strategy_parts: Vec<String> = Vec::new();
 
         for (type_key, indices, values) in groups.into_iter() {
@@ -1515,8 +1583,42 @@ impl SmartCrusher {
 
             match type_key {
                 "dict" => {
-                    let CrushArrayResult { items: crushed, .. } =
-                        self.crush_array(&values, query_context, bias);
+                    // COR-28: run the shared dict pipeline WITHOUT store
+                    // persistence. This arm consumes only the kept-items
+                    // set — the caller appends its own whole-mixed-array
+                    // sentinel (the recovery pointer rides the OUTER
+                    // hash), so an inner persist would write blob +
+                    // chunks + index under a hash no surfaced marker
+                    // ever names: orphan entries burning COR-4-bounded
+                    // capacity.
+                    let CrushArrayResult {
+                        items: crushed,
+                        strategy_info,
+                        compacted,
+                        dropped_summary,
+                        ..
+                    } = self.crush_array_inner(&values, query_context, bias, false);
+                    // COR-28b (EFF-9): ship a PURE lossless win (nothing
+                    // dropped, no sentinel) as ONE rendered table string
+                    // at the subgroup's first position — it was
+                    // previously discarded, shipping the subgroup
+                    // uncompressed while reporting `dict:N->N`. Survivor-
+                    // compacted renders (`dropped_summary` non-empty) are
+                    // NOT substituted: their baked-in sentinel names the
+                    // unpersisted inner hash — a dangling pointer — so
+                    // they keep the kept-items path below.
+                    if dropped_summary.is_empty() {
+                        if let (Some(rendered), Some(&first_idx)) = (compacted, indices.first()) {
+                            keep_indices.insert(first_idx);
+                            substitutions.insert(first_idx, Value::String(rendered));
+                            strategy_parts.push(format!(
+                                "dict:{}->{}",
+                                values.len(),
+                                strategy_info
+                            ));
+                            continue;
+                        }
+                    }
                     // Find which original indices survived by matching
                     // canonical-JSON serialization. Mirrors Python's
                     // `json.dumps(c, sort_keys=True, default=str)`-keyed
@@ -1590,8 +1692,15 @@ impl SmartCrusher {
             }
         }
 
-        // Reassemble in original order.
-        let result: Vec<Value> = keep_indices.iter().map(|&i| items[i].clone()).collect();
+        // Reassemble in original order; a substituted position ships its
+        // rendered string (COR-28b) instead of the original item.
+        let result: Vec<Value> = keep_indices
+            .iter()
+            .map(|&i| match substitutions.remove(&i) {
+                Some(rendered) => rendered,
+                None => items[i].clone(),
+            })
+            .collect();
         let strategy = format!(
             "mixed:adaptive({}->{},{})",
             n,
@@ -1663,14 +1772,19 @@ fn canonical_json_for_match(value: &Value) -> String {
     crate::transforms::anchor_selector::python_json_dumps_sort_keys(value)
 }
 
-/// Stamp `_dup_count` on kept rows whose stable-projection-hash family
-/// (over ALL original `items`, with `exclude` identity columns filtered)
-/// has more than one member (DESIGN.md Imp2).
+/// Stamp `_dup_count` on the kept REPRESENTATIVE of each
+/// stable-projection-hash family (over ALL original `items`, with
+/// `exclude` identity columns filtered) that has more than one member
+/// (DESIGN.md Imp2).
 ///
 /// `_dup_count = N` records that N original rows shared this row's
 /// value-bearing content (differing only in excluded identity columns).
-/// Rows in a singleton family are left untouched, so all-distinct input
-/// is byte-for-byte unchanged. The representative keeps its own real
+/// Only the FIRST kept member of a family — its representative — is
+/// stamped (COR-33): when several members of the same family stay
+/// visible, stamping each of them made N rows each claim N duplicates,
+/// reading like N² originals — token inflation, not information. Rows
+/// in a singleton family are left untouched, so all-distinct input is
+/// byte-for-byte unchanged. The representative keeps its own real
 /// varying values; the dropped duplicates remain CCR-recoverable from
 /// the full-original store entry.
 fn annotate_dup_counts(
@@ -1691,13 +1805,16 @@ fn annotate_dup_counts(
         }
     }
 
+    // Families whose representative has already been stamped — later
+    // kept members of the same family stay untouched (COR-33).
+    let mut stamped: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in kept.iter_mut() {
         if !row.is_object() {
             continue;
         }
         let h = stable_item_hash(row, exclude);
         let count = family_size.get(&h).copied().unwrap_or(1);
-        if count > 1 {
+        if count > 1 && stamped.insert(h) {
             if let Some(obj) = row.as_object_mut() {
                 // Don't clobber a real `_dup_count` field the caller
                 // already had (extremely unlikely; defensive).
@@ -2255,6 +2372,72 @@ mod tests {
         );
     }
 
+    // ---------- COR-33: `_dup_count` stamping ----------
+
+    #[test]
+    fn annotate_dup_counts_stamps_only_the_family_representative() {
+        // COR-33 (representative half): when SEVERAL members of the same
+        // stable-projection family stay visible, only the FIRST kept
+        // member (the representative) may carry `_dup_count`. Stamping
+        // every visible copy made N rows each claim N duplicates —
+        // reading like N² rows — pure token inflation.
+        let all: Vec<Value> = (0..4)
+            .map(|i| json!({"req_id": format!("{i:040x}"), "msg": "dup"}))
+            .collect();
+        let mut kept = vec![all[0].clone(), all[1].clone()];
+        let exclude: std::collections::BTreeSet<String> =
+            std::iter::once("req_id".to_string()).collect();
+        annotate_dup_counts(&mut kept, &all, &exclude);
+        assert_eq!(
+            kept[0].get("_dup_count"),
+            Some(&json!(4)),
+            "the representative records the family size"
+        );
+        assert_eq!(
+            kept[1].get("_dup_count"),
+            None,
+            "non-representative visible copies must NOT be stamped (COR-33)"
+        );
+    }
+
+    #[test]
+    fn dup_count_not_stamped_when_plan_drops_nothing() {
+        // COR-33 (no-drop half): `_dup_count` exists to record rows the
+        // plan COLLAPSED. When the plan dropped nothing every original
+        // row is already visible, so stamping is token inflation with
+        // zero compression. Fixture: 30 all-error rows (the error
+        // constraint pins every row through the over-budget path) in 3
+        // identical-except-identity families, with whole-item dedup
+        // disabled so the duplicates stay visible.
+        let config = SmartCrusherConfig {
+            dedup_identical_items: false,
+            ..SmartCrusherConfig::default()
+        };
+        let c = SmartCrusher::without_compaction(config);
+        let msgs = ["disk full", "auth expired", "cache miss"];
+        let items: Vec<Value> = (0..30)
+            .map(|i| {
+                json!({
+                    "req_id": format!("{i:040x}"),
+                    "status": "error",
+                    "msg": msgs[i % 3],
+                })
+            })
+            .collect();
+        let result = c.crush_array(&items, "", 1.0);
+        assert_eq!(
+            result.items.len(),
+            30,
+            "fixture precondition: all-error rows must produce a no-drop plan, got strategy {}",
+            result.strategy_info
+        );
+        assert!(
+            result.items.iter().all(|r| r.get("_dup_count").is_none()),
+            "a no-drop plan must not stamp `_dup_count` (COR-33); got {:?}",
+            result.items
+        );
+    }
+
     // ---------- crush_mixed_array ----------
 
     #[test]
@@ -2285,8 +2468,13 @@ mod tests {
         }
         let (result, strat) = c.crush_mixed_array(&items, "", 1.0);
         assert!(strat.starts_with("mixed:adaptive("));
-        // The 5 strings (small group) all survive.
-        let str_count = result.iter().filter(|v| v.is_string()).count();
+        // The 5 strings (small group) all survive. (Counted by value:
+        // since COR-28b the dict subgroup may ALSO ship as one rendered
+        // table string, so a blanket is_string() count is ambiguous.)
+        let str_count = result
+            .iter()
+            .filter(|v| v.as_str().is_some_and(|s| s.starts_with("string_")))
+            .count();
         assert_eq!(str_count, 5);
     }
 
@@ -2302,6 +2490,104 @@ mod tests {
         let null_count = result.iter().filter(|v| v.is_null()).count();
         assert_eq!(list_count, 6);
         assert_eq!(null_count, 6);
+    }
+
+    #[test]
+    fn mixed_dict_arm_persists_nothing_to_the_store() {
+        // COR-28(a): the dict subgroup's inner crush must not write
+        // blob + chunks + index into the store — the mixed arm consumes
+        // only the kept-items set and surfaces NO marker naming the
+        // inner hash (the caller appends its own whole-mixed-array
+        // sentinel), so every inner write is an orphan entry burning
+        // COR-4-bounded capacity. Store must stay EMPTY.
+        use crate::ccr::InMemoryCcrStore;
+        use std::sync::Arc;
+        let store = Arc::new(InMemoryCcrStore::new());
+        let store_dyn: Arc<dyn CcrStore> = Arc::clone(&store) as Arc<dyn CcrStore>;
+        // No compaction stage: the dict subgroup must take the LOSSY
+        // path (the persist-writing one), not a lossless render.
+        let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
+            .with_default_oss_setup()
+            .with_ccr_store(store_dyn)
+            .build();
+        let mut items: Vec<Value> = (0..25).map(|i| json!({"id": i, "status": "ok"})).collect();
+        for i in 0..9 {
+            items.push(json!(i));
+        }
+        let (crushed, strat) = c.crush_mixed_array(&items, "", 1.0);
+        assert!(
+            crushed.len() < items.len(),
+            "fixture precondition: the dict subgroup must actually drop rows, strat={strat}"
+        );
+        assert_eq!(
+            store.len(),
+            0,
+            "no surfaced marker names the inner dict-subgroup hash — the \
+             mixed arm must not persist (COR-28), strat={strat}"
+        );
+    }
+
+    #[test]
+    fn mixed_dict_subgroup_ships_lossless_render_when_it_wins() {
+        // COR-28(b) / EFF-9: a PURE lossless win on the dict subgroup
+        // (nothing dropped, no sentinel) used to be thrown away — the
+        // subgroup shipped uncompressed while `strategy_parts` reported
+        // `dict:25->25`. It must ship as ONE rendered table string at
+        // the subgroup's first position instead.
+        let config = SmartCrusherConfig {
+            // Deterministic: lossless wins whenever its gate clears,
+            // independent of tokenizer sizing.
+            routing_policy: RoutingPolicy::LosslessFirst,
+            ..SmartCrusherConfig::default()
+        };
+        let c = SmartCrusher::new(config);
+        // Wide, repetitive df-style rows — compacts far past both
+        // lossless gates (same shape as the small-array lossless test).
+        let mut items: Vec<Value> = (0..25)
+            .map(|i| {
+                json!({
+                    "filesystem": format!("/dev/disk1s{i}"),
+                    "kilobytes_total": 971350180,
+                    "kilobytes_used": 543210 + i,
+                    "capacity_percent": "85%",
+                    "mounted_on": format!("/Volumes/vol_{i}"),
+                })
+            })
+            .collect();
+        for i in 0..4 {
+            items.push(json!(format!("trailing_note_{i}")));
+        }
+        let (crushed, strat) = c.crush_mixed_array(&items, "", 1.0);
+        assert!(
+            strat.contains("dict:25->lossless:table"),
+            "strategy must report the lossless subgroup win, got: {strat}"
+        );
+        let table = crushed
+            .iter()
+            .find_map(|v| v.as_str().filter(|s| s.starts_with("[25]{")));
+        assert!(
+            table.is_some(),
+            "dict subgroup must ship as one rendered table string, got: {crushed:?}"
+        );
+        assert_eq!(
+            crushed.iter().filter(|v| v.is_object()).count(),
+            0,
+            "no raw dict row may remain once the lossless render shipped"
+        );
+        // The render sits at the subgroup's first original position.
+        assert!(
+            crushed
+                .first()
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.starts_with("[25]{")),
+            "the rendered table replaces the subgroup at its first index"
+        );
+        // The 4 trailing strings (small group) still pass through.
+        let trailing = crushed
+            .iter()
+            .filter(|v| v.as_str().is_some_and(|s| s.starts_with("trailing_note_")))
+            .count();
+        assert_eq!(trailing, 4);
     }
 
     #[test]
@@ -3167,7 +3453,7 @@ mod tests {
         let (c, _store) = crusher_with_store();
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i})).collect();
         let persisted = c
-            .persist_dropped(&items, 5, &[25, 26, 27, 28, 29])
+            .persist_dropped(&items, 5, &[25, 26, 27, 28, 29], true)
             .expect("dropped_count>0 → Some");
         let expected = hash_canonical(&canonical_array_json(&items));
         assert_eq!(persisted.hash, expected, "hash scheme must be unchanged");
@@ -3176,7 +3462,7 @@ mod tests {
             .marker
             .contains(&format!("<<ccr:{expected} 5_rows_offloaded>>")));
         // Zero dropped → None (no hash, no marker, no store write).
-        assert!(c.persist_dropped(&items, 0, &[]).is_none());
+        assert!(c.persist_dropped(&items, 0, &[], true).is_none());
     }
 
     // ---------- COR-4 / COR-20: dropped-rows-only granular persist ----------
@@ -3194,7 +3480,7 @@ mod tests {
         // Keep rows 0..7, drop rows 7, 8, 9.
         let dropped_indices = [7usize, 8, 9];
         let persisted = c
-            .persist_dropped(&items, 3, &dropped_indices)
+            .persist_dropped(&items, 3, &dropped_indices, true)
             .expect("drop → Some");
 
         // Marker advertises exactly the chunks the index holds (COR-20).
@@ -3251,7 +3537,7 @@ mod tests {
         let items: Vec<Value> = (0..n_over).map(|i| json!({"id": i})).collect();
         let dropped_indices: Vec<usize> = (0..=budget).collect(); // budget+1 dropped
         let persisted = c
-            .persist_dropped(&items, dropped_indices.len(), &dropped_indices)
+            .persist_dropped(&items, dropped_indices.len(), &dropped_indices, true)
             .expect("drop → Some");
         assert!(
             persisted.row_index_marker.is_none(),
@@ -3269,7 +3555,7 @@ mod tests {
         let (c2, store2) = crusher_with_store();
         let at_budget: Vec<usize> = (0..budget).collect();
         let persisted2 = c2
-            .persist_dropped(&items, at_budget.len(), &at_budget)
+            .persist_dropped(&items, at_budget.len(), &at_budget, true)
             .expect("drop → Some");
         assert!(
             persisted2.row_index_marker.is_some(),
@@ -3279,6 +3565,36 @@ mod tests {
             store2.len(),
             budget + 2,
             "chunks + index + whole-blob at the budget"
+        );
+    }
+
+    #[test]
+    fn persist_dropped_skip_mode_is_marker_identical_and_writes_nothing() {
+        // COR-28 persist-skip contract: `persist = false` must return a
+        // BYTE-IDENTICAL DroppedPersist (hash, whole-blob marker, and
+        // granular row-index marker — the inputs to MinTokens routing)
+        // while writing NOTHING to the store. If the marker text could
+        // shift, the mixed arm's inner routing would shift with it and
+        // the skip would no longer be behavior-invisible.
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..10).map(|i| json!({"id": i})).collect();
+        let dropped_indices = [7usize, 8, 9];
+
+        let skipped = c
+            .persist_dropped(&items, 3, &dropped_indices, false)
+            .expect("drop → Some regardless of persist mode");
+        assert_eq!(store.len(), 0, "persist=false must write nothing");
+
+        let persisted = c
+            .persist_dropped(&items, 3, &dropped_indices, true)
+            .expect("drop → Some");
+        assert_eq!(skipped.hash, persisted.hash);
+        assert_eq!(skipped.marker, persisted.marker);
+        assert_eq!(skipped.row_index_marker, persisted.row_index_marker);
+        assert_eq!(
+            store.len(),
+            5,
+            "persist=true still writes 3 chunks + index + whole-blob"
         );
     }
 
