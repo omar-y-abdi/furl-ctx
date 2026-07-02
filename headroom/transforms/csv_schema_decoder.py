@@ -289,7 +289,14 @@ def _decode_cell(raw: str, type_tag: str) -> Any:
 
 
 def _parse_header_segment(seg: str) -> ColumnSpec | None:
-    """Parse one ``name:type[?][=CONST]`` declaration segment."""
+    """Parse one ``name:type[?][=CONST]`` declaration segment.
+
+    Splitting at the FIRST colon is unambiguous only because the Rust
+    compactor declines compaction for any key containing ``:`` ``,``
+    ``{`` ``}`` ``=`` ``"`` CR/LF or the reserved ``__`` prefix
+    (COR-15, ``column_name_breaks_grammar`` in ``formatter.rs``) —
+    conformant producers never emit such names into the declaration.
+    """
     if ":" not in seg:
         return None
     name, decl = seg.split(":", 1)
