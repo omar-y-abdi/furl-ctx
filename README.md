@@ -99,7 +99,7 @@ Granular extras: `[mcp]` (MCP server), `[dev]`. Requires **Python 3.10+**.
 |---------------|------:|-------:|-------:|----------:|-------------|---------------:|
 | code          |     7 | 41,025 |    471 |       99% | lossy (CCR) |           100% |
 | disk          |     9 |    694 |    347 |       50% | lossless    |           100% |
-| multiturn     |   135 | 14,866 |  2,141 |       86% | lossy (CCR) |           100% |
+| multiturn     |   135 | 14,866 |  2,073 |       86% | lossy (CCR) |           100% |
 | logs          |    90 |  8,595 |    619 |       93% | lossy (CCR) |           100% |
 | search        |    90 |  4,102 |    318 |       92% | lossy (CCR) |           100% |
 | repeated logs |    90 |  3,621 |    120 |       97% | lossy (CCR) |           100% |
