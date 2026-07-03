@@ -123,7 +123,13 @@ impl CrushabilityAnalysis {
 /// Complete analysis of an array.
 ///
 /// Mirrors `ArrayAnalysis` at `smart_crusher.py:887-897`. `field_stats`
-/// and `constant_fields` use `BTreeMap` for sorted-by-key iteration.
+/// uses `BTreeMap` for sorted-by-key iteration. (Per-field constancy
+/// lives on `FieldStats.is_constant` / `constant_value`, which
+/// `estimate_reduction` reads; the compaction stage's constant-column
+/// fold computes its own. The old aggregate `constant_fields` snapshot —
+/// and the `factor_out_constants` config knob that toggled copying it
+/// into `CompressionPlan` — had zero downstream readers and were
+/// deleted as dead config.)
 ///
 /// # Sort vs insertion order — known parity nuance
 ///
@@ -150,7 +156,6 @@ pub struct ArrayAnalysis {
     /// One of: `"time_series"`, `"logs"`, `"search_results"`, `"generic"`.
     pub detected_pattern: String,
     pub recommended_strategy: CompressionStrategy,
-    pub constant_fields: BTreeMap<String, Value>,
     pub estimated_reduction: f64,
     pub crushability: Option<CrushabilityAnalysis>,
 }
@@ -166,7 +171,6 @@ pub struct ArrayAnalysis {
 pub struct CompressionPlan {
     pub strategy: CompressionStrategy,
     pub keep_indices: Vec<usize>,
-    pub constant_fields: BTreeMap<String, Value>,
     /// `(start, end, summary)` triples for summarized runs. Python uses
     /// `list[tuple[int, int, dict]]`; we use `Value` for the summary so
     /// any JSON shape is representable.
@@ -182,7 +186,6 @@ impl Default for CompressionPlan {
         CompressionPlan {
             strategy: CompressionStrategy::None,
             keep_indices: Vec::new(),
-            constant_fields: BTreeMap::new(),
             summary_ranges: Vec::new(),
             cluster_field: None,
             sort_field: None,

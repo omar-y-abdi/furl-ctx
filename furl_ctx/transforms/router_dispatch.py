@@ -122,6 +122,13 @@ class StrategyDispatcher:
         # loud, not degrade into a silent passthrough (#4-upstream). Any
         # strategy without a branch here falls through to the generic
         # passthrough fallback at the bottom, so the dispatch stays total.
+        #
+        # `lossless_only` (strict lossless-or-passthrough): the search /
+        # log / diff compressors all DROP lines, so their arms are gated
+        # off below and those strategies resolve to the passthrough
+        # fallback — same shape as `enable_*_compressor=False`. The
+        # SMART_CRUSHER arm stays live: the Rust crusher routes
+        # lossless-or-passthrough internally in that mode.
         if strategy == CompressionStrategy.SMART_CRUSHER:
             # The no-savings Log fallback is handled ONCE by the generic
             # post-dispatch fallback below.
@@ -137,7 +144,7 @@ class StrategyDispatcher:
                     decision_reason = "smart_crusher"
 
         elif strategy == CompressionStrategy.SEARCH:
-            if self.config.enable_search_compressor:
+            if self.config.enable_search_compressor and not self.config.lossless_only:
                 compressor = get_search_compressor()
                 if compressor:
                     compressor_name = type(compressor).__name__
@@ -149,7 +156,7 @@ class StrategyDispatcher:
                     decision_reason = "search_compressor"
 
         elif strategy == CompressionStrategy.LOG:
-            if self.config.enable_log_compressor:
+            if self.config.enable_log_compressor and not self.config.lossless_only:
                 compressor = get_log_compressor()
                 if compressor:
                     compressor_name = type(compressor).__name__
@@ -165,7 +172,7 @@ class StrategyDispatcher:
                     decision_reason = "log_compressor"
 
         elif strategy == CompressionStrategy.DIFF:
-            compressor = get_diff_compressor()
+            compressor = get_diff_compressor() if not self.config.lossless_only else None
             if compressor:
                 compressor_name = type(compressor).__name__
                 result = compressor.compress(content, context=context)
@@ -207,12 +214,14 @@ class StrategyDispatcher:
                     actual_strategy = CompressionStrategy.PASSTHROUGH
                     compressor_name = "Passthrough"
                     decision_reason = f"{decision_reason}_no_savings_passthrough"
-                elif self.config.enable_log_compressor:
+                elif self.config.enable_log_compressor and not self.config.lossless_only:
                     # Last-ditch: line-structured compressors (log dumps
                     # land here — repetitive JSONL that SmartCrusher
                     # can't shrink but the log compressor can). Only
                     # attempted when the strategy was SMART_CRUSHER so
-                    # we don't reroute genuine code/diff content.
+                    # we don't reroute genuine code/diff content — and
+                    # never under `lossless_only` (the log compressor
+                    # drops lines).
                     log_compressor = get_log_compressor()
                     if log_compressor is not None:
                         strategy_chain.append(CompressionStrategy.LOG.value)

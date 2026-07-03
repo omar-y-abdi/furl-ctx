@@ -550,9 +550,27 @@ class ContentRouterConfig:
     min_ratio_relaxed: float = 0.85  # when context is mostly empty (stricter)
     min_ratio_aggressive: float = 0.95  # when context is nearly full (permissive)
 
-    # CCR (Compress-Cache-Retrieve) settings for SmartCrusher
-    ccr_enabled: bool = True  # Enable CCR marker injection for reversible compression
-    ccr_inject_marker: bool = True  # Add retrieval markers to compressed content
+    # CCR (Compress-Cache-Retrieve) retrieval-tool preference.
+    #
+    # HONEST SEMANTICS (these flags are NOT a data-loss switch): recovery
+    # pointers are UNCONDITIONAL on every drop — the lossy row-drop
+    # `<<ccr:HASH>>` sentinel, the opaque-substitution pointer, and the
+    # log/search/diff `Retrieve …: hash=…` marker lines are all emitted
+    # regardless of these flags, and the backing store writes happen
+    # regardless too (a drop without its pointer is silent loss, which the
+    # recovery invariant forbids — Defect 1, pinned by
+    # tests/test_ccr_recovery_invariant.py). What the flags actually do:
+    #   * gate the reversible CCR-offload fallback (`_should_ccr_offload`
+    #     — offload is optional, so "CCR off" honestly disables it);
+    #   * flow to `CCRConfig` / the Rust `enable_ccr_marker` field as the
+    #     retrieval-tool advertisement preference, preserved for external
+    #     embedders that read it back when deciding whether to inject the
+    #     `furl_retrieve` tool.
+    # To ship output with NO `<<ccr:` pointers at all, use
+    # `lossless_only=True` below — that mode never drops, so there is
+    # nothing to point at.
+    ccr_enabled: bool = True
+    ccr_inject_marker: bool = True
     smart_crusher_max_items_after_crush: int | None = None
     smart_crusher_with_compaction: bool = True
     # Routing policy for the lossless-vs-lossy-recoverable choice (both
@@ -560,6 +578,18 @@ class ContentRouterConfig:
     # ships whichever render is fewer tokens; ``"lossless-first"`` keeps
     # the legacy lossless-wins-on-byte-ratio behavior.
     smart_crusher_routing_policy: str = "min-tokens"
+
+    # STRICT lossless-or-passthrough mode (default OFF — behavior
+    # unchanged). When True, only proven-lossless transforms run: JSON
+    # arrays are either replaced by a decoder-verifiable, opaque-free
+    # lossless render (SmartCrusher's compaction tier) or passed through
+    # untouched, and the lossy compressor routes (search / log / diff —
+    # all of which drop lines) plus the CCR-offload fallback resolve to
+    # passthrough. Output carries NO ``<<ccr:`` pointers and no
+    # ``Retrieve …: hash=…`` marker lines because nothing is ever
+    # dropped or substituted. For users who cannot tolerate ANY visible
+    # information reduction, even a CCR-recoverable one.
+    lossless_only: bool = False
 
     # Last-resort reversible offload: large content no compressor could
     # shrink is stored byte-exact in the CCR store and ships as an identity
@@ -909,12 +939,15 @@ class ContentRouter(Transform):
         """Offload only large content the strategy chain left essentially
         uncompressed, when the CCR recovery plane is on, and never for
         content that already carries a real marker (its producer owns
-        recovery)."""
+        recovery). Never under ``lossless_only`` — the offload replaces
+        visible content with a preview + pointer, which is exactly the
+        (recoverable) information reduction strict mode forbids."""
         cfg = self.config
         return (
             cfg.ccr_offload_fallback
             and cfg.ccr_enabled
             and cfg.ccr_inject_marker
+            and not cfg.lossless_only
             and len(content) >= _OFFLOAD_MIN_CHARS
             and result.compression_ratio >= _OFFLOAD_TRIGGER_RATIO
             and not _looks_like_ccr_output(content)

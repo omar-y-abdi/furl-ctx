@@ -193,7 +193,6 @@ class SmartCrusherConfig:
     similarity_threshold: float = 0.8
     max_items_after_crush: int = 15
     preserve_change_points: bool = True
-    factor_out_constants: bool = False
     include_summaries: bool = False
     dedup_identical_items: bool = True
     first_fraction: float = 0.3
@@ -214,6 +213,17 @@ class SmartCrusherConfig:
     #   whenever it clears ``lossless_min_savings_ratio``. Used by the
     #   lossless round-trip suite, which asserts the lossless rendering.
     routing_policy: str = "min-tokens"
+    # STRICT lossless-or-passthrough mode (default OFF — behavior
+    # unchanged). When True, only proven-lossless transforms may change
+    # the output: an array is either replaced by a decoder-verifiable,
+    # opaque-free lossless render or passed through untouched. Lossy
+    # candidates are never built — no row drops, no ``<<ccr:`` pointers
+    # of any shape, no opaque-blob substitution, no non-dict array
+    # sampling, no object key-crush, and no CCR store writes (nothing is
+    # dropped, so there is nothing to recover). For callers who cannot
+    # tolerate ANY visible information reduction, even a CCR-recoverable
+    # one.
+    lossless_only: bool = False
 
 
 # ─── Rust-backed SmartCrusher ─────────────────────────────────────────────

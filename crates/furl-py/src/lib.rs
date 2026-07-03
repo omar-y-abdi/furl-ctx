@@ -513,7 +513,6 @@ impl PySmartCrusherConfig {
         similarity_threshold = 0.8,
         max_items_after_crush = 15,
         preserve_change_points = true,
-        factor_out_constants = false,
         include_summaries = false,
         dedup_identical_items = true,
         first_fraction = 0.3,
@@ -522,6 +521,7 @@ impl PySmartCrusherConfig {
         lossless_min_savings_ratio = 0.30,
         enable_ccr_marker = true,
         routing_policy = "min-tokens",
+        lossless_only = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -533,7 +533,6 @@ impl PySmartCrusherConfig {
         similarity_threshold: f64,
         max_items_after_crush: usize,
         preserve_change_points: bool,
-        factor_out_constants: bool,
         include_summaries: bool,
         dedup_identical_items: bool,
         first_fraction: f64,
@@ -542,6 +541,7 @@ impl PySmartCrusherConfig {
         lossless_min_savings_ratio: f64,
         enable_ccr_marker: bool,
         routing_policy: &str,
+        lossless_only: bool,
     ) -> PyResult<Self> {
         // Parse the kebab-case routing policy at the boundary so a typo
         // is a clear ValueError, not a silent default.
@@ -561,7 +561,6 @@ impl PySmartCrusherConfig {
                 similarity_threshold,
                 max_items_after_crush,
                 preserve_change_points,
-                factor_out_constants,
                 include_summaries,
                 dedup_identical_items,
                 first_fraction,
@@ -570,6 +569,7 @@ impl PySmartCrusherConfig {
                 lossless_min_savings_ratio,
                 enable_ccr_marker,
                 routing_policy,
+                lossless_only,
                 // Entropy-floor crushability override: on by default so
                 // the Python `compress()` pipeline crushes near-unique
                 // no-signal data recoverably (deterministic, aggressive).
@@ -613,10 +613,6 @@ impl PySmartCrusherConfig {
         self.inner.preserve_change_points
     }
     #[getter]
-    fn factor_out_constants(&self) -> bool {
-        self.inner.factor_out_constants
-    }
-    #[getter]
     fn include_summaries(&self) -> bool {
         self.inner.include_summaries
     }
@@ -647,6 +643,10 @@ impl PySmartCrusherConfig {
     #[getter]
     fn routing_policy(&self) -> &'static str {
         self.inner.routing_policy.as_str()
+    }
+    #[getter]
+    fn lossless_only(&self) -> bool {
+        self.inner.lossless_only
     }
 
     fn __repr__(&self) -> String {

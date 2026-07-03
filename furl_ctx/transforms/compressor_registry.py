@@ -57,6 +57,9 @@ class CompressorRegistry:
                         self.config.smart_crusher_max_items_after_crush
                     )
                 crusher_config.routing_policy = self.config.smart_crusher_routing_policy
+                # Strict lossless-or-passthrough mode: threaded through to
+                # the Rust crusher's routing (lossy candidates never built).
+                crusher_config.lossless_only = self.config.lossless_only
                 self._smart_crusher = SmartCrusher(
                     config=crusher_config,
                     ccr_config=ccr_config,

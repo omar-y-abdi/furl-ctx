@@ -91,9 +91,6 @@ pub struct SmartCrusherConfig {
     pub max_items_after_crush: usize,
     /// Whether to preserve detected change points. Default true.
     pub preserve_change_points: bool,
-    /// Factor out fields with constant values across all items. Default
-    /// false (disabled — preserves original schema).
-    pub factor_out_constants: bool,
     /// Include generated text summaries in output. Default false (disabled
     /// — no generated text).
     pub include_summaries: bool,
@@ -149,6 +146,22 @@ pub struct SmartCrusherConfig {
     /// lossless rendering directly). No Python-parity counterpart — this
     /// governs Rust-side dispatch only.
     pub routing_policy: RoutingPolicy,
+    /// STRICT lossless-or-passthrough mode. Default `false`.
+    ///
+    /// When `true`, only PROVEN-lossless transforms may change the
+    /// output: an array is either replaced by a decoder-verifiable,
+    /// opaque-free lossless render (every row reconstructible from the
+    /// output alone, no `<<ccr:` pointer of any shape) or passed through
+    /// untouched. Lossy-recoverable candidates are NEVER BUILT — no row
+    /// drops, no `_ccr_dropped` sentinels, no opaque-blob substitution,
+    /// no string/number/mixed-array sampling, no object key-crush — so
+    /// no CCR store write happens on this path either (nothing is
+    /// dropped, so there is nothing to recover).
+    ///
+    /// For users who cannot tolerate ANY visible information reduction,
+    /// even a CCR-recoverable one. The recovery invariant is trivially
+    /// preserved: it constrains drops, and this mode has none.
+    pub lossless_only: bool,
     /// Entropy-floor crushability override. When `true` (default) AND a
     /// CCR store is configured, `crush_array_lossy` ignores the
     /// analyzer's no-signal SKIP verdict on near-unique data
@@ -189,7 +202,6 @@ impl Default for SmartCrusherConfig {
             similarity_threshold: 0.8,
             max_items_after_crush: 15,
             preserve_change_points: true,
-            factor_out_constants: false,
             include_summaries: false,
             dedup_identical_items: true,
             first_fraction: 0.3,
@@ -198,6 +210,7 @@ impl Default for SmartCrusherConfig {
             lossless_min_savings_ratio: 0.30,
             enable_ccr_marker: true,
             routing_policy: RoutingPolicy::MinTokens,
+            lossless_only: false,
             crush_unique_entities_when_recoverable: true,
         }
     }
@@ -221,7 +234,6 @@ mod tests {
         assert_eq!(c.similarity_threshold, 0.8);
         assert_eq!(c.max_items_after_crush, 15);
         assert!(c.preserve_change_points);
-        assert!(!c.factor_out_constants);
         assert!(!c.include_summaries);
         assert!(c.dedup_identical_items);
         assert_eq!(c.first_fraction, 0.3);
@@ -231,6 +243,9 @@ mod tests {
         assert!(c.enable_ccr_marker);
         // Route-by-min-tokens is the default max-compression policy.
         assert_eq!(c.routing_policy, RoutingPolicy::MinTokens);
+        // Strict lossless-or-passthrough mode is OFF by default —
+        // current (lossy-recoverable) behavior unchanged.
+        assert!(!c.lossless_only);
         // Entropy-floor override on by default (recoverable aggressive
         // crush on near-unique data); the byte-faithful live-zone
         // dispatcher opts out explicitly.

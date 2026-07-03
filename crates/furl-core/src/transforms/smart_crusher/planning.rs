@@ -110,11 +110,6 @@ impl<'a> SmartCrusherPlanner<'a> {
 
         let mut plan = CompressionPlan {
             strategy: analysis.recommended_strategy,
-            constant_fields: if self.config.factor_out_constants {
-                analysis.constant_fields.clone()
-            } else {
-                BTreeMap::new()
-            },
             ..CompressionPlan::default()
         };
 
@@ -812,7 +807,6 @@ mod tests {
             field_stats: BTreeMap::new(),
             detected_pattern: "generic".to_string(),
             recommended_strategy: CompressionStrategy::Skip,
-            constant_fields: BTreeMap::new(),
             estimated_reduction: 0.0,
             crushability: None,
         };

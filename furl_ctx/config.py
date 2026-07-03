@@ -258,7 +258,6 @@ class SmartCrusherConfig:
     similarity_threshold: float = 0.8  # For clustering similar strings
     max_items_after_crush: int = 15  # Target max items in output
     preserve_change_points: bool = True
-    factor_out_constants: bool = False  # Disabled - preserves original schema
     include_summaries: bool = False  # Disabled - no generated text
 
     # Relevance scoring configuration
@@ -308,10 +307,24 @@ class CCRConfig:
     - Cache has TTL (default 1800 seconds) - retrieval fails after expiration
     - Memory usage: ~1KB per cached entry
     - Only works with array compression (not string truncation)
+
+    HONEST FLAG SEMANTICS (neither flag is a data-loss switch): whenever
+    the engine drops or substitutes a distinct item, the recovery pointer
+    is surfaced and the store is written UNCONDITIONALLY — regardless of
+    these flags (a drop without its pointer is silent loss, which the
+    recovery invariant forbids; pinned by
+    tests/test_ccr_recovery_invariant.py). The flags are the
+    retrieval-tool advertisement preference: they flow to the Rust
+    ``enable_ccr_marker`` field and are preserved on
+    ``SmartCrusher._ccr_config`` for embedders that read them back when
+    deciding whether to inject the ``furl_retrieve`` tool; the router
+    additionally requires them for the optional CCR-offload fallback.
+    To get output with no ``<<ccr:`` pointers at all, use the router's
+    ``lossless_only`` mode — it never drops, so nothing needs a pointer.
     """
 
-    enabled: bool = True  # Enable CCR (cache + retrieval markers)
-    inject_retrieval_marker: bool = True  # Add retrieval hint to compressed output
+    enabled: bool = True  # Retrieval-tool advertisement preference (see above)
+    inject_retrieval_marker: bool = True  # Retrieval-tool advertisement preference (see above)
 
 
 @dataclass

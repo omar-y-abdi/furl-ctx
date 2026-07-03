@@ -198,6 +198,19 @@ impl SmartCrusherBuilder {
             (Some(stage), Some(store)) => Some(stage.with_ccr_store(Arc::clone(store))),
             (stage, _) => stage,
         };
+        // Strict lossless-or-passthrough (`lossless_only`): opaque
+        // substitution replaces visible bytes with a `<<ccr:` pointer AND
+        // writes the store EAGERLY inside `compact()` — before the crusher
+        // could reject the render — so it must be switched off at the
+        // stage, not filtered at the routing layer. Composed here for the
+        // same any-order reason as the store wiring above.
+        let compaction = match compaction {
+            Some(mut stage) if self.config.lossless_only => {
+                stage.config.substitute_opaque = false;
+                Some(stage)
+            }
+            stage => stage,
+        };
         // Default the routing tokenizer to a gpt-4o tiktoken counter when
         // the caller did not supply one. Only the relative ranking of the
         // two candidate renders matters to the routing choice, so the

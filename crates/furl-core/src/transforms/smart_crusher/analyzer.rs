@@ -64,7 +64,6 @@ impl SmartAnalyzer {
                 field_stats: BTreeMap::new(),
                 detected_pattern: "generic".to_string(),
                 recommended_strategy: CompressionStrategy::None,
-                constant_fields: BTreeMap::new(),
                 estimated_reduction: 0.0,
                 crushability: None,
             };
@@ -90,19 +89,6 @@ impl SmartAnalyzer {
 
         let pattern = self.detect_pattern(&field_stats, items);
 
-        // Constant fields: name → value snapshot. Iteration is BTreeMap
-        // sorted, so result map is also key-sorted.
-        let constant_fields: BTreeMap<String, Value> = field_stats
-            .iter()
-            .filter_map(|(k, v)| {
-                if v.is_constant {
-                    v.constant_value.clone().map(|val| (k.clone(), val))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         let crushability = self.analyze_crushability(items, &field_stats);
 
         let strategy =
@@ -119,7 +105,6 @@ impl SmartAnalyzer {
             field_stats,
             detected_pattern: pattern,
             recommended_strategy: strategy,
-            constant_fields,
             estimated_reduction: reduction,
             crushability: Some(crushability),
         }

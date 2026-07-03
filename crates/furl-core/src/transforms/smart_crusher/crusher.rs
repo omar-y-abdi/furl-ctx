@@ -613,6 +613,15 @@ impl SmartCrusher {
                 let n = arr.len();
                 if n >= self.config.min_items_to_analyze {
                     let arr_type = classify_array(arr);
+                    // Strict lossless-or-passthrough: the non-dict crushers
+                    // (string / number / mixed) are sampling drops with a
+                    // `<<ccr:HASH>>` recovery sentinel — lossy-recoverable,
+                    // so they never run under `lossless_only`. Their match
+                    // guards below fail in that mode and the array falls
+                    // through to plain recursive descent (nested content is
+                    // still processed under the same strict rules). The
+                    // DictArray arm stays unguarded: `crush_array` itself
+                    // routes lossless-or-passthrough in this mode.
                     match arr_type {
                         ArrayType::DictArray => {
                             let result = self.crush_array(arr, query_context, bias);
@@ -697,7 +706,7 @@ impl SmartCrusher {
                             }
                             return (Value::Array(items), info_parts.join(","));
                         }
-                        ArrayType::StringArray => {
+                        ArrayType::StringArray if !self.config.lossless_only => {
                             let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
                             let (crushed, strategy) = crush_string_array(&strs, &self.config, bias);
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
@@ -717,7 +726,7 @@ impl SmartCrusher {
                             }
                             return (Value::Array(crushed_values), info_parts.join(","));
                         }
-                        ArrayType::NumberArray => {
+                        ArrayType::NumberArray if !self.config.lossless_only => {
                             let (crushed, strategy) = crush_number_array(arr, &self.config, bias);
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
                             let mut crushed = crushed;
@@ -730,7 +739,7 @@ impl SmartCrusher {
                             }
                             return (Value::Array(crushed), info_parts.join(","));
                         }
-                        ArrayType::MixedArray => {
+                        ArrayType::MixedArray if !self.config.lossless_only => {
                             let (crushed, strategy) =
                                 self.crush_mixed_array(arr, query_context, bias);
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
@@ -784,8 +793,11 @@ impl SmartCrusher {
                 }
 
                 // Second pass: if the object itself has many keys,
-                // compress at the key level.
-                if processed.len() >= self.config.min_items_to_analyze {
+                // compress at the key level. Key-crush DROPS keys with no
+                // recovery pointer at all, so it is doubly out under strict
+                // lossless-or-passthrough.
+                if processed.len() >= self.config.min_items_to_analyze && !self.config.lossless_only
+                {
                     let (crushed_dict, strategy) = crush_object(&processed, &self.config, bias);
                     if strategy != "object:passthrough" {
                         info_parts.push(strategy);
@@ -867,11 +879,17 @@ impl SmartCrusher {
         // 2. Opaque blob: substitute with CCR marker AND stash the
         // original in the store so retrieval works. Hash + format
         // identical to walker.rs via the shared helper — zero drift.
-        let cfg = ClassifyConfig::default();
-        if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.to_string()), &cfg) {
-            let marker = emit_opaque_ccr_marker(s, &kind, self.ccr_store.as_ref());
-            let kind_label = opaque_kind_label(&kind);
-            return (Value::String(marker), format!("string_ccr:{kind_label}"));
+        // Substitution replaces visible bytes with a `<<ccr:` pointer —
+        // recoverable, but a visible information reduction — so it is
+        // disabled under strict `lossless_only` (the blob passes through
+        // verbatim; no store write happens: nothing was hidden).
+        if !self.config.lossless_only {
+            let cfg = ClassifyConfig::default();
+            if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.to_string()), &cfg) {
+                let marker = emit_opaque_ccr_marker(s, &kind, self.ccr_store.as_ref());
+                let kind_label = opaque_kind_label(&kind);
+                return (Value::String(marker), format!("string_ccr:{kind_label}"));
+            }
         }
 
         // 3. Plain string — passthrough.
@@ -1021,7 +1039,14 @@ impl SmartCrusher {
                 let (c, rendered) = stage.run(items);
                 // Read `contains_opaque_ref` before `c` is potentially moved.
                 let uses_opaque = c.contains_opaque_ref();
-                let candidate = if c.is_decoder_verifiable() {
+                // Strict mode tightens the lossless claim to "reconstructible
+                // from the visible output ALONE": an opaque-substituted render
+                // hides blob bytes behind a `<<ccr:` pointer (recoverable, but
+                // a visible information reduction), so it is NOT a candidate
+                // under `lossless_only` — same rule the small-array zone
+                // already applies unconditionally.
+                let opaque_ok = !(self.config.lossless_only && uses_opaque);
+                let candidate = if c.is_decoder_verifiable() && opaque_ok {
                     let input_bytes = estimate_array_bytes(&item_strings);
                     let savings_ratio = if input_bytes > 0 {
                         1.0 - (rendered.len() as f64 / input_bytes as f64)
@@ -1049,6 +1074,29 @@ impl SmartCrusher {
             } else {
                 (None, false)
             };
+
+        // ── Strict lossless-or-passthrough (`lossless_only`) ──
+        //
+        // The lossy-recoverable candidate is NEVER BUILT in this mode: no
+        // rows are dropped, no `<<ccr:HASH>>` sentinel is minted, and no
+        // CCR store write happens (`crush_array_lossy` is not invoked, so
+        // there are no deferred writes to leak either). Ship the proven-
+        // lossless render when it cleared its gates; otherwise pass every
+        // row through untouched.
+        if self.config.lossless_only {
+            return match lossless_candidate {
+                Some(lossless) => lossless,
+                None => CrushArrayResult {
+                    items: items.to_vec(),
+                    strategy_info: "skip:lossless_only".to_string(),
+                    ccr_hash: None,
+                    dropped_summary: String::new(),
+                    compacted: None,
+                    compaction_kind: None,
+                    row_index_marker: None,
+                },
+            };
+        }
 
         // ── Lossy-recoverable candidate ──
         //
@@ -3164,6 +3212,346 @@ mod tests {
         assert_eq!(
             recovered, canonical,
             "recovered payload must equal the canonical original array"
+        );
+    }
+
+    // ---------- strict lossless-or-passthrough (`lossless_only`) ----------
+
+    /// Build a store-backed crusher with `lossless_only` plus any extra
+    /// config the test needs, returning the concrete store handle so
+    /// tests can assert it never grows.
+    fn lossless_only_crusher(
+        cfg: SmartCrusherConfig,
+    ) -> (SmartCrusher, Arc<crate::ccr::InMemoryCcrStore>) {
+        use crate::ccr::InMemoryCcrStore;
+        use crate::transforms::smart_crusher::SmartCrusherBuilder;
+
+        let store = Arc::new(InMemoryCcrStore::new());
+        let store_dyn: Arc<dyn CcrStore> = Arc::clone(&store) as Arc<dyn CcrStore>;
+        let c = SmartCrusherBuilder::new(cfg)
+            .with_default_oss_setup()
+            .with_default_compaction()
+            .with_ccr_store(store_dyn)
+            .build();
+        (c, store)
+    }
+
+    #[test]
+    fn lossless_only_droppable_array_passes_through_no_markers_no_store_writes() {
+        // The shape that DOES lossy-drop under defaults (see
+        // `lossy_falls_through_when_savings_below_threshold`): low
+        // uniqueness, lossless gate forced unreachable. Under
+        // `lossless_only` the lossy candidate must never be BUILT —
+        // every row passes through, no `<<ccr:` pointer of any shape is
+        // minted, and the store stays empty.
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_min_savings_ratio: 0.99, // lossless never clears
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let items: Vec<Value> = (0..50).map(|_| json!({"status": "ok"})).collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert_eq!(result.items.len(), 50, "no row may be dropped");
+        assert_eq!(result.strategy_info, "skip:lossless_only");
+        assert!(result.ccr_hash.is_none());
+        assert!(result.dropped_summary.is_empty());
+        assert!(result.compacted.is_none());
+        assert_eq!(store.len(), 0, "strict mode must not write the CCR store");
+    }
+
+    #[test]
+    fn lossless_only_ships_proven_lossless_render_without_markers() {
+        // Cleanly tabular input still compacts LOSSLESSLY in strict mode
+        // — the mode forbids lossy candidates, not the verified lossless
+        // tier. The render must carry every row and no `<<ccr:` pointer.
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let items: Vec<Value> = (0..50)
+            .map(|i| json!({"id": i, "name": format!("u_{i}"), "status": "ok"}))
+            .collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        let compacted = result.compacted.expect("lossless render should ship");
+        assert!(compacted.starts_with("[50]{"), "got: {compacted}");
+        assert!(
+            !compacted.contains("<<ccr:"),
+            "strict-mode lossless render must be pointer-free, got: {compacted}"
+        );
+        assert!(result.strategy_info.starts_with("lossless:table"));
+        assert_eq!(result.items.len(), 50);
+        assert!(result.ccr_hash.is_none());
+        assert!(result.dropped_summary.is_empty());
+        assert_eq!(store.len(), 0, "a pure lossless win writes nothing");
+    }
+
+    #[test]
+    fn lossless_only_rejects_opaque_bearing_lossless_render() {
+        // Long base64 columns normally make the compactor substitute
+        // cells with `<<ccr:HASH,base64,SIZE>>` (opaque refs) — a
+        // recoverable render that still hides visible bytes. Strict mode
+        // must neither ship such a render NOR write the store: the
+        // builder disables the stage's `substitute_opaque` (the Defect-2
+        // store write is EAGER inside `compact()`, so a routing-layer
+        // rejection alone would come after the write), and the blobs-
+        // verbatim render then fails the savings gate → passthrough.
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let blob = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(64);
+        let items: Vec<Value> = (0..30)
+            .map(|i| json!({"path": format!("src/f{i}.py"), "content": blob.clone()}))
+            .collect();
+
+        // Counterfactual precondition: under the DEFAULT config this very
+        // fixture ships an opaque-substituted render (pointers in the
+        // output) — proving the strict-mode decline below is the work of
+        // the new gates, not an accident of the fixture.
+        let (default_c, _s) = lossless_only_crusher(SmartCrusherConfig::default());
+        let default_result = default_c.crush_array(&items, "", 1.0);
+        assert!(
+            default_result
+                .compacted
+                .as_deref()
+                .is_some_and(|r| r.contains("<<ccr:")),
+            "fixture precondition: default config must ship an opaque render, got {}",
+            default_result.strategy_info
+        );
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert_eq!(result.items.len(), 30, "nothing may be dropped");
+        assert!(result.ccr_hash.is_none());
+        assert!(result.dropped_summary.is_empty());
+        assert_eq!(
+            store.len(),
+            0,
+            "the eager Defect-2 opaque write must not fire in strict mode"
+        );
+        // With substitution off, the CONSTANT blob column folds into the
+        // declaration (`content:string=<blob>` — verbatim, exactly once):
+        // a legitimately PURE lossless render that may still win the
+        // savings gate. Whichever way the gate lands, the strict-mode
+        // output must carry the blob bytes verbatim and no pointer.
+        match &result.compacted {
+            Some(render) => {
+                assert!(
+                    !render.contains("<<ccr:"),
+                    "strict-mode render must be pointer-free"
+                );
+                assert!(
+                    render.contains(&blob),
+                    "the blob must appear verbatim in the render"
+                );
+                assert!(result.strategy_info.starts_with("lossless:"));
+            }
+            None => {
+                let rendered = serde_json::to_string(&result.items).unwrap();
+                assert!(!rendered.contains("<<ccr:"), "no pointer may be minted");
+                assert!(rendered.contains(&blob), "blobs must stay verbatim");
+            }
+        }
+    }
+
+    #[test]
+    fn lossless_only_distinct_blob_rows_pass_through_untouched() {
+        // DISTINCT per-row blobs (distinct at BOTH ends, so neither the
+        // constant fold nor the affix/head-dict encoders apply): the
+        // blobs-verbatim render cannot clear the savings gate, and the
+        // opaque-substituted render is disabled in strict mode — so the
+        // array must pass through untouched with an empty store.
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let base = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let items: Vec<Value> = (0..30)
+            .map(|i| {
+                json!({
+                    "path": format!("src/f{i}.py"),
+                    "content": format!("{i:04}{}{i:04}", base.repeat(64)),
+                })
+            })
+            .collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert_eq!(result.items.len(), 30, "nothing may be dropped");
+        assert!(result.compacted.is_none(), "no render can clear the gate");
+        assert!(result.ccr_hash.is_none());
+        assert!(result.dropped_summary.is_empty());
+        assert_eq!(store.len(), 0, "strict mode must not write the store");
+        let rendered = serde_json::to_string(&result.items).unwrap();
+        assert!(!rendered.contains("<<ccr:"), "no pointer may be minted");
+    }
+
+    #[test]
+    fn lossless_only_routing_gate_declines_opaque_render_even_if_stage_substitutes() {
+        // Belt-and-braces layer: the ROUTING gate (`opaque_ok` in
+        // `crush_array_inner`) must decline an opaque-bearing render even
+        // when a hand-composed crusher pairs `lossless_only` with a stage
+        // that still substitutes (e.g. via `from_parts` — the production
+        // builder always disables `substitute_opaque`, but the strict-mode
+        // output invariant must not depend on wiring).
+        let (mut c, _store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        // Adversarial wiring: re-enable substitution behind the mode's back.
+        c.compaction
+            .as_mut()
+            .expect("builder installs a stage")
+            .config
+            .substitute_opaque = true;
+        let blob = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(64);
+        let items: Vec<Value> = (0..30)
+            .map(|i| json!({"path": format!("src/f{i}.py"), "content": blob.clone()}))
+            .collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert!(
+            result.compacted.is_none(),
+            "routing gate must decline the opaque render in strict mode"
+        );
+        assert_eq!(result.items.len(), 30, "nothing may be dropped");
+        assert!(result.ccr_hash.is_none());
+        let rendered = serde_json::to_string(&result.items).unwrap();
+        assert!(!rendered.contains("<<ccr:"), "no pointer may ship");
+    }
+
+    #[test]
+    fn lossless_only_string_and_number_arrays_pass_through() {
+        // The non-dict crushers are sampling drops (lossy-recoverable);
+        // strict mode routes their arrays to plain recursive descent.
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+
+        let strings: Vec<Value> = (0..200)
+            .map(|i| Value::String(format!("log-line-{i}-payload")))
+            .collect();
+        let (out, _info) = c.process_value(&Value::Array(strings.clone()), 0, "", 1.0);
+        assert_eq!(
+            out.as_array().map(|a| a.len()),
+            Some(200),
+            "string array must pass through untouched"
+        );
+
+        let numbers: Vec<Value> = (0..200).map(|i| json!(i * 7)).collect();
+        let (out, _info) = c.process_value(&Value::Array(numbers.clone()), 0, "", 1.0);
+        assert_eq!(
+            out.as_array().map(|a| a.len()),
+            Some(200),
+            "number array must pass through untouched"
+        );
+
+        let mixed: Vec<Value> = (0..100)
+            .flat_map(|i| [Value::String(format!("s{i}")), json!(i)])
+            .collect();
+        let (out, _info) = c.process_value(&Value::Array(mixed.clone()), 0, "", 1.0);
+        assert_eq!(
+            out.as_array().map(|a| a.len()),
+            Some(200),
+            "mixed array must pass through untouched"
+        );
+
+        assert_eq!(store.len(), 0, "no drops → no store writes");
+    }
+
+    #[test]
+    fn lossless_only_disables_opaque_string_substitution() {
+        // The walker-equivalent string path normally substitutes long
+        // base64 blobs with `<<ccr:HASH,base64,SIZE>>`. Strict mode keeps
+        // the blob verbatim (visible bytes are never hidden).
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let big_b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".repeat(8);
+        let doc = json!({"id": 1, "blob": big_b64});
+
+        let (out, _info) = c.process_value(&doc, 0, "", 1.0);
+
+        let blob = out.pointer("/blob").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(blob, big_b64, "blob must stay verbatim in strict mode");
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn lossless_only_disables_object_key_crush() {
+        // Object key-crush drops keys with no recovery pointer at all —
+        // doubly forbidden in strict mode. Every key must survive.
+        let (c, _store) = lossless_only_crusher(SmartCrusherConfig {
+            min_tokens_to_crush: 1, // make key-crush eager if it were allowed
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let mut obj = serde_json::Map::new();
+        for i in 0..40 {
+            obj.insert(
+                format!("key_{i}"),
+                Value::String(format!("value-{i}-with-some-padding-to-cost-tokens")),
+            );
+        }
+
+        let (out, _info) = c.process_value(&Value::Object(obj.clone()), 0, "", 1.0);
+
+        assert_eq!(
+            out.as_object().map(|o| o.len()),
+            Some(40),
+            "no key may be dropped in strict mode"
+        );
+    }
+
+    #[test]
+    fn lossless_only_end_to_end_crush_output_carries_no_ccr_pointer() {
+        // Public `crush()` over a document holding every lossy-tempting
+        // shape at once: a droppable dict sub-array, a big string array,
+        // and an opaque blob. Strict mode output must contain no `<<ccr:`
+        // pointer anywhere and surface no typed row-drop hashes.
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_min_savings_ratio: 0.99, // lossless never clears → pure passthrough
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let blob = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(16);
+        let doc = json!({
+            "rows": (0..50).map(|_| json!({"status": "ok"})).collect::<Vec<_>>(),
+            "lines": (0..100).map(|i| format!("line-{i}")).collect::<Vec<_>>(),
+            "attachment": blob,
+        });
+        let content = serde_json::to_string(&doc).unwrap();
+
+        let result = c.crush(&content, "", 1.0);
+
+        assert!(
+            !result.compressed.contains("<<ccr:"),
+            "strict-mode crush() output must be pointer-free, got: {}",
+            &result.compressed[..result.compressed.len().min(300)]
+        );
+        assert!(result.ccr_hashes.is_empty(), "no typed row-drop hashes");
+        assert!(result.row_index_markers.is_empty());
+        assert_eq!(store.len(), 0, "no store writes in strict mode");
+        // Every original row/line survives (parse and count).
+        let parsed: Value = serde_json::from_str(&result.compressed).unwrap();
+        assert_eq!(
+            parsed.pointer("/rows").unwrap().as_array().unwrap().len(),
+            50
+        );
+        assert_eq!(
+            parsed.pointer("/lines").unwrap().as_array().unwrap().len(),
+            100
+        );
+        assert_eq!(
+            parsed.pointer("/attachment").unwrap().as_str().unwrap(),
+            blob
         );
     }
 

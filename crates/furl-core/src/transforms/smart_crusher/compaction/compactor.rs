@@ -95,6 +95,18 @@ pub struct CompactConfig {
     /// a pure function for the many tests + the parity formatters that
     /// only inspect the IR.
     pub ccr_store: Option<Arc<dyn CcrStore>>,
+
+    /// Whether opaque-classified cells are substituted with
+    /// `<<ccr:HASH,...>>` pointers (default `true`). The substitution
+    /// pair — store write + `OpaqueRef` cell — happens EAGERLY during
+    /// `compact()`, before any caller accept/decline decision, so
+    /// callers that must never hide visible bytes cannot merely reject
+    /// the rendered output: the write would already have happened. Set
+    /// `false` (the crusher's `lossless_only` strict mode does, via
+    /// `SmartCrusherBuilder::build`) to keep opaque cells as verbatim
+    /// `Scalar`s — no pointer, no store write; the render either wins
+    /// as a pure rearrangement or fails the savings gate.
+    pub substitute_opaque: bool,
 }
 
 impl std::fmt::Debug for CompactConfig {
@@ -108,6 +120,7 @@ impl std::fmt::Debug for CompactConfig {
             .field("min_buckets", &self.min_buckets)
             .field("max_buckets", &self.max_buckets)
             .field("ccr_store", &self.ccr_store.is_some())
+            .field("substitute_opaque", &self.substitute_opaque)
             .finish()
     }
 }
@@ -123,6 +136,7 @@ impl Default for CompactConfig {
             min_buckets: 2,
             max_buckets: 8,
             ccr_store: None,
+            substitute_opaque: true,
         }
     }
 }
@@ -272,6 +286,14 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
             CellValue::Scalar(parsed)
         }
         CellClass::Opaque(kind) => {
+            // Strict lossless-or-passthrough callers disable substitution
+            // entirely: the cell stays a verbatim Scalar, no pointer is
+            // minted, and — critically — no store write happens (the
+            // Defect-2 write below is EAGER; a caller-side render
+            // rejection would come too late to prevent it).
+            if !cfg.substitute_opaque {
+                return CellValue::Scalar(v.clone());
+            }
             let s = match v {
                 Value::String(s) => s,
                 _ => return CellValue::Scalar(v.clone()),
