@@ -80,5 +80,5 @@ pub use stats_math::{format_g, mean, median, sample_stdev, sample_variance};
 pub use traits::{Constraint, CrushEvent, Observer, Scorer};
 pub use types::{
     ArrayAnalysis, CompressionPlan, CompressionStrategy, CrushResult, CrushabilityAnalysis,
-    FieldStats,
+    DroppedRef, FieldStats,
 };

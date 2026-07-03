@@ -48,7 +48,8 @@ use super::crushers::{compute_k_split, crush_number_array, crush_object, crush_s
 use super::field_role::compute_exclude_set;
 use super::planning::SmartCrusherPlanner;
 use super::traits::{Constraint, CrushEvent, Observer};
-use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, CrushResult};
+use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, CrushResult, DroppedRef};
+use crate::ccr::persist::row_index_key;
 use crate::ccr::{marker_for_row_index, marker_for_rows_offloaded, CcrStore};
 use crate::relevance::RelevanceScorer;
 use crate::transforms::adaptive_sizer::compute_optimal_k;
@@ -111,6 +112,15 @@ pub struct CrushArrayResult {
     /// at a time instead of paying for the whole offloaded blob. `None`
     /// when nothing was dropped or no store was configured.
     pub row_index_marker: Option<String>,
+    /// Typed recovery refs for THIS result's shipped render (§4.2): the
+    /// row-drop ref mirroring `ccr_hash`/`row_index_marker` plus — when
+    /// the compacted render carries `<<ccr:HASH,KIND,SIZE>>`
+    /// substitutions — one [`DroppedRef::Opaque`] per substitution, in
+    /// render order. Pure side-output: the values are exactly those the
+    /// emission sites already computed, so every rendered byte is
+    /// identical to before this field existed. Empty when the result is
+    /// a passthrough / pure-lossless render with no substitutions.
+    pub dropped_refs: Vec<DroppedRef>,
 }
 
 /// Build the `{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>",
@@ -145,7 +155,7 @@ fn ccr_sentinel_map(
 fn build_ccr_sentinel(persisted: &DroppedPersist) -> Value {
     Value::Object(ccr_sentinel_map(
         &persisted.marker,
-        persisted.row_index_marker.as_deref(),
+        persisted.row_index_marker().as_deref(),
     ))
 }
 
@@ -202,17 +212,15 @@ struct DroppedPersist {
     /// unconditional (immediate under `Commit`, at ship-time under
     /// `Collect`).
     marker: String,
-    /// Compact GRANULAR-retrieval marker, e.g.
-    /// `<<ccr:9f3a2b#rows 50_chunks>>`. ONE short string (not a list), so
-    /// surfacing it costs ~no prompt tokens and never flips the
-    /// lossy-vs-lossless routing decision. It names the per-blob ROW
-    /// INDEX entry (`{hash}#rows`) the store now holds: a JSON array of
-    /// the per-row hashes. The retrieval layer resolves it to fetch only
-    /// the needed row(s) — `ccr_get(row_hash)` returns a 1-element array
-    /// holding exactly that row — instead of paying for the whole blob.
-    /// `None` when no store is configured to chunk into (the array hash +
-    /// whole-blob `marker` still cover recovery in that case).
-    row_index_marker: Option<String>,
+    /// Number of granular per-row chunks the store-side row index holds
+    /// (exactly the in-range dropped rows — COR-20). `None` when no
+    /// store is configured to chunk into or the drop exceeded the COR-4
+    /// granular budget (the array hash + whole-blob `marker` still cover
+    /// recovery in that case). The single datum behind BOTH the rendered
+    /// `<<ccr:{hash}#rows {n}_chunks>>` marker (derived via
+    /// [`DroppedPersist::row_index_marker`]) and the typed
+    /// [`DroppedRef::RowDrop`] the FFI carries — one source, no drift.
+    row_index_chunks: Option<usize>,
     /// Deferred store writes, populated ONLY under
     /// [`PersistMode::Collect`] (empty under `Commit` — already written —
     /// and `Skip` — never written). Commit order is preserved: granular
@@ -222,24 +230,30 @@ struct DroppedPersist {
     pending_writes: Vec<CcrWrite>,
 }
 
-/// One row-drop surfaced typed from a single `crush()` call, collected by
-/// the recursive walk so the Python shim can mirror it DIRECTLY into the
-/// compression_store instead of substring-scraping `<<ccr:HASH>>` out of
-/// the rendered output.
-///
-/// `crush()` can produce MANY of these (one per dropped sub-array at any
-/// depth) — unlike `CrushArrayResult::ccr_hash`, which is the single hash
-/// of one top-level array. The values are exactly those `persist_dropped`
-/// already computed and embedded into the prompt sentinels, so collecting
-/// them is pure plumbing — it does not change the rendered bytes.
-struct DroppedRef {
-    /// 12-char SHA-256 hex prefix keying the stored full-original array.
-    /// Same hash carried by the `<<ccr:HASH N_rows_offloaded>>` marker.
-    hash: String,
-    /// Granular per-blob row-index marker (`<<ccr:HASH#rows N_chunks>>`),
-    /// present only when a store was configured to chunk into. `None` ⇒
-    /// the whole-blob `hash` is the only recovery key for this drop.
-    row_index_marker: Option<String>,
+impl DroppedPersist {
+    /// Compact GRANULAR-retrieval marker, e.g.
+    /// `<<ccr:9f3a2b#rows 50_chunks>>`. ONE short string (not a list), so
+    /// surfacing it costs ~no prompt tokens and never flips the
+    /// lossy-vs-lossless routing decision. It names the per-blob ROW
+    /// INDEX entry (`{hash}#rows`) the store holds: a JSON array of the
+    /// per-row hashes. The retrieval layer resolves it to fetch only the
+    /// needed row(s) — `ccr_get(row_hash)` returns a 1-element array
+    /// holding exactly that row — instead of paying for the whole blob.
+    /// Derived from `row_index_chunks` through the pinned grammar owner
+    /// (`ccr::markers`), byte-identical to the pre-derivation field.
+    fn row_index_marker(&self) -> Option<String> {
+        self.row_index_chunks
+            .map(|n| marker_for_row_index(&self.hash, n))
+    }
+
+    /// The typed carrier for this drop (§4.2) — the exact values the
+    /// rendered sentinel advertises, surfaced for direct mirroring.
+    fn dropped_ref(&self) -> DroppedRef {
+        DroppedRef::RowDrop {
+            hash: self.hash.clone(),
+            row_index_chunks: self.row_index_chunks,
+        }
+    }
 }
 
 /// Result of the lossy-recoverable render attempt in
@@ -447,17 +461,18 @@ impl SmartCrusher {
     ///   (or `"passthrough"`).
     pub fn crush(&self, content: &str, query: &str, bias: f64) -> CrushResult {
         let start = std::time::Instant::now();
-        // Collect the typed row-drop hashes alongside the rendered output.
+        // Collect the typed recovery refs alongside the rendered output.
         // `smart_crush_content_collecting` threads a per-call sink through
-        // the recursive walk so EVERY dropped sub-array's `(hash,
-        // row_index_marker)` surfaces here — the values `persist_dropped`
-        // already computed. The Python shim mirrors these DIRECTLY into the
-        // compression_store, so `crush()` row-drop recovery no longer
-        // depends on scraping `<<ccr:HASH>>` out of `compressed`. The sink
-        // is pure side-output: it does not change which sentinels get
-        // embedded, so `compressed` is byte-identical to the pre-typed-field
-        // behavior (grammar-characterization + compression-floor untouched
-        // by construction).
+        // the recursive walk so EVERY reduction — row-drops and opaque
+        // substitutions — surfaces here as a [`DroppedRef`], carrying the
+        // values the emission sites already computed. The Python shim
+        // mirrors these DIRECTLY into the compression_store, so `crush()`
+        // recovery no longer depends on scraping `<<ccr:...>>` out of
+        // `compressed`. The sink is pure side-output: it does not change
+        // which sentinels/markers get embedded, so `compressed` is
+        // byte-identical to the pre-typed-field behavior
+        // (grammar-characterization + compression-floor untouched by
+        // construction).
         let (compressed, was_modified, info, dropped) =
             self.smart_crush_content_collecting(content, query, bias);
         let strategy = if info.is_empty() {
@@ -465,14 +480,6 @@ impl SmartCrusher {
         } else {
             info
         };
-        let mut ccr_hashes: Vec<String> = Vec::with_capacity(dropped.len());
-        let mut row_index_markers: Vec<String> = Vec::new();
-        for d in dropped {
-            ccr_hashes.push(d.hash);
-            if let Some(m) = d.row_index_marker {
-                row_index_markers.push(m);
-            }
-        }
 
         // Fire one event per top-level crush. Cheap when no observers
         // are configured (`for o in &[]` is a single null-pointer
@@ -498,8 +505,7 @@ impl SmartCrusher {
             original: content.to_string(),
             was_modified,
             strategy,
-            ccr_hashes,
-            row_index_markers,
+            dropped,
         }
     }
 
@@ -509,10 +515,10 @@ impl SmartCrusher {
     ///
     /// Returns `(crushed_content, was_modified, info)`.
     ///
-    /// Public wrapper that discards the row-drop sink. The FFI bridge
-    /// (`lib.rs` `smart_crush_content`) and parity callers want only the
-    /// `(String, bool, String)` tuple; the typed row-drop hashes are
-    /// surfaced through `crush()` via the private collecting variant.
+    /// Public wrapper that discards the typed-ref sink. Deprecated in
+    /// favor of [`smart_crush_content_typed`](Self::smart_crush_content_typed)
+    /// (§4.2 R3/R4) — callers that mirror recovery need the refs; parity
+    /// callers that only want the tuple keep this shape.
     pub fn smart_crush_content(
         &self,
         content: &str,
@@ -524,12 +530,27 @@ impl SmartCrusher {
         (result, was_modified, info)
     }
 
+    /// Typed sibling of [`smart_crush_content`](Self::smart_crush_content)
+    /// (§4.2 R3/R4): identical first three tuple elements — byte-identical
+    /// rendering — plus every [`DroppedRef`] the walk produced (row-drops
+    /// AND opaque substitutions, in emission order) so the FFI can hand
+    /// recovery to Python typed instead of via the text scrape.
+    pub fn smart_crush_content_typed(
+        &self,
+        content: &str,
+        query_context: &str,
+        bias: f64,
+    ) -> (String, bool, String, Vec<DroppedRef>) {
+        self.smart_crush_content_collecting(content, query_context, bias)
+    }
+
     /// Collecting variant of [`smart_crush_content`](Self::smart_crush_content):
-    /// identical rendering, but also returns every row-drop the recursive
-    /// walk produced as a `Vec<DroppedRef>` (each carrying the CCR hash and
-    /// optional per-blob row-index marker). Drives `crush()`'s typed-field
-    /// recovery. The render path is unchanged — the sink is side-output —
-    /// so `result` bytes match `smart_crush_content` exactly.
+    /// identical rendering, but also returns every recovery ref the
+    /// recursive walk produced as a `Vec<DroppedRef>` (row-drops with
+    /// their optional per-blob row-index data, plus opaque
+    /// substitutions). Drives `crush()`'s typed-field recovery. The
+    /// render path is unchanged — the sink is side-output — so `result`
+    /// bytes match `smart_crush_content` exactly.
     fn smart_crush_content_collecting(
         &self,
         content: &str,
@@ -639,24 +660,19 @@ impl SmartCrusher {
                                     rendered.len()
                                 ));
                                 // The compacted render covers TWO cases: a
-                                // PURE lossless win (nothing dropped,
-                                // `dropped_summary` empty, `ccr_hash` None →
-                                // collect nothing) AND a LOSSY survivor-
-                                // compacted drop (`smart_sample+compact:table`
-                                // — rows dropped, the `<<ccr:HASH ...>>`
-                                // sentinel baked into `rendered` as its last
-                                // line, `ccr_hash` Some). The latter is a
-                                // genuine row-drop whose recovery the Python
-                                // scrape would otherwise own — surface it
-                                // typed too, exactly like the JSON-array arm.
-                                if !result.dropped_summary.is_empty() {
-                                    if let Some(hash) = result.ccr_hash {
-                                        dropped.push(DroppedRef {
-                                            hash,
-                                            row_index_marker: result.row_index_marker,
-                                        });
-                                    }
-                                }
+                                // PURE lossless win (nothing dropped —
+                                // `dropped_refs` carries only whatever
+                                // opaque substitutions the render bakes in)
+                                // AND a LOSSY survivor-compacted drop
+                                // (`smart_sample+compact:table` — rows
+                                // dropped, the `<<ccr:HASH ...>>` sentinel
+                                // baked into `rendered` as its last line,
+                                // the row-drop ref in `dropped_refs`). Both
+                                // are genuine reductions whose recovery the
+                                // Python scrape would otherwise own —
+                                // surface them typed, exactly like the
+                                // JSON-array arm below.
+                                dropped.extend(result.dropped_refs);
                                 return (Value::String(rendered), info_parts.join(","));
                             }
                             info_parts.push(format!(
@@ -692,18 +708,14 @@ impl SmartCrusher {
                                     result.row_index_marker.as_deref(),
                                 );
                                 items.push(Value::Object(sentinel));
-                                // Surface the SAME hash + row-index marker
-                                // typed for direct mirroring. `dropped_summary`
-                                // is non-empty iff rows were dropped, which is
-                                // exactly when `crush_array` populates
-                                // `ccr_hash` — so this is always `Some` here.
-                                if let Some(hash) = result.ccr_hash {
-                                    dropped.push(DroppedRef {
-                                        hash,
-                                        row_index_marker: result.row_index_marker,
-                                    });
-                                }
                             }
+                            // Surface the SAME hash + row-index data the
+                            // sentinel advertises, typed for direct
+                            // mirroring. `dropped_refs` carries the
+                            // row-drop ref exactly when rows were dropped
+                            // (`persist_dropped` returned `Some`), so this
+                            // matches the sentinel condition above.
+                            dropped.extend(result.dropped_refs);
                             return (Value::Array(items), info_parts.join(","));
                         }
                         ArrayType::StringArray if !self.config.lossless_only => {
@@ -740,8 +752,16 @@ impl SmartCrusher {
                             return (Value::Array(crushed), info_parts.join(","));
                         }
                         ArrayType::MixedArray if !self.config.lossless_only => {
-                            let (crushed, strategy) =
-                                self.crush_mixed_array(arr, query_context, bias);
+                            // Collecting variant: a dict subgroup's
+                            // substituted lossless table can bake in
+                            // opaque-cell markers — surface those typed
+                            // through the same sink (§4.2 R2).
+                            let (crushed, strategy) = self.crush_mixed_array_collecting(
+                                arr,
+                                query_context,
+                                bias,
+                                dropped,
+                            );
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
                             let mut crushed = crushed;
                             // 1A (non-dict path): the mixed crusher drops
@@ -811,9 +831,11 @@ impl SmartCrusher {
             // `process_string` which parses stringified-JSON containers
             // (recursing through `process_value`) and CCR-substitutes
             // opaque blobs (with store-write so retrieval works). The
-            // collecting variant threads the sink so a row-drop INSIDE a
-            // stringified-JSON sub-array is surfaced too (the opaque-blob
-            // substitution itself stays on the OPAQUE scrape, by design).
+            // collecting variant threads the sink so BOTH a row-drop
+            // INSIDE a stringified-JSON sub-array AND the opaque-blob
+            // substitution itself surface typed (§4.2 R2 — this
+            // deliberately overturns the earlier scrape-by-design
+            // decision, per the owner mandate).
             Value::String(s) => {
                 self.process_string_collecting(s, depth, query_context, bias, dropped)
             }
@@ -840,9 +862,12 @@ impl SmartCrusher {
     ///    of which path emitted them.
     ///
     /// Row-drops produced while recursing into a stringified-JSON
-    /// container are appended to `dropped`. The opaque blob substitution
-    /// (case 2) is NOT collected — opaque recovery stays on the Python
-    /// OPAQUE scrape by design (this pass types only row-drop, not opaque).
+    /// container are appended to `dropped`, and so is the opaque blob
+    /// substitution itself (case 2) as a typed [`DroppedRef::Opaque`] —
+    /// §4.2 R2. (Opaque recovery previously stayed on the Python scrape
+    /// "by design"; that decision is deliberately overturned per the
+    /// owner mandate — the typed ref carries the same hash/kind the
+    /// marker renders, plus the exact byte size.)
     fn process_string_collecting(
         &self,
         s: &str,
@@ -886,7 +911,11 @@ impl SmartCrusher {
         if !self.config.lossless_only {
             let cfg = ClassifyConfig::default();
             if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.to_string()), &cfg) {
-                let marker = emit_opaque_ccr_marker(s, &kind, self.ccr_store.as_ref());
+                let (marker, dropped_ref) =
+                    emit_opaque_ccr_marker(s, &kind, self.ccr_store.as_ref());
+                // The substitution always ships from here — surface the
+                // typed ref alongside the marker text (§4.2 R2).
+                dropped.push(dropped_ref);
                 let kind_label = opaque_kind_label(&kind);
                 return (Value::String(marker), format!("string_ccr:{kind_label}"));
             }
@@ -995,6 +1024,12 @@ impl SmartCrusher {
                             && savings_ratio >= self.config.lossless_min_savings_ratio
                         {
                             let kind = compaction_kind_str(&c);
+                            // The `!contains_opaque_ref` gate above means
+                            // this collects nothing today; collecting
+                            // anyway keeps the typed carrier correct by
+                            // construction if the gate ever changes.
+                            let mut dropped_refs: Vec<DroppedRef> = Vec::new();
+                            c.collect_opaque_refs(&mut dropped_refs);
                             return CrushArrayResult {
                                 items: items.to_vec(), // nothing dropped
                                 strategy_info: format!("lossless:{kind}"),
@@ -1003,6 +1038,7 @@ impl SmartCrusher {
                                 compacted: Some(rendered),
                                 compaction_kind: Some(kind),
                                 row_index_marker: None,
+                                dropped_refs,
                             };
                         }
                     }
@@ -1016,6 +1052,7 @@ impl SmartCrusher {
                 compacted: None,
                 compaction_kind: None,
                 row_index_marker: None,
+                dropped_refs: Vec::new(),
             };
         }
 
@@ -1055,6 +1092,14 @@ impl SmartCrusher {
                     };
                     if savings_ratio >= self.config.lossless_min_savings_ratio {
                         let kind = compaction_kind_str(&c);
+                        // This render CAN carry opaque substitutions
+                        // (decoder-verifiability excludes only Nested
+                        // cells) — collect them typed (§4.2 R2). The refs
+                        // ride the candidate: they ship iff it ships, and
+                        // a discarded candidate's refs drop with it —
+                        // exactly like its pending store writes.
+                        let mut dropped_refs: Vec<DroppedRef> = Vec::new();
+                        c.collect_opaque_refs(&mut dropped_refs);
                         Some(CrushArrayResult {
                             items: items.to_vec(), // nothing dropped
                             strategy_info: format!("lossless:{kind}"),
@@ -1063,6 +1108,7 @@ impl SmartCrusher {
                             compacted: Some(rendered),
                             compaction_kind: Some(kind),
                             row_index_marker: None,
+                            dropped_refs,
                         })
                     } else {
                         None
@@ -1094,6 +1140,7 @@ impl SmartCrusher {
                     compacted: None,
                     compaction_kind: None,
                     row_index_marker: None,
+                    dropped_refs: Vec::new(),
                 },
             };
         }
@@ -1342,6 +1389,7 @@ impl SmartCrusher {
                 compacted: None,
                 compaction_kind: None,
                 row_index_marker: None,
+                dropped_refs: Vec::new(),
             });
         }
 
@@ -1384,15 +1432,22 @@ impl SmartCrusher {
         // set — threaded through so only dropped rows get granular
         // chunks (COR-4: kept rows must never flood the bounded store).
         let dropped_indices = dropped_indices_from_kept(&plan.keep_indices, items.len());
-        let (ccr_hash, dropped_summary, row_index_marker, pending_ccr_writes) =
+        let (ccr_hash, dropped_summary, row_index_marker, row_drop_refs, pending_ccr_writes) =
             match self.persist_dropped(items, dropped_count, &dropped_indices, persist_mode) {
-                Some(persisted) => (
-                    Some(persisted.hash),
-                    persisted.marker,
-                    persisted.row_index_marker,
-                    persisted.pending_writes,
-                ),
-                None => (None, String::new(), None, Vec::new()),
+                Some(persisted) => {
+                    let row_index_marker = persisted.row_index_marker();
+                    // The typed carrier for this drop — same hash + chunk
+                    // count the sentinel advertises (§4.2).
+                    let refs = vec![persisted.dropped_ref()];
+                    (
+                        Some(persisted.hash),
+                        persisted.marker,
+                        row_index_marker,
+                        refs,
+                        persisted.pending_writes,
+                    )
+                }
+                None => (None, String::new(), None, Vec::new(), Vec::new()),
             };
 
         // ── Survivor compaction: lossless re-encoding of the kept rows ──
@@ -1431,6 +1486,14 @@ impl SmartCrusher {
                         let kind = compaction_kind_str(&c);
                         let rendered_with_sentinel =
                             format!("{}\n{sentinel_line}", rendered.trim_end_matches('\n'));
+                        // Survivor renders are gated opaque-free
+                        // (`!contains_opaque_ref` above) so this collects
+                        // nothing today — kept for correctness under gate
+                        // changes. Render order: opaque cells first, the
+                        // sentinel (row-drop) is the render's last line.
+                        let mut dropped_refs: Vec<DroppedRef> = Vec::new();
+                        c.collect_opaque_refs(&mut dropped_refs);
+                        dropped_refs.extend(row_drop_refs);
                         return LossyOutcome::Crushed {
                             result: CrushArrayResult {
                                 items: result,
@@ -1443,6 +1506,7 @@ impl SmartCrusher {
                                 compacted: Some(rendered_with_sentinel),
                                 compaction_kind: Some(kind),
                                 row_index_marker,
+                                dropped_refs,
                             },
                             pending_ccr_writes,
                         };
@@ -1460,6 +1524,7 @@ impl SmartCrusher {
                 compacted: None,
                 compaction_kind: None,
                 row_index_marker,
+                dropped_refs: row_drop_refs,
             },
             pending_ccr_writes,
         }
@@ -1628,7 +1693,7 @@ impl SmartCrusher {
         // — keeping the byte-stable single-blob recovery fallback alive
         // even if proportional retrieval degrades. Recovery is therefore
         // never worse than the pre-change single-blob guarantee.
-        let mut row_index_marker: Option<String> = None;
+        let mut row_index_chunks: Option<usize> = None;
         if let Some(store) = &self.ccr_store {
             let granular_budget = store.capacity() / GRANULAR_CHUNK_CAPACITY_DIVISOR;
             if !dropped_indices.is_empty() && dropped_indices.len() <= granular_budget {
@@ -1654,11 +1719,13 @@ impl SmartCrusher {
                     // marker advertises `chunk_rows.len()` — EXACTLY the number
                     // of chunks the index holds (COR-20: it previously claimed
                     // `dropped_count` chunks over an every-original-row index).
-                    let index_key = format!("{hash}#rows");
+                    // Key construction shared with the typed carrier's
+                    // `DroppedRef::row_index_key` accessor (one owner).
+                    let index_key = row_index_key(&hash);
                     let index_payload = serde_json::to_string(&row_hashes).unwrap_or_default();
                     route_write(mode, store, &mut pending_writes, &index_key, index_payload);
                 }
-                row_index_marker = Some(marker_for_row_index(&hash, chunk_rows.len()));
+                row_index_chunks = Some(chunk_rows.len());
             }
         }
 
@@ -1694,7 +1761,7 @@ impl SmartCrusher {
         Some(DroppedPersist {
             hash,
             marker,
-            row_index_marker,
+            row_index_chunks,
             pending_writes,
         })
     }
@@ -1710,7 +1777,7 @@ impl SmartCrusher {
     /// never a silent drop. This mirrors the dict path, where
     /// `dropped_summary` is now likewise always non-empty on a drop.
     ///
-    /// Pushes the typed `(hash, row_index_marker)` onto `dropped` so the
+    /// Pushes the typed [`DroppedRef::RowDrop`] onto `dropped` so the
     /// non-dict (string/number/mixed) row-drop is surfaced for direct
     /// mirroring — parity with the dict path. Side effect only: the
     /// returned `Value` is byte-identical to the pre-collection behavior.
@@ -1737,10 +1804,7 @@ impl SmartCrusher {
             &dropped_indices,
             PersistMode::Commit,
         )?;
-        dropped.push(DroppedRef {
-            hash: persisted.hash.clone(),
-            row_index_marker: persisted.row_index_marker.clone(),
-        });
+        dropped.push(persisted.dropped_ref());
         Some(build_ccr_sentinel(&persisted))
     }
 
@@ -1757,11 +1821,36 @@ impl SmartCrusher {
     /// 4. Reassemble in original order.
     ///
     /// Returns `(crushed_items, strategy_string)`.
+    ///
+    /// Public wrapper: allocates a throwaway sink and delegates to
+    /// [`crush_mixed_array_collecting`](Self::crush_mixed_array_collecting)
+    /// — same pattern as `process_value` / `smart_crush_content`.
     pub fn crush_mixed_array(
         &self,
         items: &[Value],
         query_context: &str,
         bias: f64,
+    ) -> (Vec<Value>, String) {
+        let mut sink: Vec<DroppedRef> = Vec::new();
+        self.crush_mixed_array_collecting(items, query_context, bias, &mut sink)
+    }
+
+    /// Collecting variant of [`crush_mixed_array`](Self::crush_mixed_array):
+    /// identical output, but the typed refs of any SHIPPED substituted
+    /// render (the dict subgroup's pure-lossless table, COR-28b — which
+    /// can bake in opaque-cell markers) are appended to `dropped`
+    /// (§4.2 R2). Row-drop refs from the inner dict pipeline are NEVER
+    /// surfaced here: that call runs `persist = false` (PersistMode::Skip
+    /// — nothing persisted, COR-28), and only its pure-lossless render
+    /// (no drops, no sentinel) is ever substituted; opaque-cell store
+    /// writes happen eagerly inside `compact()` regardless of the
+    /// persist mode, so the opaque refs it carries are backed.
+    fn crush_mixed_array_collecting(
+        &self,
+        items: &[Value],
+        query_context: &str,
+        bias: f64,
+        dropped: &mut Vec<DroppedRef>,
     ) -> (Vec<Value>, String) {
         let n = items.len();
         if n <= 8 {
@@ -1803,6 +1892,7 @@ impl SmartCrusher {
                         strategy_info,
                         compacted,
                         dropped_summary,
+                        dropped_refs,
                         ..
                     } = self.crush_array_inner(&values, query_context, bias, false);
                     // COR-28b (EFF-9): ship a PURE lossless win (nothing
@@ -1818,6 +1908,12 @@ impl SmartCrusher {
                         if let (Some(rendered), Some(&first_idx)) = (compacted, indices.first()) {
                             keep_indices.insert(first_idx);
                             substitutions.insert(first_idx, Value::String(rendered));
+                            // The substituted render SHIPS — surface its
+                            // typed refs (opaque cells only: a pure
+                            // lossless render has no row-drop, and the
+                            // opaque originals were written eagerly by
+                            // `compact()` regardless of persist mode).
+                            dropped.extend(dropped_refs);
                             strategy_parts.push(format!(
                                 "dict:{}->{}",
                                 values.len(),
@@ -1826,6 +1922,9 @@ impl SmartCrusher {
                             continue;
                         }
                     }
+                    // Kept-items path: the inner result's renders (and
+                    // any refs they carried) are DISCARDED — no inner
+                    // marker ships, so no ref may surface (COR-28).
                     // Find which original indices survived by matching
                     // canonical-JSON serialization. Mirrors Python's
                     // `json.dumps(c, sort_keys=True, default=str)`-keyed
@@ -3532,8 +3631,9 @@ mod tests {
             "strict-mode crush() output must be pointer-free, got: {}",
             &result.compressed[..result.compressed.len().min(300)]
         );
-        assert!(result.ccr_hashes.is_empty(), "no typed row-drop hashes");
-        assert!(result.row_index_markers.is_empty());
+        assert!(result.dropped.is_empty(), "no typed recovery refs");
+        assert!(result.ccr_hashes().is_empty(), "no typed row-drop hashes");
+        assert!(result.row_index_markers().is_empty());
         assert_eq!(store.len(), 0, "no store writes in strict mode");
         // Every original row/line survives (parse and count).
         let parsed: Value = serde_json::from_str(&result.compressed).unwrap();
@@ -4030,8 +4130,7 @@ mod tests {
 
         // Marker advertises exactly the chunks the index holds (COR-20).
         let idx_marker = persisted
-            .row_index_marker
-            .as_ref()
+            .row_index_marker()
             .expect("granular index fires for a small drop");
         assert!(
             idx_marker.contains("#rows 3_chunks>>"),
@@ -4090,7 +4189,7 @@ mod tests {
             )
             .expect("drop → Some");
         assert!(
-            persisted.row_index_marker.is_none(),
+            persisted.row_index_marker().is_none(),
             "oversized drop must not advertise a granular index"
         );
         assert_eq!(
@@ -4108,7 +4207,7 @@ mod tests {
             .persist_dropped(&items, at_budget.len(), &at_budget, PersistMode::Commit)
             .expect("drop → Some");
         assert!(
-            persisted2.row_index_marker.is_some(),
+            persisted2.row_index_marker().is_some(),
             "a drop at the budget keeps proportional retrieval"
         );
         assert_eq!(
@@ -4145,7 +4244,7 @@ mod tests {
             .expect("drop → Some");
         assert_eq!(skipped.hash, persisted.hash);
         assert_eq!(skipped.marker, persisted.marker);
-        assert_eq!(skipped.row_index_marker, persisted.row_index_marker);
+        assert_eq!(skipped.row_index_marker(), persisted.row_index_marker());
         assert!(
             persisted.pending_writes.is_empty(),
             "Commit mode writes through — nothing rides back deferred"
@@ -4184,7 +4283,7 @@ mod tests {
             .expect("drop → Some");
         assert_eq!(collected.hash, committed.hash, "hash is mode-independent");
         assert_eq!(collected.marker, committed.marker);
-        assert_eq!(collected.row_index_marker, committed.row_index_marker);
+        assert_eq!(collected.row_index_marker(), committed.row_index_marker());
 
         // The whole-blob write is LAST (bounded-store eviction rationale
         // — redundant chunks shed before the recovery backstop).
@@ -4881,12 +4980,15 @@ mod tests {
 
         // A drop happened → at least one typed hash, and the SAME hash is
         // embedded in the rendered `<<ccr:HASH N_rows_offloaded>>` marker.
+        // Uses the DERIVED back-compat getters — the corpus lock for R1's
+        // field→getter promotion (values asserted against the RENDERED
+        // text, not against each other).
         assert!(
-            !r.ccr_hashes.is_empty(),
+            !r.ccr_hashes().is_empty(),
             "row drop must surface a typed ccr_hash; strategy={:?}",
             r.strategy
         );
-        for h in &r.ccr_hashes {
+        for h in &r.ccr_hashes() {
             assert!(
                 r.compressed.contains(&format!("<<ccr:{h} ")),
                 "typed hash {h} must match the embedded row-drop marker"
@@ -4895,13 +4997,24 @@ mod tests {
         // Store-backed → a row-index marker is surfaced for proportional
         // retrieval, and it is embedded too (as the `_ccr_rows` field).
         assert!(
-            !r.row_index_markers.is_empty(),
+            !r.row_index_markers().is_empty(),
             "store-backed drop must surface a typed row_index_marker"
         );
-        for m in &r.row_index_markers {
+        for m in &r.row_index_markers() {
             assert!(
                 r.compressed.contains(m.as_str()),
                 "typed row_index_marker {m} must be embedded in the output"
+            );
+        }
+        // The typed refs' BARE index keys resolve in the store — the
+        // datum R5's Python mirror consumes instead of marker text.
+        for d in &r.dropped {
+            let key = d
+                .row_index_key()
+                .expect("store-backed row drop carries a row-index key");
+            assert!(
+                key.ends_with("#rows"),
+                "bare key form is HASH#rows, got: {key}"
             );
         }
     }
@@ -4923,12 +5036,13 @@ mod tests {
         let r = c.crush(&content, "", 1.0);
 
         // Distinct hashes (the two arrays differ) and both ≥ 2.
-        let distinct: std::collections::HashSet<&String> = r.ccr_hashes.iter().collect();
+        let hashes = r.ccr_hashes();
+        let distinct: std::collections::HashSet<&String> = hashes.iter().collect();
         assert!(
             distinct.len() >= 2,
             "two droppable sub-arrays must surface ≥2 distinct typed hashes, \
              got {:?} (strategy={:?})",
-            r.ccr_hashes,
+            hashes,
             r.strategy
         );
         // Every typed hash is embedded in the output as a row-drop marker
@@ -4938,7 +5052,7 @@ mod tests {
         let mut embedded_hashes: Vec<String> = Vec::new();
         collect_scalars_and_hashes(&out, &mut embedded_scalars, &mut embedded_hashes);
         let embedded: std::collections::HashSet<&String> = embedded_hashes.iter().collect();
-        for h in &r.ccr_hashes {
+        for h in &hashes {
             assert!(
                 embedded.contains(h),
                 "typed hash {h} must appear in the embedded row-drop markers \

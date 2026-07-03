@@ -69,6 +69,18 @@ pub(crate) fn sha6_hex12(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Store key of the granular per-blob row index for a row-drop `hash`:
+/// `"{hash}#rows"`. The index entry holds a JSON array of per-row chunk
+/// hashes so retrieval is proportional (resolve the index, fetch only
+/// the needed rows). Single construction point for the KEY — the
+/// rendered `<<ccr:{hash}#rows {n}_chunks>>` marker interpolates the
+/// same `{hash}#rows` shape via [`super::markers::marker_for_row_index`];
+/// both are pinned by byte-identity tests, so key and grammar cannot
+/// drift apart silently.
+pub(crate) fn row_index_key(hash: &str) -> String {
+    format!("{hash}#rows")
+}
+
 /// The newline-prefixed `Retrieve more:` marker line appended after a
 /// compressed body. The leading `\n` lives here — NOT in the grammar
 /// (`ccr::markers` stays newline-free) and NOT at each call site (where
@@ -129,6 +141,18 @@ mod tests {
         // Verified against Python: hashlib.sha256(b"...").hexdigest()[:12].
         assert_eq!(sha6_hex12(b""), "e3b0c44298fc");
         assert_eq!(sha6_hex12(b"hello world"), "b94d27b9934d");
+    }
+
+    #[test]
+    fn row_index_key_is_byte_identical_to_the_marker_interpolation() {
+        // The store key and the marker grammar interpolate the same
+        // `{hash}#rows` shape; this pins the key half (the marker half is
+        // pinned by `markers::tests::row_index_is_byte_identical`).
+        assert_eq!(row_index_key("9f3a2b"), "9f3a2b#rows");
+        assert_eq!(
+            crate::ccr::marker_for_row_index("9f3a2b", 50),
+            format!("<<ccr:{} 50_chunks>>", row_index_key("9f3a2b"))
+        );
     }
 
     #[test]

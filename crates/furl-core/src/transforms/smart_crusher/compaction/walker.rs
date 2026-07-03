@@ -38,6 +38,7 @@ use super::compactor::{compact, CompactConfig};
 use super::formatter::{CsvSchemaFormatter, Formatter};
 use super::ir::OpaqueKind;
 use crate::ccr::{marker_for_opaque, CcrStore};
+use crate::transforms::smart_crusher::types::DroppedRef;
 
 /// Walks any JSON value and applies lossless compaction in place.
 ///
@@ -94,44 +95,79 @@ impl DocumentCompactor {
 
     /// Walk and compact. Returns a JSON value with the same shape but
     /// with compactable spots replaced by rendered strings.
+    ///
+    /// Wrapper that discards the typed refs — callers that mirror
+    /// recovery should use [`Self::compact_collecting`] instead of
+    /// re-parsing markers out of the returned value.
     pub fn compact(&self, doc: Value) -> Value {
-        walk(doc, self)
+        let mut sink: Vec<DroppedRef> = Vec::new();
+        self.compact_collecting(doc, &mut sink)
+    }
+
+    /// Collecting variant of [`Self::compact`] (§4.2 R2): identical
+    /// output value, but every opaque substitution the walk ships — the
+    /// `walk_string` live substitutions AND the `walk_array` → `compact`
+    /// cell substitutions baked into rendered sub-tables — is appended
+    /// to `sink` as a typed [`DroppedRef::Opaque`]. The sink is pure
+    /// side-output: it never influences what gets substituted, so the
+    /// returned value is byte-identical to `compact`'s.
+    pub fn compact_collecting(&self, doc: Value, sink: &mut Vec<DroppedRef>) -> Value {
+        walk(doc, self, sink)
     }
 }
 
-fn walk(v: Value, ctx: &DocumentCompactor) -> Value {
+fn walk(v: Value, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -> Value {
     match v {
-        Value::Object(map) => walk_object(map, ctx),
-        Value::Array(items) => walk_array(items, ctx),
-        Value::String(s) => walk_string(s, ctx),
+        Value::Object(map) => walk_object(map, ctx, sink),
+        Value::Array(items) => walk_array(items, ctx, sink),
+        Value::String(s) => walk_string(s, ctx, sink),
         scalar => scalar,
     }
 }
 
-fn walk_object(map: Map<String, Value>, ctx: &DocumentCompactor) -> Value {
-    Value::Object(map.into_iter().map(|(k, v)| (k, walk(v, ctx))).collect())
+fn walk_object(
+    map: Map<String, Value>,
+    ctx: &DocumentCompactor,
+    sink: &mut Vec<DroppedRef>,
+) -> Value {
+    Value::Object(
+        map.into_iter()
+            .map(|(k, v)| (k, walk(v, ctx, sink)))
+            .collect(),
+    )
 }
 
-fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor) -> Value {
+fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -> Value {
     // Recurse into items FIRST so inner sub-tables / opaque markers are
     // already in their compacted form when the outer compact runs. This
     // is what makes deep nesting cascade — a stringified-JSON cell
     // becomes a rendered string before the outer table sees it.
-    let inner: Vec<Value> = items.into_iter().map(|i| walk(i, ctx)).collect();
+    let inner: Vec<Value> = items.into_iter().map(|i| walk(i, ctx, sink)).collect();
 
     // Then try the array as a whole.
     let c = compact(&inner, &ctx.config);
     if c.was_compacted() {
+        // This render SHIPS (it replaces the array) — surface every
+        // opaque cell it baked in, typed. Item-level substitutions were
+        // already collected by the recursion above; `compact` classifies
+        // over the recursed values, so cells it marks opaque here are
+        // exactly the ones whose markers appear in the rendered string.
+        c.collect_opaque_refs(sink);
         Value::String(ctx.formatter.format(&c))
     } else {
         Value::Array(inner)
     }
 }
 
-fn walk_string(s: String, ctx: &DocumentCompactor) -> Value {
+fn walk_string(s: String, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -> Value {
     // Stringified-JSON: parse, recurse, replace.
     if let Some(parsed) = try_parse_json_container(&s) {
-        let recursed = walk(parsed.clone(), ctx);
+        // Recurse into a LOCAL sink: the no-op guard below may discard
+        // the recursed value, and refs must be surfaced only for
+        // substitutions that actually SHIP (a discarded recursion's
+        // markers appear nowhere in the output).
+        let mut local: Vec<DroppedRef> = Vec::new();
+        let recursed = walk(parsed.clone(), ctx, &mut local);
         // No-op guard (COR-45): when the recursion compacted NOTHING,
         // return the original string byte-identical. Re-emitting through
         // serde would silently minify Python `json.dumps`-spaced JSON,
@@ -144,6 +180,7 @@ fn walk_string(s: String, ctx: &DocumentCompactor) -> Value {
         if recursed == parsed {
             return Value::String(s);
         }
+        sink.extend(local);
         return match recursed {
             // Sub-table won — already a rendered string.
             Value::String(rendered) => Value::String(rendered),
@@ -154,13 +191,13 @@ fn walk_string(s: String, ctx: &DocumentCompactor) -> Value {
 
     // Long opaque blob: substitute with CCR marker (and stash the
     // original in the store if one is configured, so retrieval works).
+    // The substitution always ships — surface its typed ref directly.
     if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.clone()), &ctx.config.classify)
     {
-        return Value::String(emit_opaque_ccr_marker(
-            &s,
-            &kind,
-            ctx.config.ccr_store.as_ref(),
-        ));
+        let (marker, dropped_ref) =
+            emit_opaque_ccr_marker(&s, &kind, ctx.config.ccr_store.as_ref());
+        sink.push(dropped_ref);
+        return Value::String(marker);
     }
 
     Value::String(s)
@@ -210,18 +247,29 @@ pub fn try_parse_json_container(s: &str) -> Option<Value> {
 /// Marker format: `<<ccr:HASH,KIND,SIZE>>` where HASH is the 12-char
 /// SHA-256 hex prefix of the payload bytes, KIND is `base64` / `string`
 /// / `html` / custom, SIZE is humanized (`123B`, `4.5KB`, `1.2MB`).
+///
+/// Returns the marker text alongside the typed [`DroppedRef::Opaque`]
+/// carrying the SAME hash/kind (plus the EXACT byte size the marker
+/// only humanizes) — §4.2 R2: every emitter surfaces the ref so
+/// recovery mirroring never re-parses the marker.
 pub fn emit_opaque_ccr_marker(
     payload: &str,
     kind: &OpaqueKind,
     store: Option<&Arc<dyn CcrStore>>,
-) -> String {
+) -> (String, DroppedRef) {
     // 12-char SHA-256 hex prefix via the consolidated `ccr::persist`
     // implementation (ARCH-5) — same key with or without a store.
     let hash = crate::ccr::persist::sha6_hex12(payload.as_bytes());
     if let Some(s) = store {
         s.put(&hash, payload);
     }
-    marker_for_opaque(&hash, kind.wire_str(), payload.len())
+    let marker = marker_for_opaque(&hash, kind.wire_str(), payload.len());
+    let dropped_ref = DroppedRef::Opaque {
+        hash,
+        kind: kind.wire_str().to_string(),
+        byte_size: payload.len(),
+    };
+    (marker, dropped_ref)
 }
 
 /// Convenience: walk and compact with default config + CSV-schema

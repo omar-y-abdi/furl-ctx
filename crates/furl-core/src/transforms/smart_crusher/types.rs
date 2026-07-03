@@ -8,6 +8,96 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use crate::ccr::marker_for_row_index;
+use crate::ccr::persist::row_index_key;
+
+/// One CCR-recoverable reduction produced by a crush — the typed carrier
+/// the FFI hands to Python so recovery mirroring never depends on
+/// re-parsing rendered `<<ccr:...>>` marker text (§4.2 / ARCH-2 / TYPE-2).
+///
+/// The values are exactly those the emission sites already compute when
+/// they render the markers (`persist_dropped` for row-drops,
+/// `emit_opaque_ccr_marker` / `cell_from_value` for opaque
+/// substitutions): carrying them here is pure plumbing — it never
+/// changes the rendered bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DroppedRef {
+    /// Whole rows dropped from an array. The full original array is
+    /// recoverable via `ccr_get(hash)`; when a granular row index was
+    /// written, single rows are recoverable proportionally via the
+    /// `{hash}#rows` index (see [`DroppedRef::row_index_key`]).
+    RowDrop {
+        /// 12-char SHA-256 hex prefix keying the stored full-original
+        /// array — the same hash the rendered
+        /// `<<ccr:HASH N_rows_offloaded>>` marker carries.
+        hash: String,
+        /// Number of per-row chunks the store-side row index holds
+        /// (exactly the in-range dropped rows — COR-20). `None` when no
+        /// store was configured to chunk into or the drop exceeded the
+        /// COR-4 granular budget (whole-blob recovery still covers it).
+        ///
+        /// The plan's `row_index_key` is exposed as a derived accessor
+        /// instead of a stored field: the key is `"{hash}#rows"` by
+        /// store contract (single owner: `ccr::persist::row_index_key`),
+        /// while the chunk count is the datum the back-compat
+        /// [`CrushResult::row_index_markers`] getter needs to
+        /// reconstruct the rendered marker byte-identically.
+        row_index_chunks: Option<usize>,
+    },
+    /// An opaque payload (long base64 / HTML / long-text blob)
+    /// substituted in place by a `<<ccr:HASH,KIND,SIZE>>` marker. The
+    /// original bytes are recoverable via `ccr_get(hash)`.
+    Opaque {
+        /// 12-char SHA-256 hex prefix of the payload bytes — the same
+        /// hash the rendered marker carries.
+        hash: String,
+        /// Pre-resolved wire kind token (`"base64"` / `"string"` /
+        /// `"html"` / custom) — byte-identical to the KIND field of the
+        /// rendered marker (`OpaqueKind::wire_str`).
+        kind: String,
+        /// EXACT original payload length in bytes. The rendered marker
+        /// only carries the lossy humanized form (`"2.1KB"`); the typed
+        /// ref preserves the precise size.
+        byte_size: usize,
+    },
+}
+
+impl DroppedRef {
+    /// The CCR store hash of this ref, whichever variant.
+    pub fn hash(&self) -> &str {
+        match self {
+            DroppedRef::RowDrop { hash, .. } | DroppedRef::Opaque { hash, .. } => hash,
+        }
+    }
+
+    /// Bare store key of the granular row index (`"{hash}#rows"`) — the
+    /// key Python mirrors per-row chunks from. NOT marker text. `Some`
+    /// only for a [`DroppedRef::RowDrop`] that actually has an index.
+    pub fn row_index_key(&self) -> Option<String> {
+        match self {
+            DroppedRef::RowDrop {
+                hash,
+                row_index_chunks: Some(_),
+            } => Some(row_index_key(hash)),
+            _ => None,
+        }
+    }
+
+    /// Rendered `<<ccr:{hash}#rows {n}_chunks>>` marker for this ref's
+    /// row index, byte-identical to the one embedded in the output
+    /// (grammar owner: `ccr::markers`). Back-compat derivation for
+    /// [`CrushResult::row_index_markers`].
+    pub fn row_index_marker(&self) -> Option<String> {
+        match self {
+            DroppedRef::RowDrop {
+                hash,
+                row_index_chunks: Some(n),
+            } => Some(marker_for_row_index(hash, *n)),
+            _ => None,
+        }
+    }
+}
+
 /// Compression strategies based on data patterns.
 ///
 /// Mirrors `CompressionStrategy` enum at `smart_crusher.py:318-326`. The
@@ -202,27 +292,21 @@ pub struct CrushResult {
     pub original: String,
     pub was_modified: bool,
     pub strategy: String,
-    /// Row-drop CCR hashes produced anywhere in this crush. Unlike
-    /// `CrushArrayResult::ccr_hash` (a single hash for one top-level
-    /// array), `crush()` recurses via `process_value` and can drop rows
-    /// from MANY sub-arrays at any depth — dict arrays via `crush_array`,
-    /// plus string/number/mixed arrays via `ccr_dropped_sentinel`. Each
-    /// drop contributes one hash here. The Python shim mirrors each
-    /// DIRECTLY into the compression_store (typed recovery) instead of
-    /// substring-scraping `<<ccr:HASH>>` out of `compressed`. These are
-    /// the SAME hashes the embedded `<<ccr:HASH N_rows_offloaded>>`
-    /// markers carry — pure plumbing of the values `persist_dropped`
-    /// already computed, NOT a re-hash, so `compressed` is byte-identical
-    /// to before this field existed. Empty when nothing was dropped.
-    pub ccr_hashes: Vec<String>,
-    /// Granular per-blob row-index markers (`<<ccr:HASH#rows N_chunks>>`)
-    /// paired with `ccr_hashes`, one per drop that had a store configured
-    /// to chunk into. Mirrored DIRECTLY for proportional retrieval (a
-    /// single needed row resolves to exactly that row). Same values the
-    /// embedded `_ccr_rows` sentinel field carries. May be shorter than
-    /// `ccr_hashes` (a drop with no store configured produces a hash but
-    /// no row index); never longer.
-    pub row_index_markers: Vec<String>,
+    /// Every CCR-recoverable reduction this crush produced, TYPED.
+    /// Unlike `CrushArrayResult::ccr_hash` (a single hash for one
+    /// top-level array), `crush()` recurses via `process_value` and can
+    /// reduce MANY spots at any depth — row-drops from dict arrays via
+    /// `crush_array`, string/number/mixed arrays via
+    /// `ccr_dropped_sentinel`, and opaque-blob substitutions from the
+    /// compaction/`process_string` paths. Each contributes one
+    /// [`DroppedRef`] here, in emission order. The Python shim mirrors
+    /// each DIRECTLY into the compression_store (typed recovery) instead
+    /// of substring-scraping `<<ccr:...>>` out of `compressed`. These
+    /// are the SAME hashes the embedded markers carry — pure plumbing of
+    /// values the emission sites already computed, NOT a re-hash, so
+    /// `compressed` is byte-identical to before this field existed.
+    /// Empty when nothing was reduced.
+    pub dropped: Vec<DroppedRef>,
 }
 
 impl CrushResult {
@@ -236,10 +320,38 @@ impl CrushResult {
             original: s,
             was_modified: false,
             strategy: "passthrough".to_string(),
-            // Passthrough drops nothing → no recovery hashes.
-            ccr_hashes: Vec::new(),
-            row_index_markers: Vec::new(),
+            // Passthrough drops nothing → no recovery refs.
+            dropped: Vec::new(),
         }
+    }
+
+    /// Row-drop CCR hashes, in emission order — derived back-compat
+    /// getter, byte-identical to the retired `ccr_hashes` FIELD (which
+    /// carried row-drop hashes ONLY; opaque refs live in [`Self::dropped`]
+    /// and are deliberately excluded here so pre-§4.2 consumers see the
+    /// exact values the field held).
+    pub fn ccr_hashes(&self) -> Vec<String> {
+        self.dropped
+            .iter()
+            .filter_map(|d| match d {
+                DroppedRef::RowDrop { hash, .. } => Some(hash.clone()),
+                DroppedRef::Opaque { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Granular per-blob row-index markers (`<<ccr:HASH#rows N_chunks>>`)
+    /// in emission order — derived back-compat getter, byte-identical to
+    /// the retired `row_index_markers` FIELD: one marker per row-drop
+    /// that had a store configured to chunk into. May be shorter than
+    /// [`Self::ccr_hashes`] (a drop with no store produces a hash but no
+    /// row index); never longer. New consumers should read the bare
+    /// [`DroppedRef::row_index_key`] instead of re-parsing marker text.
+    pub fn row_index_markers(&self) -> Vec<String> {
+        self.dropped
+            .iter()
+            .filter_map(DroppedRef::row_index_marker)
+            .collect()
     }
 }
 
@@ -283,5 +395,85 @@ mod tests {
         assert_eq!(r.original, "hello");
         assert!(!r.was_modified);
         assert_eq!(r.strategy, "passthrough");
+        assert!(r.dropped.is_empty());
+        assert!(r.ccr_hashes().is_empty());
+        assert!(r.row_index_markers().is_empty());
+    }
+
+    fn result_with(dropped: Vec<DroppedRef>) -> CrushResult {
+        CrushResult {
+            compressed: String::new(),
+            original: String::new(),
+            was_modified: true,
+            strategy: "smart_sample".to_string(),
+            dropped,
+        }
+    }
+
+    #[test]
+    fn dropped_ref_row_drop_accessors() {
+        let with_index = DroppedRef::RowDrop {
+            hash: "9f3a2b9f3a2b".to_string(),
+            row_index_chunks: Some(50),
+        };
+        assert_eq!(with_index.hash(), "9f3a2b9f3a2b");
+        // Bare key — NOT marker text (the datum R5's Python consumes).
+        assert_eq!(
+            with_index.row_index_key().as_deref(),
+            Some("9f3a2b9f3a2b#rows")
+        );
+        // Reconstructed marker is byte-identical to the pinned grammar.
+        assert_eq!(
+            with_index.row_index_marker().as_deref(),
+            Some("<<ccr:9f3a2b9f3a2b#rows 50_chunks>>")
+        );
+
+        let no_index = DroppedRef::RowDrop {
+            hash: "abc123def456".to_string(),
+            row_index_chunks: None,
+        };
+        assert_eq!(no_index.row_index_key(), None);
+        assert_eq!(no_index.row_index_marker(), None);
+    }
+
+    #[test]
+    fn dropped_ref_opaque_accessors() {
+        let opaque = DroppedRef::Opaque {
+            hash: "ff00ff00ff00".to_string(),
+            kind: "base64".to_string(),
+            byte_size: 2150,
+        };
+        assert_eq!(opaque.hash(), "ff00ff00ff00");
+        // An opaque ref never has a row index of any form.
+        assert_eq!(opaque.row_index_key(), None);
+        assert_eq!(opaque.row_index_marker(), None);
+    }
+
+    #[test]
+    fn derived_getters_match_the_retired_field_semantics() {
+        // The retired fields carried: every ROW-DROP hash in emission
+        // order, and one marker per drop that HAD a row index (shorter,
+        // never longer). Opaque refs — new in the typed carrier — must
+        // be excluded from both back-compat getters.
+        let r = result_with(vec![
+            DroppedRef::RowDrop {
+                hash: "aaaaaaaaaaaa".to_string(),
+                row_index_chunks: Some(3),
+            },
+            DroppedRef::Opaque {
+                hash: "cccccccccccc".to_string(),
+                kind: "html".to_string(),
+                byte_size: 512,
+            },
+            DroppedRef::RowDrop {
+                hash: "bbbbbbbbbbbb".to_string(),
+                row_index_chunks: None,
+            },
+        ]);
+        assert_eq!(r.ccr_hashes(), vec!["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+        assert_eq!(
+            r.row_index_markers(),
+            vec!["<<ccr:aaaaaaaaaaaa#rows 3_chunks>>"]
+        );
     }
 }

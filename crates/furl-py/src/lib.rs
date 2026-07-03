@@ -23,8 +23,9 @@ use furl_core::transforms::smart_crusher::compaction::{
     has_serde_private_marker, DocumentCompactor,
 };
 use furl_core::transforms::smart_crusher::{
-    CrushResult as RustCrushResult, RoutingPolicy as RustRoutingPolicy,
-    SmartCrusher as RustSmartCrusher, SmartCrusherConfig as RustSmartCrusherConfig,
+    CrushResult as RustCrushResult, DroppedRef as RustDroppedRef,
+    RoutingPolicy as RustRoutingPolicy, SmartCrusher as RustSmartCrusher,
+    SmartCrusherConfig as RustSmartCrusherConfig,
 };
 use furl_core::transforms::tag_protector::{
     is_known_html_tag as rust_is_known_html_tag, known_html_tag_names as rust_known_html_tag_names,
@@ -97,6 +98,13 @@ fn type_name(v: &serde_json::Value) -> &'static str {
 /// Option<String> / Option<&'static str>) without tripping the
 /// `clippy::useless_conversion` false positive that fires inside the
 /// pyo3 0.22 method-attribute macro.
+///
+/// `dropped_refs` (typed recovery refs, §4.2 R3/R4) is converted to a
+/// `list[DroppedRef]`; `row_index_key` is the bare `"HASH#rows"` store
+/// key of the top-level row-drop (NOT marker text), `None` when no
+/// granular index was written. `set_item` on the pyclass list allocates
+/// Python objects and can in principle fail — propagated as PyErr.
+#[allow(clippy::too_many_arguments)]
 fn build_crush_array_dict<'py>(
     py: Python<'py>,
     kept_json: String,
@@ -105,7 +113,9 @@ fn build_crush_array_dict<'py>(
     strategy_info: String,
     compacted: Option<String>,
     compaction_kind: Option<&'static str>,
-) -> Bound<'py, PyDict> {
+    row_index_key: Option<String>,
+    dropped_refs: Vec<PyDroppedRef>,
+) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("items", kept_json).unwrap();
     dict.set_item("ccr_hash", ccr_hash).unwrap();
@@ -113,7 +123,9 @@ fn build_crush_array_dict<'py>(
     dict.set_item("strategy_info", strategy_info).unwrap();
     dict.set_item("compacted", compacted).unwrap();
     dict.set_item("compaction_kind", compaction_kind).unwrap();
-    dict
+    dict.set_item("row_index_key", row_index_key).unwrap();
+    dict.set_item("dropped_refs", dropped_refs)?;
+    Ok(dict)
 }
 
 // ─── DiffCompressorConfig ──────────────────────────────────────────────────
@@ -685,6 +697,112 @@ impl PySmartCrusherConfig {
     }
 }
 
+// ─── DroppedRef ────────────────────────────────────────────────────────────
+
+/// Typed CCR recovery ref carried across the FFI (§4.2) — one per
+/// reduction the engine shipped (row-drop or opaque substitution).
+///
+/// A small pyclass instead of a flat tuple so the row-drop variant never
+/// needs a documented `byte_size=0` filler: fields that don't apply to a
+/// variant are `None`.
+///
+/// * `kind_tag` — `"row_drop"` | `"opaque"` (the variant discriminator).
+/// * `hash` — the CCR store key (also embedded in the rendered marker).
+/// * `row_index_key` — bare granular-index store key (`"HASH#rows"`,
+///   NOT marker text); row-drop only, `None` when no index was written.
+/// * `opaque_kind` — wire kind token (`"base64"` / `"string"` / `"html"`
+///   / custom); opaque only.
+/// * `byte_size` — EXACT original payload length in bytes (the rendered
+///   marker only carries the humanized form); opaque only.
+#[pyclass(name = "DroppedRef", module = "furl_ctx._core", from_py_object)]
+#[derive(Clone)]
+struct PyDroppedRef {
+    kind_tag: &'static str,
+    hash: String,
+    row_index_key: Option<String>,
+    opaque_kind: Option<String>,
+    byte_size: Option<usize>,
+}
+
+impl From<&RustDroppedRef> for PyDroppedRef {
+    fn from(r: &RustDroppedRef) -> Self {
+        match r {
+            RustDroppedRef::RowDrop { hash, .. } => PyDroppedRef {
+                kind_tag: "row_drop",
+                hash: hash.clone(),
+                row_index_key: r.row_index_key(),
+                opaque_kind: None,
+                byte_size: None,
+            },
+            RustDroppedRef::Opaque {
+                hash,
+                kind,
+                byte_size,
+            } => PyDroppedRef {
+                kind_tag: "opaque",
+                hash: hash.clone(),
+                row_index_key: None,
+                opaque_kind: Some(kind.clone()),
+                byte_size: Some(*byte_size),
+            },
+        }
+    }
+}
+
+fn py_dropped_refs(refs: &[RustDroppedRef]) -> Vec<PyDroppedRef> {
+    refs.iter().map(PyDroppedRef::from).collect()
+}
+
+#[pymethods]
+impl PyDroppedRef {
+    #[getter]
+    fn kind_tag(&self) -> &'static str {
+        self.kind_tag
+    }
+    #[getter]
+    fn hash(&self) -> &str {
+        &self.hash
+    }
+    #[getter]
+    fn row_index_key(&self) -> Option<String> {
+        self.row_index_key.clone()
+    }
+    #[getter]
+    fn opaque_kind(&self) -> Option<String> {
+        self.opaque_kind.clone()
+    }
+    #[getter]
+    fn byte_size(&self) -> Option<usize> {
+        self.byte_size
+    }
+
+    fn __repr__(&self) -> String {
+        // Python-style repr: options render as 'value' / None, not as
+        // Rust's Some(..) Debug form.
+        fn opt(v: &Option<String>) -> String {
+            match v {
+                Some(s) => format!("'{s}'"),
+                None => "None".to_string(),
+            }
+        }
+        match self.kind_tag {
+            "row_drop" => format!(
+                "DroppedRef(kind_tag='row_drop', hash='{}', row_index_key={})",
+                self.hash,
+                opt(&self.row_index_key)
+            ),
+            _ => format!(
+                "DroppedRef(kind_tag='opaque', hash='{}', opaque_kind={}, byte_size={})",
+                self.hash,
+                opt(&self.opaque_kind),
+                self.byte_size
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "None".to_string()),
+            ),
+        }
+    }
+}
+
 // ─── CrushResult ───────────────────────────────────────────────────────────
 
 /// Mirror of `furl_ctx.transforms.smart_crusher.CrushResult`. Read-only;
@@ -718,31 +836,44 @@ impl PyCrushResult {
     /// shim mirrors EACH directly into the compression_store (typed
     /// recovery) instead of scraping `<<ccr:HASH>>` out of `compressed`.
     /// Plural because `crush()` recurses and can drop rows from many
-    /// sub-arrays — see `RustCrushResult::ccr_hashes`. Empty when nothing
-    /// was dropped. Returned as a fresh `list[str]` per call.
+    /// sub-arrays — see `RustCrushResult::ccr_hashes()`. Empty when
+    /// nothing was dropped. Returned as a fresh `list[str]` per call.
+    /// Back-compat derivation over the typed `dropped` carrier —
+    /// byte-identical to the retired field.
     #[getter]
     fn ccr_hashes(&self) -> Vec<String> {
-        self.inner.ccr_hashes.clone()
+        self.inner.ccr_hashes()
     }
 
     /// Granular per-blob row-index markers (`<<ccr:HASH#rows N_chunks>>`)
     /// paired with `ccr_hashes`, for proportional retrieval. May be
     /// shorter than `ccr_hashes` (a drop with no store configured has no
-    /// row index); never longer. Returned as a fresh `list[str]` per call.
+    /// row index); never longer. Returned as a fresh `list[str]` per
+    /// call. Back-compat derivation over the typed `dropped` carrier —
+    /// byte-identical to the retired field. Deprecated: prefer
+    /// `dropped_refs` (bare `row_index_key`, no marker re-parsing).
     #[getter]
     fn row_index_markers(&self) -> Vec<String> {
-        self.inner.row_index_markers.clone()
+        self.inner.row_index_markers()
+    }
+
+    /// Every CCR-recoverable reduction this crush shipped, typed
+    /// (§4.2): row-drops AND opaque substitutions, in emission order.
+    /// The Python shim mirrors each directly — no marker re-parsing.
+    /// Returned as a fresh `list[DroppedRef]` per call.
+    #[getter]
+    fn dropped_refs(&self) -> Vec<PyDroppedRef> {
+        py_dropped_refs(&self.inner.dropped)
     }
 
     fn __repr__(&self) -> String {
         format!(
             "CrushResult(compressed=<{} chars>, was_modified={}, strategy={:?}, \
-             ccr_hashes={}, row_index_markers={})",
+             dropped_refs={})",
             self.inner.compressed.len(),
             self.inner.was_modified,
             self.inner.strategy,
-            self.inner.ccr_hashes.len(),
-            self.inner.row_index_markers.len(),
+            self.inner.dropped.len(),
         )
     }
 }
@@ -840,6 +971,11 @@ impl PySmartCrusher {
     /// `smart_crush_tool_output` convenience function and direct
     /// callers that want the tuple form. Releases the GIL across the
     /// compute (same rationale as `crush`).
+    ///
+    /// Deprecated (§4.2 R3/R4): prefer `smart_crush_content_typed`,
+    /// which additionally returns the typed recovery refs — this shape
+    /// forces the caller back onto the text scrape for recovery.
+    /// Delegates to the same engine walk; rendered bytes are identical.
     #[pyo3(signature = (content, query = "", bias = 1.0))]
     fn smart_crush_content(
         &self,
@@ -859,6 +995,34 @@ impl PySmartCrusher {
         .map_err(panic_to_pyerr)
     }
 
+    /// `smart_crush_content_typed(content, query="", bias=1.0) ->
+    /// (str, bool, str, list[DroppedRef])` — the typed sibling of
+    /// `smart_crush_content` (§4.2 R3/R4): identical first three
+    /// elements (byte-identical rendering), plus every typed recovery
+    /// ref the walk shipped (row-drops AND opaque substitutions, in
+    /// emission order) so the Python mirror consumes refs directly
+    /// instead of re-parsing rendered markers.
+    #[pyo3(signature = (content, query = "", bias = 1.0))]
+    fn smart_crush_content_typed(
+        &self,
+        py: Python<'_>,
+        content: &str,
+        query: &str,
+        bias: f64,
+    ) -> PyResult<(String, bool, String, Vec<PyDroppedRef>)> {
+        let content = content.to_string();
+        let query = query.to_string();
+        // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
+        let (crushed, was_modified, info, dropped) = py
+            .detach(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.inner.smart_crush_content_typed(&content, &query, bias)
+                }))
+            })
+            .map_err(panic_to_pyerr)?;
+        Ok((crushed, was_modified, info, py_dropped_refs(&dropped)))
+    }
+
     /// Crush a JSON array directly and return the structured result.
     ///
     /// Input is a JSON string holding an array (`[item, item, ...]`).
@@ -871,6 +1035,11 @@ impl PySmartCrusher {
     ///   `"smart_sample"`, `"lossless:table"`, `"none:adaptive_at_limit"`)
     /// - `compacted`: rendered bytes when the lossless path won, else `None`
     /// - `compaction_kind`: `"table" | "buckets" | "ccr" | None`
+    /// - `row_index_key`: bare `"HASH#rows"` granular-index store key of
+    ///   the drop (NOT marker text), `None` when no index was written
+    /// - `dropped_refs`: `list[DroppedRef]` — every typed recovery ref
+    ///   the shipped render carries (the row-drop plus any opaque
+    ///   substitutions baked into `compacted`), §4.2 R3/R4
     ///
     /// This surfaces `CrushArrayResult` to Python so tests and the
     /// runtime can reach the CCR hash directly (rather than parsing it
@@ -899,7 +1068,15 @@ impl PySmartCrusher {
         // (COR-7). Two Result layers to flatten: the outer is the panic
         // (`map_err(panic_to_pyerr)?`), the inner is the existing input-validation
         // `PyErr` (`?`).
-        let (kept_json, ccr_hash, dropped_summary, strategy_info, compacted, compaction_kind) = py
+        let (
+            kept_json,
+            ccr_hash,
+            dropped_summary,
+            strategy_info,
+            compacted,
+            compaction_kind,
+            dropped_refs,
+        ) = py
             .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // COR-44: decline magic-key payloads before from_str so
@@ -938,11 +1115,16 @@ impl PySmartCrusher {
                         result.strategy_info,
                         result.compacted,
                         result.compaction_kind,
+                        result.dropped_refs,
                     ))
                 }))
             })
             .map_err(panic_to_pyerr)??;
-        Ok(build_crush_array_dict(
+        // Bare granular-index key of the top-level row-drop (a
+        // CrushArrayResult carries at most ONE RowDrop ref by
+        // construction — one array, one drop).
+        let row_index_key = dropped_refs.iter().find_map(|d| d.row_index_key());
+        build_crush_array_dict(
             py,
             kept_json,
             ccr_hash,
@@ -950,7 +1132,9 @@ impl PySmartCrusher {
             strategy_info,
             compacted,
             compaction_kind,
-        ))
+            row_index_key,
+            py_dropped_refs(&dropped_refs),
+        )
     }
 
     /// Run the document-level walker on `doc_json` (JSON string) and
@@ -968,40 +1152,65 @@ impl PySmartCrusher {
     /// rather than statistical row drop.
     /// Raises `ValueError` when `doc_json` is not valid JSON — boundary
     /// validation, not a panic (same rationale as `crush_array_json`).
+    ///
+    /// Deprecated (§4.2 R3/R4): prefer `compact_document_json_typed`,
+    /// which additionally returns the typed opaque refs — this shape
+    /// forces the caller back onto the text scrape for recovery.
+    /// Delegates to the typed sibling and discards the refs, so the
+    /// returned JSON is identical by construction.
     fn compact_document_json(&self, py: Python<'_>, doc_json: &str) -> PyResult<String> {
+        let (compacted, _refs) = self.compact_document_json_typed(py, doc_json)?;
+        Ok(compacted)
+    }
+
+    /// `compact_document_json_typed(doc_json) -> (str, list[DroppedRef])`
+    /// — the typed sibling of `compact_document_json` (§4.2 R3/R4):
+    /// identical compacted JSON, plus every typed opaque ref the walker
+    /// shipped (both the live string substitutions and the opaque cells
+    /// baked into rendered sub-tables) so the Python mirror consumes
+    /// refs directly instead of re-parsing rendered markers.
+    fn compact_document_json_typed(
+        &self,
+        py: Python<'_>,
+        doc_json: &str,
+    ) -> PyResult<(String, Vec<PyDroppedRef>)> {
         // Heavy: JSON parse + recursive walker + tabular compaction +
         // re-serialize. None of it touches Python; release the GIL.
         let doc_json = doc_json.to_string();
         // catch_unwind wraps the GIL-free walker compute (COR-7). Flatten the
         // panic Result (`map_err(panic_to_pyerr)?`) over the existing
         // input-validation `PyErr` (`?`).
-        py.detach(|| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // COR-44: decline magic-key payloads before from_str so
-                // serde_json's arbitrary_precision / raw_value promotions
-                // never fire.  Raises ValueError — same class as the
-                // invalid-JSON path.
-                if has_serde_private_marker(&doc_json) {
-                    return Err(invalid_input(
-                        "doc_json contains a serde_json internal key \
-                         ($serde_json::private::); parsing declined to \
-                         prevent silent data mutation"
-                            .to_string(),
-                    ));
-                }
-                let parsed: serde_json::Value = serde_json::from_str(&doc_json)
-                    .map_err(|e| invalid_input(format!("doc_json must be JSON: {e}")))?;
-                let mut dc = DocumentCompactor::new();
-                if let Some(store) = self.inner.ccr_store() {
-                    dc = dc.with_ccr_store(store.clone());
-                }
-                let out = dc.compact(parsed);
-                serde_json::to_string(&out).map_err(|e| {
-                    invalid_input(format!("failed to serialize compacted document: {e}"))
-                })
-            }))
-        })
-        .map_err(panic_to_pyerr)?
+        let (compacted, dropped) = py
+            .detach(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // COR-44: decline magic-key payloads before from_str so
+                    // serde_json's arbitrary_precision / raw_value promotions
+                    // never fire.  Raises ValueError — same class as the
+                    // invalid-JSON path.
+                    if has_serde_private_marker(&doc_json) {
+                        return Err(invalid_input(
+                            "doc_json contains a serde_json internal key \
+                             ($serde_json::private::); parsing declined to \
+                             prevent silent data mutation"
+                                .to_string(),
+                        ));
+                    }
+                    let parsed: serde_json::Value = serde_json::from_str(&doc_json)
+                        .map_err(|e| invalid_input(format!("doc_json must be JSON: {e}")))?;
+                    let mut dc = DocumentCompactor::new();
+                    if let Some(store) = self.inner.ccr_store() {
+                        dc = dc.with_ccr_store(store.clone());
+                    }
+                    let mut sink: Vec<RustDroppedRef> = Vec::new();
+                    let out = dc.compact_collecting(parsed, &mut sink);
+                    let compacted = serde_json::to_string(&out).map_err(|e| {
+                        invalid_input(format!("failed to serialize compacted document: {e}"))
+                    })?;
+                    Ok::<_, PyErr>((compacted, sink))
+                }))
+            })
+            .map_err(panic_to_pyerr)??;
+        Ok((compacted, py_dropped_refs(&dropped)))
     }
 
     /// Look up an original payload by CCR hash.
@@ -1924,6 +2133,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySearchCompressor>()?;
     m.add_function(wrap_pyfunction!(parse_search_lines, m)?)?;
     m.add_class::<PySmartCrusherConfig>()?;
+    m.add_class::<PyDroppedRef>()?;
     m.add_class::<PyCrushResult>()?;
     m.add_class::<PySmartCrusher>()?;
     m.add_class::<PyDetectionResult>()?;

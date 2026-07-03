@@ -1,12 +1,13 @@
-"""Characterization: ``crush()`` surfaces row-drop recovery TYPED.
+"""Characterization: the engine surfaces CCR recovery TYPED (§4.2).
 
-Pass 1a brings the live ``SmartCrusher.crush()`` path to recovery PARITY
-with its sibling ``crush_array_json``: the dropped-row CCR hash (and the
-granular row-index marker) come back as TYPED Rust fields
-(``CrushResult.ccr_hashes`` / ``.row_index_markers``) instead of being
-substring-scraped out of the rendered ``<<ccr:HASH>>`` text. The Python
-shim mirrors those typed fields DIRECTLY into the compression_store, so
-``crush()`` row-drop recovery no longer depends on the scrape.
+The live ``SmartCrusher.crush()`` path surfaces every recovery ref as a
+typed carrier: the dropped-row CCR hashes (with granular row-index keys)
+AND — since §4.2 R2/R3 — the opaque-blob substitutions, all carried on
+``CrushResult.dropped_refs`` (a list of ``furl_ctx._core.DroppedRef``)
+instead of being substring-scraped out of the rendered ``<<ccr:...>>``
+text. The Python shim mirrors those typed refs DIRECTLY into the
+compression_store; the back-compat ``ccr_hashes`` / ``row_index_markers``
+getters stay byte-identical to the retired fields.
 
 These tests PIN that contract and were written to BITE: stubbing the
 typed getter to drop/wrong a hash turns them RED (proven during
@@ -20,8 +21,13 @@ so the typed field is PLURAL — unlike the sibling's single ``ccr_hash``
 for one top-level array. The multi-array case below pins that multiplicity
 (the singular-hash model would silently leave extra drops on the scrape).
 
-OPAQUE-blob markers (``<<ccr:HASH,KIND,SIZE>>``) are intentionally NOT
-typed here — they stay on the comma-shape scrape on both paths (1b).
+The typed-vs-scraped comparison for OPAQUE refs is directional
+(typed ⊇ scraped): column-encoding folds (e.g. the CSV Affix fold) can
+hide verbatim markers from the raw-text scrape, which the typed path
+still carries — see ``crates/furl-core/tests/typed_dropped_refs.rs``
+for the Rust-side pin of that discovery. The scrape's OWN false-positive
+class (literal ``<<ccr:...>>`` text quoted inside payloads) is pinned
+here: scraped but never typed.
 """
 
 from __future__ import annotations
@@ -147,11 +153,14 @@ def test_crush_typed_hash_equals_scrape_and_retrieves(
     1. ``crush()`` returns a non-empty typed ``ccr_hashes``.
     2. That typed set EQUALS the row-drop hashes the old scrape extracts
        from the SAME ``r.compressed`` (parity).
-    3. ``ccr_get(typed_hash)`` and ``ccr_get(scraped_hash)`` return the SAME
-       payload (same recovery, regardless of source).
+    3. The PAYLOAD retrieved under every typed/scraped hash is the FULL
+       ORIGINAL array — parsed-equal to the exact ``items`` this test
+       built (TEST-11: the payload assertion is against ground truth,
+       not a call compared with itself).
 
     BITE PROOF: returning ``None``/a wrong hash from the typed getter makes
-    step 1 or 2 fail (verified during development).
+    step 1 or 2 fail; corrupting the stored payload makes step 3 fail
+    (verified during development).
     """
     items = _BUILDERS[shape](seed)
     content = json.dumps(items, ensure_ascii=False)
@@ -167,16 +176,15 @@ def test_crush_typed_hash_equals_scrape_and_retrieves(
     )
     # (2) Typed set == scraped row-drop set (byte-for-byte parity).
     assert typed == scraped, f"{shape}-{seed}: typed {sorted(typed)} != scraped {sorted(scraped)}"
-    # (3) Both sources resolve, and to the SAME payload.
-    for h in typed:
-        typed_payload = crusher._rust.ccr_get(h)
-        assert typed_payload is not None, f"typed hash {h} unresolvable in store"
-    for h in scraped:
-        scraped_payload = crusher._rust.ccr_get(h)
-        assert scraped_payload is not None, f"scraped hash {h} unresolvable"
-    for h in typed & scraped:
-        assert crusher._rust.ccr_get(h) == crusher._rust.ccr_get(h), (
-            f"{shape}-{seed}: typed vs scraped payload diverge for {h}"
+    # (3) TEST-11 payload equality against GROUND TRUTH: each fixture is
+    # ONE top-level array, so the whole-blob entry under the (single)
+    # typed==scraped hash must decode to exactly the original items.
+    for h in typed | scraped:
+        payload = crusher._rust.ccr_get(h)
+        assert payload is not None, f"hash {h} unresolvable in store"
+        assert json.loads(payload) == items, (
+            f"{shape}-{seed}: payload under {h} must be the FULL original "
+            f"array (typed and scraped recovery resolve the same entry)"
         )
 
 
@@ -225,6 +233,151 @@ def test_crush_multi_array_surfaces_one_hash_per_drop(crusher: SmartCrusher) -> 
     )
     # Typed set fully covers the scrape — no drop is left scrape-only.
     assert typed == scraped, f"typed {sorted(typed)} != scraped {sorted(scraped)}"
-    # Every typed hash retrieves.
+    # Every typed hash retrieves, and each payload is one of the ORIGINAL
+    # sub-arrays (ground-truth payload assertion, TEST-11).
+    originals = [arr_a, arr_b]
     for h in typed:
-        assert crusher._rust.ccr_get(h) is not None, f"typed hash {h} unresolvable"
+        payload = crusher._rust.ccr_get(h)
+        assert payload is not None, f"typed hash {h} unresolvable"
+        assert json.loads(payload) in originals, (
+            f"payload under {h} must be one of the original sub-arrays"
+        )
+
+
+# ─── §4.2 R3/R4: the typed FFI surface (DroppedRef across the boundary) ────
+
+
+_BLOB_BASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+
+
+def _blob(seed: int, repeats: int = 8) -> str:
+    return f"{seed}:" + _BLOB_BASE * repeats
+
+
+def _scrape_opaque_hashes(rendered: str) -> set[str]:
+    """The comma-shape (opaque) scrape — Python's pre-§4.2 discovery path."""
+    sink: set[str] = set()
+    SmartCrusher._collect_opaque_ccr_hashes_from_string(rendered, sink)
+    return sink
+
+
+def _scrape_row_drop_only(rendered: str) -> set[str]:
+    """Row-drop hashes STRICTLY: the full scrape minus ``#rows`` index
+    keys minus comma-shape opaque hashes. (The module-level
+    ``_scrape_row_drop_hashes`` only excludes ``#rows`` — adequate for
+    the opaque-free row-drop fixtures above, wrong for mixed ones.)"""
+    return _scrape_row_drop_hashes(rendered) - _scrape_opaque_hashes(rendered)
+
+
+def _typed_by_kind(refs: list) -> tuple[set[str], set[str], set[str]]:
+    """(row_drop hashes, row_index keys, opaque hashes) from typed refs."""
+    row_drop = {d.hash for d in refs if d.kind_tag == "row_drop"}
+    index_keys = {d.row_index_key for d in refs if d.row_index_key is not None}
+    opaque = {d.hash for d in refs if d.kind_tag == "opaque"}
+    return row_drop, index_keys, opaque
+
+
+def test_crush_dropped_refs_carry_row_drop_and_opaque(crusher: SmartCrusher) -> None:
+    """``CrushResult.dropped_refs`` carries BOTH planes typed: the row
+    drop (hash + bare ``HASH#rows`` index key, no marker text) and the
+    opaque substitution (hash + wire kind + EXACT byte size)."""
+    doc = {"payload": _blob(3), "rows": _dict_case(1)}
+    r = crusher._rust.crush(json.dumps(doc, ensure_ascii=False), "", 1.0)
+
+    row_drop, index_keys, opaque = _typed_by_kind(list(r.dropped_refs))
+    # Row-drop plane: typed refs == back-compat getters == scrape.
+    assert row_drop == set(r.ccr_hashes) == _scrape_row_drop_only(r.compressed)
+    assert index_keys == _typed_index_keys(list(r.row_index_markers))
+    for key in index_keys:
+        assert key.endswith("#rows") and "<<" not in key, (
+            f"row_index_key must be the BARE store key, got {key!r}"
+        )
+    # Opaque plane: typed covers the scrape (directional — encoding folds
+    # can hide markers from the scrape, never from the typed path).
+    scraped_opaque = _scrape_opaque_hashes(r.compressed)
+    assert scraped_opaque <= opaque, (
+        f"scrape-only opaque refs would be lost: {sorted(scraped_opaque - opaque)}"
+    )
+    assert opaque, "fixture must exercise the opaque substitution"
+    # Exact byte size: the payload under each opaque hash is exactly
+    # byte_size bytes (the marker only carries the humanized form).
+    for d in r.dropped_refs:
+        if d.kind_tag == "opaque":
+            payload = crusher._rust.ccr_get(d.hash)
+            assert payload is not None, f"opaque hash {d.hash} unresolvable"
+            assert len(payload.encode()) == d.byte_size
+
+
+def test_smart_crush_content_typed_is_byte_identical_and_carries_refs(
+    crusher: SmartCrusher,
+) -> None:
+    """The typed sibling renders byte-identically to the deprecated
+    3-tuple method and carries the refs the 3-tuple forces back onto the
+    scrape."""
+    doc = {"payload": _blob(7), "rows": _dict_case(2)}
+    content = json.dumps(doc, ensure_ascii=False)
+
+    crushed, was_modified, info, refs = crusher._rust.smart_crush_content_typed(content, "", 1.0)
+    old_crushed, old_was_modified, old_info = crusher._rust.smart_crush_content(content, "", 1.0)
+    assert (crushed, was_modified, info) == (old_crushed, old_was_modified, old_info), (
+        "typed sibling must be byte-identical on the shared tuple elements"
+    )
+
+    row_drop, _index_keys, opaque = _typed_by_kind(list(refs))
+    assert row_drop == _scrape_row_drop_only(crushed)
+    assert _scrape_opaque_hashes(crushed) <= opaque
+    assert opaque, "fixture must exercise the opaque substitution"
+
+
+def test_compact_document_json_typed_is_byte_identical_and_carries_refs(
+    crusher: SmartCrusher,
+) -> None:
+    """Same contract for the document walker: identical JSON out, plus
+    the typed opaque refs of every substitution the walk shipped."""
+    doc = json.dumps({"summary": "ok", "payload": _blob(11)}, ensure_ascii=False)
+
+    compacted, refs = crusher._rust.compact_document_json_typed(doc)
+    assert compacted == crusher._rust.compact_document_json(doc), (
+        "typed sibling must produce byte-identical compacted JSON"
+    )
+    _row_drop, _index_keys, opaque = _typed_by_kind(list(refs))
+    assert opaque, "fixture must exercise the opaque substitution"
+    assert _scrape_opaque_hashes(compacted) <= opaque
+    for d in refs:
+        assert d.kind_tag == "opaque", "the lossless walker never row-drops"
+        assert crusher._rust.ccr_get(d.hash) is not None
+
+
+def test_crush_array_json_carries_row_index_key_and_dropped_refs(
+    crusher: SmartCrusher,
+) -> None:
+    """The dict gains ``row_index_key`` (bare key, not marker text) and
+    ``dropped_refs`` — and they agree with the established fields."""
+    items = _dict_case(3)
+    result = crusher.crush_array_json(json.dumps(items, ensure_ascii=False))
+
+    ccr_hash = result["ccr_hash"]
+    assert ccr_hash, "fixture must take the lossy row-drop path"
+    assert result["row_index_key"] == f"{ccr_hash}#rows"
+    refs = list(result["dropped_refs"])
+    row_drop, index_keys, _opaque = _typed_by_kind(refs)
+    assert ccr_hash in row_drop
+    assert result["row_index_key"] in index_keys
+
+
+def test_literal_marker_text_is_scraped_but_never_typed(crusher: SmartCrusher) -> None:
+    """★ The scrape's false-positive class (§4.2 R2): a payload QUOTING
+    literal ``<<ccr:...>>`` text is picked up by the raw-text scrape but
+    must never appear in the typed refs — the engine never emitted it."""
+    planted = "<<ccr:aaaaaaaaaaaa,base64,2.0KB>>"
+    items = [{"id": i, "note": f"saw {planted} in output"} for i in range(40)]
+    r = crusher._rust.crush(json.dumps(items, ensure_ascii=False), "", 1.0)
+
+    assert planted in r.compressed, "the planted literal must survive into the output"
+    assert "aaaaaaaaaaaa" in _scrape_opaque_hashes(r.compressed), (
+        "the scrape must exhibit its false positive for this pin to bite"
+    )
+    typed_hashes = {d.hash for d in r.dropped_refs}
+    assert "aaaaaaaaaaaa" not in typed_hashes, (
+        "the typed path must never carry a hash the engine did not emit"
+    )

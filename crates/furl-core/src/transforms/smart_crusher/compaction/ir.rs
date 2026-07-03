@@ -17,6 +17,8 @@
 
 use serde_json::Value;
 
+use crate::transforms::smart_crusher::types::DroppedRef;
+
 /// What kind of opaque payload was substituted by CCR.
 ///
 /// Carried for telemetry and so formatters can render a one-line hint
@@ -299,6 +301,68 @@ impl Compaction {
         }
     }
 
+    /// Append one typed [`DroppedRef::Opaque`] to `sink` for every
+    /// opaque substitution in this tree — [`CellValue::OpaqueRef`] cells
+    /// (including inside [`CellValue::Nested`] sub-compactions and
+    /// [`Compaction::Buckets`]) and the top-level
+    /// [`Compaction::OpaqueRef`] — in render order (row-major, cell
+    /// order; buckets in bucket order).
+    ///
+    /// Pure IR walk (§4.2 R2): the values are exactly those
+    /// `cell_from_value` computed when it minted the marker and wrote
+    /// the store, so collecting them is side-output only — callers run
+    /// this on [`CompactionStage::run`]'s existing return value and the
+    /// rendered bytes are untouched. `kind` is the wire token
+    /// ([`OpaqueKind::wire_str`]) — byte-identical to the KIND field of
+    /// the rendered `<<ccr:HASH,KIND,SIZE>>` marker.
+    ///
+    /// [`CompactionStage::run`]: super::CompactionStage::run
+    pub fn collect_opaque_refs(&self, sink: &mut Vec<DroppedRef>) {
+        fn collect_cell(cell: &CellValue, sink: &mut Vec<DroppedRef>) {
+            match cell {
+                CellValue::OpaqueRef {
+                    ccr_hash,
+                    byte_size,
+                    kind,
+                } => sink.push(DroppedRef::Opaque {
+                    hash: ccr_hash.clone(),
+                    kind: kind.wire_str().to_string(),
+                    byte_size: *byte_size,
+                }),
+                CellValue::Nested(sub) => sub.collect_opaque_refs(sink),
+                CellValue::Scalar(_) | CellValue::Missing => {}
+            }
+        }
+        match self {
+            Compaction::OpaqueRef {
+                ccr_hash,
+                byte_size,
+                kind,
+            } => sink.push(DroppedRef::Opaque {
+                hash: ccr_hash.clone(),
+                kind: kind.wire_str().to_string(),
+                byte_size: *byte_size,
+            }),
+            Compaction::Table { rows, .. } => {
+                for row in rows {
+                    for cell in &row.0 {
+                        collect_cell(cell, sink);
+                    }
+                }
+            }
+            Compaction::Buckets { buckets, .. } => {
+                for bucket in buckets {
+                    for row in &bucket.rows {
+                        for cell in &row.0 {
+                            collect_cell(cell, sink);
+                        }
+                    }
+                }
+            }
+            Compaction::Untouched(_) => {}
+        }
+    }
+
     /// True if ANY cell in the tree is an [`CellValue::OpaqueRef`]
     /// substitution (or the tree itself is a top-level
     /// [`Compaction::OpaqueRef`]). Used by callers that only want a
@@ -437,6 +501,96 @@ mod tests {
         // A Nested cell renders as CSV-quoted IR JSON, which the
         // reference decoder decodes to a plain string — unverifiable.
         assert!(!c.is_decoder_verifiable());
+    }
+
+    // ---------- collect_opaque_refs (§4.2 R2) ----------
+
+    #[test]
+    fn collect_opaque_refs_walks_tables_nested_and_buckets_in_render_order() {
+        let opaque = |h: &str, k: OpaqueKind, n: usize| CellValue::OpaqueRef {
+            ccr_hash: h.into(),
+            byte_size: n,
+            kind: k,
+        };
+        let sub = Compaction::Table {
+            schema: Schema { fields: vec![] },
+            rows: vec![Row::new(vec![opaque(
+                "222222222222",
+                OpaqueKind::HtmlChunk,
+                512,
+            )])],
+            original_count: 1,
+        };
+        let c = Compaction::Buckets {
+            discriminator: "type".into(),
+            buckets: vec![
+                Bucket {
+                    key: json!("a"),
+                    schema: Schema { fields: vec![] },
+                    rows: vec![Row::new(vec![
+                        CellValue::Scalar(json!(1)),
+                        opaque("111111111111", OpaqueKind::Base64Blob, 2150),
+                    ])],
+                },
+                Bucket {
+                    key: json!("b"),
+                    schema: Schema { fields: vec![] },
+                    rows: vec![Row::new(vec![
+                        CellValue::Nested(Box::new(sub)),
+                        CellValue::Missing,
+                    ])],
+                },
+            ],
+            original_count: 2,
+        };
+        let mut sink = Vec::new();
+        c.collect_opaque_refs(&mut sink);
+        assert_eq!(
+            sink,
+            vec![
+                DroppedRef::Opaque {
+                    hash: "111111111111".into(),
+                    kind: "base64".into(),
+                    byte_size: 2150,
+                },
+                DroppedRef::Opaque {
+                    hash: "222222222222".into(),
+                    kind: "html".into(),
+                    byte_size: 512,
+                },
+            ]
+        );
+        // Consistency with the boolean twin: refs exist ⟺ contains says so.
+        assert!(c.contains_opaque_ref());
+    }
+
+    #[test]
+    fn collect_opaque_refs_top_level_and_empty_shapes() {
+        let top = Compaction::OpaqueRef {
+            ccr_hash: "abc123def456".into(),
+            byte_size: 10,
+            kind: OpaqueKind::Other("diff".into()),
+        };
+        let mut sink = Vec::new();
+        top.collect_opaque_refs(&mut sink);
+        assert_eq!(
+            sink,
+            vec![DroppedRef::Opaque {
+                hash: "abc123def456".into(),
+                kind: "diff".into(),
+                byte_size: 10,
+            }]
+        );
+
+        let mut empty_sink = Vec::new();
+        Compaction::Untouched(json!([1, 2])).collect_opaque_refs(&mut empty_sink);
+        let plain = Compaction::Table {
+            schema: Schema { fields: vec![] },
+            rows: vec![Row::new(vec![CellValue::Scalar(json!("x"))])],
+            original_count: 1,
+        };
+        plain.collect_opaque_refs(&mut empty_sink);
+        assert!(empty_sink.is_empty(), "no opaque cells → no refs");
     }
 
     #[test]
