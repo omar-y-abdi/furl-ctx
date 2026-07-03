@@ -15,10 +15,16 @@ name: CI
 # test matrix would multiply CI cost without exercising new native code.
 
 on:
-  push:
-    branches: [main]
+  # Quota guard: no `push: main` trigger. Every change reaches main via a
+  # squash-merged PR (ruleset 18484290 requires the PR checks), so the
+  # post-merge tree is byte-identical to what the PR already tested —
+  # re-running CI on main doubled the bill for zero signal. The weekly
+  # cron is the drift guard (toolchain/image/dependency rot on an
+  # untouched tree).
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:

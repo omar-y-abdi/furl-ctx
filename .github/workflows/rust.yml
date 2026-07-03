@@ -1,15 +1,10 @@
 name: rust
 
 on:
-  push:
-    branches: [ main, rust-rewrite ]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'Makefile'
-      - '.github/workflows/rust.yml'
+  # Quota guard: no push trigger — main only receives squash-merged PRs
+  # whose tree the PR run already tested (ruleset-required checks), so
+  # the post-merge re-run was pure double-billing. Weekly cron guards
+  # against toolchain/dependency drift on an untouched tree.
   pull_request:
     paths:
       - 'crates/**'
@@ -18,6 +13,9 @@ on:
       - 'rust-toolchain.toml'
       - 'Makefile'
       - '.github/workflows/rust.yml'
+  schedule:
+    - cron: "15 6 * * 1"
+  workflow_dispatch:
 
 concurrency:
   group: rust-${{ github.ref }}
@@ -58,6 +56,12 @@ jobs:
 
   wheels:
     name: wheels (${{ matrix.target }})
+    # Quota guard: NOT on PRs. This job's macOS leg bills 10x (private
+    # repo) on every crates-touching PR, and PR-time Linux buildability
+    # is already covered by CI's required `build-wheel` check; the full
+    # cross-platform wheel gate runs in release.yml's dry-run/release
+    # matrix. Weekly cron + manual dispatch keep the drift signal.
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:

@@ -146,37 +146,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Use manylinux_2_28 explicitly (instead of `auto`, which resolved
-          # to manylinux2014 / CentOS 7 / OpenSSL 1.0.2k — too old for
-          # `openssl-sys 0.9`). manylinux_2_28 is AlmaLinux 8 / glibc 2.28.
-          # Pinning the floor keeps us off CentOS 7's ancient gcc/glibc
-          # surface.
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            manylinux: 2_28
-          # Native arm64 runner (`ubuntu-24.04-arm`, GA Jan 2025, free
-          # for public repos) replaces the previous `ubuntu-latest` +
-          # QEMU path. Building inside `manylinux_2_28_aarch64` natively
-          # on an ARM host cuts the aarch64 wheel build from ~50–60 min
-          # (emulated) to ~10 min. Wheel ABI is unchanged — the
-          # `manylinux: 2_28` field still pins the runtime glibc floor,
-          # which keeps the resolved build graph identical.
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            manylinux: 2_28
-          # NOTE: `macos-15-intel` (x86_64-apple-darwin) is intentionally
-          # NOT in the matrix. `ort-sys 2.0.0-rc.12` (transitive via our
-          # ML compression backend) does not provide prebuilt ONNX Runtime
-          # binaries for `x86_64-apple-darwin`, and building ORT from
-          # source would add CMake + ~5 minutes per build. Apple Silicon
-          # macOS is fully covered below; Intel-mac users install the
-          # platform-independent sdist (also produced by this matrix).
-          # Tracked as a follow-up: switch to `ort-tract` or upstream a
-          # request for x86_64 macOS prebuilts.
-          - os: macos-14
-            target: aarch64-apple-darwin
-            manylinux: ""
+        # Quota guard (private repo, macOS bills 10x): PR dry-runs build
+        # ONLY the Linux x86_64 wheel (+ sdist, keyed on that target) —
+        # enough to gate buildability, version consistency, and
+        # smoke-import before merge. The FULL matrix (Linux arm64 native
+        # runner + macOS arm64) runs on real releases and manual
+        # dispatch, where completeness matters.
+        #
+        # Full-matrix notes preserved: manylinux_2_28 is pinned explicitly
+        # (auto resolved to manylinux2014/CentOS 7/OpenSSL 1.0.2k — too
+        # old for openssl-sys 0.9). `ubuntu-24.04-arm` builds aarch64
+        # natively (~10 min vs ~50-60 emulated), same wheel ABI.
+        # `macos-15-intel` (x86_64-apple-darwin) intentionally absent:
+        # ort-sys ships no prebuilt ONNX Runtime for it (re-verify after
+        # the ML-backend excision before adding Intel rows).
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"}]') || fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","manylinux":"2_28"},{"os":"macos-14","target":"aarch64-apple-darwin","manylinux":""}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -378,36 +362,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Linux x86_64 — span manylinux floor + customer glibcs.
-          # `quay.io/pypa/manylinux_2_28_x86_64` is the floor we
-          # promise; if the wheel fails here, our manylinux tag is
-          # a lie. `ubuntu:22.04` (glibc 2.35) is the environment
-          # from issue #355's reporter.
-          #
-          # NOTE: `ubuntu:20.04 + python 3.10` was a third entry,
-          # dropped on PR #396 because the deadsnakes PPA install
-          # path stopped reliably provisioning python3.10-venv on
-          # focal once Ubuntu 20.04 hit End of Standard Support
-          # (May 2025). The failure mode was an apt-get error, NOT
-          # a wheel-import error — i.e. the test environment, not
-          # the wheel. Promising the wheel works on glibc 2.31 in
-          # CI now requires either ESM-tier images or pinning a
-          # specific deadsnakes snapshot, neither of which we want
-          # owning. Manylinux 2.28 (glibc 2.28) is still the floor
-          # we promise; ubuntu:22.04 covers the most-reported
-          # customer environment.
-          - { runner: ubuntu-24.04, image: "quay.io/pypa/manylinux_2_28_x86_64", python: "3.11", wheel_target: x86_64-unknown-linux-gnu, wheel_artifact: wheels-ubuntu-24.04-x86_64-unknown-linux-gnu, glibc_label: "2.28-floor" }
-          - { runner: ubuntu-24.04, image: "ubuntu:22.04", python: "3.12", wheel_target: x86_64-unknown-linux-gnu, wheel_artifact: wheels-ubuntu-24.04-x86_64-unknown-linux-gnu, glibc_label: "2.35" }
-          # Linux aarch64 — floor + one customer env. Native arm64
-          # runners (PR #376) host the container.
-          - { runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64", python: "3.11", wheel_target: aarch64-unknown-linux-gnu, wheel_artifact: wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu, glibc_label: "2.28-floor" }
-          - { runner: ubuntu-24.04-arm, image: "ubuntu:22.04", python: "3.12", wheel_target: aarch64-unknown-linux-gnu, wheel_artifact: wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu, glibc_label: "2.35" }
-          # macOS arm64 — runs natively on the host runner; no
-          # container. Apple Silicon is the only macOS target we
-          # ship today (Intel macOS dropped in PR #371 — ort-sys
-          # has no x86_64-apple-darwin prebuilts).
-          - { runner: macos-14, image: "", python: "3.13", wheel_target: aarch64-apple-darwin, wheel_artifact: wheels-macos-14-aarch64-apple-darwin, glibc_label: "" }
+        # Linux x86_64 spans manylinux floor + customer glibc:
+        # `manylinux_2_28` is the floor we promise (fails here = our tag
+        # lies); `ubuntu:22.04` (glibc 2.35) is issue #355's reporter env.
+        # (`ubuntu:20.04 + py3.10` dropped PR #396 — deadsnakes stopped
+        # provisioning on EOL focal; env failure, not wheel failure.)
+        #
+        # Quota guard (see build-wheels): PR dry-runs smoke ONLY the
+        # x86_64 Linux wheel that PR builds — manylinux floor + the
+        # most-reported customer env. Full five-environment sweep
+        # (Linux arm64 floor+22.04, macOS arm64 native) runs on real
+        # releases / dispatch, matching the wheels actually built.
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.11","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"}]') || fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.11","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"ubuntu-24.04-arm","image":"quay.io/pypa/manylinux_2_28_aarch64","python":"3.11","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04-arm","image":"ubuntu:22.04","python":"3.12","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"macos-14","image":"","python":"3.13","wheel_target":"aarch64-apple-darwin","wheel_artifact":"wheels-macos-14-aarch64-apple-darwin","glibc_label":""}]') }}
 
     steps:
       - name: Download wheels artifact for this target
