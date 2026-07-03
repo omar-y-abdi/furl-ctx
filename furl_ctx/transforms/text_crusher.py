@@ -70,6 +70,13 @@ class TextCrusherConfig:
     max_pairwise_dedup_segments: int = 2000
     enable_ccr: bool = True
     max_shippable_ratio: float = 0.9
+    # Secret-mask keep rail (input-side defense): segments carrying
+    # secret-shaped tokens (long high-entropy hex/base64 runs, AKIA/ghp_/
+    # sk- prefixed keys, PEM armor, JWTs) join the mandatory keeps so the
+    # lossy selector can never drop them into CCR-only visibility. Drop
+    # protection only — content is never rewritten (store-side redaction
+    # owns log exposure). ``False`` restores pre-rail selection exactly.
+    secret_keep_rail: bool = True
 
 
 @dataclass
@@ -131,6 +138,7 @@ class TextCrusher:
                 max_pairwise_dedup_segments=cfg.max_pairwise_dedup_segments,
                 enable_ccr=cfg.enable_ccr,
                 max_shippable_ratio=cfg.max_shippable_ratio,
+                secret_keep_rail=cfg.secret_keep_rail,
             )
         )
 
@@ -163,6 +171,7 @@ class TextCrusher:
                 "segments_dropped_by_budget": rust_result.segments_dropped_by_budget,
                 "protected_tag_blocks": rust_result.protected_tag_blocks,
                 "mandatory_keeps": rust_result.mandatory_keeps,
+                "secret_keep_segments": rust_result.secret_keep_segments,
             },
         )
 

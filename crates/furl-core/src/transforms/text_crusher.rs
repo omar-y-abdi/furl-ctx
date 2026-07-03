@@ -132,6 +132,15 @@ pub struct TextCrusherConfig {
     /// worth shipping: passthrough instead. Keeps "compressed output ⟺
     /// marker present ⟺ store backed" while refusing marginal crushes.
     pub max_shippable_ratio: f64,
+    /// Secret-mask keep rail (input-side defense, complements the
+    /// store-side redaction): segments containing secret-shaped tokens
+    /// (long high-entropy hex/base64 runs, `AKIA`/`ghp_`/`sk-` prefixed
+    /// keys, PEM armor, JWTs) join the mandatory keeps, so the lossy
+    /// selector can NEVER drop them into CCR-only visibility where a
+    /// reviewer would not see them. A drop-protection rail, NOT content
+    /// rewriting — log exposure is the store-side redaction's job.
+    /// `false` restores the pre-rail selection byte-for-byte.
+    pub secret_keep_rail: bool,
 }
 
 impl Default for TextCrusherConfig {
@@ -148,6 +157,7 @@ impl Default for TextCrusherConfig {
             max_pairwise_dedup_segments: 2000,
             enable_ccr: true,
             max_shippable_ratio: 0.9,
+            secret_keep_rail: true,
         }
     }
 }
@@ -180,6 +190,10 @@ pub struct TextCrusherStats {
     pub protected_tag_blocks: usize,
     /// Segments kept unconditionally (structure/placeholder/ends).
     pub mandatory_keeps: usize,
+    /// Segments promoted to mandatory by the secret-mask keep rail
+    /// (counted only when the rail promoted them — segments that were
+    /// already mandatory for another reason are not double-counted).
+    pub secret_keep_segments: usize,
     pub ccr_emitted: bool,
     pub ccr_skip_reason: Option<&'static str>,
     /// Why the input passed through, when it did.
@@ -513,7 +527,21 @@ impl TextCrusher {
         mark_placeholder_segments(&cleaned, &blocks, &mut segments);
 
         let scores = self.score_segments(&cleaned, &segments, query);
-        let mandatory = self.mandatory_flags(&segments);
+        let mut mandatory = self.mandatory_flags(&segments);
+        // Secret-mask keep rail: a segment carrying a secret-shaped token
+        // must never be dropped (masked-content silently vanishing into
+        // CCR-only visibility is exactly what a reviewer would miss).
+        // Runs BEFORE dedup so a secret segment is also never collapsed
+        // as a near-duplicate of an earlier non-secret line.
+        if self.config.secret_keep_rail {
+            for (i, seg) in segments.iter().enumerate() {
+                if !mandatory[i] && segment_has_secret(&cleaned[seg.start..seg.end]) {
+                    mandatory[i] = true;
+                    stats.secret_keep_segments += 1;
+                }
+            }
+        }
+        let mandatory = mandatory;
         stats.mandatory_keeps = mandatory.iter().filter(|&&m| m).count();
 
         let duplicate = self.duplicate_flags(&cleaned, &segments, &mandatory, &mut stats);
@@ -924,6 +952,197 @@ fn hash_u64(s: &str) -> u64 {
 // `md5_hex_24` (the CCR cache key, same algorithm as the diff/log/search
 // siblings) lives in `crate::ccr::persist` — one shared implementation
 // (ARCH-5), imported at the top of this module.
+
+// ─── Secret-mask keep rail (input-side defense) ─────────────────────────
+//
+// Deterministic, regex-free detection of secret-shaped tokens. A hit only
+// ever KEEPS a segment (drop-protection), so the false-positive cost is a
+// few extra kept chars — the thresholds therefore lean sensitive. Content
+// is never rewritten here; log exposure is the store-side redaction's job.
+
+/// Minimum length of a hex run considered secret-shaped (digests, keys).
+const SECRET_HEX_MIN_LEN: usize = 32;
+/// Minimum Shannon entropy (bits/char) for a hex run. Random hex sits
+/// near 3.7-4.0; degenerate runs (`aaaa…`, `deadbeef…`) fall well below.
+const SECRET_HEX_MIN_ENTROPY: f64 = 3.0;
+/// Minimum length of a base64-ish run considered secret-shaped.
+const SECRET_B64_MIN_LEN: usize = 40;
+/// Minimum Shannon entropy (bits/char) for a base64-ish run. Random
+/// base64 sits near 5.2-5.7; prose-like camelCase runs sit lower but a
+/// false keep is safe, so the gate stays permissive.
+const SECRET_B64_MIN_ENTROPY: f64 = 4.0;
+/// Minimum char count after a `ghp_`-family / `sk-` key prefix.
+const SECRET_KEY_BODY_MIN_LEN: usize = 20;
+/// Minimum char count per dot-separated JWT section.
+const SECRET_JWT_PART_MIN_LEN: usize = 8;
+
+/// True when `text` contains at least one secret-shaped token: PEM armor,
+/// a well-known key prefix (`AKIA…`, `ghp_…`, `sk-…`), a JWT (`eyJ…`), or
+/// a long high-entropy hex/base64 run. Public for tests.
+pub fn segment_has_secret(text: &str) -> bool {
+    // PEM armor opens every RFC-7468 block (private keys, certs, CSRs).
+    if text.contains("-----BEGIN ") {
+        return true;
+    }
+    has_prefixed_secret(text) || has_high_entropy_run(text)
+}
+
+/// Byte offsets of every occurrence of `needle` in `haystack` whose
+/// PRECEDING byte is not alphanumeric (word-ish boundary) — so `task-…`
+/// never counts as an `sk-` hit while `KEY=sk-…` / `"sk-…` do.
+fn boundary_occurrences<'a>(
+    haystack: &'a str,
+    needle: &'a str,
+) -> impl Iterator<Item = usize> + 'a {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle).filter_map(move |(pos, _)| {
+        let boundary = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        boundary.then_some(pos)
+    })
+}
+
+/// Well-known secret prefixes: AWS access-key ids, GitHub token family,
+/// `sk-` API keys (OpenAI / Anthropic `sk-ant-…`), and JWTs.
+fn has_prefixed_secret(text: &str) -> bool {
+    let bytes = text.as_bytes();
+
+    // AWS access key id: `AKIA` + exactly 16 uppercase alphanumerics.
+    for pos in boundary_occurrences(text, "AKIA") {
+        let rest = &bytes[pos + 4..];
+        if rest.len() >= 16
+            && rest[..16]
+                .iter()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+
+    // GitHub tokens (classic + fine-grained): prefix + ≥ 20 word chars.
+    for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"] {
+        for pos in boundary_occurrences(text, prefix) {
+            let body = bytes[pos + prefix.len()..]
+                .iter()
+                .take_while(|&&c| c.is_ascii_alphanumeric() || c == b'_')
+                .count();
+            if body >= SECRET_KEY_BODY_MIN_LEN {
+                return true;
+            }
+        }
+    }
+
+    // `sk-` API keys: prefix + ≥ 20 key chars ([A-Za-z0-9_-]).
+    for pos in boundary_occurrences(text, "sk-") {
+        let body = bytes[pos + 3..]
+            .iter()
+            .take_while(|&&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            .count();
+        if body >= SECRET_KEY_BODY_MIN_LEN {
+            return true;
+        }
+    }
+
+    // JWT: `eyJ<b64url>.<b64url>.<b64url>` — three dot-separated
+    // base64url sections, each at least SECRET_JWT_PART_MIN_LEN chars.
+    let is_b64url = |c: &&u8| c.is_ascii_alphanumeric() || **c == b'-' || **c == b'_';
+    for pos in boundary_occurrences(text, "eyJ") {
+        let rest = &bytes[pos..];
+        let p1 = rest.iter().take_while(is_b64url).count();
+        if p1 < SECRET_JWT_PART_MIN_LEN || rest.get(p1) != Some(&b'.') {
+            continue;
+        }
+        let rest2 = &rest[p1 + 1..];
+        let p2 = rest2.iter().take_while(is_b64url).count();
+        if p2 < SECRET_JWT_PART_MIN_LEN || rest2.get(p2) != Some(&b'.') {
+            continue;
+        }
+        let p3 = rest2[p2 + 1..].iter().take_while(is_b64url).count();
+        if p3 >= SECRET_JWT_PART_MIN_LEN {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Shannon entropy of `bytes` in bits per byte (0.0 for empty input).
+fn shannon_entropy_bits(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0usize; 256];
+    for &b in bytes {
+        counts[b as usize] += 1;
+    }
+    let n = bytes.len() as f64;
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// Long high-entropy hex or base64 runs (unprefixed key material,
+/// signatures, tokens). Walks maximal base64-charset runs (a superset of
+/// the hex charset) and gates each run — and its maximal hex sub-runs —
+/// on length, character-class mix, and Shannon entropy, so degenerate
+/// runs (`aaaa…`, repeated words) never trigger.
+fn has_high_entropy_run(text: &str) -> bool {
+    let is_b64 = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'-' | b'_');
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if !is_b64(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && is_b64(bytes[i]) {
+            i += 1;
+        }
+        let run = &bytes[start..i];
+        if base64_run_is_secret(run) || hex_subruns_are_secret(run) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Base64 gate: length + all three of upper/lower/digit + entropy.
+fn base64_run_is_secret(run: &[u8]) -> bool {
+    run.len() >= SECRET_B64_MIN_LEN
+        && run.iter().any(u8::is_ascii_uppercase)
+        && run.iter().any(u8::is_ascii_lowercase)
+        && run.iter().any(u8::is_ascii_digit)
+        && shannon_entropy_bits(run) >= SECRET_B64_MIN_ENTROPY
+}
+
+/// Hex gate over maximal hex sub-runs: length + digit AND letter + entropy.
+fn hex_subruns_are_secret(run: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i < run.len() {
+        if !run[i].is_ascii_hexdigit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < run.len() && run[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        let sub = &run[start..i];
+        if sub.len() >= SECRET_HEX_MIN_LEN
+            && sub.iter().any(u8::is_ascii_digit)
+            && sub.iter().any(u8::is_ascii_alphabetic)
+            && shannon_entropy_bits(sub) >= SECRET_HEX_MIN_ENTROPY
+        {
+            return true;
+        }
+    }
+    false
+}
 
 #[cfg(test)]
 mod tests {
@@ -1420,5 +1639,144 @@ mod tests {
                 content
             );
         }
+    }
+
+    // ─── Secret-mask keep rail ─────────────────────────────────────────
+
+    /// Obviously-fake secret-shaped tokens, one per detector class,
+    /// constructed at runtime from parts so no contiguous token-shaped
+    /// literal sits in the source (scanner hygiene).
+    fn fake_secret_sentences() -> Vec<String> {
+        let gh_token = format!("ghp_{}", "abcdEFGH1234".repeat(3));
+        // The AWS documentation example access key id (public, not real).
+        let aws_key = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+        let sk_key = format!("sk-{}", "abcdefghijklmnopqrstuvwx");
+        let jwt = format!(
+            "{}.{}.{}",
+            "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjMifQ", "fAkEsIgNaTuRe123456"
+        );
+        let hex_run = format!("{}{}", "d4f2a9c1b8e35f7a", "6d0c4b2e9f1a8c3d");
+        let b64_run = format!(
+            "{}{}",
+            "QmFzZTY0U2VjcmV0S2V5", "TWF0ZXJpYWxYWTAxMjM0NTY3ODk"
+        );
+        vec![
+            format!("The old deploy key {sk_key} was rotated by the operator."),
+            format!("An AWS credential {aws_key} leaked into the staging environment."),
+            format!("A contractor pasted {gh_token} into the shared channel."),
+            format!("The session cookie carried {jwt} as a bearer token."),
+            format!("The webhook signing secret {hex_run} sat in plain text."),
+            format!("Its raw value {b64_run} was never rotated after the incident."),
+        ]
+    }
+
+    /// Fixture where every filler carries a digit (numeric-bonus parity
+    /// with the secret sentences) so mid-document survival can only come
+    /// from the rail, never from scoring luck.
+    fn prose_with_secrets_mid_document() -> (String, Vec<String>) {
+        let mut sentences: Vec<String> = (0..60)
+            .map(|i| format!("{} in batch {}.", varied_filler(i).trim_end_matches('.'), i))
+            .collect();
+        let secrets = fake_secret_sentences();
+        for (k, secret) in secrets.iter().enumerate() {
+            sentences.insert(20 + 3 * k, secret.clone());
+        }
+        (sentences.join(" "), secrets)
+    }
+
+    fn aggressive() -> TextCrusherConfig {
+        TextCrusherConfig {
+            target_ratio: 0.10,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn secret_detection_positive_classes() {
+        for secret in fake_secret_sentences() {
+            assert!(segment_has_secret(&secret), "missed secret in: {secret}");
+        }
+        // PEM armor (assembled at runtime — scanner hygiene).
+        let pem = format!("-----{} RSA PRIVATE KEY-----\nMIIEow…", "BEGIN");
+        assert!(segment_has_secret(&pem));
+        // Assignment / quoting context still detects (boundary is non-word).
+        let assignment = format!("export API_KEY=\"sk-{}\"", "proj_abcdefghijklmnopqrst");
+        assert!(segment_has_secret(&assignment));
+    }
+
+    #[test]
+    fn secret_detection_negatives() {
+        // Ordinary prose, including numbers and hyphens.
+        assert!(!segment_has_secret(
+            "The scheduler processed 12,345 customer records before the morning deadline."
+        ));
+        // `task-…` must not count as an `sk-` hit (word boundary).
+        assert!(!segment_has_secret(
+            "See task-1234567890abcdefghij for details."
+        ));
+        // Degenerate low-entropy runs never trigger the charset gates.
+        assert!(!segment_has_secret(&"a".repeat(48)));
+        assert!(!segment_has_secret(&"deadbeef".repeat(5)));
+        // Short hex (a 12-char id) is below the run floor.
+        assert!(!segment_has_secret(
+            "commit 4f2a9c1b8e35 fixed the regression."
+        ));
+        // The whole varied-prose fixture is secret-free.
+        assert!(!segment_has_secret(&big_prose()));
+    }
+
+    #[test]
+    fn secret_bearing_segments_survive_aggressive_crush() {
+        let (content, secrets) = prose_with_secrets_mid_document();
+        let store = InMemoryCcrStore::new();
+        let (result, stats) =
+            TextCrusher::new(aggressive()).compress_with_store(&content, "", 1.0, Some(&store));
+        assert!(result.cache_key.is_some(), "fixture must actually crush");
+        assert_eq!(stats.secret_keep_segments, secrets.len());
+        for secret in &secrets {
+            assert!(
+                result.compressed.contains(secret),
+                "secret-bearing segment was dropped: {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn rail_off_restores_old_behavior_and_drops_secrets() {
+        // Same fixture, rail off: the mid-document secret segments score
+        // like any filler and the aggressive budget drops them — proving
+        // the rail (not scoring luck) is what keeps them above.
+        let (content, secrets) = prose_with_secrets_mid_document();
+        let store = InMemoryCcrStore::new();
+        let cfg = TextCrusherConfig {
+            secret_keep_rail: false,
+            ..aggressive()
+        };
+        let (result, stats) =
+            TextCrusher::new(cfg).compress_with_store(&content, "", 1.0, Some(&store));
+        assert!(result.cache_key.is_some(), "fixture must actually crush");
+        assert_eq!(stats.secret_keep_segments, 0);
+        assert!(
+            secrets.iter().any(|s| !result.compressed.contains(s)),
+            "rail-off must reproduce the pre-rail drops"
+        );
+    }
+
+    #[test]
+    fn no_secrets_byte_identity_rail_on_vs_off() {
+        // The rail must be a no-op on secret-free input: byte-identical
+        // output with the flag on and off.
+        let content = big_prose();
+        let on = TextCrusher::new(TextCrusherConfig::default());
+        let off = TextCrusher::new(TextCrusherConfig {
+            secret_keep_rail: false,
+            ..Default::default()
+        });
+        let (a, stats_a) =
+            on.compress_with_store(&content, "", 1.0, Some(&InMemoryCcrStore::new()));
+        let (b, _) = off.compress_with_store(&content, "", 1.0, Some(&InMemoryCcrStore::new()));
+        assert_eq!(stats_a.secret_keep_segments, 0);
+        assert_eq!(a.compressed, b.compressed);
+        assert_eq!(a.cache_key, b.cache_key);
     }
 }

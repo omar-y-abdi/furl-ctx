@@ -1823,6 +1823,7 @@ impl PyTextCrusherConfig {
         max_pairwise_dedup_segments = 2000,
         enable_ccr = true,
         max_shippable_ratio = 0.9,
+        secret_keep_rail = true,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1837,6 +1838,7 @@ impl PyTextCrusherConfig {
         max_pairwise_dedup_segments: usize,
         enable_ccr: bool,
         max_shippable_ratio: f64,
+        secret_keep_rail: bool,
     ) -> Self {
         Self {
             inner: RustTextCrusherConfig {
@@ -1851,6 +1853,7 @@ impl PyTextCrusherConfig {
                 max_pairwise_dedup_segments,
                 enable_ccr,
                 max_shippable_ratio,
+                secret_keep_rail,
             },
         }
     }
@@ -1912,6 +1915,10 @@ impl PyTextCrushResult {
     #[getter]
     fn mandatory_keeps(&self) -> usize {
         self.stats.mandatory_keeps
+    }
+    #[getter]
+    fn secret_keep_segments(&self) -> usize {
+        self.stats.secret_keep_segments
     }
     #[getter]
     fn ccr_emitted(&self) -> bool {
