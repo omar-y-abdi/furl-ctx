@@ -16,8 +16,10 @@
 //!    starting point for every detector. This is what
 //!    [`keyword_detector::KeywordDetector`] gives us today.
 //! 2. **Structured parser** — when the input has grammar (diffs, JSON,
-//!    code), parse it. Already done for `unidiff` (content type) and
-//!    `tree-sitter` (language).
+//!    code), parse it. Already done for `unidiff` (content type) here in
+//!    the core, and for `tree-sitter` (language) on the Python side —
+//!    the opt-in `furl-ctx[code]` extra's code-aware compressor; the
+//!    Rust core itself ships no tree-sitter.
 //! 3. **ML model** — for fuzzy categories (line importance, anchor cells,
 //!    HTML extraction), a small classifier trained on labeled traffic
 //!    outperforms keywords.

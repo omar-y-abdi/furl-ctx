@@ -72,18 +72,38 @@ def test_affix_column_with_embedded_newline_roundtrips_byte_exact() -> None:
 
 
 def test_affix_quote_chars_do_not_leak_into_value() -> None:
-    # Minimal: a 2-row affix column where the variable middle is multi-line.
+    """Embedded double-quotes inside an affix-folded cell survive byte-exactly.
+
+    TEST-11: the old 3-row fixture never reached the lossless columnar path
+    at all (small arrays pass through / route lossy at every size for that
+    shape), so its `if decoded is None: return` + per-key conditional assert
+    made the test pass vacuously forever. This fixture is shaped like the
+    96-row digest test above (proven to take the CSV-schema path under the
+    DEFAULT policy) with `"`-quoted frames added inside the folded column;
+    every assert is unconditional.
+    """
     items = [
-        {"k": "id-1", "v": 'ERR alpha\n  at "frame_1"\n  end'},
-        {"k": "id-2", "v": 'ERR beta\n  at "frame_2"\n  end'},
-        {"k": "id-3", "v": 'ERR gamma\n  at "frame_3"\n  end'},
+        {
+            "file": f"pkg/svc_{i:03d}/handler.go",
+            "line": 7 + i,
+            "match": (
+                f'panic: nil deref at op_{i}\n\tat "frame_{i}" in scope\n\tmain.handle(0x{i:x})'
+            ),
+        }
+        for i in range(96)
     ]
     result = ContentRouter(ContentRouterConfig()).compress(json.dumps(items, ensure_ascii=False))
     decoded = _decode_any(result.compressed)
-    if decoded is None:
-        # Small arrays may pass through untouched; only assert when compacted.
-        return
-    by_k = {r.get("k"): r.get("v") for r in decoded if "k" in r}
-    for it in items:
-        if it["k"] in by_k:
-            assert by_k[it["k"]] == it["v"], f"value corrupted: {by_k[it['k']]!r} != {it['v']!r}"
+    assert decoded is not None, (
+        "expected the lossless CSV-schema path — the fixture no longer "
+        "compacts and this regression test has gone vacuous"
+    )
+
+    by_key = {row.get("file"): row.get("match") for row in decoded}
+    original = {item["file"]: item["match"] for item in items}
+    assert set(by_key) == set(original), "every row must decode (no full-row drop)"
+    for key, want in original.items():
+        assert by_key[key] == want, f"value corrupted for {key}: {by_key[key]!r} != {want!r}"
+    # The regression class this file exists for: the quote characters
+    # belong INSIDE the value, not leaked as CSV artifacts.
+    assert '"frame_5"' in by_key["pkg/svc_005/handler.go"]

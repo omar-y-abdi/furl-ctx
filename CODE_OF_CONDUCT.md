@@ -59,8 +59,10 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-**conduct@furl_ctx.dev**.
+reported to the community leaders responsible for enforcement by opening an
+issue at [github.com/omar-y-abdi/furl/issues](https://github.com/omar-y-abdi/furl/issues)
+(for sensitive reports, contact the repository owner directly via their
+GitHub profile instead of a public issue).
 
 All complaints will be reviewed and investigated promptly and fairly.
 

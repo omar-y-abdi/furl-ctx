@@ -858,9 +858,15 @@ mod tests {
 
     #[test]
     fn prioritize_includes_first_3_and_last_2_when_room() {
-        // No errors / outliers / anomalies → first 3 + last 2 anchors fill.
+        // TEST-17: the old fixture (kept = 5..15, budget 10) was exactly AT
+        // budget, so the first-3/last-2 branch — which only runs on the
+        // OVER-budget path — never executed, and the sole assert
+        // (`len <= 10`) could not fail. Drive the over-budget path for
+        // real: all 30 indices kept, budget 10, no critical items (all
+        // distinct rows → the singleton rarity gate suppresses itself;
+        // linear `v` produces no >2σ anomalies; no error keywords).
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i, "v": i})).collect();
-        let kept: BTreeSet<usize> = (5..15).collect();
+        let kept: BTreeSet<usize> = (0..30).collect();
         let result = prioritize_indices(test_params(
             &cfg(),
             &kept,
@@ -870,11 +876,15 @@ mod tests {
             &no_exclude(),
             &BTreeSet::new(),
         ));
-        // With no critical items and budget 10, dedup is a no-op (all
-        // distinct) and fill keeps us at <= 10. We should see at least
-        // some of items 0..3 OR 28..30 covered through fill.
-        // Cap is 10; ensure we don't exceed.
-        assert!(result.len() <= 10);
+        // The name's promise, actually asserted: first 3 AND last 2 are in.
+        for anchor in [0usize, 1, 2, 28, 29] {
+            assert!(
+                result.contains(&anchor),
+                "anchor index {anchor} missing from {result:?}"
+            );
+        }
+        // And the budget holds exactly (no critical items to overflow it).
+        assert_eq!(result.len(), 10, "budget must be filled to effective_max");
     }
 
     // ---------- 1B: field-value singletons ----------

@@ -200,9 +200,12 @@ class TransformPipeline:
             model: Model name for token counting.
             **kwargs: Additional arguments passed to transforms.
                 - model_limit: Context limit override.
-                - output_buffer: Output buffer override.
-                - tool_profiles: Per-tool compression profiles.
                 - request_id: Optional request ID for diff artifact.
+                - previous_prefix_hash: The prior turn's
+                  ``cache_metrics.stable_prefix_hash`` for CacheAligner's
+                  turn-to-turn prefix tracking.
+                (Per-tool compression profiles are configured via
+                ``ContentRouterConfig.tool_profiles``, not per call.)
 
         Returns:
             Combined TransformResult.

@@ -12,7 +12,7 @@ help:
 	@echo "Furl Rust targets:"
 	@echo "  make test               - cargo test --workspace"
 	@echo "  make bench              - cargo bench --workspace"
-	@echo "  make build-wheel        - release wheel for furl-py"
+	@echo "  make build-wheel        - release wheel (root manifest: Python pkg + _core.so)"
 	@echo "  make verify-rust-core   - build + install + import-verify furl_ctx._core"
 	@echo "  make fmt                - cargo fmt --all"
 	@echo "  make fmt-check          - cargo fmt --all -- --check"
@@ -32,8 +32,13 @@ test:
 bench:
 	$(CARGO) bench --workspace
 
+# Build the release wheel from the ROOT pyproject.toml — the single wheel
+# that ships the Python package + compiled furl_ctx/_core.so together
+# (rust.yml builds from the root manifest for exactly this reason). Building
+# from crates/furl-py/Cargo.toml directly produces a never-shipped
+# `furl-py 0.1.0` wheel exposing a top-level `_core` nothing imports.
 build-wheel:
-	$(MATURIN) build --release -m crates/furl-py/Cargo.toml
+	$(MATURIN) build --release
 
 # maturin-develop + import-verify in one shot. Run this any time you suspect
 # the engine is silently falling back to Python-only mode because the compiled

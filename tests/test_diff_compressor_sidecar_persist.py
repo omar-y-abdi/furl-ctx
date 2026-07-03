@@ -32,41 +32,13 @@ from furl_ctx.transforms.diff_compressor import (
     DiffCompressor,
     DiffCompressorConfig,
 )
+from tests._fixtures import make_large_diff as _make_large_diff  # TEST-19 shared
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_large_diff(n_files: int = 5, hunks_each: int = 20) -> str:
-    """Generate a synthetic git diff large enough to trigger CCR emission.
-
-    The DiffCompressor's CCR path fires when min_lines_for_ccr is met
-    (default 50). We generate well above that threshold so the test is
-    robust to minor threshold tweaks.
-    """
-    parts: list[str] = []
-    for i in range(n_files):
-        header = textwrap.dedent(f"""\
-            diff --git a/src/module_{i}.py b/src/module_{i}.py
-            index abc1234..def5678 100644
-            --- a/src/module_{i}.py
-            +++ b/src/module_{i}.py
-        """)
-        parts.append(header)
-        for h in range(hunks_each):
-            hunk = textwrap.dedent(f"""\
-                @@ -{h * 10 + 1},{h * 10 + 6} +{h * 10 + 1},{h * 10 + 6} @@
-                 context line one for file {i} hunk {h}
-                 context line two for file {i} hunk {h}
-                -old code line A in file {i} hunk {h}
-                +new code line A in file {i} hunk {h}
-                -old code line B in file {i} hunk {h}
-                +new code line B in file {i} hunk {h}
-                 context line three for file {i} hunk {h}
-            """)
-            parts.append(hunk)
-    return "".join(parts)
 
 
 def _make_tiny_diff() -> str:

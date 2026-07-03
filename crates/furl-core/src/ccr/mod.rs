@@ -48,8 +48,9 @@ pub trait CcrStore: Send + Sync {
     /// Number of live entries — stored AND not past TTL. Backends with
     /// lazy expiry must not count expired-but-unreaped entries (a `get`
     /// would refuse them). Informational; used by tests + telemetry.
-    /// Some backends (notably Redis) cannot answer this efficiently and
-    /// return 0 — see backend-specific docs.
+    /// A backend that cannot answer this efficiently (e.g. a remote
+    /// store) may return 0 — see backend-specific docs. (The in-memory
+    /// store is the ONLY Rust backend today; no remote one ships.)
     fn len(&self) -> usize;
 
     /// Capacity bound of the backend — the maximum number of live

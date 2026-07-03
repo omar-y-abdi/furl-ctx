@@ -56,6 +56,7 @@ Examples:
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import dataclass, field, replace
@@ -119,8 +120,12 @@ class CompressConfig:
     agents where tool definitions and instructions must not be altered."""
 
     protect_recent: int = 4
-    """Don't compress the last N messages (they're the active conversation).
-    Set 0 to compress everything."""
+    """Protect the last N messages' CODE from compression and exempt those
+    messages from cross-message dedup. This does NOT skip compression
+    entirely for the window: non-code content (logs, JSON, search output)
+    in recent messages is still compressed — covered by
+    ``min_tokens_to_compress`` and CCR reversibility. Set 0 to disable
+    the window and compress everything."""
 
     protect_analysis_context: bool = True
     """Detect 'analyze'/'review' intent and protect code from compression."""
@@ -339,6 +344,56 @@ def _frozen_transformed_content_warning(messages: list[dict[str, Any]], frozen: 
         return None
 
 
+def _surfaced_ccr_hashes(messages: list[dict[str, Any]]) -> set[str]:
+    """Distinct CCR recovery-pointer hashes present in *messages*' content.
+
+    Uses the owned marker scanner (``CcrMirror.extract_ccr_hashes``) so the
+    parse grammar stays in one place. Block-format content is serialized to
+    JSON text first, which the scanner walks structurally. Pure and total:
+    unparseable/absent content contributes nothing.
+    """
+    from .transforms.router_ccr_mirror import CcrMirror
+
+    hashes: set[str] = set()
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            hashes |= CcrMirror.extract_ccr_hashes(content)
+        elif content is not None:
+            try:
+                text = json.dumps(content, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                continue
+            hashes |= CcrMirror.extract_ccr_hashes(text)
+    return hashes
+
+
+def _event_ccr_hashes(
+    markers_inserted: list[str],
+    pre_existing: set[str],
+    compressed_messages: list[dict[str, Any]],
+) -> list[str]:
+    """CCR hashes newly surfaced by THIS compression, for ``CompressEvent``.
+
+    Union of (a) hashes scraped from the returned messages minus the ones the
+    INPUT already carried (previous turns' markers must not be re-reported)
+    and (b) the pipeline's ``markers_inserted`` — which carries the
+    read-lifecycle store hashes whose marker text (shape I) the ``<<ccr:``
+    scanner deliberately does not match. Filtered to the strict 12/24-hex
+    consumer widths; sorted for determinism.
+    """
+    from .ccr.marker_grammar import is_valid_ccr_hash
+    from .transforms.router_ccr_mirror import CcrMirror
+
+    surfaced = _surfaced_ccr_hashes(compressed_messages) - pre_existing
+    for marker in markers_inserted:
+        if is_valid_ccr_hash(marker):
+            surfaced.add(marker)
+        else:
+            surfaced |= CcrMirror.extract_ccr_hashes(marker)
+    return sorted(h for h in surfaced if is_valid_ccr_hash(h))
+
+
 def compress(
     messages: list[dict[str, Any]],
     model: str = "claude-sonnet-4-5-20250929",
@@ -436,12 +491,16 @@ def compress(
         pipeline = _get_pipeline()
         pipeline_extensions = PipelineExtensionManager(hooks=hooks)
 
-        # Compute biases from hooks if provided
+        # Compute biases from hooks if provided. The user query is extracted
+        # HERE, before the hook invocations, so bias hooks following this
+        # module's own examples can score by relevance instead of seeing an
+        # empty query forever (API-2). The pipeline re-extracts below because
+        # pre_compress / INPUT_RECEIVED may rewrite the messages.
         biases = None
         if hooks:
             from furl_ctx.hooks import CompressContext
 
-            ctx = CompressContext(model=model)
+            ctx = CompressContext(model=model, user_query=_extract_user_query(messages))
             messages = hooks.pre_compress(messages, ctx)
             biases = hooks.compute_biases(messages, ctx)
 
@@ -462,10 +521,16 @@ def compress(
         # Compute the frozen-prefix count from cache_control markers.
         # Must run AFTER pre_compress hook and INPUT_RECEIVED event may have
         # rewritten messages, so the index aligns with what pipeline sees.
-        # Mirrors Rust compute_frozen_count (cache_control.rs:109): only
-        # messages[i].content[*].cache_control bumps the floor; system/tools
-        # are never passed here.
+        # ``_compute_frozen_message_count`` (above) is the sole owner of the
+        # contract: only messages[i].content[*].cache_control bumps the
+        # floor; system/tools are never passed here.
         frozen = _compute_frozen_message_count(messages)
+
+        # Snapshot the CCR hashes the INPUT already carries (previous turns'
+        # markers) so the post_compress event can report only the hashes THIS
+        # compression surfaces. Hook-path-only cost: one scan, skipped
+        # entirely when no hooks are installed.
+        pre_existing_ccr_hashes: set[str] = _surfaced_ccr_hashes(messages) if hooks else set()
 
         # cache_control interactions must be LOUD but non-fatal. A breakpoint
         # on (nearly) the last message freezes everything — every transform
@@ -512,6 +577,24 @@ def compress(
                 tokens_before,
                 tokens_after,
             )
+            # The inflation revert is a success-path outcome the documented
+            # A/B-testing and anomaly-detection hook use-cases must see
+            # (API-2): report the REVERTED state (nothing shipped compressed,
+            # nothing newly surfaced).
+            if hooks:
+                from furl_ctx.hooks import CompressEvent
+
+                hooks.post_compress(
+                    CompressEvent(
+                        tokens_before=tokens_before,
+                        tokens_after=tokens_before,
+                        tokens_saved=0,
+                        compression_ratio=0.0,
+                        transforms_applied=["inflation_guard:reverted"],
+                        model=model,
+                        user_query=context,
+                    )
+                )
             return CompressResult(
                 messages=messages,
                 tokens_before=tokens_before,
@@ -554,8 +637,13 @@ def compress(
         tokens_saved = tokens_before - tokens_after
         ratio = tokens_saved / tokens_before if tokens_before > 0 else 0.0
 
-        # Post-compress hook
-        if hooks and tokens_saved > 0:
+        # Post-compress hook — fires on EVERY success-path completion, zero
+        # savings included, so subclasses see the negative class too (API-2;
+        # subclasses that assumed savings>0 now also receive zero-events).
+        # ``ccr_hashes`` carries the recovery pointers newly surfaced by this
+        # compression. Fail-open failures (the except path below) do not
+        # emit an event — no compression happened.
+        if hooks:
             from furl_ctx.hooks import CompressEvent
 
             hooks.post_compress(
@@ -565,7 +653,13 @@ def compress(
                     tokens_saved=tokens_saved,
                     compression_ratio=ratio,
                     transforms_applied=result.transforms_applied,
+                    ccr_hashes=_event_ccr_hashes(
+                        result.markers_inserted,
+                        pre_existing_ccr_hashes,
+                        compressed_messages,
+                    ),
                     model=model,
+                    user_query=context,
                 )
             )
 

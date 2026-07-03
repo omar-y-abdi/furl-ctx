@@ -56,6 +56,12 @@ from furl_ctx.tokenizer import Tokenizer
 from furl_ctx.tokenizers import EstimatingTokenCounter
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
+# Shared load-bearing fixture (TEST-19): previously a verbatim copy of
+# test_ccr_recovery_invariant.py's `_log_shaped_rows` — delicately tuned to
+# stay lossy; this suite rotted to vacuous-green whenever the copies drifted.
+from tests._fixtures import assert_fixture_drops, canonical_repr
+from tests._fixtures import log_shaped_rows as _log_rows
+
 # General CCR hash extractor: matches <<ccr:HASH>> and <<ccr:HASH ...>>
 _ANY_CCR_RE = re.compile(r"<<ccr:([a-f0-9]{6,})")
 
@@ -79,72 +85,10 @@ def _flatten_content(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _log_rows(n: int = 90) -> list[dict]:
-    """High-entropy distinct log-shaped rows that force the lossy drop path.
-
-    Fractional-second timestamps are used deliberately: second-precision ISO
-    columns delta-encode losslessly and tip the fixture onto the lossless path.
-    Fractional seconds are refused by the strict encoder, keeping this fixture
-    reliably lossy so the CCR drop sentinel is emitted.
-    """
-    _PREFIXES = ["feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci"]
-    _AREAS = [
-        "crusher",
-        "proxy",
-        "ccr",
-        "router",
-        "bench",
-        "tokenizer",
-        "store",
-        "pipeline",
-        "compaction",
-        "relevance",
-    ]
-    _VERBS = [
-        "add",
-        "remove",
-        "rework",
-        "guard",
-        "pin",
-        "extend",
-        "isolate",
-        "deflake",
-        "speed up",
-        "harden",
-    ]
-    _THINGS = [
-        "the lossy budget",
-        "novelty fill",
-        "sentinel emission",
-        "marker parsing",
-        "store mirroring",
-        "field-role gates",
-        "ditto marks",
-        "schema folding",
-        "query anchors",
-        "drop accounting",
-        "TTL handling",
-        "thread-local state",
-        "import guards",
-        "error surfaces",
-        "byte parity",
-    ]
-    return [
-        {
-            "commit": f"{i * 2654435761 + 12345:040x}",
-            "author": f"Author {i % 7}",
-            "date": (
-                f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"
-                f"T{i % 24:02d}:{(i * 13) % 60:02d}:00"
-                f".{(i * 104729) % 1000000:06d}+02:00"
-            ),
-            "subject": (
-                f"{_PREFIXES[i % 8]}({_AREAS[i % 10]}): "
-                f"{_VERBS[i % 10]} {_THINGS[i % 15]} #{i + 100}"
-            ),
-        }
-        for i in range(n)
-    ]
+def test_shared_lossy_fixture_still_drops() -> None:
+    """TEST-19 canary: this suite is vacuous if the shared fixture stops
+    dropping — fail loudly first, naming the cause."""
+    assert_fixture_drops()
 
 
 def _make_messages(rows: list[dict]) -> list[dict]:
@@ -280,7 +224,10 @@ class TestResultCacheCCRDivergence:
         hashes2 = _extract_ccr_hashes(out2)
         assert hashes2 == hashes1, "Served output changed its CCR hashes unexpectedly"
 
-        # --- Invariant: every served hash must now be backed in the Python store ---
+        # --- Invariant: every served hash must now be backed in the Python store,
+        # and the backing must be BYTE-EXACT original rows — "an entry exists"
+        # (TEST-11) also passed when the store held garbage for the hash.
+        original_reprs = {canonical_repr(row) for row in _log_rows(90)}
         for h in hashes2:
             entry = py_store.retrieve(h)
             assert entry is not None, (
@@ -290,6 +237,16 @@ class TestResultCacheCCRDivergence:
             )
             assert entry.original_content, (
                 f"hash {h!r}: CCR entry present but original_content is empty"
+            )
+            recovered_rows = json.loads(entry.original_content)
+            if not isinstance(recovered_rows, list):
+                recovered_rows = [recovered_rows]
+            foreign = [
+                row for row in recovered_rows if canonical_repr(row) not in original_reprs
+            ]
+            assert not foreign, (
+                f"hash {h!r}: {len(foreign)} recovered row(s) are not byte-exact "
+                f"originals (recovery-invariant subset check); first: {foreign[:1]!r}"
             )
 
     def test_multiple_resets_invariant_holds(self):
@@ -315,10 +272,17 @@ class TestResultCacheCCRDivergence:
             out = _flatten_content(r.messages)
             served_hashes = _extract_ccr_hashes(out)
 
+            original_reprs = {canonical_repr(row) for row in _log_rows(90)}
             for h in served_hashes:
                 entry = py_store.retrieve(h)
                 assert entry is not None, (
                     f"Cycle {cycle}: hash {h!r} unbacked after reset + result-cache hit"
+                )
+                recovered_rows = json.loads(entry.original_content)
+                if not isinstance(recovered_rows, list):
+                    recovered_rows = [recovered_rows]
+                assert all(canonical_repr(r) in original_reprs for r in recovered_rows), (
+                    f"Cycle {cycle}: hash {h!r} backing is not byte-exact original rows"
                 )
 
     def test_no_ccr_sentinel_is_cheap_noop(self):
@@ -427,8 +391,11 @@ class TestResultCacheCCRDivergence:
             "the fix did not fall through to the recompute path."
         )
 
-        # Invariant: every served sentinel resolves in the Python store again.
+        # Invariant: every served sentinel resolves in the Python store again,
+        # and the recomputed backing is byte-exact original rows (TEST-11 —
+        # "backed" alone also passed on a store holding garbage).
         py_store = get_compression_store()
+        original_reprs = {canonical_repr(row) for row in _log_rows(90)}
         for h in hashes2:
             entry = py_store.retrieve(h)
             assert entry is not None, (
@@ -438,6 +405,12 @@ class TestResultCacheCCRDivergence:
             )
             assert entry.original_content, (
                 f"hash {h!r}: recomputed CCR entry has empty original_content"
+            )
+            recovered_rows = json.loads(entry.original_content)
+            if not isinstance(recovered_rows, list):
+                recovered_rows = [recovered_rows]
+            assert all(canonical_repr(r) in original_reprs for r in recovered_rows), (
+                f"hash {h!r}: recomputed backing is not byte-exact original rows"
             )
 
     def test_both_stores_expired_does_not_serve_stale_pointer(self):

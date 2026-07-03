@@ -54,6 +54,8 @@ from typing import TYPE_CHECKING, Any
 from ..relevance.bm25 import BM25Scorer
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .backends import CompressionStoreBackend
 
 logger = logging.getLogger(__name__)
@@ -249,9 +251,14 @@ class CompressionEntry:
     search_queries: list[str] = field(default_factory=list)
     last_accessed: float | None = None
 
-    def is_expired(self) -> bool:
-        """Check if this entry has expired."""
-        return time.time() - self.created_at > self.ttl
+    def is_expired(self, now: float | None = None) -> bool:
+        """Check if this entry has expired.
+
+        ``now`` lets the owning store inject its clock (TEST-20: tests use a
+        fake clock instead of real ``sleep``); ``None`` reads the wall clock.
+        """
+        reference = time.time() if now is None else now
+        return reference - self.created_at > self.ttl
 
     def record_access(self, query: str | None = None) -> None:
         """Record an access to this entry for local access tracking."""
@@ -311,6 +318,7 @@ class CompressionStore:
         default_ttl: int = DEFAULT_CCR_TTL_SECONDS,
         enable_feedback: bool = True,
         backend: CompressionStoreBackend | None = None,
+        now_fn: Callable[[], float] | None = None,
     ):
         """Initialize the compression store.
 
@@ -328,6 +336,9 @@ class CompressionStore:
                      (durability != retention). The durable backend does keep
                      un-evicted entries across restarts and makes them
                      retrievable from other processes.
+            now_fn: Clock used for entry timestamps and TTL-expiry checks
+                    (TEST-20). Defaults to ``time.time``; tests inject a fake
+                    clock so TTL cases advance time without real ``sleep``.
         """
         # Import here to avoid circular imports
         from .backends import InMemoryBackend
@@ -337,6 +348,7 @@ class CompressionStore:
         self._max_entries = max_entries
         self._default_ttl = default_ttl
         self._enable_feedback = enable_feedback
+        self._now: Callable[[], float] = now_fn or time.time
 
         # Local retrieval-event tracking
         self._retrieval_events: list[RetrievalEvent] = []
@@ -394,8 +406,8 @@ class CompressionStore:
                 producer with its own hash function (e.g. SmartCrusher's
                 Rust row-drop path uses SHA-256[:12]). If not a hex
                 string, raises ``ValueError``. The marker hash and the
-                store key MUST match — otherwise ``/v1/retrieve/{hash}``
-                returns 404 even though the data is present.
+                store key MUST match — otherwise a ``furl_retrieve`` of the
+                marker hash misses even though the data is present.
 
         Returns:
             Hash key for retrieving this content. On a true hash collision
@@ -422,7 +434,7 @@ class CompressionStore:
         # verbatim — required when the hash that ends up in the prompt
         # marker is produced by another component (e.g. the Rust
         # SmartCrusher row-drop path emits SHA-256[:12], which the
-        # Python store has to mirror so /v1/retrieve resolves it).
+        # Python store has to mirror so the MCP furl_retrieve tool resolves it).
         # 24 chars (96 bits) was chosen for collision resistance under the
         # birthday bound: 50% collision probability at ~280 trillion entries
         # (2^48), versus ~4 billion (2^32) for the previous 16-char default.
@@ -474,7 +486,7 @@ class CompressionStore:
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             query_context=query_context,
-            created_at=time.time(),
+            created_at=self._now(),
             ttl=ttl if ttl is not None else self._default_ttl,
             compression_strategy=compression_strategy,
         )
@@ -555,7 +567,7 @@ class CompressionStore:
             if entry is None:
                 return None
 
-            if entry.is_expired():
+            if entry.is_expired(self._now()):
                 self._backend.delete(hash_key)
                 # CRITICAL FIX: Track stale heap entry
                 self._stale_heap_entries += 1
@@ -623,7 +635,7 @@ class CompressionStore:
             if entry is None:
                 return None
 
-            if entry.is_expired():
+            if entry.is_expired(self._now()):
                 self._backend.delete(hash_key)
                 self._stale_heap_entries += 1
                 return None
@@ -969,7 +981,7 @@ class CompressionStore:
             if entry is None:
                 return None
 
-            if entry.is_expired():
+            if entry.is_expired(self._now()):
                 self._backend.delete(hash_key)
                 # CRITICAL FIX: Track stale heap entry
                 self._stale_heap_entries += 1
@@ -996,7 +1008,7 @@ class CompressionStore:
         signal_meta: tuple[str | None, str | None] | None = None
         with self._lock:
             entry = self._backend.get(hash_key)
-            if entry is None or entry.is_expired():
+            if entry is None or entry.is_expired(self._now()):
                 return
             entry.record_access(query)
             self._backend.set(hash_key, entry)
@@ -1042,7 +1054,7 @@ class CompressionStore:
             entry = self._backend.get(hash_key)
             if entry is None:
                 return False
-            if entry.is_expired():
+            if entry.is_expired(self._now()):
                 # Only delete if explicitly requested.
                 # This makes exists() a pure check by default
                 if clean_expired:
@@ -1059,7 +1071,7 @@ class CompressionStore:
         clean_expired: bool = False,
     ) -> dict[str, Any]:
         """Return availability and TTL metadata for a stored entry."""
-        now = time.time()
+        now = self._now()
         with self._lock:
             entry = self._backend.get(hash_key)
             if entry is None:
@@ -1212,7 +1224,8 @@ class CompressionStore:
 
         CRITICAL FIX: Track stale heap entries when deleting to prevent memory leak.
         """
-        expired_keys = [key for key, entry in self._backend.items() if entry.is_expired()]
+        now = self._now()
+        expired_keys = [key for key, entry in self._backend.items() if entry.is_expired(now)]
         for key in expired_keys:
             self._backend.delete(key)
             # CRITICAL FIX: Increment stale counter - the heap still has an entry
@@ -1291,51 +1304,77 @@ def clear_request_compression_store() -> None:
     _request_ccr_store.set(None)
 
 
+def _backend_opts_from_env() -> dict[str, Any]:
+    """Parse ``FURL_CCR_BACKEND_OPTS`` (a JSON object) into factory kwargs.
+
+    Unset/blank means the entry-point factory is called with no arguments.
+    Malformed JSON or a non-object value raises ``ValueError`` — an operator
+    who set the variable asked for those kwargs; guessing is worse.
+    """
+    raw = (os.environ.get("FURL_CCR_BACKEND_OPTS") or "").strip()
+    if not raw:
+        return {}
+    try:
+        opts = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"FURL_CCR_BACKEND_OPTS is not valid JSON: {e}") from e
+    if not isinstance(opts, dict):
+        raise ValueError(
+            "FURL_CCR_BACKEND_OPTS must be a JSON object of factory kwargs, "
+            f"got {type(opts).__name__}"
+        )
+    return opts
+
+
 def _create_default_ccr_backend() -> CompressionStoreBackend | None:
-    """Create a CCR backend from env (e.g. FURL_CCR_BACKEND=<your-plugin-name>).
+    """Create a CCR backend from env (``FURL_CCR_BACKEND=<name>``).
 
     Built-in names resolve first: ``memory`` (the default, returns None) and
-    ``sqlite`` (the durable workspace-file backend). Anything else loads via
-    the setuptools entry point 'furl_ctx.ccr_backend'.
-    Returns None to use default InMemoryBackend.
+    ``sqlite`` (the durable workspace-file backend, Engine P1-7 — its
+    constructor handles DB corruption internally). Anything else loads via
+    the setuptools entry point group ``furl_ctx.ccr_backend``, with factory
+    kwargs taken from ``FURL_CCR_BACKEND_OPTS`` (a JSON object; unset means
+    a zero-argument factory call).
+
+    An operator who EXPLICITLY selects a backend asked for its durability
+    semantics, so failure to deliver that backend RAISES instead of silently
+    downgrading to the in-memory store (API-5):
+
+    * unknown backend name or malformed ``FURL_CCR_BACKEND_OPTS`` →
+      ``ValueError`` (misconfiguration);
+    * entry-point load / factory failure → ``RuntimeError`` (cause chained).
+
+    Returns None to use the default InMemoryBackend.
     """
     backend_type = (os.environ.get("FURL_CCR_BACKEND") or "").strip().lower()
     if not backend_type or backend_type == "memory":
         return None
     if backend_type == "sqlite":
-        # Built-in durable backend (Engine P1-7). Construction fails open
-        # internally (corruption -> in-memory fallback + one ERROR log); the
-        # guard here only covers the import/unforeseen cases so backend
-        # selection never crashes the caller.
-        try:
-            from .backends.sqlite import SqliteBackend
+        from .backends.sqlite import SqliteBackend
 
-            return SqliteBackend()
-        except Exception as e:
-            logger.warning("Failed to initialize sqlite CCR backend: %s", e)
-            return None
+        return SqliteBackend()
+
+    import importlib.metadata
+
+    opts = _backend_opts_from_env()
+    all_eps = importlib.metadata.entry_points(group="furl_ctx.ccr_backend")
+    ep = next((e for e in all_eps if e.name == backend_type), None)
+    if ep is None:
+        raise ValueError(
+            f"FURL_CCR_BACKEND={backend_type!r} selected, but no entry point "
+            f"furl_ctx.ccr_backend[{backend_type}] is installed. Install the "
+            "backend package, or unset FURL_CCR_BACKEND / set it to "
+            "'memory'/'sqlite'."
+        )
     try:
-        from importlib.metadata import entry_points
-
-        all_eps = entry_points(group="furl_ctx.ccr_backend")
-        ep = next((e for e in all_eps if e.name == backend_type), None)
-        if ep is None:
-            logger.warning(
-                "FURL_CCR_BACKEND=%s but no entry point furl_ctx.ccr_backend[%s]",
-                backend_type,
-                backend_type,
-            )
-            return None
-        fn = ep.load()
-        kwargs = {
-            "url": os.environ.get("FURL_REDIS_URL", ""),
-            "tenant_prefix": os.environ.get("FURL_CCR_TENANT_PREFIX", ""),
-        }
-        backend: CompressionStoreBackend = fn(**kwargs)
-        return backend
+        factory = ep.load()
+        backend: CompressionStoreBackend = factory(**opts)
     except Exception as e:
-        logger.warning("Failed to load CCR backend %s: %s", backend_type, e)
-        return None
+        raise RuntimeError(
+            f"CCR backend {backend_type!r} failed to load/construct "
+            f"(FURL_CCR_BACKEND_OPTS kwargs: {sorted(opts)}): {e}"
+        ) from e
+    return backend
 
 
 def get_compression_store(

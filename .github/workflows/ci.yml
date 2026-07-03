@@ -7,7 +7,12 @@ name: CI
 #   test         — 4 parallel shards (pytest-split), each a fresh runner VM
 #   build / commitlint — preserved
 #
-# Multi-version (3.10/3.11/3.13) coverage on main is a planned follow-up.
+# Python-version policy (TEST-23, deliberate cost decision — not a gap):
+# the test suite runs on 3.12 ONLY. The 3.10–3.14 classifiers in
+# pyproject.toml describe WHEEL compatibility, which is covered elsewhere:
+# abi3 wheels are built once for cp310+ (release.yml) and smoke-imported
+# on a 3.11/3.12/3.13 customer-environment matrix there. Adding a full
+# test matrix would multiply CI cost without exercising new native code.
 
 on:
   push:
@@ -89,7 +94,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PY_VERSION }}
+      # toolchain pinned to rust-toolchain.toml's version (TEST-30): the
+      # action exports RUSTUP_TOOLCHAIN, which overrides the file — an
+      # unpinned @stable would build with a different compiler than
+      # rust.yml/local. Action ref stays @stable (see rust.yml note).
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0  # keep in sync with rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
@@ -177,6 +188,8 @@ jobs:
           key: ${{ runner.os }}-pip-build-${{ hashFiles('pyproject.toml') }}
           restore-keys: ${{ runner.os }}-pip-build-
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0  # keep in sync with rust-toolchain.toml (TEST-30)
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"

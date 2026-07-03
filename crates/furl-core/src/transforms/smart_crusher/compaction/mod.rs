@@ -142,3 +142,28 @@ impl std::fmt::Debug for CompactionStage {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TEST-18: `SUPPORTED_FORMAT_NAMES` and `from_format_name` are a
+    /// keep-in-sync pair (the FFI error message renders the constant;
+    /// the constructor consults the match). Every advertised name must
+    /// construct — and the constructed stage must self-report the SAME
+    /// name — while unknown names stay `None`.
+    #[test]
+    fn supported_format_names_and_from_format_name_stay_in_sync() {
+        for name in CompactionStage::SUPPORTED_FORMAT_NAMES {
+            let stage = CompactionStage::from_format_name(name)
+                .unwrap_or_else(|| panic!("advertised format {name:?} must construct"));
+            assert_eq!(
+                &stage.formatter.name(),
+                name,
+                "formatter must self-report {name:?}"
+            );
+        }
+        assert!(CompactionStage::from_format_name("banana").is_none());
+        assert!(CompactionStage::from_format_name("").is_none());
+    }
+}

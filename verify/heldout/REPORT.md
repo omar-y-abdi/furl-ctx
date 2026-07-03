@@ -1,5 +1,17 @@
 # Held-out Verification — Phase 2 Audit & Verdict (SECOND run)
 
+> **DATED HISTORICAL AUDIT (2026-06-13) — read before citing (TEST-15,
+> stamped 2026-07-03).** Verification *record* of the tree as of engine
+> commit `e1ce1cb8` / harness commit `50b43d52`, kept verbatim for
+> provenance (the Follow-up section below already tracks the two resolved
+> leniencies). One claim needs correcting from today's tree:
+> **`verify/heldout/raw_results.json` is NOT committed** — the held-out
+> sweep regenerates it per run; the "committed red%" columns and the
+> degradations-array citations below refer to the file produced by the
+> audited run, which the auditor held locally. The numbers are
+> *re-runnable* (pinned data + fixed seeds), not verifiable from the
+> repository alone.
+
 **Auditor:** independent Phase-2 verifier (adversarial). **Date:** 2026-06-13 (UTC).
 **Engine commit under test:** `e1ce1cb8` (round-3: entropy-floor crushability
 override + head-dictionary fold + cross-row affix fold + result-cache recompute
@@ -208,7 +220,8 @@ genuine; the headline percentages are upper-tier figures that degrade by
 ## Files
 
 - Harness (Phase 1): `verify/heldout/{run,measure,worker,encprobe,generators}.py`,
-  `verify/heldout/SOURCES.md`, `verify/heldout/data/*`, `verify/heldout/raw_results.json`.
+  `verify/heldout/SOURCES.md`, `verify/heldout/data/*`;
+  `verify/heldout/raw_results.json` is produced per run (not committed).
 - Phase-2 strict recheck (mine, de-cheats the lossless check):
   `verify/heldout/strict_recheck.py`.
 - This report: `verify/heldout/REPORT.md`.

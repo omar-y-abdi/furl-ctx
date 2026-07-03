@@ -1072,15 +1072,33 @@ mod tests {
     fn time_series_keeps_window_around_change_points() {
         let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
         let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
-        // 30 items with a step at index 15; analyzer should detect
-        // change points around there.
+        // 60 items with a step at index 50. The split is deliberately
+        // ASYMMETRIC (50 low / 10 high): the detector fires on
+        // |mean_after - mean_before| > variance_threshold (2.0) x overall
+        // std, and a 50/50 two-level step has shift ~= 2 x std — exactly AT
+        // the threshold, never above it. (That is why the original 30/30
+        // fixture produced ZERO change points and the old assert-non-empty
+        // test stayed green vacuously — TEST-17.)
         let items: Vec<Value> = (0..60)
             .map(|i| {
-                let v = if i < 30 { 1.0 } else { 100.0 };
+                let v = if i < 50 { 1.0 } else { 100.0 };
                 json!({"id": i, "value": v})
             })
             .collect();
         let analysis = analyzer.analyze_array(&items);
+
+        // TEST-17 precondition: the analyzer must actually find change
+        // points, otherwise the membership assert below is vacuous.
+        let change_points: Vec<usize> = analysis
+            .field_stats
+            .values()
+            .flat_map(|s| s.change_points.iter().copied())
+            .collect();
+        assert!(
+            !change_points.is_empty(),
+            "fixture must produce >=1 change point (step 1.0 -> 100.0 at 50)"
+        );
+
         let plan_in = CompressionPlan {
             strategy: CompressionStrategy::TimeSeries,
             ..CompressionPlan::default()
@@ -1095,8 +1113,22 @@ mod tests {
             None,
             &BTreeSet::new(),
         );
-        // Whatever change points the analyzer finds, the window ±2
-        // around them should appear in keep_indices.
-        assert!(!plan.keep_indices.is_empty());
+
+        // The name's promise, actually asserted (TEST-17: the old test
+        // only checked `!keep_indices.is_empty()`): EVERY in-range index
+        // in the ±2 window around EVERY detected change point is kept.
+        let kept: BTreeSet<usize> = plan.keep_indices.iter().copied().collect();
+        for &cp in &change_points {
+            for offset in -2_isize..=2 {
+                let idx = cp as isize + offset;
+                if idx >= 0 && (idx as usize) < items.len() {
+                    assert!(
+                        kept.contains(&(idx as usize)),
+                        "index {idx} (change point {cp} {offset:+}) missing from \
+                         keep_indices {kept:?}"
+                    );
+                }
+            }
+        }
     }
 }

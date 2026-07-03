@@ -26,6 +26,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0  # keep in sync with rust-toolchain.toml (TEST-30)
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2

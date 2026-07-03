@@ -56,6 +56,9 @@ from furl_ctx.transforms.smart_crusher import (
     SmartCrusherConfig,
 )
 
+# TEST-19: shared single-copy raising-store wrapper (was duplicated here).
+from tests._fixtures import FailingStore as _FailingStore
+
 # Row-drop fixture: the same 1000 distinct strings the recovery-invariant
 # suite uses (``_NON_DICT_CASES["strings"]``). A homogeneous flat array this
 # large takes SmartCrusher's lossy row-drop path and emits a ``<<ccr:>>``
@@ -63,19 +66,6 @@ from furl_ctx.transforms.smart_crusher import (
 _ROW_DROP_ITEMS = [f"log-line-{i}-payload" for i in range(1000)]
 
 
-class _FailingStore:
-    """Wraps the real store but makes ``store()`` raise, simulating a Python
-    compression_store write failure during the mirror. Every other attribute
-    delegates to the real singleton so retrieval/search still behave."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def store(self, *args: Any, **kwargs: Any) -> str:
-        raise RuntimeError("INJECTED compression_store write failure")
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
 
 
 @pytest.fixture

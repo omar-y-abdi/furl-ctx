@@ -35,10 +35,11 @@ updates:
     schedule:
       interval: weekly
     commit-message:
-      # "chore", NOT "deps": commitlint's type-enum does not include "deps"
-      # (TEST-29 — the pip entry above trips exactly that), so a "deps(...)"
-      # PR title arrives with a red required check. "chore" is in the enum.
-      prefix: "chore"
+      # "deps" for BOTH ecosystems (TEST-29): commitlint's type-enum now
+      # includes "deps" (.commitlintrc.json), release-please already maps
+      # it to a "Dependencies" changelog section, and release_version.py
+      # classifies it as a patch bump — one convention, three configs.
+      prefix: "deps"
     open-pull-requests-limit: 5
     groups:
       cargo-minor-patch:

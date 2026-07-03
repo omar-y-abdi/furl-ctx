@@ -1365,14 +1365,21 @@ mod tests {
     fn lossy_without_compaction_still_emits_ccr_hash() {
         // The CCR-Dropped restoration applies regardless of whether
         // lossless was attempted — without_compaction also gets the
-        // ccr_hash on row drops.
+        // ccr_hash on row drops. TEST-17: the drop is asserted as a
+        // PRECONDITION — the old `if dropped { assert }` gate made this
+        // test vacuously green whenever the fixture stopped dropping.
         let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
         let items: Vec<Value> = (0..30).map(|_| json!({"status": "ok"})).collect();
         let result = c.crush_array(&items, "", 1.0);
-        if result.items.len() < items.len() {
-            assert!(result.ccr_hash.is_some());
-            assert!(!result.dropped_summary.is_empty());
-        }
+        assert!(
+            result.items.len() < items.len(),
+            "fixture must drop rows (kept {} of {}) — without a drop this \
+             test proves nothing",
+            result.items.len(),
+            items.len()
+        );
+        assert!(result.ccr_hash.is_some());
+        assert!(!result.dropped_summary.is_empty());
     }
 
     #[test]

@@ -1,5 +1,8 @@
-# cargo-deny configuration for the Rust workspace. Intentionally permissive
-# during Phase 0 — tighten before Phase 2 goes to production.
+# cargo-deny configuration for the Rust workspace. Deliberately permissive:
+# the license allow-list below covers the permissive-license set the
+# workspace actually resolves; bans/sources only warn. Tighten as an
+# explicit decision (e.g. pin multiple-versions to "deny") — the original
+# "Phase 0 / Phase 2" schedule this file referenced is long gone.
 
 [graph]
 all-features = false

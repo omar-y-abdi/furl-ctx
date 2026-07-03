@@ -545,11 +545,6 @@ fn const_decl_value(v: &Value) -> String {
     }
 }
 
-/// Render a plain string cell with the CSV-schema grammar guards: a
-/// literal `=` is quoted (ditto marker), a string starting `__dict:` is
-/// quoted (dictionary-line marker), and CSV-special chars quote as
-/// usual. Shared with the compactor's byte-gate simulation so stamping
-/// decisions measure EXACTLY what the formatter ships.
 /// Build a head-dict cell `<head_index><delim><tail>` for `value`,
 /// looking the head up in `heads`. `None` when the value lacks the
 /// delimiter or its head is not in the dictionary (only possible when
@@ -560,6 +555,12 @@ fn head_cell_for(value: &str, delim: char, heads: &[String]) -> Option<String> {
     Some(encodings::encode_head_cell(idx, delim, tail))
 }
 
+/// Render a plain string cell with the CSV-schema grammar guards: a
+/// literal `=` is quoted (ditto marker), the reserved sentinels and the
+/// `__dict:`/`__affix:`/`__head:` preamble prefixes are quoted, and
+/// CSV-special chars quote as usual. Shared with the compactor's
+/// byte-gate simulation so stamping decisions measure EXACTLY what the
+/// formatter ships.
 pub(super) fn csv_render_str(s: &str) -> String {
     if s == "="
         || s == NULL_SENTINEL

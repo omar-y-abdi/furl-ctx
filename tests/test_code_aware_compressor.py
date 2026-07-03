@@ -44,6 +44,7 @@ from furl_ctx.transforms.router_policy import (
     strategy_from_detection,
     strategy_from_detection_type,
 )
+from tests._fixtures import FailingStore as _FailingStore  # TEST-19 shared
 
 _HAS_TREE_SITTER = importlib.util.find_spec("tree_sitter_language_pack") is not None
 
@@ -82,21 +83,6 @@ def _javascript_code(n_funcs: int = 8, body_lines: int = 14) -> str:
     return "\n".join(parts)
 
 
-class _FailingStore:
-    """A store whose ``store()`` always raises, simulating a Python
-    compression_store write failure. ``store_calls`` guards against a
-    vacuous GREEN where the CCR path was never exercised."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.store_calls = 0
-
-    def store(self, *args: Any, **kwargs: Any) -> str:
-        self.store_calls += 1
-        raise RuntimeError("INJECTED compression_store write failure")
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
 
 
 @pytest.fixture

@@ -3,10 +3,10 @@
 The Python implementation has been retired.
 All array compression now goes through `furl_ctx._core.SmartCrusher`
 (built from `crates/furl-py`). Byte-equality of the two
-implementations was verified against 17 recorded fixtures
-(`tests/parity/fixtures/smart_crusher/`) before the Python source was
-removed; the Rust crate has its own coverage in `crates/furl-core/`
-(388 unit tests + property tests).
+implementations was verified against 17 recorded parity fixtures
+before the Python source was removed (the fixture corpus itself was
+retired with the parity runner in the standalone excise); the Rust
+crate has its own coverage in `crates/furl-core/`.
 
 This module retains the public surface — `SmartCrusherConfig`,
 `CrushResult`, `SmartCrusher`, `smart_crush_tool_output` — so existing
@@ -130,16 +130,17 @@ class CcrMirrorError(RuntimeError):
 
     A SmartCrusher row-drop commits the original to the ephemeral,
     process-local Rust store and emits a ``<<ccr:HASH>>`` pointer, but the
-    store production ``/v1/retrieve`` reads is the Python
+    store the production MCP ``furl_retrieve`` tool reads is the Python
     ``compression_store``. If the mirror into that store fails, the dropped
     rows are UNRECOVERABLE for a consumer holding only the output — exactly
-    the silent loss the store's contract forbids (``no SILENT loss``,
-    compression_store.py:234-244).
+    the silent loss the store's contract forbids (the "no SILENT loss"
+    guarantee in ``CompressionStore``'s class docstring).
 
     Raising (instead of swallowing at ``logger.debug``) lets the failure
-    propagate to ``compress()``'s fail-open boundary (compress.py:386),
-    which discards the lossy output and returns the ORIGINAL uncompressed
-    messages — so the lossy drop never stands without a recovery copy.
+    propagate to ``compress()``'s fail-open boundary (the ``BaseException``
+    handler in ``compress()``), which discards the lossy output and returns
+    the ORIGINAL uncompressed messages — so the lossy drop never stands
+    without a recovery copy.
     """
 
 
@@ -467,10 +468,10 @@ class SmartCrusher(Transform):
         # `typed=True`, on a Rust store MISS — COR-5: the engine reported
         # this exact reduction, so a missing entry is a dangling marker,
         # not a foreign one), propagating up through this `crush()` call
-        # to ContentRouter's fail-open boundary (the `crush()` call site
-        # is `content_router.py:1043`, caught by the `except` at
-        # `:1118`), which reverts to the ORIGINAL uncompressed content so
-        # the reduction never stands without a recovery copy.
+        # site (`router_dispatch.RouterDispatch` — compressor exceptions
+        # propagate by design) to `compress()`'s fail-open boundary, which
+        # reverts to the ORIGINAL uncompressed messages so the reduction
+        # never stands without a recovery copy.
         typed_keys = self._mirror_typed_refs(
             r.dropped_refs,
             strategy="smart_crusher_row_drop",
@@ -716,10 +717,10 @@ class SmartCrusher(Transform):
     #
     # SmartCrusher's row-drop and opaque-blob paths emit
     # `<<ccr:HASH ...>>` markers and stash the original payload in the
-    # Rust process-local CCR store. /v1/retrieve queries the Python
-    # `compression_store` via `get_compression_store()` — which is a
-    # different store. Without an explicit bridge, every retrieve call
-    # for a marker emitted by the Rust crusher returns 404.
+    # Rust process-local CCR store. The MCP `furl_retrieve` tool queries
+    # the Python `compression_store` via `get_compression_store()` — which
+    # is a different store. Without an explicit bridge, every retrieve
+    # call for a marker emitted by the Rust crusher misses.
     #
     # Since §4.2 R5 the SIX fresh-output mirror sites consume TYPED refs
     # (`_mirror_typed_refs` + the one-release `_mirror_union_scrape_net`)
@@ -737,7 +738,7 @@ class SmartCrusher(Transform):
     # Best-effort by design: a missing compression_store import (e.g.
     # in a stripped CLI build) or a transient store error must NOT
     # break compression itself. Compression has already succeeded; the
-    # bridge just makes /v1/retrieve work. Errors log at debug.
+    # bridge just makes `furl_retrieve` work. Errors log at debug.
 
     def _mirror_ccr_to_python_store(
         self,
@@ -930,8 +931,8 @@ class SmartCrusher(Transform):
         GRANULAR row-index keys (``HASH#rows``) are expanded: the index
         (a JSON array of per-row hashes) is fetched from Rust and EACH
         per-row chunk is mirrored into Python under its own hex hash, so
-        the Python ``/v1/retrieve`` can serve a SINGLE row instead of the
-        whole blob. The ``#rows`` key itself is not stored in Python (its
+        a Python-side ``furl_retrieve`` can serve a SINGLE row instead of
+        the whole blob. The ``#rows`` key itself is not stored in Python (its
         non-hex form fails the store's hex-hash validation, and Python
         retrieve is keyed by the per-row hex hashes anyway).
         """
@@ -956,8 +957,8 @@ class SmartCrusher(Transform):
                 # marker dangles and the dropped rows are UNRECOVERABLE —
                 # the silent loss the store contract forbids, and Python
                 # is the last place to catch it. Raise so compress()'s
-                # fail-open boundary (compress.py:386) discards the lossy
-                # output and returns the ORIGINAL messages.
+                # fail-open boundary (its BaseException handler) discards
+                # the lossy output and returns the ORIGINAL messages.
                 raise CcrMirrorError(
                     f"CCR mirror: typed row-drop hash {ccr_hash} missing "
                     f"from the Rust store; its <<ccr:{ccr_hash}>> marker "
@@ -977,13 +978,14 @@ class SmartCrusher(Transform):
         except ImportError as e:
             # The lossy row-drop has ALREADY happened in the Rust store
             # (ephemeral, process-local). If we cannot reach the Python
-            # compression_store — the store production /v1/retrieve reads —
-            # the dropped rows are UNRECOVERABLE for the consumer that holds
-            # only the output. That is the silent-loss the store's contract
-            # forbids ("no SILENT loss," compression_store.py:234-244).
-            # Raise so the failure propagates to compress()'s fail-open
-            # boundary (compress.py:386), which discards the lossy output and
-            # returns the ORIGINAL messages uncompressed — nothing lost.
+            # compression_store — the store the production MCP furl_retrieve
+            # tool reads — the dropped rows are UNRECOVERABLE for the
+            # consumer that holds only the output. That is the silent-loss
+            # the store's contract forbids ("no SILENT loss" in
+            # CompressionStore's class docstring). Raise so the failure
+            # propagates to compress()'s fail-open boundary, which discards
+            # the lossy output and returns the ORIGINAL messages
+            # uncompressed — nothing lost.
             raise CcrMirrorError(
                 f"CCR mirror: compression_store module unavailable; "
                 f"hash {ccr_hash} would be unrecoverable"
@@ -1008,7 +1010,7 @@ class SmartCrusher(Transform):
                 # The "compressed" payload for the row-drop case isn't
                 # readily available here (the rendered output may be
                 # only one of many crushed sub-arrays). Use the marker
-                # itself as a placeholder — `/v1/retrieve` returns
+                # itself as a placeholder — `furl_retrieve` returns
                 # `original_content` and `compressed` isn't surfaced.
                 compressed=f"<<ccr:{ccr_hash}>>",
                 tool_name=tool_name,
@@ -1028,9 +1030,9 @@ class SmartCrusher(Transform):
             # ephemeral Rust store, but the Python store write FAILED, so the
             # dropped rows never reach the store production retrieval reads —
             # a later retrieve() returns None and the recovery data is GONE.
-            # Raise so the failure reaches compress()'s fail-open boundary
-            # (compress.py:386), which reverts to the ORIGINAL uncompressed
-            # messages. The lossy drop never stands without a recovery copy.
+            # Raise so the failure reaches compress()'s fail-open boundary,
+            # which reverts to the ORIGINAL uncompressed messages. The lossy
+            # drop never stands without a recovery copy.
             raise CcrMirrorError(
                 f"CCR mirror: store.store() failed for hash {ccr_hash} "
                 f"({e}); dropped rows would be unrecoverable"
@@ -1046,7 +1048,7 @@ class SmartCrusher(Transform):
     ) -> None:
         """Expand a granular row-index key (``HASH#rows``) and mirror each
         per-row chunk into the Python compression_store under its own hex
-        hash. This is what makes Python-side ``/v1/retrieve`` PROPORTIONAL:
+        hash. This is what makes Python-side ``furl_retrieve`` PROPORTIONAL:
         a single needed row resolves to exactly that one row, not the
         whole offloaded blob. Best-effort — a missing index or chunk just
         leaves the whole-blob fallback (mirrored from ``_ccr_dropped``)

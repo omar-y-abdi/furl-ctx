@@ -43,6 +43,12 @@ class CompressContext:
 
     Provides enough information for hooks to make decisions without
     needing to understand the engine's internals.
+
+    ``compress()`` populates ``model`` and ``user_query`` (the most recent
+    user question, extracted from the input messages BEFORE the hooks run).
+    ``turn_number``, ``tool_calls``, and ``provider`` keep their defaults on
+    that path — they exist for embedders that construct the context
+    themselves when driving the hooks directly.
     """
 
     model: str = ""
@@ -57,6 +63,10 @@ class CompressEvent:
     """Data passed to post_compress hook after compression completes.
 
     Contains before/after state and full metrics for learning and analytics.
+    ``ccr_hashes`` lists the CCR recovery-pointer hashes NEWLY surfaced by
+    this compression (strict 12/24-hex store keys, sorted; empty when
+    nothing was offloaded). ``provider`` keeps its default on the
+    ``compress()`` path.
     """
 
     tokens_before: int = 0
@@ -129,6 +139,12 @@ class CompressionHooks:
 
     def post_compress(self, event: CompressEvent) -> None:
         """Called after compression completes. Observational only.
+
+        Fires on EVERY success-path completion — including zero-savings
+        runs and the inflation-guard revert (``transforms_applied ==
+        ["inflation_guard:reverted"]``) — so the negative class is
+        observable. It does NOT fire on fail-open failures (``compress()``
+        returned the originals with ``result.error`` set).
 
         Use for:
         - Failure-driven learning (log events, analyze offline)

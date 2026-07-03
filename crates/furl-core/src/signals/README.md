@@ -38,10 +38,10 @@ pub struct BgeClassifierDetector {
 impl LineImportanceDetector for BgeClassifierDetector { ... }
 ```
 
-Why this is the cheapest path:
+Why this would be the cheapest ML path (note: the core is ML-free today — this tier must first REINTRODUCE an ONNX embedder, per the caveat above):
 
-- The embedder is already loaded for SmartCrusher relevance scoring. A classification head adds ~1.5 KB of weights and ~1 ms inference per line (batchable).
-- No new ONNX runtime, no new model file, no new download.
+- Once an embedder is (re)introduced and shared with relevance scoring, the classification head itself adds only ~1.5 KB of weights and ~1 ms inference per line (batchable) on top of it.
+- One shared model file and runtime would then serve both relevance scoring and this detector — no second model download.
 - Calibrated confidence lets the head short-circuit `KeywordDetector` on high-confidence positives but step aside on borderlines (where the keyword automaton is reliable anyway).
 
 Two alternatives kept open in case BGE-head underfits:

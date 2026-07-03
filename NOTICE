@@ -1,43 +1,61 @@
 Furl
-Copyright 2025 Furl Contributors
+Copyright 2025-2026 Furl Contributors
 
 This product includes software developed by the Furl Contributors.
 
-Third-Party Licenses
+Third-Party Software
 ====================
 
-This software uses the following third-party libraries:
+Python dependencies (runtime)
+-----------------------------
 
 tiktoken
---------
-Copyright (c) 2022 OpenAI, Shantanu Jain
-Licensed under the MIT License
-https://github.com/openai/tiktoken
+  Copyright (c) 2022 OpenAI, Shantanu Jain
+  Licensed under the MIT License
+  https://github.com/openai/tiktoken
 
-Pydantic
---------
-Copyright (c) 2017 to present Pydantic Services Inc. and individual contributors
-Licensed under the MIT License
-https://github.com/pydantic/pydantic
+Python dependencies (optional extras — installed only on request)
+------------------------------------------------------------------
 
-sentence-transformers (optional dependency)
--------------------------------------------
-Copyright 2019 Nils Reimers
-Licensed under the Apache License 2.0
-https://github.com/UKPLab/sentence-transformers
+mcp — Model Context Protocol SDK ("furl-ctx[mcp]")
+  Copyright (c) 2024 Anthropic, PBC
+  Licensed under the MIT License
+  https://github.com/modelcontextprotocol/python-sdk
 
-Note: Some pretrained sentence-transformer models may have additional licensing
-restrictions based on their training data. Please verify model-specific licenses
-before commercial use.
+tree-sitter ("furl-ctx[code]")
+  Copyright (c) 2018-2024 Max Brunsfeld
+  Licensed under the MIT License
+  https://github.com/tree-sitter/py-tree-sitter
 
-FastAPI (optional dependency)
------------------------------
-Copyright (c) 2018 Sebastián Ramírez
-Licensed under the MIT License
-https://github.com/tiangolo/fastapi
+tree-sitter-language-pack ("furl-ctx[code]")
+  Licensed under the MIT License
+  https://github.com/Goldziher/tree-sitter-language-pack
+  Note: the language grammars this pack bundles carry their own
+  licenses (MIT/Apache-2.0 family); verify grammar-specific terms
+  before redistribution.
 
-NumPy (optional dependency)
----------------------------
-Copyright (c) 2005-2024, NumPy Developers
-Licensed under the BSD 3-Clause License
-https://github.com/numpy/numpy
+Rust crates statically compiled into the bundled extension
+(furl_ctx/_core.so) — direct dependencies
+-----------------------------------------------------------
+
+aho-corasick   — Unlicense OR MIT      — https://github.com/BurntSushi/aho-corasick
+dashmap        — MIT                   — https://github.com/xacrimon/dashmap
+flate2         — MIT OR Apache-2.0     — https://github.com/rust-lang/flate2-rs
+md-5           — MIT OR Apache-2.0     — https://github.com/RustCrypto/hashes
+pyo3           — MIT OR Apache-2.0     — https://github.com/pyo3/pyo3
+regex          — MIT OR Apache-2.0     — https://github.com/rust-lang/regex
+rustc-hash     — Apache-2.0 OR MIT     — https://github.com/rust-lang/rustc-hash
+serde          — MIT OR Apache-2.0     — https://github.com/serde-rs/serde
+serde_json     — MIT OR Apache-2.0     — https://github.com/serde-rs/json
+sha2           — MIT OR Apache-2.0     — https://github.com/RustCrypto/hashes
+thiserror      — MIT OR Apache-2.0     — https://github.com/dtolnay/thiserror
+tiktoken-rs    — MIT                   — https://github.com/zurawiki/tiktoken-rs
+tracing        — MIT                   — https://github.com/tokio-rs/tracing
+unidiff        — MIT                   — https://github.com/messense/unidiff-rs
+
+(cc — MIT OR Apache-2.0 — https://github.com/rust-lang/cc-rs — is a
+build-time dependency of the extension's build script; it does not ship
+in the wheel.)
+
+Transitive Rust dependencies are resolved in Cargo.lock; all resolve to
+licenses in the permissive allow-list enforced by deny.toml (cargo-deny).

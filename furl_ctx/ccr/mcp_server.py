@@ -9,11 +9,12 @@ Tools:
     furl_stats      — Session compression statistics
 
 Usage:
-    # As standalone server (stdio transport, called by AI coding tools)
-    furl mcp serve
+    # As a standalone server (stdio transport, spawned by AI coding tools)
+    python -m furl_ctx.ccr.mcp_server
 
-    # Add to Claude Code
-    furl mcp install
+    # Register with an MCP host, e.g. Claude Code:
+    #   claude mcp add furl -- python -m furl_ctx.ccr.mcp_server
+    # (there is no ``furl`` console script — the module IS the entry point)
 
 Compression and retrieval happen locally in this process via the shared
 CCR compression store.
@@ -824,13 +825,25 @@ class FurlMCPServer:
                 # Full exception detail (message + traceback) is logged server-side
                 # at ERROR; the model channel gets only a generic message so internal
                 # detail (paths, stack frames, dependency internals) never leaks.
+                #
+                # RE-RAISE (sanitized) instead of returning a success-shaped
+                # ``{"error": ...}`` TextContent: the MCP SDK converts a raised
+                # exception into a CallToolResult with ``isError=True``, which is
+                # the only machine-readable failure signal hosts/retriers/
+                # evaluators have (API-15). Parameter mistakes (missing/mistyped
+                # arguments, bad hashes, unknown tools) stay model-visible JSON
+                # envelopes — those are the model's to fix, not server failures.
                 logger.error(f"Tool {name} failed: {e}", exc_info=True)
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps({"error": f"Internal error handling tool: {name}"}),
-                    )
-                ]
+                raise RuntimeError(f"Internal error handling tool: {name}") from e
+
+        # TEST-22: expose the routing handler as a named attribute so tests
+        # (and any embedder) can call the tool-dispatch logic directly. The
+        # SDK registration above wraps `call_tool` in its own private
+        # `handler` closure under `request_handlers[CallToolRequest]`;
+        # without this attribute the only way to reach the routing branches
+        # was closure-cell introspection of that wrapper — which breaks on
+        # any `mcp` SDK bump.
+        self.route_call_tool = call_tool
 
     async def _handle_compress(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_compress tool call."""
@@ -840,6 +853,20 @@ class FurlMCPServer:
                 TextContent(
                     type="text",
                     text=json.dumps({"error": "content parameter is required"}),
+                )
+            ]
+
+        # Non-string params take a parameter error, not the generic internal
+        # path — mirrors the retrieve handler's hash guard (API-15).
+        if not isinstance(content, str):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": f"content parameter must be a string, got {type(content).__name__}"
+                        }
+                    ),
                 )
             ]
 
@@ -899,6 +926,17 @@ class FurlMCPServer:
         hash_key = hash_key.lower()
 
         query = arguments.get("query")
+        # Same parameter-error treatment as the hash guard above: a non-string
+        # query is the caller's mistake, not an internal failure (API-15).
+        if query is not None and not isinstance(query, str):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"error": f"query parameter must be a string, got {type(query).__name__}"}
+                    ),
+                )
+            ]
         # INFO: the hash is a content-address (validated 12/24-hex above), safe
         # to log; the query is a user-supplied search string and the result can
         # carry the retrieved ORIGINAL content — neither is logged verbatim. The
@@ -989,6 +1027,22 @@ class FurlMCPServer:
                 TextContent(
                     type="text",
                     text=json.dumps({"error": "file_path parameter is required"}),
+                )
+            ]
+
+        # Parameter error for a non-string path — mirrors the hash guard; the
+        # jail below must only ever see real path strings (API-15).
+        if not isinstance(file_path, str):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": (
+                                f"file_path parameter must be a string, got {type(file_path).__name__}"
+                            )
+                        }
+                    ),
                 )
             ]
 

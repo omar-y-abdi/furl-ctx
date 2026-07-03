@@ -16,7 +16,6 @@ GREEN after (cache_key None, no ``<<ccr:`` marker, compressed == original).
 
 from __future__ import annotations
 
-import textwrap
 from collections.abc import Callable
 from typing import Any
 
@@ -32,57 +31,9 @@ from furl_ctx.transforms.log_compressor import LogCompressor, LogCompressorConfi
 from furl_ctx.transforms.search_compressor import SearchCompressor, SearchCompressorConfig
 from furl_ctx.transforms.text_crusher import TextCrusher, TextCrusherConfig
 
-
-class _FailingStore:
-    """A store whose ``store()`` always raises (simulating a Python
-    compression_store write failure during the mirror). Every other attribute
-    delegates to a real store so the compressor's other reads still behave.
-    ``store_calls`` lets the test assert the CCR path was actually exercised —
-    guarding against a vacuous GREEN where no marker was ever produced."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.store_calls = 0
-
-    def store(self, *args: Any, **kwargs: Any) -> str:
-        self.store_calls += 1
-        raise RuntimeError("INJECTED compression_store write failure")
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-
-def _make_large_diff(n_files: int = 5, hunks_each: int = 20) -> str:
-    """A synthetic git diff well above min_lines_for_ccr — proven to emit a
-    CCR marker (reused from test_diff_compressor_sidecar_persist.py)."""
-    parts: list[str] = []
-    for i in range(n_files):
-        parts.append(
-            textwrap.dedent(
-                f"""\
-                diff --git a/src/module_{i}.py b/src/module_{i}.py
-                index abc1234..def5678 100644
-                --- a/src/module_{i}.py
-                +++ b/src/module_{i}.py
-                """
-            )
-        )
-        for h in range(hunks_each):
-            parts.append(
-                textwrap.dedent(
-                    f"""\
-                    @@ -{h * 10 + 1},{h * 10 + 6} +{h * 10 + 1},{h * 10 + 6} @@
-                     context line one for file {i} hunk {h}
-                     context line two for file {i} hunk {h}
-                    -old code line A in file {i} hunk {h}
-                    +new code line A in file {i} hunk {h}
-                    -old code line B in file {i} hunk {h}
-                    +new code line B in file {i} hunk {h}
-                     context line three for file {i} hunk {h}
-                    """
-                )
-            )
-    return "".join(parts)
+# TEST-19: shared single-copy helpers (were duplicated verbatim here).
+from tests._fixtures import FailingStore as _FailingStore
+from tests._fixtures import make_large_diff as _make_large_diff
 
 
 def _diff_case() -> tuple[str, Callable[[], Any]]:

@@ -9,14 +9,19 @@ env:
   PYPI_ENVIRONMENT: pypi
 
   # ─── Safety Gates ──────────────────────────────────────────────────────────────
-  # Set to 'true' to skip the publish target (e.g., when tokens are not configured).
-  # In GitHub: repo Settings → Variables → Actions Variables → New repository variable.
-  # Locally via act: pass -e event.yml or set in .actrc.local (see .actrc.example).
-  # SKIPPED: the `furl-ctx` PyPI project is owned by the upstream author; this
-  # fork has no PyPI trusted publisher configured, so the publish exchange fails
-  # (`invalid-publisher`). Flip to "false" after configuring a trusted publisher
-  # under your own PyPI package name.
-  PYPI_SKIP: "true"
+  # The publish kill-switch is the repository Actions VARIABLE `PYPI_SKIP`
+  # (read as `vars.PYPI_SKIP` by the publish-pypi and create-release gates
+  # below) — NOT a workflow env constant. TEST-31: an env entry here was a
+  # decoy the gates never read; an operator editing it still published.
+  # Set it in GitHub: repo Settings → Secrets and variables → Actions →
+  # Variables → New repository variable `PYPI_SKIP` = 'true'.
+  # Locally via act: pass -e event.yml or set in .actrc.local (see
+  # .actrc.local.example).
+  # Current state: 'true' — the `furl-ctx` PyPI project is owned by the
+  # upstream author; this fork has no PyPI trusted publisher configured, so
+  # the publish exchange fails (`invalid-publisher`). Set the variable to
+  # 'false' after configuring a trusted publisher under your own PyPI
+  # package name.
 
 on:
   # Triggered when release-please's release PR is merged: the bot
@@ -67,7 +72,6 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.ver.outputs.version }}
-      npm_version: ${{ steps.ver.outputs.npm_version }}
       canonical: ${{ steps.ver.outputs.canonical }}
       height: ${{ steps.ver.outputs.height }}
       bump: ${{ steps.ver.outputs.bump }}
@@ -80,8 +84,12 @@ jobs:
       # When fired by release-please's release event, the tag the
       # bot just published IS the canonical version for this run —
       # release_version.py's git-log derivation would re-bump it.
-      # workflow_dispatch still honors `inputs.version`; PR dry-runs
-      # leave MANUAL_VER empty and the script computes normally.
+      # workflow_dispatch REQUIRES `inputs.version` (TEST-28): without
+      # it the script computes one bump AHEAD of every built artifact
+      # (wheels carry pyproject's version), so the run would tag vX+1
+      # over wheels versioned X — and `skip-existing: true` on the PyPI
+      # step would silently no-op the mismatch. PR dry-runs leave
+      # MANUAL_VER empty and the script computes normally.
       - name: Resolve MANUAL_VER from trigger
         id: manualver
         shell: bash
@@ -94,7 +102,14 @@ jobs:
             # leading "v" so release_version.py's SemVer parser
             # accepts it.
             echo "value=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-          elif [ -n "$MANUAL_INPUT" ]; then
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -z "$MANUAL_INPUT" ]; then
+              echo "::error::workflow_dispatch requires inputs.version" \
+                "(TEST-28): a computed version runs one bump ahead of the" \
+                "built artifacts and mis-tags the release. Pass the version" \
+                "that matches pyproject.toml."
+              exit 1
+            fi
             echo "value=$MANUAL_INPUT" >> "$GITHUB_OUTPUT"
           else
             echo "value=" >> "$GITHUB_OUTPUT"
@@ -264,10 +279,10 @@ jobs:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: dist/*
 
-  # Aggregator step: merge all wheel artifacts + the npm release assets
-  # into the canonical `dist/` directory for downstream publishing jobs.
+  # Aggregator step: merge all wheel artifacts into the canonical
+  # `dist/` directory for downstream publishing jobs.
   collect-dist:
-    needs: [build-wheels]
+    needs: [detect-version, build-wheels]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -287,6 +302,39 @@ jobs:
           # Mirror the wheels into release-assets so create-release uploads them.
           cp -v dist/*.whl dist/*.tar.gz release-assets/ 2>/dev/null || true
           ls -la release-assets/
+
+      # TEST-28: wheel-version <-> tag consistency gate. Every artifact in
+      # dist/ must carry EXACTLY the version detect-version resolved — a
+      # mismatch means the release would tag one version over artifacts
+      # built as another (and `skip-existing: true` on the PyPI step would
+      # silently no-op it). Fail loud here, before anything publishes.
+      - name: Gate — dist/* versions must equal detect-version
+        env:
+          EXPECTED: ${{ needs.detect-version.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, sys
+          expected = os.environ["EXPECTED"]
+          artifacts = sorted(pathlib.Path("dist").iterdir())
+          if not artifacts:
+              sys.exit("dist/ is empty - nothing to gate")
+          bad = []
+          for f in artifacts:
+              if f.name.endswith(".tar.gz"):
+                  version = f.name[: -len(".tar.gz")].rsplit("-", 1)[-1]
+              elif f.name.endswith(".whl"):
+                  version = f.name.split("-")[1]
+              else:
+                  continue
+              if version != expected:
+                  bad.append(f"{f.name} (found {version})")
+          if bad:
+              sys.exit(
+                  f"version mismatch: detect-version says {expected} but "
+                  + "; ".join(bad)
+              )
+          print(f"OK: {len(artifacts)} dist artifacts all carry {expected}")
+          PY
 
       - name: Upload merged dist artifact
         uses: actions/upload-artifact@v7

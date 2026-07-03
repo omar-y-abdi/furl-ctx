@@ -11,6 +11,8 @@ Rust crate (`log_compressor.rs` unit tests); the Python shim no longer carries
 those helpers, so this suite exercises them only through `compress()`.
 """
 
+import re
+
 from furl_ctx.transforms.log_compressor import (
     LogCompressionResult,
     LogCompressor,
@@ -212,8 +214,17 @@ class TestEdgeCases:
         assert result.compression_ratio == 1.0
 
     def test_all_errors_no_info(self):
-        """Log with only errors is handled."""
-        lines = [f"ERROR: failure {i}" for i in range(100)]
+        """All-error input: kept ERROR lines are bounded and the omission
+        arithmetic ties out.
+
+        TEST-11: the old assert checked ``max_total_lines`` after setting
+        ``max_errors=5`` — it never counted ERROR lines, so a selector that
+        ignored ``max_errors`` entirely still passed. Pin the real contract:
+        a small head/tail window of errors survives, everything else is
+        disclosed in the omission summary, and kept + omitted == input.
+        """
+        n = 100
+        lines = [f"ERROR: failure {i}" for i in range(n)]
         content = "\n".join(lines)
 
         compressor = LogCompressor(
@@ -225,8 +236,21 @@ class TestEdgeCases:
         )
         result = compressor.compress(content)
 
-        # Should limit to max_errors
-        assert result.compressed_line_count <= compressor.config.max_total_lines
+        out_lines = result.compressed.split("\n")
+        kept_errors = [ln for ln in out_lines if ln.startswith("ERROR: failure")]
+        # Selection is real: a bounded window survives, not the whole log.
+        assert 0 < len(kept_errors) < n / 2, (
+            f"expected a bounded error window, kept {len(kept_errors)} of {n}"
+        )
+
+        # The omission summary discloses the drop and the arithmetic ties out.
+        summaries = [ln for ln in out_lines if "lines omitted" in ln]
+        assert summaries, f"expected an omission summary line, got: {out_lines[-3:]}"
+        m = re.search(r"\[(\d+) lines omitted", summaries[-1])
+        assert m is not None, f"unparseable summary: {summaries[-1]!r}"
+        assert len(kept_errors) + int(m.group(1)) == n, (
+            "kept + omitted must equal the input line count"
+        )
 
     def test_unicode_content(self):
         """Unicode characters are handled correctly."""
@@ -448,3 +472,33 @@ class TestOutputFormatting:
 
         # Should have omission summary
         assert "lines omitted" in result.compressed
+
+
+class TestMinLinesBoundary:
+    """At/below/above triple for min_lines_for_ccr (TEST-12).
+
+    The gate is ``original_line_count < min_lines_for_ccr``
+    (log_compressor.rs) → the boundary value itself gets compression
+    attempted. Only the below side was pinned before.
+    """
+
+    def _compress(self, n_lines: int) -> "LogCompressionResult":
+        compressor = LogCompressor(
+            config=LogCompressorConfig(min_lines_for_ccr=5, enable_ccr=True)
+        )
+        return compressor.compress("\n".join(f"INFO line {i}" for i in range(n_lines)))
+
+    def test_below_floor_is_verbatim(self):
+        result = self._compress(4)
+        assert result.compression_ratio == 1.0
+        assert result.cache_key is None
+
+    def test_at_floor_attempts_compression(self):
+        result = self._compress(5)
+        assert result.compression_ratio < 1.0, (
+            "exactly min_lines_for_ccr lines must be compressed (gate is `<`)"
+        )
+
+    def test_above_floor_attempts_compression(self):
+        result = self._compress(6)
+        assert result.compression_ratio < 1.0

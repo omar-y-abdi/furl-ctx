@@ -13,7 +13,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use furl_core::ccr::{CcrStore, InMemoryCcrStore};
-use furl_core::transforms::smart_crusher::{SmartCrusher, SmartCrusherBuilder, SmartCrusherConfig};
+use furl_core::transforms::smart_crusher::{
+    RoutingPolicy, SmartCrusher, SmartCrusherBuilder, SmartCrusherConfig,
+};
 
 /// Force the lossy path: set the lossless savings threshold above 1.0
 /// so no tabular rendering can ever clear it.
@@ -48,25 +50,31 @@ fn default_crusher_stores_dropped_rows() {
     let store = crusher.ccr_store().expect("default crusher has a store");
 
     let retrieved = store.get(hash).expect("hash must resolve in the store");
-    let parsed: Value = serde_json::from_str(&retrieved).expect("payload is valid JSON");
-    assert_eq!(parsed, Value::Array(items.clone()), "roundtrip mismatch");
+    // TEST-10: byte equality against the canonical serialization — the
+    // recovery contract is byte-exact; parsed-Value equality alone let
+    // key-order/number-form changes ship silently.
+    assert_eq!(retrieved, canonical_json(&items), "byte-exact roundtrip");
 }
 
 #[test]
 fn without_compaction_also_stores_dropped_rows() {
     // The legacy / parity constructor still carries a default store —
-    // CCR is the no-data-loss contract, not an opt-in extra.
+    // CCR is the no-data-loss contract, not an opt-in extra. TEST-10:
+    // the drop is asserted as a PRECONDITION — the old
+    // `if let Some(hash)` gate made this test vacuously green whenever
+    // the fixture stopped dropping.
     let crusher = SmartCrusher::without_compaction(SmartCrusherConfig::default());
     let items = lossy_friendly_items(30);
 
     let result = crusher.crush_array(&items, "", 1.0);
 
-    if let Some(hash) = result.ccr_hash.as_ref() {
-        let store = crusher.ccr_store().expect("default crusher has a store");
-        let retrieved = store.get(hash).expect("hash must resolve");
-        let parsed: Value = serde_json::from_str(&retrieved).unwrap();
-        assert_eq!(parsed, Value::Array(items.clone()));
-    }
+    let hash = result
+        .ccr_hash
+        .as_ref()
+        .expect("30 low-uniqueness rows without compaction must crush lossily and emit a hash");
+    let store = crusher.ccr_store().expect("default crusher has a store");
+    let retrieved = store.get(hash).expect("hash must resolve");
+    assert_eq!(retrieved, canonical_json(&items), "byte-exact roundtrip");
 }
 
 #[test]
@@ -86,8 +94,7 @@ fn shared_external_store_sees_writes() {
     let hash = result.ccr_hash.expect("lossy path emits a hash");
 
     let retrieved = store.get(&hash).expect("external store has the payload");
-    let parsed: Value = serde_json::from_str(&retrieved).unwrap();
-    assert_eq!(parsed, Value::Array(items));
+    assert_eq!(retrieved, canonical_json(&items), "byte-exact roundtrip");
 }
 
 #[test]
@@ -110,8 +117,16 @@ fn passthrough_does_not_write_to_store() {
 fn lossless_win_does_not_write_to_store() {
     // Lossless wins → nothing dropped, no CCR retrieval needed → no
     // store write. The store should only see writes when the prompt
-    // actually loses data.
-    let crusher = SmartCrusher::new(SmartCrusherConfig::default());
+    // actually loses data. TEST-10: the lossless win is asserted as a
+    // PRECONDITION — the old `if result.compacted.is_some()` gate made
+    // this test vacuously green forever: under the default MinTokens
+    // routing this fixture actually ships the LOSSY smart_sample render
+    // (fewer tokens), so the gated asserts never ran. LosslessFirst
+    // routing puts the test on the path its name promises.
+    let crusher = SmartCrusher::new(SmartCrusherConfig {
+        routing_policy: RoutingPolicy::LosslessFirst,
+        ..SmartCrusherConfig::default()
+    });
     let store = crusher.ccr_store().unwrap().clone();
     let starting_len = store.len();
 
@@ -123,10 +138,14 @@ fn lossless_win_does_not_write_to_store() {
 
     let result = crusher.crush_array(&items, "", 1.0);
 
-    if result.compacted.is_some() {
-        assert!(result.ccr_hash.is_none(), "lossless win → no hash");
-        assert_eq!(store.len(), starting_len, "lossless win → no store write");
-    }
+    assert!(
+        result.compacted.is_some(),
+        "the tabular fixture must WIN the lossless tier (strategy: {}) — \
+         without that this test proves nothing",
+        result.strategy_info
+    );
+    assert!(result.ccr_hash.is_none(), "lossless win → no hash");
+    assert_eq!(store.len(), starting_len, "lossless win → no store write");
 }
 
 #[test]
@@ -151,8 +170,7 @@ fn store_roundtrip_is_deterministic_across_calls() {
     );
 
     let retrieved = store.get(&hash).unwrap();
-    let parsed: Value = serde_json::from_str(&retrieved).unwrap();
-    assert_eq!(parsed, Value::Array(items));
+    assert_eq!(retrieved, canonical_json(&items), "byte-exact roundtrip");
 }
 
 #[test]
@@ -171,12 +189,10 @@ fn distinct_inputs_produce_distinct_store_entries() {
     let hb = rb.ccr_hash.clone().unwrap();
     assert_ne!(ha, hb);
 
-    // Both whole-blob originals retrievable (the byte-stable recovery
-    // key, unchanged by the granular model).
-    let pa: Value = serde_json::from_str(&store.get(&ha).unwrap()).unwrap();
-    let pb: Value = serde_json::from_str(&store.get(&hb).unwrap()).unwrap();
-    assert_eq!(pa, Value::Array(a.clone()));
-    assert_eq!(pb, Value::Array(b.clone()));
+    // Both whole-blob originals retrievable BYTE-EXACTLY (the recovery
+    // key, unchanged by the granular model) — TEST-10.
+    assert_eq!(store.get(&ha).unwrap(), canonical_json(&a));
+    assert_eq!(store.get(&hb).unwrap(), canonical_json(&b));
 
     // Granular model: besides the two distinct whole-blobs, each crush
     // also stores PER-ROW chunks (so a single retrieve fetches one row,
@@ -243,8 +259,11 @@ fn dropped_summary_marker_points_at_stored_hash() {
         result.dropped_summary,
         hash
     );
-    // The hash actually resolves.
-    assert!(store.get(hash).is_some());
+    // The hash resolves to the byte-exact canonical original (TEST-10).
+    assert_eq!(
+        store.get(hash).as_deref(),
+        Some(canonical_json(&items).as_str())
+    );
 }
 
 #[test]
@@ -283,21 +302,28 @@ fn dropped_count_ties_out_kept_plus_advertised() {
 #[test]
 fn full_crush_pipeline_roundtrips_through_store() {
     // End-to-end through the public `crush()` API (the entry point
-    // that ContentRouter calls). The result string contains the marker;
-    // we verify the marker hash resolves in the store.
+    // that ContentRouter calls). TEST-10: the old version asserted only
+    // `store.len() > 0` — it roundtripped NOTHING (any write of any
+    // garbage passed). Now the marker hash in the OUTPUT must resolve
+    // to the byte-exact canonical original.
     let crusher = SmartCrusher::new(force_lossy_config());
     let store = crusher.ccr_store().unwrap().clone();
 
     let items: Vec<Value> = (0..50).map(|i| json!({"id": i, "status": "ok"})).collect();
     let raw_input = serde_json::to_string(&Value::Array(items.clone())).unwrap();
 
-    let _ = crusher.crush(&raw_input, "", 1.0);
+    let result = crusher.crush(&raw_input, "", 1.0);
 
-    // The pipeline routed through `process_value` → `crush_array`,
-    // which calls our wired `put`. So the original is in the store
-    // under the canonical hash.
-    let store_len = store.len();
-    assert!(store_len > 0, "expected at least one CCR store entry");
+    let marker_hash = extract_hash_from_marker(&result.compressed)
+        .expect("lossy crush output must surface a <<ccr:HASH ...>> marker");
+    let payload = store
+        .get(&marker_hash)
+        .expect("the marker hash the model sees must resolve in the store");
+    assert_eq!(
+        payload,
+        canonical_json(&items),
+        "the stored payload must be the byte-exact canonical original array"
+    );
 }
 
 // ─── PR8 additions: marker injection + walker unification ──────────
@@ -506,10 +532,9 @@ fn two_large_arrays_in_one_document_keep_every_marker_resolvable() {
                  persists (COR-4 silent loss)"
             )
         });
-        let restored: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(
-            restored,
-            Value::Array(original.clone()),
+            payload,
+            canonical_json(original),
             "array {key:?}'s blob must recover the original rows byte-exactly"
         );
     }
@@ -548,8 +573,11 @@ fn single_oversized_array_never_advertises_unresolvable_chunks() {
     let payload = store
         .get(&hash)
         .expect("the whole-blob recovery key must survive the document's own persists");
-    let restored: Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(restored, Value::Array(items.clone()));
+    assert_eq!(
+        payload,
+        canonical_json(&items),
+        "byte-exact whole-blob recovery"
+    );
 
     // IF a granular `_ccr_rows` index is advertised, then EVERY row hash
     // it lists must resolve — the output must never advertise retrievals
@@ -577,6 +605,14 @@ fn single_oversized_array_never_advertises_unresolvable_chunks() {
 }
 
 // ─── helpers ──────────────────────────────────────────────────────
+
+/// The byte-exact canonical form the store payload is written in
+/// (`persist::canonical_array_json` = `serde_json::to_string` over the
+/// item slice). TEST-10: roundtrip asserts compare against THESE bytes,
+/// not a parsed `Value` — key-order/number-form drift must fail.
+fn canonical_json(items: &[Value]) -> String {
+    serde_json::to_string(items).expect("test fixtures serialize")
+}
 
 /// Pull the hash out of a `<<ccr:HASH N_rows_offloaded>>` row marker.
 fn extract_hash_from_marker(s: &str) -> Option<String> {

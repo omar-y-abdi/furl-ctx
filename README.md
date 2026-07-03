@@ -99,14 +99,14 @@ Granular extras: `[mcp]` (MCP server), `[dev]`. Requires **Python 3.10+**.
 |---------------|------:|-------:|-------:|----------:|-------------|---------------:|
 | code          |     7 | 41,025 |    471 |       99% | lossy (CCR) |           100% |
 | disk          |     9 |    694 |    347 |       50% | lossless    |           100% |
-| multiturn     |   135 | 14,866 |  2,211 |       85% | lossy (CCR) |           100% |
+| multiturn     |   135 | 14,866 |  2,141 |       86% | lossy (CCR) |           100% |
 | logs          |    90 |  8,595 |    619 |       93% | lossy (CCR) |           100% |
 | search        |    90 |  4,102 |    318 |       92% | lossy (CCR) |           100% |
 | repeated logs |    90 |  3,621 |    120 |       97% | lossy (CCR) |           100% |
 
-<sub>**Regime** — *lossless*: the compressed output is self-contained (zero rows dropped). *lossy (CCR)*: rows are offloaded to the local CCR store and replaced with `<<ccr:HASH>>` markers — smaller output, and **every dropped row is byte-exactly recoverable on demand** (100% info retention, within the configured TTL). `code` (large distinct source files that no compressor can shrink) takes the reversible CCR-offload fallback: an identity preview (paths + first lines) plus a retrieval marker ships in place of the full files.</sub>
+<sub>**Regime** — *lossless*: the compressed output is self-contained (zero rows dropped). *lossy (CCR)*: rows are offloaded to the local CCR store and replaced with `<<ccr:HASH>>` markers — smaller output, and **every dropped row is byte-exactly recoverable on demand** (100% info retention, within the configured TTL). `code` (large distinct source files that no compressor can shrink) takes the reversible CCR-offload fallback: an identity preview (paths + first lines) plus a retrieval marker ships in place of the full files. The same offload covers any large, low-redundancy tool output the compressors can't shrink — not just file reads.</sub>
 
-These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). Across the whole corpus the table sums to **94% fewer tokens** (72,903 → 4,086) at 100% information retention; the **60–95%** headline maps to this table's lossy-CCR range. Full methodology and the 6-seed adversarial sweep live in [BENCHMARKS.md](BENCHMARKS.md).
+These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). Across the whole corpus the table sums to **94% fewer tokens** (72,903 → 4,016) at 100% information retention; the **60–95%** headline maps to this table's lossy-CCR range. Full methodology and the 6-seed adversarial sweep live in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## When to use · When to skip
 
@@ -213,6 +213,24 @@ One runtime asset is fetched over TLS; if it is blocked, trust your corporate CA
 - **`openaipublic.blob.core.windows.net`** — tiktoken's BPE encoding files, downloaded once on
   first use and cached locally. Pre-populate the cache and point `TIKTOKEN_CACHE_DIR` at it to
   run fully offline.
+
+## Configuration (environment variables)
+
+Every live `FURL_*` knob. All are optional — the defaults are the shipped behavior.
+
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `FURL_WORKSPACE_DIR` | `~/.furl` | Workspace root: home of the durable CCR SQLite store and the shared session-stats file. Also the **security boundary for `furl_read`** — file reads are jailed to it (the jail alone defaults to the server's working directory when unset). |
+| `FURL_CCR_TTL_SECONDS` | `1800` | CCR retention window in seconds — how long "reversible" lasts before an entry expires (an expired/evicted retrieval is a loud miss, never silent). Positive integer; invalid values warn and fall back. |
+| `FURL_CCR_BACKEND` | unset (in-memory; the MCP server defaults to `sqlite`) | CCR store backend: `memory`, `sqlite`, or the name of a third-party `furl_ctx.ccr_backend` entry point. Explicitly selecting a backend that cannot be loaded **raises at startup** — no silent downgrade to memory. |
+| `FURL_CCR_BACKEND_OPTS` | unset (`{}`) | JSON object of keyword arguments passed to a third-party backend factory, e.g. `{"url": "..."}`. |
+| `FURL_CCR_SQLITE_PATH` | `<workspace>/ccr.sqlite3` | File path of the durable SQLite CCR store. |
+| `FURL_CCR_SQLITE_MAX_ROWS` | `10000` | Row cap for the SQLite store (oldest-created evicted first). |
+| `FURL_MCP_READ` | `off` | Enables the `furl_read` MCP tool (`on`/`true`/`1`/`yes`/`enabled`). Reads are jailed to `FURL_WORKSPACE_DIR`. |
+| `FURL_COMPRESS_WORKERS` | `4` | Worker threads for the router's parallel per-message compression. |
+| `FURL_PIPELINE_BREAKER_THRESHOLD` | `3` | Consecutive pipeline failures before the circuit breaker opens and messages pass through **uncompressed** for the cooldown window. `<= 0` disables the breaker. |
+| `FURL_PIPELINE_BREAKER_COOLDOWN_S` | `60` | Seconds an open circuit breaker keeps passing messages through untouched before retrying. |
+| `FURL_COMPACTION_FORMAT` | `csv-schema` | Lossless render format for SmartCrusher compaction: `csv-schema`, `json`, or `markdown-kv`. Unknown values raise. |
 
 ## Compared to
 

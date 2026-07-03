@@ -18,10 +18,10 @@
 //!
 //! [`default_oss_constraints`] returns the OSS default stack as a
 //! `Vec<Box<dyn Constraint>>`. `SmartCrusher::new(config)` uses this;
-//! `SmartCrusherBuilder::new(config)` does NOT (the builder gives you
-//! exactly what you ask for, no surprises). To get OSS defaults plus
-//! your own constraints, use `with_default_constraints()` on the
-//! builder.
+//! `SmartCrusherBuilder::new(config)` does NOT (the builder starts with
+//! an empty constraint stack). To get the OSS defaults plus your own
+//! constraints, start the builder from `with_default_oss_setup()` and
+//! stack `with_constraint(...)` calls on top.
 
 use serde_json::Value;
 

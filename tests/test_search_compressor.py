@@ -7,6 +7,8 @@ Tests cover:
 4. Edge cases
 """
 
+import pytest
+
 from furl_ctx.transforms.search_compressor import (
     FileMatches,
     SearchCompressionResult,
@@ -219,7 +221,12 @@ class TestCompressionBehavior:
         assert "more matches" in result.compressed
 
     def test_compression_ratio_calculated(self):
-        """Compression ratio is calculated correctly."""
+        """Compression ratio IS compressed_chars / original_chars.
+
+        TEST-11: `< 1.0` accepted any made-up number below one; pin the
+        actual formula so a units mix-up (lines, tokens, inverted ratio)
+        fails.
+        """
         content = "\n".join([f"src/file.py:{i}:line {i}" for i in range(1, 101)])
 
         compressor = SearchCompressor(
@@ -230,7 +237,9 @@ class TestCompressionBehavior:
         )
         result = compressor.compress(content)
 
-        # Ratio should be less than 1.0 for compression
+        assert result.compression_ratio == pytest.approx(
+            len(result.compressed) / len(content)
+        )
         assert result.compression_ratio < 1.0
 
 
@@ -385,28 +394,36 @@ class TestContextIntegration:
     """Tests for context-aware compression."""
 
     def test_context_influences_selection(self):
-        """Context string influences which matches are selected."""
-        lines = []
-        for i in range(50):
-            lines.append(f"src/utils.py:{i}:def helper_{i}():")
+        """The context string changes WHICH matches are selected.
 
-        # Add some specific matches
-        lines.append("src/auth.py:100:def authenticate_user():")
-        lines.append("src/auth.py:200:def validate_token():")
-
+        Counterfactual pair (TEST-11): the old fixture put the auth lines in
+        their own (alphabetically first) file, so they were selected with or
+        without context and the OR-shaped assert could never fail. Here a
+        single mid-file line matches the context words: it survives the
+        3-slot budget ONLY when the context is passed.
+        """
+        lines = [f"src/utils.py:{i}:def helper_{i}():" for i in range(1, 41)]
+        lines[29] = "src/utils.py:30:def parse_manifest_payload():"
         content = "\n".join(lines)
 
-        compressor = SearchCompressor(
-            config=SearchCompressorConfig(
-                max_total_matches=5,
-                context_keywords=["auth", "token", "validate"],
-                enable_ccr=False,
-            )
+        config = SearchCompressorConfig(
+            max_matches_per_file=3,
+            always_keep_first=False,
+            always_keep_last=False,
+            enable_ccr=False,
         )
-        result = compressor.compress(content, context="find authentication code")
+        with_context = SearchCompressor(config=config).compress(
+            content, context="manifest payload parsing"
+        )
+        without_context = SearchCompressor(config=config).compress(content)
 
-        # Auth-related matches should be included
-        assert "authenticate" in result.compressed or "token" in result.compressed
+        assert "parse_manifest_payload" in with_context.compressed, (
+            "context-matching line must win a selection slot"
+        )
+        assert "parse_manifest_payload" not in without_context.compressed, (
+            "without context the same line loses on position — if it appears "
+            "anyway, this fixture no longer detects context influence"
+        )
 
 
 class TestOutputFormatting:
@@ -484,46 +501,72 @@ class TestSearchMatchDataclass:
 class TestConfigOptions:
     """Tests for configuration options."""
 
-    def test_disable_keep_first(self):
-        """always_keep_first=False doesn't force first match."""
-        content = "\n".join([f"src/file.py:{i}:line {i}" for i in range(1, 51)])
+    @staticmethod
+    def _merit_content() -> str:
+        """40 plain lines with two ERROR lines mid-file.
 
+        With `boost_errors` (default on), the ERROR lines outscore the plain
+        first/last lines — so whether line 1 / line 40 survive a 2-slot
+        budget is decided EXACTLY by the always_keep_first/last flags. The
+        old all-identical fixture couldn't tell the flags apart (TEST-11):
+        every line scored the same and line 1 won on position either way.
+        """
+        lines = [f"src/file.py:{i}:plain line {i}" for i in range(1, 41)]
+        lines[19] = "src/file.py:20:ERROR fatal crash here"
+        lines[24] = "src/file.py:25:ERROR another failure"
+        return "\n".join(lines)
+
+    def _compress_merit(self, *, keep_first: bool, keep_last: bool) -> str:
         compressor = SearchCompressor(
             config=SearchCompressorConfig(
-                always_keep_first=False,
-                always_keep_last=True,
+                always_keep_first=keep_first,
+                always_keep_last=keep_last,
                 max_matches_per_file=2,
                 enable_ccr=False,
             )
         )
-        result = compressor.compress(content)
+        return compressor.compress(self._merit_content()).compressed
 
-        # First line not guaranteed to be present
-        # But last should be
-        assert "src/file.py:50:line 50" in result.compressed
+    def test_disable_keep_first(self):
+        """always_keep_first=False actually releases the first-match slot.
+
+        Counterfactual pair (TEST-11): the SAME content keeps line 1 with
+        the flag on and drops it (in favor of a merit line) with it off.
+        """
+        with_flag = self._compress_merit(keep_first=True, keep_last=True)
+        without_flag = self._compress_merit(keep_first=False, keep_last=True)
+
+        assert "src/file.py:1:plain line 1" in with_flag
+        assert "src/file.py:1:plain line 1" not in without_flag
+        # The released slot went to a higher-scoring match, not nowhere.
+        assert "ERROR" in without_flag
 
     def test_disable_keep_last(self):
-        """always_keep_last=False doesn't force last match."""
-        content = "\n".join([f"src/file.py:{i}:line {i}" for i in range(1, 51)])
+        """always_keep_last=False actually releases the last-match slot."""
+        with_flag = self._compress_merit(keep_first=True, keep_last=True)
+        without_flag = self._compress_merit(keep_first=True, keep_last=False)
 
-        compressor = SearchCompressor(
-            config=SearchCompressorConfig(
-                always_keep_first=True,
-                always_keep_last=False,
-                max_matches_per_file=2,
-                enable_ccr=False,
-            )
-        )
-        result = compressor.compress(content)
+        assert "src/file.py:40:plain line 40" in with_flag
+        assert "src/file.py:40:plain line 40" not in without_flag
+        assert "ERROR" in without_flag
 
-        # First line should be present
-        assert "src/file.py:1:line 1" in result.compressed
+    @pytest.mark.parametrize(
+        ("n_matches", "ccr_active"),
+        [
+            (9, False),  # below: skipped
+            (10, True),  # at: activates (gate is `count < min`, TEST-12)
+            (11, True),  # above: activates
+        ],
+        ids=["below", "at", "above"],
+    )
+    def test_min_matches_for_ccr(self, n_matches: int, ccr_active: bool):
+        """At/below/above triple for min_matches_for_ccr (TEST-12).
 
-    def test_min_matches_for_ccr(self):
-        """min_matches_for_ccr threshold is respected."""
-        content = "\n".join([f"src/file.py:{i}:line {i}" for i in range(1, 6)])
+        Only the deactivate side (5 < 10) was tested before — a regression
+        that never activated CCR at all stayed green.
+        """
+        content = "\n".join([f"src/file.py:{i}:line {i}" for i in range(1, n_matches + 1)])
 
-        # With threshold of 10, CCR should not activate for 5 matches
         compressor = SearchCompressor(
             config=SearchCompressorConfig(
                 min_matches_for_ccr=10,
@@ -532,4 +575,7 @@ class TestConfigOptions:
         )
         result = compressor.compress(content)
 
-        assert result.cache_key is None
+        assert (result.cache_key is not None) == ccr_active, (
+            f"{n_matches} matches with floor 10: expected CCR active={ccr_active}, "
+            f"got cache_key={result.cache_key!r}"
+        )

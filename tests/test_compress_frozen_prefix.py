@@ -5,14 +5,11 @@ Contract tested (Contract #2 — prompt-cache ordering):
   messages[0..=k] are returned BYTE-IDENTICAL (no compression, no
   reorder, msg 0 preserved, cache_control bytes intact).
 
-TDD RED tests written before _compute_frozen_message_count is added to
-compress.py.  They should FAIL before the implementation is added.
-
-Parity tests (adapter fixtures):
-  Feed the same logical bodies to the Python helper and verify the
-  Python helper returns the same integer as the Rust test asserts.
-  The Rust expected values are taken verbatim from
-  crates/furl-core/tests/cache_control.rs.
+``_compute_frozen_message_count`` in compress.py is the SOLE owner of
+this logic — there is no Rust twin (an earlier docstring here cited a
+``cache_control.rs`` that never existed in crates/; TEST-7). The
+``TestParity`` class below is a table-driven characterization of that
+Python owner, not a cross-language parity lock.
 """
 
 from __future__ import annotations
@@ -75,7 +72,7 @@ class TestComputeFrozenMessageCount:
         assert _compute_frozen_message_count(messages) == 1
 
     def test_marker_on_index_k_yields_k_plus_1(self) -> None:
-        # Marker on messages[3] => frozen = 4  (mirrors Rust test)
+        # Marker on messages[3] => frozen = 4
         messages = [
             {"role": "user", "content": "first"},
             {"role": "assistant", "content": "second"},
@@ -197,16 +194,20 @@ class TestComputeFrozenMessageCount:
 
 
 # ---------------------------------------------------------------------------
-# Parity micro-tests (Python helper vs Rust compute_frozen_count fixtures)
+# Table-driven characterization of the Python owner
 # ---------------------------------------------------------------------------
 
 
 class TestParity:
-    """Shared fixture parity.
+    """Table-driven characterization of ``_compute_frozen_message_count``.
 
-    These fixtures are the table-driven cases from
-    crates/furl-core/tests/cache_control.rs.  Expected values are the
-    integer literals asserted by the Rust tests.
+    Historical name: this class once claimed to mirror fixtures from a
+    Rust ``cache_control.rs`` — no such file ever existed (TEST-7); the
+    helper is Python-only. The expected integers below are the pinned
+    behavior of the sole owner. Two vacuous tests were deleted with the
+    fiction: "system/tools markers don't bump" is untestable through this
+    helper (its input is the messages list; system/tools live outside it),
+    and both were byte-identical to ``test_parity_no_markers_zero``.
     """
 
     def _run(self, messages: list[dict]) -> int:
@@ -225,23 +226,7 @@ class TestParity:
             },
             {"role": "user", "content": "fifth"},
         ]
-        assert self._run(messages) == 4  # Rust: assert_eq!(compute_frozen_count(&body), 4)
-
-    def test_parity_system_markers_dont_bump(self) -> None:
-        """System-level cache_control never bumps the message-index floor."""
-        # system markers: note we only pass messages here, system is ignored
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ]
-        assert self._run(messages) == 0  # Rust: assert_eq!(compute_frozen_count(&body), 0)
-
-    def test_parity_tools_markers_dont_bump(self) -> None:
-        """Tool-level cache_control never bumps the message-index floor."""
-        messages = [
-            {"role": "user", "content": "what is 2+2?"},
-        ]
-        assert self._run(messages) == 0  # Rust: assert_eq!(compute_frozen_count(&body), 0)
+        assert self._run(messages) == 4
 
     def test_parity_ttl_1h_and_5m_both_bump(self) -> None:
         """Both 1h and 5m TTL markers count; highest index wins."""
@@ -267,14 +252,14 @@ class TestParity:
                 ],
             },
         ]
-        assert self._run(messages) == 2  # Rust: assert_eq!(compute_frozen_count(&body), 2)
+        assert self._run(messages) == 2
 
     def test_parity_no_markers_zero(self) -> None:
         messages = [
             {"role": "user", "content": "no marker here"},
             {"role": "assistant", "content": [{"type": "text", "text": "no marker either"}]},
         ]
-        assert self._run(messages) == 0  # Rust: assert_eq!(compute_frozen_count(&body), 0)
+        assert self._run(messages) == 0
 
     def test_parity_multiple_non_adjacent_markers(self) -> None:
         messages = [
@@ -304,7 +289,7 @@ class TestParity:
             },
             {"role": "assistant", "content": "m5 string"},
         ]
-        assert self._run(messages) == 5  # Rust: assert_eq!(compute_frozen_count(&body), 5)
+        assert self._run(messages) == 5
 
     def test_parity_multi_block_one_message(self) -> None:
         messages = [
@@ -326,7 +311,7 @@ class TestParity:
                 ],
             },
         ]
-        assert self._run(messages) == 2  # Rust: assert_eq!(compute_frozen_count(&body), 2)
+        assert self._run(messages) == 2
 
     def test_parity_string_then_block_with_marker(self) -> None:
         messages = [
@@ -343,11 +328,11 @@ class TestParity:
                 ],
             },
         ]
-        assert self._run(messages) == 3  # Rust: assert_eq!(compute_frozen_count(&body), 3)
+        assert self._run(messages) == 3
 
     def test_parity_missing_messages_field_yields_zero(self) -> None:
         # Python helper takes messages list directly; empty list = same
-        assert self._run([]) == 0  # Rust: assert_eq!(compute_frozen_count(&body), 0)
+        assert self._run([]) == 0
 
     def test_parity_non_object_blocks_skipped(self) -> None:
         messages = [
@@ -361,7 +346,7 @@ class TestParity:
                 ],
             },
         ]
-        assert self._run(messages) == 1  # Rust: assert_eq!(compute_frozen_count(&body), 1)
+        assert self._run(messages) == 1
 
 
 # ---------------------------------------------------------------------------

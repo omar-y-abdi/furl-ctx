@@ -76,19 +76,14 @@ def _envelope(result: list[mt.TextContent]) -> dict:
 
 
 def _get_call_tool(server: FurlMCPServer):
-    """Recover the registered user ``call_tool`` closure (mcp_server.py:500).
+    """Return the routing handler via its public attribute (TEST-22).
 
-    The SDK wraps our handler in its own ``handler`` closure under
-    ``request_handlers[CallToolRequest]``; the user closure is captured as a
-    cell named ``call_tool``. Reaching it lets us exercise the ROUTING/unknown
-    -tool branches (:508-522) that bound ``_handle_*`` calls cannot reach.
+    ``FurlMCPServer`` exposes the registered ``call_tool`` closure as
+    ``route_call_tool`` exactly so tests can exercise the ROUTING /
+    unknown-tool branches without introspecting the MCP SDK's private
+    wrapper closure — the old closure-cell walk broke on any ``mcp`` bump.
     """
-    sdk_handler = server.server.request_handlers[mt.CallToolRequest]
-    for cell in sdk_handler.__closure__ or []:
-        candidate = cell.cell_contents
-        if callable(candidate) and getattr(candidate, "__name__", "") == "call_tool":
-            return candidate
-    raise AssertionError("user call_tool closure not found in SDK handler")
+    return server.route_call_tool
 
 
 # ─── _handle_compress / _handle_retrieve missing-param envelopes ────────────

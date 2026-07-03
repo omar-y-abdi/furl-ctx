@@ -11,8 +11,12 @@ from pathlib import Path
 
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$")
+# Type list aligned with .commitlintrc.json's type-enum (TEST-29): "deps" is
+# dependabot's pip/cargo prefix — it classifies as a patch bump (same result
+# the unmatched-commit fallback produced) but now honors a `deps(...)!:`
+# breaking marker instead of silently ignoring it.
 CONVENTIONAL_COMMIT_RE = re.compile(
-    r"^(feat|fix|ci|chore|perf|refactor|docs|style|test)(\(.+\))?(!)?:\s*(.+)$"
+    r"^(feat|fix|ci|chore|deps|perf|refactor|docs|style|test)(\(.+\))?(!)?:\s*(.+)$"
 )
 BREAKING_CHANGE_RE = re.compile(r"^BREAKING CHANGE:\s*(.+)$", re.MULTILINE)
 FIELD_SEP = "\x1f"

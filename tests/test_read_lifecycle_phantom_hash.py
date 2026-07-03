@@ -203,8 +203,14 @@ class TestStoreNoneNoPhantomHash:
         )
 
     def test_stale_read_content_recoverable_from_output(self) -> None:
-        """With store=None and a stale Read, original content must be recoverable
-        from the output alone — either verbatim or no substitution occurred."""
+        """With store=None a detected-stale Read stays VERBATIM.
+
+        TEST-11: the old OR-shaped assert (`content_present or reads_stale
+        == 0`) also passed when staleness detection never fired at all. Pin
+        both halves: the fixture's read IS classified stale (the feature
+        fired), and the store-less substitution path declined — content
+        ships verbatim, zero data loss.
+        """
         original_content = "unique_stale_content_" * 30  # ~630 bytes
         messages = _build_messages_with_stale_read(read_content=original_content)
         manager = self._make_manager()
@@ -213,14 +219,12 @@ class TestStoreNoneNoPhantomHash:
 
         all_text = _get_all_text_from_messages(result.messages)
 
-        # Either the original content is still present verbatim in the output,
-        # OR no substitution occurred at all. Either way, no data loss.
-        content_present = original_content in all_text
-        no_substitution = result.reads_stale == 0
-        assert content_present or no_substitution, (
-            "With store=None, original Read content must remain recoverable. "
-            "Either the content is still in the output or no substitution happened. "
-            f"reads_stale={result.reads_stale}, content_present={content_present}"
+        assert result.reads_stale == 1, (
+            "precondition: the fixture's read must be CLASSIFIED stale — "
+            "otherwise this test proves nothing about the store=None path"
+        )
+        assert original_content in all_text, (
+            "store=None must skip substitution and ship the content verbatim"
         )
 
     def test_superseded_read_no_phantom_hash(self) -> None:
@@ -241,7 +245,11 @@ class TestStoreNoneNoPhantomHash:
         )
 
     def test_superseded_read_content_recoverable_from_output(self) -> None:
-        """With store=None and a superseded Read, original content is recoverable."""
+        """With store=None a detected-superseded Read stays VERBATIM.
+
+        TEST-11: same OR-shape hole as the stale twin — pin detection AND
+        the verbatim skip separately.
+        """
         original_content = "unique_superseded_content_" * 25  # ~650 bytes
         messages = _build_messages_with_superseded_read(read_content=original_content)
         # Enable superseded compression to exercise that code path
@@ -252,11 +260,11 @@ class TestStoreNoneNoPhantomHash:
 
         all_text = _get_all_text_from_messages(result.messages)
 
-        content_present = original_content in all_text
-        no_substitution = result.reads_superseded == 0
-        assert content_present or no_substitution, (
-            "With store=None, superseded Read content must remain recoverable. "
-            f"reads_superseded={result.reads_superseded}, content_present={content_present}"
+        assert result.reads_superseded == 1, (
+            "precondition: the fixture's read must be CLASSIFIED superseded"
+        )
+        assert original_content in all_text, (
+            "store=None must skip substitution and ship the content verbatim"
         )
 
     def test_small_read_below_min_size_unchanged(self) -> None:
@@ -382,3 +390,39 @@ class TestStoreConfiguredBackedMarkerUnchanged:
             raise AssertionError(
                 f"With store=None, result.ccr_hashes must be empty but got: {result.ccr_hashes}"
             )
+
+
+class TestMinSizeBytesBoundary:
+    """At/below/above triple for the min_size_bytes floor (TEST-12).
+
+    The gate is ``content_bytes < min_size_bytes`` (read_lifecycle.py) →
+    the boundary value itself IS substituted. Only a far-below case
+    ("tiny") existed before; an off-by-one (`<=`) was invisible.
+    """
+
+    def _apply(self, size: int) -> tuple[bool, object]:
+        content = "y" * size
+        store = CompressionStore()
+        manager = ReadLifecycleManager(
+            config=ReadLifecycleConfig(enabled=True, min_size_bytes=200),
+            compression_store=store,
+        )
+        result = manager.apply(_build_messages_with_stale_read(read_content=content))
+        all_text = _get_all_text_from_messages(result.messages)
+        substituted = content not in all_text
+        return substituted, result
+
+    def test_below_floor_stays_verbatim(self) -> None:
+        substituted, result = self._apply(199)
+        assert not substituted, "199 bytes < 200 floor: content must ship verbatim"
+        assert result.reads_stale == 1, "the read is still CLASSIFIED stale"
+
+    def test_at_floor_is_substituted(self) -> None:
+        substituted, result = self._apply(200)
+        assert substituted, "exactly 200 bytes must substitute (gate is `<`)"
+        assert result.ccr_hashes, "the substitution must be CCR-backed"
+
+    def test_above_floor_is_substituted(self) -> None:
+        substituted, result = self._apply(201)
+        assert substituted
+        assert result.ccr_hashes

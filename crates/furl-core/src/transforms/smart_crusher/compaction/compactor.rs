@@ -28,6 +28,14 @@
 //!   with the same inner key set, where flattening doesn't blow up the
 //!   column count by more than `max_flatten_inner_keys`, gets promoted
 //!   into dotted columns (`meta.region`, `meta.tier`).
+//!
+//!   HONEST CONTRACT (COR-14): the wire grammar records nothing about the
+//!   flatten, so the reference decoder reconstructs such rows with dotted
+//!   TOP-LEVEL keys (`{"meta.region": ...}`), not the original nesting.
+//!   Reconstruction is **value-exact under dotted keys** — every value is
+//!   exact, the nesting shape is not restored. `csv_schema_decoder.py`
+//!   documents the same caveat on the consumer side, and
+//!   `verify/independent_recheck.py` compares both sides un-flattened.
 //! - **Stringified-JSON.** Cells that classify as
 //!   [`CellClass::StringifiedJson`] become [`CellValue::Nested`] when the
 //!   parsed value is an array of objects (recursive table); otherwise
@@ -68,7 +76,7 @@ pub struct CompactConfig {
 
     /// Heterogeneity threshold: when fewer than this fraction of all
     /// observed keys are core, treat the array as heterogeneous and
-    /// look for a discriminator. Default: 0.5.
+    /// look for a discriminator. Default: 0.6.
     pub heterogeneous_core_ratio: f64,
 
     /// Cap on inner-key count for nested-uniform flattening. Larger
@@ -336,6 +344,11 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
 /// Promote fields whose every row holds an object with the same key
 /// set into dotted columns. Bounded by `cfg.max_flatten_inner_keys` so
 /// a 50-key inner schema doesn't blow up the table width.
+///
+/// COR-14 contract note: the flatten is NOT recorded in the wire grammar,
+/// so the decoder cannot un-flatten — decoded rows carry the dotted
+/// column names as top-level keys. "Lossless" for a flattened table means
+/// value-exact under dotted keys, not shape-exact reconstruction.
 fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &CompactConfig) {
     use super::formatter::column_name_breaks_grammar;
 

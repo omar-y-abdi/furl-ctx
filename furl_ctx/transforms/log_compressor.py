@@ -150,10 +150,11 @@ def _format_from_str(name: str) -> LogFormat:
 class LogCompressor:
     """Rust-backed log compressor.
 
-    Drop-in replacement for the retired Python class. `compress()`
-    delegates to Rust end-to-end; internal helpers used by the
-    existing test surface keep working but route through the same
-    Rust building blocks where they exist.
+    Drop-in replacement for the retired Python class: `compress()`
+    delegates to Rust end-to-end. The retired class's internal parsing
+    helpers were NOT preserved; the only Python-side additions are the
+    CCR persistence bridge (`_persist_to_python_ccr`) and the
+    passthrough result builder.
     """
 
     def __init__(self, config: LogCompressorConfig | None = None) -> None:

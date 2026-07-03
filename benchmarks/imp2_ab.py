@@ -1,6 +1,6 @@
 """Improvement-2 (field-aware dedup) honest A/B — stable hash ON vs OFF.
 
-DESIGN.md Improvement 2 replaces the whole-item dedup hash with a *stable
+docs/audits/DESIGN.md (historical Phase-2 design) Improvement 2 replaces the whole-item dedup hash with a *stable
 projection* hash that excludes high-cardinality "VaryingIdentity" columns
 (per-row timestamps / UUIDs / commit hashes / monotone counters). One such
 column makes every row's whole-item hash unique, silently defeating dedup,

@@ -289,7 +289,9 @@ class ContentRouterConfig:
         min_section_tokens: Minimum tokens for a section to compress.
         fallback_strategy: Strategy when no compressor matches.
         skip_user_messages: Never compress user messages (they're the subject).
-        skip_recent_messages: Don't compress last N messages (likely the subject).
+        protect_recent_code: Don't compress CODE in the last N messages
+            (0 = disabled; overridable per call via the ``protect_recent``
+            kwarg).
         protect_analysis_context: Detect "analyze/review" intent, skip compression.
     """
 
@@ -465,11 +467,17 @@ class ContentRouterConfig:
 #      broadcasts the SAME ``**kwargs`` to every transform
 #      (``pipeline.py``: ``transform.apply(..., **kwargs)``), so apply()
 #      legitimately RECEIVES keys destined for the pipeline's public surface
-#      or for sibling transforms — e.g. ``model_limit`` / ``output_buffer`` /
-#      ``tool_profiles`` / ``request_id`` (documented in
-#      ``TransformPipeline.apply``) and ``record_metrics`` /
-#      ``model`` / ``messages`` / ``tokenizer`` (positionals / dry-run marker).
-#      These are valid, just not consumed here.
+#      or for sibling transforms — e.g. ``model_limit`` / ``request_id``
+#      (documented in ``TransformPipeline.apply``),
+#      ``previous_prefix_hash`` (CacheAligner's documented turn-to-turn
+#      tracking kwarg, API-4), and ``model`` / ``messages`` / ``tokenizer``
+#      (positionals). These are valid, just not consumed here.
+#      (``record_metrics`` is NOT accepted: the pipeline pops it before the
+#      broadcast, so it can never legitimately arrive here. ``output_buffer``
+#      and ``tool_profiles`` were removed with their dead docstring bullets —
+#      per-tool profiles are configured via ``ContentRouterConfig
+#      .tool_profiles``; passing either kwarg now fails loudly instead of
+#      being silently ignored, API-16.)
 _APPLY_ALLOWED_KWARGS: frozenset[str] = frozenset(
     {
         # --- read by apply() directly ---
@@ -492,10 +500,8 @@ _APPLY_ALLOWED_KWARGS: frozenset[str] = frozenset(
         "model",
         "messages",
         "tokenizer",
-        "output_buffer",
-        "tool_profiles",
+        "previous_prefix_hash",
         "request_id",
-        "record_metrics",
     }
 )
 
@@ -869,7 +875,7 @@ class ContentRouter(Transform):
 
     def _ensure_ccr_backed(self, cached_compressed: str, context: str) -> bool:
         """Ensure every ``<<ccr:HASH>>`` pointer in *cached_compressed* resolves
-        in the Python ``compression_store`` (the store ``/v1/retrieve`` reads).
+        in the Python ``compression_store`` (the store the MCP ``furl_retrieve`` tool reads).
 
         Thin delegator to :meth:`CcrMirror.ensure_ccr_backed`. The SmartCrusher
         getter is resolved fresh here on every call and passed in, so

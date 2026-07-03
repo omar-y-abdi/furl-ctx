@@ -6,6 +6,17 @@ formatter.rs``): a consumer holding ONLY the rendered text reconstructs
 every original row exactly. "Lossless" in this engine means *exact
 reconstruction through this decoder*, not verbatim string presence.
 
+ONE documented shape caveat (COR-14): the encoder's nested-uniform
+flatten (``compactor.rs::flatten_uniform_nested``) promotes an object
+column into dotted columns (``{"cfg": {"k": 1}}`` → column ``cfg.k``)
+and records nothing in the grammar, so this decoder returns such rows
+with dotted TOP-LEVEL keys (``{"cfg.k": 1}``). Reconstruction of a
+flattened table is therefore **value-exact under dotted keys** — every
+value is exact; the original nesting shape is not restored. Consumers
+comparing against pre-compression originals must compare un-flattened
+(``verify/independent_recheck._unflatten_dotted`` is the reference
+canonicalization).
+
 Grammar decoded here (one table)::
 
     [N]{col:type[?][=CONST],...}     declaration line

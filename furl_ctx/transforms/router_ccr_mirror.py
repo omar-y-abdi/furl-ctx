@@ -64,7 +64,8 @@ class CcrMirror:
         get_smart_crusher: _GetSmartCrusher,
     ) -> bool:
         """Ensure every ``<<ccr:HASH>>`` pointer in *cached_compressed* resolves
-        in the Python ``compression_store`` (the store ``/v1/retrieve`` reads).
+        in the Python ``compression_store`` (the store the MCP ``furl_retrieve``
+        tool reads).
 
         Returns ``True`` iff, after a best-effort re-mirror, EVERY referenced
         hash is backed by a live store entry. Returns ``False`` if any sentinel
@@ -114,7 +115,7 @@ class CcrMirror:
                 logger.debug("_ensure_ccr_backed: mirror raised (non-fatal): %s", e)
 
         # Verify against the authoritative Python store: a sentinel is "backed"
-        # only if `/v1/retrieve` would resolve it right now.
+        # only if a `furl_retrieve` lookup would resolve it right now.
         try:
             from ..cache.compression_store import get_compression_store
 

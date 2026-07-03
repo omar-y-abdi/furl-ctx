@@ -9,8 +9,16 @@
 # locally" = "passes in CI" for every check that depends on the
 # toolchain.
 #
-# Bump procedure: edit the channel string here, run `rustup update`,
-# run `make ci-precheck`, fix any new lints, commit.
+# CI note (TEST-30): dtolnay/rust-toolchain exports RUSTUP_TOOLCHAIN,
+# which OVERRIDES this file on the runner — so every workflow site must
+# pass `with: toolchain: 1.95.0` (the action-ref stays @stable; the
+# @1.95.0 ref errors on ubuntu-latest, see rust.yml) or this pin
+# silently loses in CI. Pinned sites: ci.yml (x2), rust.yml (x2),
+# publish.yml (x1).
+#
+# Bump procedure: edit the channel string here AND the five
+# `toolchain:` inputs listed above, run `rustup update`, run
+# `make ci-precheck`, fix any new lints, commit.
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

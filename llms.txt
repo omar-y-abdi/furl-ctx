@@ -1,8 +1,8 @@
 # Furl
 
-> Context optimization layer for LLM applications. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, 60–95% fewer tokens. Python library and MCP server. Apache 2.0, local-first.
+> Context compression layer for AI agents. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, 60–95% fewer tokens on redundant workloads. Python library and MCP server. Apache 2.0, local-first.
 
-Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compress`, `furl_retrieve`, `furl_stats` tools). Both use the same compression pipeline: per-content-type compressors (JSON, search results, logs, diffs) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original whenever it wants.
+Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compress`, `furl_retrieve`, `furl_stats` tools). Both use the same compression pipeline: per-content-type compressors (JSON, search results, logs, diffs) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original on demand, within the configured retention window (default TTL 1800 s; entries are also capacity-evicted oldest-first, and an expired/evicted retrieval is a loud miss, never silent).
 
 ## Packages
 
@@ -14,27 +14,19 @@ Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compr
 - MCP server: `pip install "furl-ctx[mcp]"` then run `python -m furl_ctx.ccr.mcp_server`
 - Compress in code: `from furl_ctx import compress`
 
-## Entry points
+## Docs
 
-- **Quickstart**: 5-minute end-to-end (install → compress → call the model).
-- **Installation**: All install paths, extras, env vars.
-- **MCP server**: `furl_compress`, `furl_retrieve`, `furl_stats` for Claude Code / Cursor / any MCP host.
-- **API reference**: Python `compress()` API.
-
-## How it works
-
-- **How compression works**: Three-stage pipeline + automatic content routing.
-- **SmartCrusher**: Statistical JSON / array compression (70–90% on tool outputs).
-- **Code & large files**: large distinct content no compressor can shrink (e.g. source files) takes the reversible CCR offload — an identity preview plus a retrieval marker.
-- **Text & log compression**: Search results, build logs, diffs.
-- **CCR (reversible)**: Compress-Cache-Retrieve — originals stored locally; LLM retrieves on demand (within the configured TTL).
-
-## Operations
-
-- **Configuration**: Env vars, config file, per-call overrides.
-- **Benchmarks**: Token-savings numbers across content types.
-- **Troubleshooting**: Common failure modes and fixes.
-- **Limitations**: What Furl won't do well today.
+- [Get started](README.md#get-started-60-seconds): install → compress → run the MCP server, in 60 seconds.
+- [How it works](README.md#how-it-works-30-seconds): pipeline diagram + per-content-type compressors.
+- [Proof / benchmark table](README.md#proof): measured reductions on committed real captures (50–99% per dataset, redundancy-dependent; lossy rows are CCR-recoverable).
+- [Configuration (environment variables)](README.md#configuration-environment-variables): every live `FURL_*` knob with defaults.
+- [When to use / when to skip](README.md#when-to-use--when-to-skip): fit guidance.
+- [Full benchmark methodology](BENCHMARKS.md): adversarial multi-seed sweep + honest-metrics definitions.
+- [Current baseline numbers](benchmarks/BASELINE.md): the deterministic per-dataset capture at HEAD.
+- [CCR retention contract](CCR-RETENTION.md): exactly how long "reversible" lasts and what evicts.
+- [Rust core developer guide](RUST_DEV.md): building the extension, workspace layout, store internals.
+- [Contributing](CONTRIBUTING.md): PR policy and review gates.
+- [Security policy](SECURITY.md): reporting vulnerabilities.
 
 ## Licensing
 

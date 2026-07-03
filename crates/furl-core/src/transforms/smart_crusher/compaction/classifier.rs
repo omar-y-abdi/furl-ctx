@@ -51,8 +51,8 @@ pub struct ClassifyConfig {
     /// classification. Default: 256 bytes.
     pub opaque_min_bytes: usize,
     /// Base64-alphabet ratio threshold. Strings whose chars are at
-    /// least this fraction in `[A-Za-z0-9+/=_-]` and longer than 64
-    /// bytes are tagged base64. Default: 0.95.
+    /// least this fraction in `[A-Za-z0-9+/=_-]` and at least 64 bytes
+    /// long are tagged base64. Default: 0.95.
     pub base64_alphabet_ratio: f64,
     /// `<` count above which a long string is considered HTML-ish.
     /// Default: 3.

@@ -1,13 +1,13 @@
 """
-Furl - The Context Compression Layer for LLM Applications.
+Furl - The context compression layer for AI agents.
 
-Cut your LLM token usage by 50-90% without losing accuracy.
+60-95% fewer tokens on redundant workloads, reversible via CCR.
 
 Furl provides:
 - Smart compression of tool outputs (keeps errors, anomalies, relevant items)
-- Cache-aligned prefix optimization for better provider cache hits
-- BM25 / embedding relevance scoring for content selection
-- Deterministic, byte-stable transforms with zero accuracy loss
+- Cache-aligned prefix stability warnings for better provider cache hits
+- BM25 relevance scoring for content selection
+- Reversible CCR offload: dropped content stays retrievable by hash
 
 Quick Start:
 
@@ -30,16 +30,22 @@ Configuration:
     config = CompressConfig(...)
     result = compress(messages, config=config)
 
-Error Handling:
+Error Handling — the real contract:
 
-    from furl_ctx import FurlError, ConfigurationError
+    ``compress()`` is FAIL-OPEN for content and pipeline failures: it never
+    raises for them. On failure it returns the ORIGINAL messages unchanged
+    with ``result.error`` set (a string describing the swallowed failure)
+    — check it to tell a failed run from a genuine "nothing to do"
+    (``error is None``). Non-fatal problems land in ``result.warnings``.
+    The only exception raised for bad usage is ``TypeError``, for unknown
+    keyword arguments (e.g. a typo'd config field):
 
-    try:
-        result = compress(messages)
-    except ConfigurationError as e:
-        print(f"Config issue: {e.details}")
-    except FurlError as e:
-        print(f"Furl error: {e}")
+    result = compress(messages)
+    if result.error is not None:
+        log.warning("compression failed open: %s", result.error)
+
+    ``FurlError`` is exported as the reserved base class for future typed
+    errors; no current API raises it.
 """
 
 from __future__ import annotations
@@ -53,16 +59,11 @@ from .compress import CompressConfig, CompressResult, compress
 # `from furl_ctx import compress` is never shadowed by the submodule object.
 
 __all__ = [
-    # Exceptions
+    # Exceptions — the reserved base class only. The eight subclasses this
+    # package used to export were raised NOWHERE (decorative API) and were
+    # removed in the API-1 prune; compress() fails open (``result.error``)
+    # and raises TypeError for unknown kwargs.
     "FurlError",
-    "ConfigurationError",
-    "ProviderError",
-    "StorageError",
-    "CompressionError",
-    "TokenizationError",
-    "CacheError",
-    "ValidationError",
-    "TransformError",
     # Config
     "FurlConfig",
     "SmartCrusherConfig",
@@ -78,9 +79,6 @@ __all__ = [
     "SmartCrusher",
     "CacheAligner",
     "TransformPipeline",
-    # Cache config types
-    "CacheConfig",
-    "CacheStrategy",
     # Relevance scoring - BM25 keyword scorer
     "RelevanceScore",
     "RelevanceScorer",
@@ -111,14 +109,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "__version__": ("furl_ctx._version", "__version__"),
     # Exceptions
     "FurlError": ("furl_ctx.exceptions", "FurlError"),
-    "ConfigurationError": ("furl_ctx.exceptions", "ConfigurationError"),
-    "ProviderError": ("furl_ctx.exceptions", "ProviderError"),
-    "StorageError": ("furl_ctx.exceptions", "StorageError"),
-    "CompressionError": ("furl_ctx.exceptions", "CompressionError"),
-    "TokenizationError": ("furl_ctx.exceptions", "TokenizationError"),
-    "CacheError": ("furl_ctx.exceptions", "CacheError"),
-    "ValidationError": ("furl_ctx.exceptions", "ValidationError"),
-    "TransformError": ("furl_ctx.exceptions", "TransformError"),
     # Config
     "FurlConfig": ("furl_ctx.config", "FurlConfig"),
     # API-14: the LIVE engine config class. The top-level export used to
@@ -139,9 +129,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "SmartCrusher": ("furl_ctx.transforms", "SmartCrusher"),
     "CacheAligner": ("furl_ctx.transforms", "CacheAligner"),
     "TransformPipeline": ("furl_ctx.transforms", "TransformPipeline"),
-    # Cache config types
-    "CacheConfig": ("furl_ctx.cache", "CacheConfig"),
-    "CacheStrategy": ("furl_ctx.cache", "CacheStrategy"),
     # Relevance scoring
     "RelevanceScore": ("furl_ctx.relevance", "RelevanceScore"),
     "RelevanceScorer": ("furl_ctx.relevance", "RelevanceScorer"),

@@ -69,51 +69,72 @@ class TestTiktokenCounter:
         assert counter.count_text("") == 0
 
     def test_count_text_simple(self):
-        """Test counting simple text."""
+        """Simple text counts exactly (o200k_base pin, TEST-11)."""
         counter = TiktokenCounter()
-        count = counter.count_text("Hello, world!")
-        assert count > 0
-        assert count < 10  # Should be a few tokens
+        assert counter.count_text("Hello, world!") == 4
 
     def test_count_text_unicode(self):
-        """Test counting text with unicode."""
+        """Unicode text counts exactly (o200k_base pin, TEST-11)."""
         counter = TiktokenCounter()
-        count = counter.count_text("Hello, 世界!")
-        assert count > 0
+        assert counter.count_text("Hello, 世界!") == 4
 
     def test_count_messages_single(self):
-        """Test counting single message."""
+        """A single message is its text plus the documented overheads.
+
+        TEST-11: pins the composition (text tokens + MESSAGE_OVERHEAD +
+        REPLY_OVERHEAD) instead of `count > 0`, so an overhead regression
+        or a double-count fails loudly.
+        """
         counter = TiktokenCounter()
         messages = [{"role": "user", "content": "Hello!"}]
         count = counter.count_messages(messages)
-        assert count > 0
+        expected_floor = (
+            counter.count_text("Hello!")
+            + BaseTokenizer.MESSAGE_OVERHEAD
+            + BaseTokenizer.REPLY_OVERHEAD
+        )
+        # Role tokens may add a small constant on top of the floor; the
+        # exact total for THIS message under o200k_base is pinned.
+        assert count >= expected_floor
+        assert count == 9
 
     def test_count_messages_with_tool_calls(self):
-        """Test counting messages with tool calls."""
+        """tool_calls contribute tokens (counterfactual pin, TEST-11)."""
         counter = TiktokenCounter()
+        tool_call_msg = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "arguments": '{"query": "Python"}',
+                    },
+                }
+            ],
+        }
         messages = [
             {"role": "user", "content": "Search for Python"},
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "call_123",
-                        "type": "function",
-                        "function": {
-                            "name": "search",
-                            "arguments": '{"query": "Python"}',
-                        },
-                    }
-                ],
-            },
+            tool_call_msg,
             {
                 "role": "tool",
                 "tool_call_id": "call_123",
                 "content": "Results...",
             },
         ]
+        without_tool_calls = [
+            messages[0],
+            {"role": "assistant"},
+            messages[2],
+        ]
+
         count = counter.count_messages(messages)
-        assert count > 0
+        # Counterfactual: dropping the tool_calls block must lower the count —
+        # proves the block's name/arguments/id are actually being counted
+        # (`count > 0` passed even when tool_calls were ignored entirely).
+        assert count > counter.count_messages(without_tool_calls)
+        assert count == 36  # o200k_base pin for THESE messages
 
     def test_anthropic_base64_image_part_uses_fixed_image_cost(self):
         """A base64 image part costs the fixed image estimate, not text tokens.
@@ -189,13 +210,11 @@ class TestEstimatingTokenCounter:
         assert counter.count_text("") == 0
 
     def test_count_text_simple(self):
-        """Test counting simple text."""
+        """Simple text uses the default 4.0 ratio: 13 chars → 3 (TEST-11 pin)."""
         counter = EstimatingTokenCounter()
         text = "Hello, world!"
-        count = counter.count_text(text)
-        assert count > 0
-        # Rough estimate: 13 chars / 4 chars per token ≈ 3-4 tokens
-        assert 2 <= count <= 6
+        # max(1, int(13 / 4.0 + 0.5)) == 3 — the shared estimation formula.
+        assert counter.count_text(text) == 3
 
     def test_count_text_fixed_ratio(self):
         """Test counting with fixed ratio."""
@@ -210,32 +229,49 @@ class TestEstimatingTokenCounter:
         assert counter.count_text("x") >= 1
 
     def test_count_messages(self):
-        """Test counting messages."""
+        """Messages count text + per-message and reply overheads (TEST-11).
+
+        The composition floor (content tokens + 2×MESSAGE_OVERHEAD +
+        REPLY_OVERHEAD) must hold, and the exact total for THESE messages
+        is pinned — `count > 0` accepted any behavior at all.
+        """
         counter = EstimatingTokenCounter()
         messages = [
             {"role": "user", "content": "Hello!"},
             {"role": "assistant", "content": "Hi there!"},
         ]
         count = counter.count_messages(messages)
-        assert count > 0
+        floor = (
+            counter.count_text("Hello!")
+            + counter.count_text("Hi there!")
+            + 2 * BaseTokenizer.MESSAGE_OVERHEAD
+            + BaseTokenizer.REPLY_OVERHEAD
+        )
+        assert count >= floor
+        assert count == 18
 
     def test_json_detection(self):
-        """Test JSON content detection."""
+        """JSON content is detected and counted at the JSON ratio (TEST-11).
+
+        The old assert (`count > 0`) held even if detection never fired;
+        pin the detected ratio class AND the resulting count.
+        """
         counter = EstimatingTokenCounter()
         json_text = '{"name": "test", "value": 123}'
-        # Should use JSON ratio
-        count = counter.count_text(json_text)
-        assert count > 0
+        assert counter._detect_ratio(json_text) == counter.CHARS_PER_TOKEN_JSON
+        # 30 chars at the 3.2 JSON ratio → max(1, int(30/3.2 + 0.5)) == 9.
+        assert counter.count_text(json_text) == 9
 
     def test_code_detection(self):
-        """Test code content detection."""
+        """Code content is detected and counted at the code ratio (TEST-11)."""
         counter = EstimatingTokenCounter()
         code_text = """
 def hello():
     return "Hello, world!"
 """
-        count = counter.count_text(code_text)
-        assert count > 0
+        assert counter._detect_ratio(code_text) == counter.CHARS_PER_TOKEN_CODE
+        # 42 chars at the 3.5 code ratio → max(1, int(42/3.5 + 0.5)) == 12.
+        assert counter.count_text(code_text) == 12
 
     def test_repr(self):
         """Test string representation."""
@@ -292,7 +328,10 @@ class TestEstimatorPrefixSampling:
 
         count = counter.count_text(huge)
 
-        assert count > 0
+        # Sanity floor: the JSON ratio (3.2 chars/token) means the count must
+        # exceed a chars/4 floor — a stub returning a token or two would pass
+        # the old `count > 0`.
+        assert count >= len(huge) // 4
         assert calls["n"] == 0
 
     def test_huge_numeric_json_array_keeps_the_json_ratio_class(self):

@@ -15,7 +15,6 @@ if TYPE_CHECKING:
         detect_content_type,
     )
     from furl_ctx.transforms.content_router import (  # noqa: F401
-        CompressionStrategy,
         ContentRouter,
         ContentRouterConfig,
         RouterCompressionResult,
@@ -32,6 +31,7 @@ if TYPE_CHECKING:
         LogCompressorConfig,
     )
     from furl_ctx.transforms.pipeline import TransformPipeline  # noqa: F401
+    from furl_ctx.transforms.router_policy import CompressionStrategy  # noqa: F401
     from furl_ctx.transforms.search_compressor import (  # noqa: F401
         SearchCompressionResult,
         SearchCompressor,
@@ -117,7 +117,11 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "furl_ctx.transforms.content_router",
         "RouterCompressionResult",
     ),
-    "CompressionStrategy": ("furl_ctx.transforms.content_router", "CompressionStrategy"),
+    # API-12: bind the enum to its 115-line OWNER (router_policy), not the
+    # content_router facade — touching CompressionStrategy must not import
+    # the whole router + Rust chain. content_router re-exports the same
+    # object, so both import paths resolve to one canonical enum.
+    "CompressionStrategy": ("furl_ctx.transforms.router_policy", "CompressionStrategy"),
     # Other transforms
     "CacheAligner": ("furl_ctx.transforms.cache_aligner", "CacheAligner"),
     "CrossMessageDeduper": (

@@ -1,6 +1,8 @@
 //! BM25 relevance scorer with a single-/multi-term match boost.
 //!
-//! Direct port of the BM25-fallback path of `furl_ctx/relevance/hybrid.py`.
+//! Direct port of the BM25-fallback path of the RETIRED Python hybrid
+//! scorer (`furl_ctx/relevance/hybrid.py`, deleted with the Python-twin
+//! excise — `furl_ctx/relevance/` now ships only `base.py` + `bm25.py`).
 //! The optional ONNX embedding-fusion path was feature-gated (`embeddings`),
 //! never shipped in the default wheel, and never CI-tested; it has been
 //! removed. `HybridScorer` now always scores BM25-only with the boost below.
@@ -14,8 +16,8 @@
 //! - Items with any matched term get `score >= 0.3`.
 //! - Items with two or more matched terms get `+0.2`, capped at 1.0.
 //!
-//! Pinned to Python's `score`/`score_batch` boost rules
-//! (`hybrid.py:171-181` and `225-238`).
+//! Pinned to the retired Python twin's `score`/`score_batch` boost rules
+//! (recorded here as this module's own contract; the Python file is gone).
 
 use super::base::{RelevanceScore, RelevanceScorer};
 use super::bm25::BM25Scorer;
@@ -29,8 +31,8 @@ pub struct HybridScorer {
 }
 
 impl HybridScorer {
-    /// BM25 match boost. Mirrors Python `score`/`score_batch` boost rules
-    /// (`hybrid.py:171-181` and `225-238`).
+    /// BM25 match boost. Mirrors the retired Python twin's
+    /// `score`/`score_batch` boost rules (see the module docstring).
     fn boost_bm25_only(&self, bm25_result: &RelevanceScore) -> RelevanceScore {
         let mut boosted = bm25_result.score;
         if !bm25_result.matched_terms.is_empty() {

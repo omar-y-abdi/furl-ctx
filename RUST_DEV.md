@@ -8,7 +8,7 @@ are not versioned in this repo.
 
 ```
 Cargo.toml                       # workspace root
-rust-toolchain.toml              # pins stable rustc with rustfmt+clippy
+rust-toolchain.toml              # pins rustc 1.95.0 with rustfmt+clippy
 crates/
   furl-core/                 # library: shared types + transform trait surface
   furl-py/                   # PyO3 cdylib exposing `furl_ctx._core`
@@ -28,8 +28,8 @@ exposes the same targets:
 | --- | --- |
 | `make test` | `cargo test --workspace` |
 | `make bench` | `cargo bench --workspace` |
-| `make build-wheel` | `maturin build --release -m crates/furl-py/Cargo.toml` |
-| `make verify-rust-core` | maturin-develop + import-verify `furl_ctx._core` in one shot |
+| `make build-wheel` | `maturin build --release` from the ROOT `pyproject.toml` (the single wheel that ships Python source + `_core.so`) |
+| `make verify-rust-core` | build + install + import-verify `furl_ctx._core` in one shot |
 | `make fmt` | `cargo fmt --all` |
 | `make fmt-check` | `cargo fmt --check` |
 
@@ -41,34 +41,37 @@ not try to link against `libpython` on systems that don't have it.
 
 ### First-time setup (clean venv recommended)
 
+Single-wheel architecture: the ROOT `pyproject.toml` is the maturin
+manifest (`[tool.maturin] manifest-path = "crates/furl-py/Cargo.toml"`).
+One editable install builds the Rust extension AND installs the Python
+package together — do NOT run maturin inside `crates/furl-py/` (that
+builds a `furl-py 0.1.0` package exposing a top-level `_core` that
+nothing imports; the old dual-package layout died in the single-wheel
+migration).
+
 ```bash
-python3.11 -m venv /tmp/hr-rust-venv
-source /tmp/hr-rust-venv/bin/activate
-pip install maturin
-cd crates/furl-py
-maturin develop           # editable dev build, installs furl_ctx._core
-cd /tmp                   # IMPORTANT: step out of the repo root first
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .          # drives maturin via [build-system]; builds _core.so
 python -c "from furl_ctx._core import hello; print(hello())"
 # => furl-core
 ```
 
-> Why `cd /tmp`? The repo root also contains the Python `furl_ctx/` package.
-> Running the smoke import from the repo root makes Python resolve `furl_ctx`
-> to `./furl_ctx/__init__.py` (the full SDK, which pulls in heavy deps) instead
-> of the lightweight namespace package installed by maturin. Tests should
-> either run outside the repo root, or ensure `furl_ctx` is installed into
-> the same venv (then the maturin-installed `_core.so` lands alongside it and
-> both imports resolve).
+Rebuilds after Rust changes: `bash scripts/build_rust_extension.sh`
+(idempotent; also runs the import smoke check) or `make verify-rust-core`.
 
 ### Release wheels
 
 ```bash
-make build-wheel
+make build-wheel          # maturin build --release from the root manifest
 # wheels land under target/wheels/
 ```
 
-CI (`.github/workflows/rust.yml`) builds linux-x86_64, macos-arm64, and
-macos-x86_64 wheels via `PyO3/maturin-action` and uploads them as artifacts.
+CI (`.github/workflows/rust.yml`) builds exactly two wheel targets —
+linux-x86_64 and macos-arm64 (Apple Silicon) — via `PyO3/maturin-action`
+and uploads them as artifacts. macOS x86_64 (Intel) is deliberately NOT
+in the matrix (see the comment in rust.yml); Intel-macOS users build
+from the sdist.
 
 ## Known regressions in retired-Python components
 
@@ -143,28 +146,32 @@ survives in the current tree; offloading is inlined in
 
 When any item above changes, update both this section and the test file. The shim's docstring also references this section — keep them aligned.
 
-## Phase 0 Blockers
+## Toolchain pinning
 
-These are known limitations for Phase 0. They are tracked here so Phase 1
-doesn't rediscover them.
-
-- **`rust-toolchain.toml`** pins `channel = "stable"` rather than a specific
-  version so CI picks up the same toolchain the local box uses. Tighten to a
-  pinned version (e.g. `1.78`) once the port stabilizes.
+- **`rust-toolchain.toml`** pins `channel = "1.95.0"` (a specific stable
+  version, NOT the moving `stable` channel) so CI and local dev run the
+  EXACT same compiler — a clippy lint added in a newer stable used to
+  break CI without firing locally. Bump procedure: edit the channel
+  string, `rustup update`, `make ci-precheck`, fix any new lints, commit.
 
 ## CCR storage — process-local, request-window-scoped
 
-The CCR store (`crates/furl-core/src/ccr/backends/`) ships a single
+The Rust CCR store (`crates/furl-core/src/ccr/backends/`) ships a single
 backend: `InMemoryCcrStore`, a process-local sharded `DashMap` constructed once
-at startup and shared across worker threads behind an `Arc`. Entries are bounded
-(capacity-LRU + TTL, defaults 1000 entries / 300 s) and lost on restart, so
-byte-exact CCR recovery is guaranteed only **within the process / request
-window** — long enough for the `<<ccr:HASH>>` markers a single compression emits
-to round-trip on the model's retrieval call.
+at startup and shared across worker threads behind an `Arc`. Entries are
+bounded — **generation-counter FIFO** eviction (oldest-created-first; NOT LRU —
+see the eviction-scheme writeup in `in_memory.rs`) + TTL, defaults 1000
+entries / 1800 s — and lost on restart, so Rust-side byte-exact CCR recovery is
+guaranteed only **within the process window** — long enough for the
+`<<ccr:HASH>>` markers a single compression emits to round-trip on the model's
+retrieval call.
 
-No persistent or cross-process backend ships. Spilling evicted entries to a
-durable store (keyed by session for cleanup) is a deliberately-deferred epic —
-see `CCR-RETENTION.md` for the design and trade-offs. On the Python side,
-`CompressionStore` exposes a `furl_ctx.ccr_backend` setuptools entry point so a
-durable adapter can be registered out-of-tree (`FURL_CCR_BACKEND=<name>`),
-but none ships by default and the in-memory backend is the only one wired.
+On the Python side a durable backend DOES ship (Engine P1-7):
+`SqliteBackend` (`furl_ctx/cache/backends/sqlite.py`) is the MCP server's
+default store backend (`FURL_CCR_BACKEND=memory` opts out; the plain-library
+default stays in-memory). Durability ≠ retention: it survives restarts and
+serves cross-process lookups, but the eviction window is unchanged. True
+retention of *evicted* entries remains the deliberately-deferred epic — see
+`CCR-RETENTION.md`. Third-party adapters register via the
+`furl_ctx.ccr_backend` setuptools entry point (`FURL_CCR_BACKEND=<name>`,
+kwargs via `FURL_CCR_BACKEND_OPTS` JSON).

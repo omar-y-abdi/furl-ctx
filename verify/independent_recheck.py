@@ -1,13 +1,18 @@
-"""INDEPENDENT recheck — does NOT trust the harness's _present_in_text scalar
-fallback. Reconstructs the original item multiset using ONLY:
+"""INDEPENDENT recheck — a second, harness-free reconstruction path.
+
+Historical note (TEST-15): this was written to distrust the harness's
+`_present_in_text` scalar fallback, which has since been REMOVED from
+verify/measure.py — both paths are now equally strict; this recheck remains
+as an independent implementation of the same round-trip. It reconstructs
+the original item multiset using ONLY:
 
   (a) rows visible verbatim in a JSON-array rendering of the compressed output,
   (b) rows decoded by the documented decoder decode_csv_schema_rows, and
   (c) rows retrieved from the CCR store via the <<ccr:HASH>> sentinel.
 
 Then sha256-compares the reconstructed multiset to the original multiset. This
-is the STRICT round-trip the mandate demands. If a case is byte_exact under the
-harness but NOT here, the harness's substring fallback is inflating recovery.
+is the STRICT round-trip the mandate demands. A byte_exact disagreement with
+the harness now indicates a bug in one of the two implementations.
 
 Usage: python -m verify.independent_recheck '<json-spec>'
 """
@@ -32,6 +37,67 @@ CCR_SENTINEL_KEY = "_ccr_dropped"
 
 def _canonical(item) -> str:
     return json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+
+def _insert_nested(node: dict, segments: list[str], leaf) -> bool:
+    """Insert *leaf* at the dotted path IFF nothing existing is clobbered.
+
+    Returns False (and changes nothing observable) when a path component is
+    occupied by a non-dict or the leaf slot is already taken — the caller
+    then keeps the literal dotted key.
+    """
+    head = segments[0]
+    if len(segments) == 1:
+        if head in node:
+            return False
+        node[head] = leaf
+        return True
+    if head not in node:
+        child: dict = {}
+        if not _insert_nested(child, segments[1:], leaf):
+            return False
+        node[head] = child
+        return True
+    existing = node[head]
+    if not isinstance(existing, dict):
+        return False
+    return _insert_nested(existing, segments[1:], leaf)
+
+
+def _unflatten_dotted(value):
+    """Fold dotted keys back into nested objects, recursively — the COR-14
+    value-exact-under-dotted-keys canonicalization.
+
+    The CSV-schema encoder promotes uniformly-nested objects into dotted
+    columns (``compactor.rs::flatten_uniform_nested``) and the wire grammar
+    records nothing, so the documented decoder returns dotted TOP-LEVEL keys
+    (``{"cfg.k": 1}`` for an original ``{"cfg": {"k": 1}}``). Comparing BOTH
+    sides under this canonicalization keeps the recheck exact on every value
+    while insensitive to that documented shape change.
+
+    Total and pure: non-dict values pass through (lists recurse); a dotted
+    key that cannot nest without clobbering existing data stays literal;
+    degenerate keys (empty segments) stay literal; the input is never
+    mutated. Dotted keys are processed in sorted order so the result is
+    deterministic regardless of input key order.
+    """
+    if isinstance(value, list):
+        return [_unflatten_dotted(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out: dict = {}
+    dotted: list[tuple[str, list[str], object]] = []
+    for key, val in value.items():
+        folded = _unflatten_dotted(val)
+        segments = key.split(".")
+        if len(segments) == 1 or any(s == "" for s in segments):
+            out[key] = folded
+        else:
+            dotted.append((key, segments, folded))
+    for key, segments, folded in sorted(dotted, key=lambda t: t[0]):
+        if not _insert_nested(out, segments, folded):
+            out[key] = folded
+    return out
 
 
 def _sha(text: str) -> str:
@@ -103,7 +169,7 @@ def _visible_sigs(output_text: str):
     for row in parsed:
         if isinstance(row, dict) and CCR_SENTINEL_KEY in row and len(row) == 1:
             continue
-        sigs.add(_canonical(row))
+        sigs.add(_canonical(_unflatten_dotted(row)))
     return sigs
 
 
@@ -118,7 +184,10 @@ def _decoded_sigs(output_text: str):
     rows = decode_csv_schema_rows(text)
     if rows is None:
         return set()
-    return {_canonical(r) for r in rows}
+    # COR-14: decoded rows carry dotted keys where the encoder flattened
+    # uniform nesting; the originals in recheck() are canonicalized the
+    # same way, so the comparison is value-exact under dotted keys.
+    return {_canonical(_unflatten_dotted(r)) for r in rows}
 
 
 def _ccr_sigs(recovered):
@@ -130,7 +199,7 @@ def _ccr_sigs(recovered):
             continue
         rows = parsed if isinstance(parsed, list) else [parsed]
         for row in rows:
-            sigs.add(_canonical(row))
+            sigs.add(_canonical(_unflatten_dotted(row)))
     return sigs
 
 
@@ -180,7 +249,9 @@ def recheck(spec: dict) -> dict:
             "ccr_resolved": len(recovered),
         }
 
-    orig = [_canonical(it) for it in case.items]
+    # Same un-flattening canonicalization as the reconstructed side (COR-14):
+    # the round-trip comparison is value-exact under dotted keys on BOTH sides.
+    orig = [_canonical(_unflatten_dotted(it)) for it in case.items]
     recon, missing = [], []
     for sig in orig:
         if sig in reconstructable:

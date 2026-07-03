@@ -110,21 +110,6 @@ def _compress_to_text(items: list) -> str:
     return rendered
 
 
-def _compress_to_csv_text(items: list) -> str:
-    """Like ``_compress_to_text`` but asserts the result is a CSV-schema string.
-
-    Use for tests that require the lossless CSV path (non-trivial arrays).
-    """
-    text = _compress_to_text(items)
-    rows = decode_csv_schema_rows(text)
-    assert rows is not None, (
-        f"Expected lossless CSV-schema output for {len(items)} rows, "
-        f"but decode_csv_schema_rows returned None.  "
-        f"Try passing more rows to exceed the compressor's min-token threshold."
-    )
-    return text
-
-
 def _has_ccr_sentinel(text: str) -> bool:
     """True if *text* contains any CCR drop sentinel."""
     return bool(_DROP_RE.search(text)) or bool(_OPAQUE_RE.search(text))

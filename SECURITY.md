@@ -2,10 +2,13 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
-| 0.1.x   | :x:                |
+| Version           | Supported          |
+| ----------------- | ------------------ |
+| latest 0.x release | :white_check_mark: |
+| older releases    | :x:                |
+
+Only the latest published 0.x release receives security fixes — upgrade to
+the newest version before reporting.
 
 ## Reporting a Vulnerability
 
@@ -15,7 +18,9 @@ We take security vulnerabilities seriously. If you discover a security issue, pl
 
 **Please DO NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email us at: **security@furl_ctx.dev**
+Instead, report privately via **GitHub Security Advisories**: open
+[github.com/omar-y-abdi/furl/security/advisories](https://github.com/omar-y-abdi/furl/security/advisories)
+and click **"Report a vulnerability"**.
 
 Include the following information:
 - Type of vulnerability (e.g., injection, data exposure, authentication bypass)
@@ -38,7 +43,6 @@ When using Furl:
 
 1. **API Keys**: Never commit API keys. Use environment variables.
 2. **Log Files**: Be aware that request logs may contain sensitive information
-3. **Budget Limits**: Set budget limits to prevent unexpected costs
 
 ### Scope
 

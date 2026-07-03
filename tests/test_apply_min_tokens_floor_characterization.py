@@ -79,3 +79,20 @@ def test_control_both_paths_compress_above_250(tok) -> None:
     )
     assert raw.messages[0]["content"] != payload
     assert req.messages[0]["content"] != payload
+
+
+def test_raw_apply_sub_50_stays_untouched(tok) -> None:
+    """TEST-12: the raw-path floor's ACTIVATE side was pinned (154 > 50
+    compresses) but the deactivate side never was — a floor that silently
+    dropped to 0 (compress everything, however tiny) stayed green. A
+    sub-50-token array through raw ``apply()`` must pass through verbatim."""
+    payload = _array(2)
+    tokens = tok.count_text(payload)
+    assert tokens < 50, f"fixture must sit under the raw floor, got {tokens}"
+
+    out = _router().apply([{"role": "tool", "content": payload}], tok)
+
+    assert out.messages[0]["content"] == payload, (
+        f"a {tokens}-token array is below the raw-caller floor of 50 and must "
+        "not be compressed"
+    )

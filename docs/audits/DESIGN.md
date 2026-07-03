@@ -1,3 +1,13 @@
+> **HISTORICAL — Phase-2 design document (written 2026-06, archived to docs/audits/ 2026-07-03). SUPERSEDED.**
+> This describes the engine as it was audited BEFORE the Phase-2/3 work landed and
+> must not be read as current behavior. Known-stale core claims: the silent-loss
+> path described below is CLOSED (store write + recovery pointer are UNCONDITIONAL
+> on every drop — `enable_ccr_marker` gates neither; see `CODEBASE-MAP.md`
+> §CONTRACT-ENFORCEMENT); the default routing policy is `min-tokens`, not
+> lossless-first; all `file:line` anchors predate two refactor eras (the
+> crusher.rs split into walk/route/persist among them). Kept for audit-trail
+> value only.
+
 # DESIGN — Furl Engine Improvements (Phase 2)
 
 Grounded in the engine map (`headroom-engine-map` workflow, 5-facet read + synthesis).

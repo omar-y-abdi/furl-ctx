@@ -472,7 +472,6 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
-    { name = "httpx" },
     { name = "mcp" },
 ]
 code = [
@@ -490,14 +489,12 @@ dev = [
     { name = "ruff" },
 ]
 mcp = [
-    { name = "httpx" },
     { name = "mcp" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "furl-ctx", extras = ["mcp"], marker = "extra == 'all'" },
-    { name = "httpx", marker = "extra == 'mcp'", specifier = ">=0.24.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.1" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.24.0" },

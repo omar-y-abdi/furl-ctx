@@ -731,19 +731,42 @@ mod tests {
         assert_eq!(t, "Name");
     }
 
+    /// Independent days-in-month table (proleptic Gregorian) — the oracle
+    /// the loop below checks the Hinnant round-trip against. Kept separate
+    /// from the production code on purpose: sharing its leap logic would
+    /// make the test tautological.
+    fn days_in_month(y: i64, m: u32) -> u32 {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if leap => 29,
+            2 => 28,
+            _ => unreachable!("month out of range"),
+        }
+    }
+
     #[test]
     fn civil_math_round_trips_every_day_of_leap_and_normal_years() {
+        // TEST-17: the old loop asserted NOTHING per iteration (valid days
+        // `continue`d, invalid days fell through comment-only) — only the 4
+        // spot anchors could fail. Now every (y, m, d) is checked against an
+        // independent calendar oracle: valid dates MUST round-trip, invalid
+        // ones MUST NOT (parse_iso_strict uses exactly that non-round-trip
+        // as its validity check, so both directions are load-bearing).
+        // Years cover leap (2000, 2024), non-leap (1999, 2023) and the
+        // century non-leap 2100.
         for y in [1999i64, 2000, 2023, 2024, 2100] {
             for m in 1..=12u32 {
                 for d in 1..=31u32 {
                     let days = days_from_civil(y, m, d);
-                    let (ry, rm, rd) = civil_from_days(days);
-                    if (ry, rm, rd) == (y, m, d) {
-                        continue; // valid day round-trips
-                    }
-                    // Invalid civil dates (e.g. Apr 31) won't round-trip;
-                    // parse_iso_strict uses exactly this as its validity
-                    // check, so nothing more to assert here.
+                    let round_tripped = civil_from_days(days) == (y, m, d);
+                    let valid = d <= days_in_month(y, m);
+                    assert_eq!(
+                        round_tripped, valid,
+                        "{y:04}-{m:02}-{d:02}: round_trip={round_tripped} but \
+                         calendar-valid={valid}"
+                    );
                 }
             }
         }

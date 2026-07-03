@@ -34,7 +34,16 @@ import pytest
 from furl_ctx.cache.compression_store import get_compression_store
 from furl_ctx.ccr import marker_grammar
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
-from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
+
+# Shared load-bearing fixtures (TEST-19): the tuned lossy fixture, its
+# drop canary, and the recovery-comparison helpers live in one canonical
+# place instead of being duplicated per file (they were previously copied
+# verbatim into test_result_cache_ccr_divergence.py and cross-imported by
+# test_lossless_column_encodings.py).
+from tests._fixtures import assert_fixture_drops
+from tests._fixtures import canonical_repr as _repr
+from tests._fixtures import decode_csv_schema_into as _decode_csv_schema
+from tests._fixtures import log_shaped_rows as _log_shaped_rows
 
 # Recovery-floor parsers. These deliberately use a LOOSER lower bound
 # (``{6,}``) than the strict consumer set ``marker_grammar.HASH_WIDTHS``
@@ -82,27 +91,13 @@ def test_recovery_floor_is_looser_than_strict_consumer_set() -> None:
     assert "{6,}" in _OPAQUE_RE.pattern
 
 
-def _repr(x: object) -> str:
-    return json.dumps(x, sort_keys=True, ensure_ascii=False)
+def test_log_shaped_fixture_still_drops() -> None:
+    """TEST-19 canary: the shared tuned fixture still routes lossy.
 
-
-def _decode_csv_schema(text: str, recovered: set[str]) -> None:
-    """Decode a lossless CSV-schema body (``[N]{cols}\\n<rows>``) back to
-    JSON objects via the documented reference decoder
-    (``furl_ctx.transforms.csv_schema_decoder``). Those rows are exactly
-    reconstructible from the output — lossless — so they count as
-    recovered-from-output-alone.
-
-    The decoder understands every column encoding the CSV-schema
-    formatter emits (constant fold, ditto marks, and the reversible
-    column encodings); "recoverable" here means decode-and-compare
-    equality, not verbatim string presence.
+    Every recovery test below that consumes ``log_shaped_rows`` is vacuous
+    if the fixture drifts onto the lossless path; this fails loudly first.
     """
-    rows = decode_csv_schema_rows(text)
-    if rows is None:
-        return
-    for row in rows:
-        recovered.add(_repr(row))
+    assert_fixture_drops()
 
 
 def _collect(node: object, scalars: set[str], hashes: set[str]) -> None:
@@ -290,80 +285,6 @@ def test_opaque_blob_recovers_from_output_marker(
     )
 
 
-_SUBJECT_PREFIXES = ["feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci"]
-_SUBJECT_AREAS = [
-    "crusher",
-    "proxy",
-    "ccr",
-    "router",
-    "bench",
-    "tokenizer",
-    "store",
-    "pipeline",
-    "compaction",
-    "relevance",
-]
-_SUBJECT_VERBS = [
-    "add",
-    "remove",
-    "rework",
-    "guard",
-    "pin",
-    "extend",
-    "isolate",
-    "deflake",
-    "speed up",
-    "harden",
-]
-_SUBJECT_THINGS = [
-    "the lossy budget",
-    "novelty fill",
-    "sentinel emission",
-    "marker parsing",
-    "store mirroring",
-    "field-role gates",
-    "ditto marks",
-    "schema folding",
-    "query anchors",
-    "drop accounting",
-    "TTL handling",
-    "thread-local state",
-    "import guards",
-    "error surfaces",
-    "byte parity",
-]
-
-
-def _log_shaped_rows(n: int = 90) -> list[dict]:
-    # High-entropy distinct rows (git-log shaped): hex identity columns,
-    # low-cardinality author, genuinely varied unique subjects (uniformly
-    # templated subjects trip the engine's `skip:unique_entities_no_signal`
-    # crushability gate and never reach the lossy path). Forces the LOSSY
-    # path, then the survivor-compaction rendering: a JSON string whose
-    # final line is the `{"_ccr_dropped": ...}` sentinel.
-    #
-    # The dates carry MICROSECOND precision deliberately: strict-shape
-    # second-precision ISO columns now delta-encode losslessly, which
-    # pushed the previous fixture over the 0.30 lossless gate and off the
-    # lossy path this test exists to pin. Fractional seconds are entirely
-    # realistic for logs and are (honestly) refused by the strict
-    # encoder, keeping this fixture lossy. The assertions are unchanged.
-    return [
-        {
-            "commit": f"{i * 2654435761 + 12345:040x}",
-            "author": f"Author {i % 7}",
-            "date": (
-                f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"
-                f"T{i % 24:02d}:{(i * 13) % 60:02d}:00.{(i * 104729) % 1000000:06d}+02:00"
-            ),
-            "subject": (
-                f"{_SUBJECT_PREFIXES[i % 8]}({_SUBJECT_AREAS[i % 10]}): "
-                f"{_SUBJECT_VERBS[i % 10]} {_SUBJECT_THINGS[i % 15]} #{i + 100}"
-            ),
-        }
-        for i in range(n)
-    ]
-
 
 @pytest.mark.parametrize("ccr_enabled, ccr_inject_marker", _MARKER_OFF_MATRIX)
 def test_lossy_survivor_table_recovers_100pct(ccr_enabled: bool, ccr_inject_marker: bool) -> None:
@@ -484,3 +405,56 @@ def test_opaque_blob_default_config_recovers() -> None:
     crusher = router._get_smart_crusher()
     recovered = {crusher.ccr_get(h) for h in hashes if crusher.ccr_get(h) is not None}
     assert blobs <= recovered
+
+
+# --------------------------------------------------------------------------- #
+# TEST-12 — the 256-byte opaque floor, pinned at the boundary from Python.
+# Rust pins classifier internals at 255/256/257 (`opaque_min_bytes`); the
+# Python fixtures above only used 600-byte-source blobs, so an off-by-one in
+# the `len <= opaque_min_bytes` gate was invisible from this side of the FFI.
+# --------------------------------------------------------------------------- #
+
+_OPAQUE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+
+def _alphabet_blob(i: int, size: int) -> str:
+    blob = (_OPAQUE_ALPHABET[i % 32 :] + _OPAQUE_ALPHABET * 8)[:size]
+    assert len(blob) == size
+    return blob
+
+
+@pytest.mark.parametrize(
+    ("cell_bytes", "expect_opaque"),
+    [
+        (255, False),  # below the floor: never opaque
+        (256, False),  # AT the floor: still not opaque — the gate is `len <= 256`
+        (257, True),  # above: every cell substituted with <<ccr:HASH,base64,SIZE>>
+    ],
+    ids=["below", "at", "above"],
+)
+def test_opaque_floor_boundary_triple(cell_bytes: int, expect_opaque: bool) -> None:
+    items = [{"id": i, "tag": "x", "data": _alphabet_blob(i, cell_bytes)} for i in range(50)]
+    result = ContentRouter(ContentRouterConfig()).compress(json.dumps(items))
+
+    opaque_markers = _OPAQUE_RE.findall(result.compressed)
+    if not expect_opaque:
+        assert not opaque_markers, (
+            f"{cell_bytes}B cells must NOT be opaque-substituted "
+            f"(floor is inclusive-skip at 256), got {len(opaque_markers)} markers"
+        )
+        return
+
+    assert len(opaque_markers) == len(items), (
+        f"every {cell_bytes}B cell must be opaque-substituted, "
+        f"got {len(opaque_markers)} of {len(items)}"
+    )
+    # Recovery invariant: every surfaced opaque hash resolves byte-exactly to
+    # one of the ORIGINAL cell payloads — not merely "some entry exists".
+    py_store = get_compression_store()
+    original_blobs = {item["data"] for item in items}
+    for hash_key in opaque_markers:
+        payload = _py_payload(py_store, hash_key)
+        assert payload is not None, f"opaque hash {hash_key} unbacked in the Python store"
+        assert payload in original_blobs, (
+            f"opaque hash {hash_key} resolves to bytes that are not any original cell"
+        )

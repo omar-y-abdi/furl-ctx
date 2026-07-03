@@ -9,7 +9,6 @@ These tests verify that:
 """
 
 import json
-import time
 
 import pytest
 
@@ -23,6 +22,25 @@ from furl_ctx.transforms.smart_crusher import (
     SmartCrusherConfig,
     smart_crush_tool_output,
 )
+
+
+class _FakeClock:
+    """Injectable clock for TTL tests (TEST-20).
+
+    Replaces the two real ``time.sleep(1.1)`` waits (~22% of the whole
+    suite's wall-time) with an instantaneous ``advance``. The store reads
+    it through the ``now_fn`` constructor seam, so expiry semantics are
+    exercised for real — only the waiting is fake.
+    """
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self._t = start
+
+    def now(self) -> float:
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        self._t += seconds
 
 
 class TestCompressionStore:
@@ -69,8 +87,9 @@ class TestCompressionStore:
         assert entry is None
 
     def test_ttl_expiration(self):
-        """Entries expire after TTL."""
-        store = CompressionStore(default_ttl=1)  # 1 second TTL
+        """Entries expire after TTL (fake clock — no real sleep)."""
+        clock = _FakeClock()
+        store = CompressionStore(default_ttl=1, now_fn=clock.now)  # 1 second TTL
 
         hash_key = store.store(
             original="[1,2,3]",
@@ -81,8 +100,8 @@ class TestCompressionStore:
         # Should exist immediately
         assert store.exists(hash_key)
 
-        # Wait for expiration
-        time.sleep(1.1)
+        # Advance past expiration
+        clock.advance(1.1)
 
         # Should be expired
         assert not store.exists(hash_key)
@@ -91,7 +110,8 @@ class TestCompressionStore:
 
     def test_eviction_at_capacity(self):
         """Oldest entries evicted when at capacity."""
-        store = CompressionStore(max_entries=3)
+        clock = _FakeClock()
+        store = CompressionStore(max_entries=3, now_fn=clock.now)
 
         hashes = []
         for i in range(5):
@@ -100,7 +120,7 @@ class TestCompressionStore:
                 compressed=f"compressed_{i}",
             )
             hashes.append(h)
-            time.sleep(0.01)  # Ensure different timestamps
+            clock.advance(0.01)  # Ensure different timestamps
 
         # Only last 3 should exist
         assert not store.exists(hashes[0])
@@ -338,15 +358,16 @@ class TestCCREdgeCases:
         reset_compression_store()
 
     def test_search_expired_entry(self):
-        """Search on expired entry returns empty."""
-        store = CompressionStore(default_ttl=1)
+        """Search on expired entry returns empty (fake clock — no real sleep)."""
+        clock = _FakeClock()
+        store = CompressionStore(default_ttl=1, now_fn=clock.now)
 
         hash_key = store.store(
             original=json.dumps([{"id": 1}]),
             compressed="[]",
         )
 
-        time.sleep(1.1)
+        clock.advance(1.1)
 
         results = store.search(hash_key, "query")
         assert results == []
@@ -376,7 +397,12 @@ class TestCCREdgeCases:
         assert results == []
 
     def test_empty_query_search(self):
-        """Search with empty query returns empty or all."""
+        """Empty query matches nothing — returns [] (TEST-11 contract pin).
+
+        An empty BM25 query scores every item 0.0, below the 0.3
+        ``score_threshold``, so nothing clears the filter. The old assert
+        (``isinstance(results, list)``) accepted ANY behavior.
+        """
         store = CompressionStore()
 
         items = [{"id": i} for i in range(10)]
@@ -385,10 +411,7 @@ class TestCCREdgeCases:
             compressed="[]",
         )
 
-        # Empty query should return something (BM25 handles this)
-        results = store.search(hash_key, "")
-        # Behavior depends on BM25 implementation
-        assert isinstance(results, list)
+        assert store.search(hash_key, "") == []
 
     def test_ccr_disabled_no_caching(self):
         """When CCR is disabled AND no row is dropped, no caching occurs.

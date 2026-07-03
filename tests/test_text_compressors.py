@@ -422,14 +422,20 @@ class TestSmartCrusherTextIntegration:
 
         result = crusher.apply(messages, tokenizer)
 
-        # Check JSON compression happened (character-level, not necessarily item count)
+        # TEST-11: the old asserts (`len <= original + 100`, `len(parsed) > 0`)
+        # passed on a byte-identical no-op. Compression must ACTUALLY happen:
+        # strictly fewer bytes AND strictly fewer visible rows.
         tool_content = result.messages[1]["content"]
-        # SmartCrusher compresses JSON (may reduce chars via field pruning, etc.)
-        # or adds a digest marker - either way it processes the JSON
-        assert len(tool_content) <= len(json_content) + 100  # Allow for digest marker
+        assert len(tool_content) < len(json_content), "output must actually shrink"
 
-        # Extract JSON part (may have headroom digest marker appended)
+        # Extract JSON part (may have a digest marker appended)
         base_content = re.split(r"\n<headroom:", tool_content)[0]
         parsed = json.loads(base_content)
         assert isinstance(parsed, list)
-        assert len(parsed) > 0  # JSON is still valid and contains items
+        assert 0 < len(parsed) < len(items), (
+            f"lossy crush must drop rows: kept {len(parsed)} of {len(items)}"
+        )
+        # The drop is CCR-recoverable, not silent: the sentinel rides along.
+        assert any(
+            isinstance(row, dict) and "_ccr_dropped" in row for row in parsed
+        ), "dropped rows must leave a _ccr_dropped recovery sentinel"

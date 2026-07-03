@@ -1,19 +1,20 @@
-"""Custom exceptions for Furl.
+"""Exception surface for Furl — one reserved base class.
 
-This module provides explicit exception classes for better error handling
-and debugging. All exceptions inherit from FurlError, making it easy
-to catch all Furl-related errors.
+Furl's real error contract does not use typed exceptions today:
 
-Example:
-    from furl_ctx import FurlClient, FurlError, ConfigurationError
+* ``compress()`` is FAIL-OPEN — content and pipeline failures never raise.
+  The original messages come back unchanged with ``result.error`` set to a
+  string describing the swallowed failure.
+* Bad usage (an unknown keyword argument) raises plain ``TypeError`` at the
+  public boundary, matching Python's own unexpected-kwarg behavior.
 
-    try:
-        client = FurlClient(...)
-        client.validate_setup()
-    except ConfigurationError as e:
-        print(f"Configuration problem: {e}")
-    except FurlError as e:
-        print(f"Furl error: {e}")
+``FurlError`` is kept as the RESERVED base for future typed errors so
+embedders can write ``except FurlError`` today and stay forward-compatible;
+no current API raises it. The eight subclasses this module used to define
+(``ConfigurationError``, ``ProviderError``, ``StorageError``,
+``CompressionError``, ``TokenizationError``, ``CacheError``,
+``ValidationError``, ``TransformError``) were raised nowhere in the package
+and were removed in the API-1 prune.
 """
 
 from __future__ import annotations
@@ -24,14 +25,10 @@ from typing import Any
 class FurlError(Exception):
     """Base exception for all Furl errors.
 
-    All Furl exceptions inherit from this class, making it easy
-    to catch any Furl-related error:
-
-        try:
-            client.chat.completions.create(...)
-        except FurlError as e:
-            # Handle any Furl error
-            pass
+    Reserved: any typed error a future Furl version raises will inherit
+    from this class, so a broad ``except FurlError`` written today keeps
+    working. No current API raises it — see the module docstring for the
+    fail-open contract.
     """
 
     def __init__(self, message: str, details: dict[str, Any] | None = None):
@@ -44,149 +41,3 @@ class FurlError(Exception):
             detail_str = ", ".join(f"{k}={v}" for k, v in self.details.items())
             return f"{self.message} ({detail_str})"
         return self.message
-
-
-class ConfigurationError(FurlError):
-    """Raised when Furl is misconfigured.
-
-    This includes:
-    - Invalid mode values
-    - Missing required configuration
-    - Incompatible configuration combinations
-
-    Example:
-        ConfigurationError(
-            "Invalid mode 'foo'",
-            details={"valid_modes": ["audit", "optimize"]}
-        )
-    """
-
-    pass
-
-
-class ProviderError(FurlError):
-    """Raised when there's an issue with the LLM provider.
-
-    This includes:
-    - Provider not recognized
-    - Provider-specific configuration issues
-    - Token counter errors
-
-    Example:
-        ProviderError(
-            "Unknown provider",
-            details={"provider": "foo", "known_providers": ["openai", "anthropic"]}
-        )
-    """
-
-    pass
-
-
-class StorageError(FurlError):
-    """Raised when there's an issue with metrics storage.
-
-    This includes:
-    - Database connection failures
-    - Invalid storage URL
-    - Write failures
-
-    Example:
-        StorageError(
-            "Cannot connect to database",
-            details={"url": "sqlite:///foo.db", "error": "Permission denied"}
-        )
-    """
-
-    pass
-
-
-class CompressionError(FurlError):
-    """Raised when compression fails.
-
-    This includes:
-    - Parse errors in tool outputs
-    - Invalid JSON structures
-    - Compression strategy failures
-
-    Example:
-        CompressionError(
-            "Failed to parse tool output",
-            details={"tool_name": "search_api", "content_preview": "..."}
-        )
-    """
-
-    pass
-
-
-class TokenizationError(FurlError):
-    """Raised when token counting fails.
-
-    This includes:
-    - Unknown model for tokenization
-    - Encoding errors
-    - Tiktoken/tokenizer loading failures
-
-    Example:
-        TokenizationError(
-            "Unknown model for tokenization",
-            details={"model": "gpt-99", "fallback_used": True}
-        )
-    """
-
-    pass
-
-
-class CacheError(FurlError):
-    """Raised when caching operations fail.
-
-    This includes:
-    - Cache store errors
-    - Retrieval failures
-    - CCR (Compress-Cache-Retrieve) errors
-
-    Example:
-        CacheError(
-            "Cache entry expired",
-            details={"hash": "abc123", "ttl": 300}
-        )
-    """
-
-    pass
-
-
-class ValidationError(FurlError):
-    """Raised when setup validation fails.
-
-    This is raised by validate_setup() when the configuration
-    or environment is not properly set up.
-
-    Example:
-        ValidationError(
-            "Setup validation failed",
-            details={
-                "provider_ok": True,
-                "storage_ok": False,
-                "storage_error": "Cannot write to database"
-            }
-        )
-    """
-
-    pass
-
-
-class TransformError(FurlError):
-    """Raised when a transform fails to apply.
-
-    This includes:
-    - SmartCrusher failures
-    - ContentRouter errors
-    - Pipeline errors
-
-    Example:
-        TransformError(
-            "Transform failed",
-            details={"transform": "smart_crusher", "reason": "..."}
-        )
-    """
-
-    pass

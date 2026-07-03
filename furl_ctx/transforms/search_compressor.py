@@ -131,11 +131,12 @@ class SearchCompressionResult:
 class SearchCompressor:
     """Compresses grep/ripgrep search results via the Rust port.
 
-    Drop-in replacement for the retired Python class. The main
-    `compress()` method delegates to Rust end-to-end. The internal
-    helpers used by the existing test surface are preserved and route
-    through the same Rust parser so the bug fixes (Windows paths,
-    dashes-in-filename) land everywhere.
+    Drop-in replacement for the retired Python class: `compress()`
+    delegates to Rust end-to-end (the Rust parser owns the bug fixes —
+    Windows paths, dashes-in-filename). The retired class's internal
+    parsing helpers were NOT preserved; the only Python-side additions
+    are the CCR persistence bridge (`_persist_to_python_ccr`) and the
+    passthrough result builder.
     """
 
     def __init__(self, config: SearchCompressorConfig | None = None) -> None:

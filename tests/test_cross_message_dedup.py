@@ -502,3 +502,37 @@ def test_lone_surrogate_near_duplicate_never_crashes() -> None:
     result = _apply(messages)  # must not raise
 
     assert result.messages[1]["content"] == content_a, "first occurrence verbatim"
+
+
+@pytest.mark.parametrize(
+    ("size", "should_dedup"),
+    [
+        (MIN_DEDUP_CHARS - 1, False),  # below: skipped
+        (MIN_DEDUP_CHARS, True),  # at: activates (gate is `len < MIN`, TEST-12)
+        (MIN_DEDUP_CHARS + 1, True),  # above: activates
+    ],
+    ids=["below", "at", "above"],
+)
+def test_min_dedup_chars_boundary_triple(size: int, should_dedup: bool) -> None:
+    """At/below/above triple for the MIN_DEDUP_CHARS floor (TEST-12).
+
+    The gate is ``len(content) < MIN_DEDUP_CHARS`` → the boundary value
+    itself ACTIVATES. Only the below side existed before; an off-by-one
+    (`<=`) would have shipped invisibly.
+    """
+    unit = "x" * size
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "tool", "content": unit, "tool_call_id": "t1"},
+        {"role": "tool", "content": unit, "tool_call_id": "t2"},
+    ]
+    before = [_msg_bytes(m) for m in messages]
+
+    result = _apply(messages)
+
+    later_rewritten = _msg_bytes(result.messages[2]) != before[2]
+    assert later_rewritten == should_dedup, (
+        f"size={size}: expected dedup={should_dedup}, got rewritten={later_rewritten}"
+    )
+    # First occurrence is verbatim in every case.
+    assert _msg_bytes(result.messages[1]) == before[1]

@@ -22,7 +22,12 @@ from __future__ import annotations
 import json
 
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
-from tests.test_ccr_recovery_invariant import _decode_csv_schema, _repr
+
+# TEST-19: helpers come from the shared fixtures module — importing them
+# from a SIBLING TEST FILE (tests.test_ccr_recovery_invariant) coupled this
+# suite to that file's internals and executed its module top level on import.
+from tests._fixtures import canonical_repr as _repr
+from tests._fixtures import decode_csv_schema_into as _decode_csv_schema
 
 # These tests assert the LOSSLESS CSV-schema rendering directly (every
 # row encoded in the output, `isinstance(parsed, str)`). The production

@@ -95,8 +95,9 @@ fn type_name(v: &serde_json::Value) -> &'static str {
 /// outside `#[pymethods]` so we can `unwrap()` `set_item` (it cannot
 /// fail when keys are static str literals and values are owned String /
 /// Option<String> / Option<&'static str>) without tripping the
-/// `clippy::useless_conversion` false positive that fires inside the
-/// pyo3 0.22 method-attribute macro.
+/// `clippy::useless_conversion` false positive that fired inside the
+/// pyo3 method-attribute macro (first seen under pyo3 0.22; kept
+/// defensively under the pinned 0.29 — re-check on pyo3 bumps).
 ///
 /// `dropped_refs` (typed recovery refs, §4.2 R3/R4) is converted to a
 /// `list[DroppedRef]`; `row_index_key` is the bare `"HASH#rows"` store
@@ -1335,9 +1336,10 @@ fn shared_keyword_detector() -> &'static KeywordDetector {
 }
 
 /// Returns `Some(ctx)` for known names and `None` otherwise — caller
-/// converts to PyValueError. Avoids the pyo3-0.22 + clippy
+/// converts to PyValueError. Avoids the pyo3 + clippy
 /// `useless_conversion` false positive that fires when `?` propagates a
-/// `PyResult<_>` through another `PyResult<_>`.
+/// `PyResult<_>` through another `PyResult<_>` (first seen under pyo3
+/// 0.22; shape kept under the pinned 0.29).
 fn ctx_from_str(name: &str) -> Option<ImportanceContext> {
     match name {
         "text" => Some(ImportanceContext::Text),
@@ -1364,7 +1366,7 @@ fn category_to_str(cat: ImportanceCategory) -> &'static str {
 /// contexts (`text|search|diff|log`) and `None` for an unknown context
 /// — the Python shim translates `None` into `ValueError` for the
 /// caller. (Historical note: this used to return a bare `Option` to
-/// dodge a pyo3-0.22 + clippy `useless_conversion` false positive; the
+/// dodge a pyo3-0.22-era clippy `useless_conversion` false positive; the
 /// P0-1 panic-containment audit wrapped it in `PyResult` for the COR-7
 /// catch_unwind, and the lint no longer fires on this shape.)
 ///
@@ -1403,8 +1405,9 @@ fn content_has_error_indicators(text: &str) -> PyResult<bool> {
 /// shim can recompile the legacy `re.Pattern` objects without
 /// re-declaring keyword data on the Python side. Uses `.unwrap()` on
 /// `set_item` because keys are static str literals and values are
-/// `Vec<&'static str>`, which can't fail — and avoids the pyo3-0.22
-/// `useless_conversion` clippy false positive.
+/// `Vec<&'static str>`, which can't fail — and avoids the pyo3
+/// `useless_conversion` clippy false positive (first seen under 0.22;
+/// kept defensively under the pinned 0.29).
 #[pyfunction]
 fn keyword_registry_snapshot(py: Python<'_>) -> Py<PyDict> {
     let registry = KeywordRegistry::default_set();

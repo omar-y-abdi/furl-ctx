@@ -76,9 +76,11 @@ impl RoutingPolicy {
 
 /// Configuration for SmartCrusher.
 ///
-/// SCHEMA-PRESERVING: Output contains only items from the original array.
-/// No wrappers, no generated text, no metadata keys. (Python comment at
-/// line 930-931.)
+/// SCHEMA-PRESERVING: kept items ship byte-shaped as they arrived — no
+/// wrappers and no generated prose. Two DOCUMENTED sentinel keys are the
+/// exception: the lossy path appends the `{"_ccr_dropped": ..}` recovery
+/// pointer object (plus `_ccr_rows` when granular chunks exist), and
+/// dedup may annotate a kept representative with `_dup_count`.
 #[derive(Debug, Clone)]
 pub struct SmartCrusherConfig {
     /// Don't analyze arrays smaller than this. Default 5.

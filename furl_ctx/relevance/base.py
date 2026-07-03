@@ -64,8 +64,10 @@ class RelevanceScorer(ABC):
     def score_batch(self, items: list[str], context: str) -> list[RelevanceScore]:
         """Score multiple items efficiently.
 
-        Default implementation calls score() for each item.
-        Subclasses should override for batch-optimized implementations.
+        Abstract — there is no default implementation (this base never
+        loops ``score()`` for you). Implementations should batch-optimize
+        where the backend allows; a per-item ``score()`` loop is the
+        simplest conforming implementation.
 
         Args:
             items: List of string representations of items.

@@ -22,13 +22,15 @@
 //!
 //! # Defaults vs explicit
 //!
-//! `SmartCrusherBuilder::new()` starts EMPTY — no scorer, no
-//! constraints, no observers. You get exactly what you ask for. Use
+//! `SmartCrusherBuilder::new()` starts EMPTY — no constraints, no
+//! observers, no compaction, no CCR store. Two build-time fallbacks
+//! exist so an all-defaults `build()` still produces a working crusher:
+//! an unset scorer becomes `HybridScorer::default()` and an unset
+//! routing tokenizer becomes the gpt-4o tiktoken counter (both
+//! documented on [`build`](SmartCrusherBuilder::build)). Everything
+//! else you must ask for. Use
 //! [`with_default_oss_setup`](SmartCrusherBuilder::with_default_oss_setup)
-//! to start from the OSS default and customize from there. This is
-//! the "no silent fallback" rule applied to composition: the builder
-//! makes your intent explicit; the `new()` factory shorthand for the
-//! OSS preset.
+//! to start from the OSS default and customize from there.
 
 use std::sync::Arc;
 

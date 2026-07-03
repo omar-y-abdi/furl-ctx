@@ -84,12 +84,18 @@ def test_known_good_call_does_not_raise() -> None:
 # from grepping every call site in furl_ctx/ AND tests/:
 #   * the production path (``_POST_PIPELINE_KWARGS``, via compress()), plus
 #   * the keys the pipeline's documented public surface broadcasts
-#     (``request_id`` / ``output_buffer`` / ``tool_profiles`` / ``record_metrics``).
+#     (``request_id``, and ``previous_prefix_hash`` — CacheAligner's
+#     documented turn-to-turn kwarg, API-4).
+# ``record_metrics`` is deliberately NOT here: the pipeline pops it before
+# the broadcast (pinned by test_pipeline_record_metrics_contract.py).
+# ``output_buffer`` / ``tool_profiles`` were removed from the pipeline's
+# documented surface with API-16 (zero readers — per-tool profiles are
+# config-level via ``ContentRouterConfig.tool_profiles``), so passing them
+# now fails loudly instead of being silently ignored (pinned by
+# test_api_contract_fixes.py).
 _REAL_CALLER_KEYS = set(_POST_PIPELINE_KWARGS) | {
     "request_id",
-    "output_buffer",
-    "tool_profiles",
-    "record_metrics",
+    "previous_prefix_hash",
 }
 
 

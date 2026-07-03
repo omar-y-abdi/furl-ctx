@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "furl-ctx"
 version = "0.26.0"
-description = "The Context Optimization Layer for LLM Applications - Cut costs by 50-90%"
+description = "The context compression layer for AI agents - 60-95% fewer tokens on redundant workloads, reversible via CCR"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
@@ -64,9 +64,10 @@ Issues = "https://github.com/omar-y-abdi/furl/issues"
 
 [project.optional-dependencies]
 # MCP server for Claude Code integration (furl_ctx.ccr.mcp_server).
+# (httpx was dropped from this extra — nothing in the package imports it;
+# it was proxy-era residue. The mcp SDK declares its own transport deps.)
 mcp = [
     "mcp>=1.0.0",
-    "httpx>=0.24.0",
 ]
 # Opt-in AST-verified code compression (transforms.code_aware_compressor,
 # Engine P2-12; enable via ContentRouterConfig.enable_code_aware=True).
@@ -206,10 +207,11 @@ filterwarnings = [
     # (production threads are long-lived and drop their parsers on themselves).
     "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
+# `real_llm` / `live` markers removed (TEST-20/TEST-24): the proxy-era network
+# suites they served are gone and no test carries either mark. `slow` stays —
+# test_benchmarks_metrics_honesty.py marks four tests with it.
 markers = [
     "slow: slow tests (model loads, large fixtures)",
-    "real_llm: tests that hit real LLM APIs; skipped unless explicitly enabled",
-    "live: opt-in multi-turn tests that hit real upstream APIs; require provider keys",
 ]
 
 [tool.coverage.run]

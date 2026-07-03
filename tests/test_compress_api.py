@@ -34,7 +34,11 @@ class TestCompressFunction:
         assert hasattr(result, "transforms_applied")
 
     def test_large_tool_output_compressed(self):
-        """Large JSON tool output should be compressed."""
+        """Large JSON tool output IS compressed — not merely not-inflated.
+
+        TEST-11: `tokens_after <= tokens_before` passed on a passthrough;
+        "should be compressed" means tokens were actually saved.
+        """
         big_data = json.dumps(
             [
                 {"id": i, "status": "active", "name": f"item_{i}", "value": i * 17}
@@ -46,7 +50,8 @@ class TestCompressFunction:
             {"role": "tool", "content": big_data, "tool_call_id": "call_1"},
         ]
         result = compress(messages, model="gpt-4o")
-        assert result.tokens_after <= result.tokens_before
+        assert result.error is None
+        assert result.tokens_saved > 0, "a 200-row uniform array must compress"
         assert len(result.messages) == 2
 
     def test_compact_json_counts_tokens_not_whitespace(self):
