@@ -1119,7 +1119,15 @@ class SmartCrusher(Transform):
                         )
                         if was_modified:
                             marker = create_tool_digest_marker(compute_short_hash(content))
-                            msg["content"] = crushed + "\n" + marker
+                            # Copy-on-write (COR-55): deepcopy preserves
+                            # aliasing via its memo, so mutating `msg` in
+                            # place would rewrite an aliased occurrence of
+                            # the same dict inside the frozen prefix.
+                            # Mirror the router/dedup idiom instead.
+                            result_messages[msg_idx] = {
+                                **msg,
+                                "content": crushed + "\n" + marker,
+                            }
                             crushed_count += 1
                             _record(msg.get("tool_call_id"))
                             markers_inserted.append(marker)
@@ -1134,11 +1142,18 @@ class SmartCrusher(Transform):
             # individually (COR-47 mirror; previously skipped entirely).
             content = msg.get("content")
             if isinstance(content, list):
+                # Copy-on-write (COR-55): lazily copy the containing list /
+                # block / message on the first write — never mutate the
+                # originals, which an aliased occurrence inside the frozen
+                # prefix may still reference (deepcopy's memo preserves
+                # aliasing). Mirrors the router/dedup idiom.
+                new_content: list[Any] | None = None
                 for i, block in enumerate(content):
                     if not isinstance(block, dict) or block.get("type") != "tool_result":
                         continue
                     tool_content = block.get("content", "")
                     if isinstance(tool_content, list):
+                        new_parts: list[Any] | None = None
                         for j, part in enumerate(tool_content):
                             if not isinstance(part, dict) or part.get("type") != "text":
                                 continue
@@ -1153,13 +1168,19 @@ class SmartCrusher(Transform):
                             )
                             if was_modified:
                                 marker = create_tool_digest_marker(compute_short_hash(part_text))
-                                tool_content[j]["text"] = crushed + "\n" + marker
+                                if new_parts is None:
+                                    new_parts = list(tool_content)
+                                new_parts[j] = {**part, "text": crushed + "\n" + marker}
                                 crushed_count += 1
                                 _record(block.get("tool_use_id"))
                                 markers_inserted.append(marker)
                                 if info:
                                     transforms_applied.append(f"smart:{info}")
                                 self._notify_observer(part_tokens, tokenizer.count_text(crushed))
+                        if new_parts is not None:
+                            if new_content is None:
+                                new_content = list(content)
+                            new_content[i] = {**block, "content": new_parts}
                         continue
                     if not isinstance(tool_content, str):
                         continue
@@ -1172,13 +1193,17 @@ class SmartCrusher(Transform):
                     )
                     if was_modified:
                         marker = create_tool_digest_marker(compute_short_hash(tool_content))
-                        content[i]["content"] = crushed + "\n" + marker
+                        if new_content is None:
+                            new_content = list(content)
+                        new_content[i] = {**block, "content": crushed + "\n" + marker}
                         crushed_count += 1
                         _record(block.get("tool_use_id"))
                         markers_inserted.append(marker)
                         if info:
                             transforms_applied.append(f"smart:{info}")
                         self._notify_observer(tokens, tokenizer.count_text(crushed))
+                if new_content is not None:
+                    result_messages[msg_idx] = {**msg, "content": new_content}
 
         if crushed_count > 0:
             transforms_applied.insert(

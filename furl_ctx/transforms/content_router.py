@@ -109,6 +109,37 @@ _RETRIEVE_HINT_PATTERN = re.compile(
     r"Retrieve (?:more|original): hash=[0-9a-fA-F]{12}(?:[0-9a-fA-F]{12})?(?![0-9a-fA-F])"
 )
 
+# Genuine analysis verbs (and analysis-question phrases) only, matched on
+# word boundaries (COR-16). The previous substring scan over a much broader
+# set — fix/error/bug/issue/problem/wrong/broken/improve/"clean up"/
+# security/vulnerability — tripped on virtually every coding-agent message
+# ("fix" matched *prefix*, "error" matched any mention), so analysis_intent
+# was ~always true and SOURCE_CODE was ~never compressed (protection 3).
+# refactor/optimize stay: precise code-work verbs with low ambient
+# frequency whose requests need full code fidelity.
+_ANALYSIS_INTENT_KEYWORDS: tuple[str, ...] = (
+    "analyze",
+    "analyse",
+    "audit",
+    "debug",
+    "explain",
+    "how does",
+    "inspect",
+    "optimize",
+    "refactor",
+    "review",
+    "understand",
+    "what does",
+)
+
+_ANALYSIS_INTENT_PATTERN = re.compile(
+    r"\b(?:"
+    + "|".join(
+        r"\s+".join(map(re.escape, keyword.split())) for keyword in _ANALYSIS_INTENT_KEYWORDS
+    )
+    + r")\b"
+)
+
 # Roles whose message content is a tool output. OpenAI's current API uses
 # ``tool``; the legacy function-calling API uses ``function`` (name carried on
 # ``message["name"]``, no tool_call_id). Mirrors cross_message_dedup's
@@ -2406,9 +2437,13 @@ class ContentRouter(Transform):
     def _detect_analysis_intent(self, messages: list[dict[str, Any]]) -> bool:
         """Detect if user wants to analyze/review code.
 
-        Looks at the most recent user message for analysis keywords. Both
-        plain-string and block-format user content are scanned (text parts
-        concatenated — COR-53).
+        Looks at the most recent user message for genuine analysis verbs,
+        matched on word boundaries against ``_ANALYSIS_INTENT_PATTERN``
+        (COR-16 — the old substring scan over a broader set tripped on
+        e.g. "fix" in "prefix" and left SOURCE_CODE ~never compressed).
+        Both plain-string and block-format user content are scanned (text
+        parts concatenated — COR-53). The matched keyword is DEBUG-logged
+        so over-breadth stays visible.
 
         Args:
             messages: Conversation messages.
@@ -2416,42 +2451,18 @@ class ContentRouter(Transform):
         Returns:
             True if analysis intent detected.
         """
-        # Analysis keywords that suggest user wants full code details
-        analysis_keywords = {
-            "analyze",
-            "analyse",
-            "review",
-            "audit",
-            "inspect",
-            "security",
-            "vulnerability",
-            "bug",
-            "issue",
-            "problem",
-            "explain",
-            "understand",
-            "how does",
-            "what does",
-            "debug",
-            "fix",
-            "error",
-            "wrong",
-            "broken",
-            "refactor",
-            "improve",
-            "optimize",
-            "clean up",
-        }
-
         # Find most recent user message
         for message in reversed(messages):
             if message.get("role") == "user":
                 content = concat_text_parts(message.get("content", ""))
                 if content:
-                    content_lower = content.lower()
-                    for keyword in analysis_keywords:
-                        if keyword in content_lower:
-                            return True
+                    match = _ANALYSIS_INTENT_PATTERN.search(content.lower())
+                    if match:
+                        logger.debug(
+                            "analysis_intent: keyword %r matched in latest user message",
+                            match.group(0),
+                        )
+                        return True
                 break
 
         return False
