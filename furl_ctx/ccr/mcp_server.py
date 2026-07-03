@@ -221,6 +221,59 @@ _READ_ENABLED = os.environ.get("FURL_MCP_READ", "off").lower().strip() in (
     "enabled",
 )
 
+# ─── Server-level instructions: CSV decode legend (engine P1-10) ───────────
+#
+# The compacted-table decode legend ships ONCE per conversation via the MCP
+# SDK's server-level ``instructions=`` parameter (surfaced to the host in
+# the initialize response) instead of per-table in-band bytes: zero
+# wire-byte change to any table render — the grammar characterization
+# suites stay untouched — at an amortized conversation-scope cost of ~190
+# o200k tokens. This is owner-approved alternative (b) of
+# QUESTIONS-FOR-USER.md item 15; the original once-per-conversation carrier
+# (``CCRToolInjector.inject_system_instructions``) was excised in SIMP-4,
+# leaving server-level instructions as the out-of-band channel.
+#
+# Every decode claim below is grammar-verified against the reference
+# decoder ``furl_ctx/transforms/csv_schema_decoder.py`` (the documented
+# consumer contract for the Rust ``formatter.rs`` output); the executable
+# pins live in ``tests/test_mcp_server_instructions.py``. The highest
+# comprehension risk is ``%k``: a cell ``53`` under ``time_ms:float%3``
+# decodes to 0.053, NOT 53.
+CSV_DECODE_LEGEND = (
+    "Compacted tables: `[N]{col:type,...}` = N rows; body lines = CSV rows "
+    "of the remaining columns. "
+    "type=V: constant V. "
+    "int=B+S: row i = B+S*i (i from 0). "
+    "float%k: cell/10^k (53 at %3 = 0.053, not 53). "
+    "string~: full ISO timestamp first, then ±seconds[/tz] deltas. "
+    "string^ + __affix:col=P,S: value = P+cell+S. "
+    "string@ + __head:col=<d>h0,h1: cell 1<d>tail = h1+tail. "
+    "__dict:col=v0,v1: cells index the list. "
+    "= alone repeats the cell above. "
+    "__null__ null, __missing__ absent key, ? nullable. "
+    "<<ccr:HASH>> markers: dropped rows; retrieve via furl_retrieve."
+)
+
+
+def _legend_enabled() -> bool:
+    """``FURL_MCP_LEGEND`` flag — default ON (the owner wants the legend).
+
+    Re-read from the environment per call (the SEC-7 no-import-freeze
+    discipline: paths.py's contract is "every call re-reads the
+    environment", and the flag is consumed at server CONSTRUCTION time,
+    so tests and host re-configuration see the live value). Recognized
+    OFF spellings disable; anything else — including the default — keeps
+    the legend on.
+    """
+    return os.environ.get("FURL_MCP_LEGEND", "on").lower().strip() not in (
+        "off",
+        "false",
+        "0",
+        "no",
+        "disabled",
+    )
+
+
 # Session-scoped TTL: content persists for the session (1 hour), outlasting
 # the library's own 30-minute default. The MCP server process lives as long
 # as the coding session.
@@ -489,7 +542,13 @@ class FurlMCPServer:
         if not MCP_AVAILABLE or Server is None:
             raise ImportError("MCP SDK not installed. Install with: pip install mcp")
 
-        self.server: Server = Server("furl")
+        # Server-level instructions carry the CSV decode legend once per
+        # conversation (FURL_MCP_LEGEND, default ON). ``None`` when gated
+        # off — the SDK then omits the field from the initialize response.
+        self.server: Server = Server(
+            "furl",
+            instructions=CSV_DECODE_LEGEND if _legend_enabled() else None,
+        )
         self._setup_handlers()
 
     def _get_local_store(self) -> Any:
