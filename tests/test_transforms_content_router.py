@@ -486,6 +486,24 @@ def test_log_strategy_has_no_fallback_when_log_is_noop(
 # ---------------------------------------------------------------------------
 
 
+def _process_blocks(router: ContentRouter, msg: dict, **overrides):
+    """Call ``_process_content_blocks`` with the policy knobs that were module
+    defaults before §4.1 S4 made them REQUIRED keywords (SIMP-9: the defaults
+    silently duplicated ``ContentRouterConfig`` field defaults and drifted).
+    Values here are exactly the old defaults, so behavior is unchanged."""
+    kwargs: dict = {
+        "min_ratio": 0.85,
+        "read_protection_window": 8,
+        "messages_from_end": 0,
+        "min_chars": 500,
+        "skip_user": True,
+        "skip_system": True,
+        "compress_assistant_text_blocks": False,
+    }
+    kwargs.update(overrides)
+    return router._process_content_blocks(msg, msg["content"], "", [], set(), **kwargs)
+
+
 def _make_router_with_mock_compress(monkeypatch: pytest.MonkeyPatch) -> ContentRouter:
     """Return a ContentRouter whose compress() always emits a half-length
     ``[compressed]`` payload at ratio 0.5 (passes the < min_ratio check)."""
@@ -524,12 +542,9 @@ def test_text_block_cache_control_protected_with_assistant_optin(
         "non_string": 0,
         "content_blocks": 0,
     }
-    result = router._process_content_blocks(
+    result = _process_blocks(
+        router,
         msg,
-        msg["content"],
-        "",
-        [],
-        set(),
         route_counts=counts,
         compress_assistant_text_blocks=True,
     )
@@ -556,13 +571,7 @@ def test_tool_result_cache_control_protected(monkeypatch: pytest.MonkeyPatch) ->
             }
         ],
     }
-    result = router._process_content_blocks(
-        msg,
-        msg["content"],
-        "",
-        [],
-        set(),
-    )
+    result = _process_blocks(router, msg)
     # cache_control hard-skip applies to tool_result too
     assert result["content"][0]["content"] == long_text
 
@@ -573,13 +582,7 @@ def test_assistant_text_blocks_skipped_by_default(
     router = _make_router_with_mock_compress(monkeypatch)
     long_text = "X" * 1000
     msg = {"role": "assistant", "content": [{"type": "text", "text": long_text}]}
-    result = router._process_content_blocks(
-        msg,
-        msg["content"],
-        "",
-        [],
-        set(),
-    )
+    result = _process_blocks(router, msg)
     # Default OFF: assistant text untouched, restoring pre-#431 cache safety
     assert result["content"][0]["text"] == long_text
 
@@ -590,12 +593,9 @@ def test_assistant_text_blocks_opt_in_compresses(
     router = _make_router_with_mock_compress(monkeypatch)
     long_text = "Y" * 1000
     msg = {"role": "assistant", "content": [{"type": "text", "text": long_text}]}
-    result = router._process_content_blocks(
+    result = _process_blocks(
+        router,
         msg,
-        msg["content"],
-        "",
-        [],
-        set(),
         compress_assistant_text_blocks=True,
     )
     assert "[compressed]" in result["content"][0]["text"]
@@ -607,12 +607,9 @@ def test_user_text_blocks_never_compressed_even_with_assistant_optin(
     router = _make_router_with_mock_compress(monkeypatch)
     long_text = "U" * 1000
     msg = {"role": "user", "content": [{"type": "text", "text": long_text}]}
-    result = router._process_content_blocks(
+    result = _process_blocks(
+        router,
         msg,
-        msg["content"],
-        "",
-        [],
-        set(),
         compress_assistant_text_blocks=True,  # MUST NOT bleed into user
     )
     assert result["content"][0]["text"] == long_text
@@ -624,12 +621,9 @@ def test_system_text_blocks_skipped_when_skip_system_true(
     router = _make_router_with_mock_compress(monkeypatch)
     long_text = "S" * 1000
     msg = {"role": "system", "content": [{"type": "text", "text": long_text}]}
-    result = router._process_content_blocks(
+    result = _process_blocks(
+        router,
         msg,
-        msg["content"],
-        "",
-        [],
-        set(),
         skip_system=True,
         compress_assistant_text_blocks=True,
     )
@@ -642,13 +636,7 @@ def test_tool_role_text_blocks_compressed_by_default(
     router = _make_router_with_mock_compress(monkeypatch)
     long_text = "T" * 1000
     msg = {"role": "tool", "content": [{"type": "text", "text": long_text}]}
-    result = router._process_content_blocks(
-        msg,
-        msg["content"],
-        "",
-        [],
-        set(),
-    )
+    result = _process_blocks(router, msg)
     # tool role ≈ tool output — compress freely
     assert "[compressed]" in result["content"][0]["text"]
 
@@ -659,12 +647,9 @@ def test_unknown_role_text_blocks_skipped_for_safety(
     router = _make_router_with_mock_compress(monkeypatch)
     long_text = "Q" * 1000
     msg = {"role": "developer", "content": [{"type": "text", "text": long_text}]}
-    result = router._process_content_blocks(
+    result = _process_blocks(
+        router,
         msg,
-        msg["content"],
-        "",
-        [],
-        set(),
         compress_assistant_text_blocks=True,
     )
     # Unknown role: be safe, don't compress
@@ -675,12 +660,9 @@ def test_min_chars_gates_short_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     router = _make_router_with_mock_compress(monkeypatch)
     short_text = "tiny"
     msg = {"role": "tool", "content": [{"type": "text", "text": short_text}]}
-    result = router._process_content_blocks(
+    result = _process_blocks(
+        router,
         msg,
-        msg["content"],
-        "",
-        [],
-        set(),
         min_chars=500,
     )
     assert result["content"][0]["text"] == short_text
@@ -690,13 +672,7 @@ def test_pinning_skips_already_compressed(monkeypatch: pytest.MonkeyPatch) -> No
     router = _make_router_with_mock_compress(monkeypatch)
     pinned = "Retrieve more: hash=abc " + "x" * 1000
     msg = {"role": "tool", "content": [{"type": "text", "text": pinned}]}
-    result = router._process_content_blocks(
-        msg,
-        msg["content"],
-        "",
-        [],
-        set(),
-    )
+    result = _process_blocks(router, msg)
     # Already-compressed marker keeps proxy idempotent across turns
     assert result["content"][0]["text"] == pinned
 

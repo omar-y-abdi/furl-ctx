@@ -47,12 +47,51 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Hashable
+from dataclasses import dataclass
 from typing import Any
 
 # Opaque cache key contract: the cache never inspects key structure — equality
 # and hash are all it needs. Callers own key construction (and therefore own
 # how much identity — content, length, options — a key encodes).
 CacheKey = Hashable
+
+
+@dataclass(frozen=True)
+class ServeOriginal:
+    """Serve the original message/block unchanged — the two-tier cache says this
+    content will not compress: a Tier-1 skip hit, or a Tier-2 entry whose ratio
+    no longer clears ``min_ratio`` and was relocated to the skip set."""
+
+
+@dataclass(frozen=True)
+class ServeCached:
+    """Serve a live cached compression whose ``<<ccr:HASH>>`` sentinels (if any)
+    are confirmed still backed. The caller swaps in ``compressed`` and formats
+    the transform string — the flat (string-path) and label-threaded
+    (block-path) formats differ, so formatting stays in the caller."""
+
+    compressed: str
+    strategy: str
+    ratio: float
+
+
+@dataclass(frozen=True)
+class Recompute:
+    """Cache miss, or a stale Tier-2 entry whose CCR backing has expired and was
+    evicted. The caller (re)compresses — inline on the block path, deferred to
+    the batched parallel pass on the string path."""
+
+
+# A two-tier cache lookup resolves to exactly one of three dispositions. The two
+# empty variants carry no data, so they are shared module singletons: the hot
+# path resolves one per message and must not allocate for the common
+# serve-original / recompute cases. ``ServeCached`` holds per-entry payload and
+# stays fresh. (The ADT lives HERE — the cache's disposition language — so the
+# block walker can match on it without importing ``content_router``, which
+# re-exports every name for back-compat.)
+CacheDisposition = ServeOriginal | ServeCached | Recompute
+_SERVE_ORIGINAL = ServeOriginal()
+_RECOMPUTE = Recompute()
 
 # Sweep both tiers for expired entries once per this many insertions.
 # Amortized cost per insertion is O(max_entries / interval) timestamp
