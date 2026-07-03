@@ -12,12 +12,16 @@
 //! 5. Hashing the original with MD5 truncated to 24 hex chars for a CCR
 //!    cache_key (only emitted if compression saved >20% of lines).
 //!
-//! # Parity contract
-//! Output bytes (`compressed` field + all numeric counts) must be
-//! byte-identical to the Python implementation. The 20 fixtures in
-//! `tests/parity/fixtures/diff_compressor/` are the spec.
+//! # Output contract
+//! This Rust implementation is canonical — the Python
+//! `furl_ctx.transforms.diff_compressor` shim wraps it (the pure-Python
+//! original and its parity fixtures are retired). The spec is the
+//! recovery contract exercised by the test suites: every dropped hunk /
+//! trimmed context line must stay CCR-recoverable via the emitted
+//! `cache_key`, and the in-crate unit tests + Python wrapper tests pin
+//! the output grammar directly.
 //!
-//! # Information preservation hardening (no parity impact)
+//! # Information preservation hardening
 //! - Below `min_lines_for_ccr`, we return the input unchanged (matches
 //!   Python). Important for short diffs that don't benefit from compression
 //!   and would lose context-trim slack.
@@ -211,11 +215,12 @@ pub struct DiffCompressorStats {
     /// mode 100755")`. Empty when no normalization occurred (mode was
     /// already 100644, or no mode line was present).
     ///
-    /// Why this matters: parity with Python forces us to hardcode `100644`
-    /// in the emit path regardless of what the input said. An input with
-    /// executable bit `100755` becomes a non-executable `100644` on output —
-    /// silent information loss. Surfacing this lets prod monitoring catch
-    /// real cases where it bites.
+    /// Why this matters: the emit path hardcodes `100644` regardless of
+    /// what the input said (kept deliberately — owner Q7: document +
+    /// keep). An input with executable bit `100755` becomes a
+    /// non-executable `100644` on output — silent information loss.
+    /// Surfacing this lets prod monitoring catch real cases where it
+    /// bites.
     pub file_mode_normalizations: Vec<(String, String)>,
 
     /// Binary file marker lines whose original detail (e.g. `Binary files
@@ -224,9 +229,9 @@ pub struct DiffCompressorStats {
     /// simplification occurred (input was already `Binary files differ`,
     /// or the file wasn't binary).
     ///
-    /// Same parity-loss pattern as `file_mode_normalizations`: Python's
-    /// emitter hardcodes `Binary files differ`, dropping the filename
-    /// detail. This stat surfaces what was lost.
+    /// Same loss pattern as `file_mode_normalizations`: the emitter
+    /// hardcodes `Binary files differ` (kept deliberately — owner Q7),
+    /// dropping the filename detail. This stat surfaces what was lost.
     pub binary_files_simplified: Vec<String>,
 
     /// Hunks elided by the `drop_noise_hunks` pass (lockfile churn +
@@ -400,9 +405,11 @@ impl DiffCompressor {
         stats.files_kept = diff_files.len();
 
         // Capture lossy-emit signals on the files that survived the file cap.
-        // These cases are parity-bound (Python's emit hardcodes `100644` and
-        // `Binary files differ` regardless of input), so the only honest move
-        // is to surface the loss via observability rather than fix it.
+        // The emit path hardcodes `100644` and `Binary files differ`
+        // regardless of input — originally a Python-parity constraint, now
+        // KEPT DELIBERATELY (owner decision, QUESTIONS-FOR-USER Q7:
+        // document + keep — lifting would churn every diff render for a
+        // marginal fidelity win). The loss is surfaced via observability.
         for file in diff_files.iter() {
             let label = format!("{} -> {}", file.old_file, file.new_file);
             // File-mode normalization: any original mode line not literally

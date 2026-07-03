@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use super::classifier::{classify_cell, CellClass};
+use super::classifier::{classify_string, CellClass};
 use super::compactor::{compact, CompactConfig};
 use super::formatter::{CsvSchemaFormatter, Formatter};
 use super::ir::OpaqueKind;
@@ -45,7 +45,7 @@ use crate::transforms::smart_crusher::types::DroppedRef;
 /// Reuses the compaction primitives:
 /// - [`compact`](super::compactor::compact) — array → IR
 /// - [`Formatter`] — IR → bytes
-/// - [`classify_cell`] + opaque-blob detection
+/// - [`classify_string`] + opaque-blob detection
 ///
 /// The walker itself owns no compaction logic; it just decides
 /// **where** to apply each primitive in the tree.
@@ -192,8 +192,9 @@ fn walk_string(s: String, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -
     // Long opaque blob: substitute with CCR marker (and stash the
     // original in the store if one is configured, so retrieval works).
     // The substitution always ships — surface its typed ref directly.
-    if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.clone()), &ctx.config.classify)
-    {
+    // `classify_string` takes the borrowed str — no throwaway
+    // `Value::String` clone just to classify (PERF-5).
+    if let CellClass::Opaque(kind) = classify_string(&s, &ctx.config.classify) {
         let (marker, dropped_ref) =
             emit_opaque_ccr_marker(&s, &kind, ctx.config.ccr_store.as_ref());
         sink.push(dropped_ref);

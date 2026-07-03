@@ -55,6 +55,19 @@ impl SmartAnalyzer {
     /// Top-level analysis. Mirrors `analyze_array` at
     /// `smart_crusher.py:966-1014`.
     pub fn analyze_array(&self, items: &[Value]) -> ArrayAnalysis {
+        self.analyze_array_with_strings(items, None)
+    }
+
+    /// [`analyze_array`](Self::analyze_array) with the caller's
+    /// pre-computed JSON serializations threaded through (PERF-3), so
+    /// the crushability error-keyword scan never re-serializes an array
+    /// the caller already serialized. Detection is byte-identical with
+    /// or without them.
+    pub fn analyze_array_with_strings(
+        &self,
+        items: &[Value],
+        item_strings: Option<&[String]>,
+    ) -> ArrayAnalysis {
         // Empty / non-dict-first guard: Python returns NONE strategy with
         // empty stats. We mirror exactly.
         let first_is_dict = items.first().map(|v| v.is_object()).unwrap_or(false);
@@ -89,7 +102,7 @@ impl SmartAnalyzer {
 
         let pattern = self.detect_pattern(&field_stats, items);
 
-        let crushability = self.analyze_crushability(items, &field_stats);
+        let crushability = self.analyze_crushability(items, &field_stats, item_strings);
 
         let strategy =
             self.select_strategy(&field_stats, &pattern, items.len(), Some(&crushability));
@@ -412,10 +425,15 @@ impl SmartAnalyzer {
     /// Returns a `CrushabilityAnalysis` with the verdict, confidence, and
     /// the signals that drove the decision. Callers consult `crushable`
     /// before invoking any actual compression.
+    ///
+    /// `item_strings` — the caller's pre-computed JSON serializations,
+    /// reused by the error-keyword scan (PERF-3); `None` serializes on
+    /// the fly (byte-identical detection either way).
     pub fn analyze_crushability(
         &self,
         items: &[Value],
         field_stats: &BTreeMap<String, FieldStats>,
+        item_strings: Option<&[String]>,
     ) -> CrushabilityAnalysis {
         use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
 
@@ -464,8 +482,9 @@ impl SmartAnalyzer {
             signals_absent.push("structural_outliers".to_string());
         }
 
-        // 3b. Error-keyword fallback when no structural signal.
-        let error_keyword_indices = detect_error_items_for_preservation(items, None);
+        // 3b. Error-keyword fallback when no structural signal. Reuses
+        // the caller's serializations when provided (PERF-3).
+        let error_keyword_indices = detect_error_items_for_preservation(items, item_strings);
         let keyword_error_count = error_keyword_indices.len();
         if keyword_error_count > 0 && structural_outlier_count == 0 {
             signals_present.push(format!("error_keywords:{}", keyword_error_count));
@@ -568,6 +587,11 @@ impl SmartAnalyzer {
                 has_score_field,
                 error_item_count: error_count,
                 anomaly_count,
+                // Memoized for the over-budget prioritizer (PERF-3) —
+                // both detections already ran above to derive the
+                // counts; carrying the indices avoids a re-scan.
+                structural_outlier_indices: outlier_indices.clone(),
+                error_keyword_indices: error_keyword_indices.clone(),
             }
         };
 
@@ -1169,7 +1193,7 @@ mod tests {
         let a = analyzer();
         let mut fs: BTreeMap<String, FieldStats> = BTreeMap::new();
         fs.insert("status".to_string(), a.analyze_field("status", &items));
-        let c = a.analyze_crushability(&items, &fs);
+        let c = a.analyze_crushability(&items, &fs, None);
         assert!(c.crushable);
         // Only "status" string field with unique_ratio=1/30=0.033 → max
         // uniqueness ≈ 0.033 < 0.3 → low_uniqueness path.
@@ -1188,7 +1212,7 @@ mod tests {
         for k in ["id", "name"] {
             fs.insert(k.to_string(), a.analyze_field(k, &items));
         }
-        let c = a.analyze_crushability(&items, &fs);
+        let c = a.analyze_crushability(&items, &fs, None);
         assert!(!c.crushable);
         assert_eq!(c.reason, "unique_entities_no_signal");
     }
@@ -1202,7 +1226,7 @@ mod tests {
         for k in ["id", "status"] {
             fs.insert(k.to_string(), a.analyze_field(k, &items));
         }
-        let c = a.analyze_crushability(&items, &fs);
+        let c = a.analyze_crushability(&items, &fs, None);
         assert!(c.crushable);
         assert_eq!(c.reason, "repetitive_content_with_ids");
     }

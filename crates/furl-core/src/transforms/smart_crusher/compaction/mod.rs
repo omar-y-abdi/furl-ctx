@@ -30,7 +30,7 @@ pub mod formatter;
 pub mod ir;
 pub mod walker;
 
-pub use classifier::{classify_cell, CellClass, ClassifyConfig};
+pub use classifier::{classify_cell, classify_string, CellClass, ClassifyConfig};
 pub use compactor::{compact, CompactConfig};
 pub use formatter::{CsvSchemaFormatter, Formatter, JsonFormatter, MarkdownKvFormatter};
 pub use ir::{Bucket, CellValue, ColumnEncoding, Compaction, FieldSpec, OpaqueKind, Row, Schema};
@@ -118,8 +118,17 @@ impl CompactionStage {
     /// Run the stage end-to-end: compact + format. Returns the
     /// [`Compaction`] tree (so callers can inspect kept/total row
     /// counts) alongside the rendered bytes.
+    ///
+    /// A DECLINED compaction (`Untouched`) short-circuits with an empty
+    /// render (PERF-5): the CSV formatter used to serialize the ENTIRE
+    /// original array for a render every caller immediately discarded —
+    /// all of them gate on `was_compacted()` / `is_decoder_verifiable()`
+    /// before using the bytes.
     pub fn run(&self, items: &[serde_json::Value]) -> (Compaction, String) {
         let c = compact(items, &self.config);
+        if !c.was_compacted() {
+            return (c, String::new());
+        }
         let rendered = self.formatter.format(&c);
         (c, rendered)
     }

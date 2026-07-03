@@ -53,6 +53,17 @@ pub fn deduplicate_indices_by_content(
     items: &[Value],
     exclude: &BTreeSet<String>,
 ) -> BTreeSet<usize> {
+    let mut memo = HashMemo::new(items, exclude);
+    deduplicate_indices_memo(keep_indices, &mut memo)
+}
+
+/// [`deduplicate_indices_by_content`] against a shared [`HashMemo`] so a
+/// caller running dedup + fill + novelty (the prioritizer) hashes each
+/// item at most once per call instead of once per pass (PERF-3).
+fn deduplicate_indices_memo(
+    keep_indices: &BTreeSet<usize>,
+    memo: &mut HashMemo<'_>,
+) -> BTreeSet<usize> {
     if keep_indices.is_empty() {
         return BTreeSet::new();
     }
@@ -61,10 +72,10 @@ pub fn deduplicate_indices_by_content(
     // the first insertion for each hash IS the lowest index.
     let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for &idx in keep_indices {
-        if idx >= items.len() {
+        if idx >= memo.len() {
             continue;
         }
-        let h = item_content_hash(&items[idx], idx, exclude);
+        let h = memo.hash_at(idx);
         seen.entry(h).or_insert(idx);
     }
     seen.values().copied().collect()
@@ -89,6 +100,18 @@ pub fn fill_remaining_slots(
     effective_max: usize,
     exclude: &BTreeSet<String>,
 ) -> BTreeSet<usize> {
+    let mut memo = HashMemo::new(items, exclude);
+    fill_remaining_slots_memo(keep_indices, n, effective_max, &mut memo)
+}
+
+/// [`fill_remaining_slots`] against a shared [`HashMemo`] (PERF-3 — see
+/// [`deduplicate_indices_memo`]).
+fn fill_remaining_slots_memo(
+    keep_indices: &BTreeSet<usize>,
+    n: usize,
+    effective_max: usize,
+    memo: &mut HashMemo<'_>,
+) -> BTreeSet<usize> {
     let remaining = effective_max.saturating_sub(keep_indices.len());
     if remaining == 0 {
         return keep_indices.clone();
@@ -101,7 +124,7 @@ pub fn fill_remaining_slots(
     let mut seen: HashSet<String> = HashSet::new();
     for &idx in keep_indices {
         if idx < n {
-            seen.insert(item_content_hash(&items[idx], idx, exclude));
+            seen.insert(memo.hash_at(idx));
         }
     }
 
@@ -128,7 +151,7 @@ pub fn fill_remaining_slots(
                 break 'outer;
             }
             let idx = candidates[i];
-            let h = item_content_hash(&items[idx], idx, exclude);
+            let h = memo.hash_at(idx);
             if !seen.contains(&h) {
                 result.insert(idx);
                 seen.insert(h);
@@ -166,6 +189,12 @@ pub struct PrioritizeParams<'a> {
     pub exclude: &'a BTreeSet<String>,
     /// Query-relevant indices the planner pinned (anchor + relevance hits).
     pub query_pinned: &'a BTreeSet<usize>,
+    /// Pre-computed JSON serializations of `items` (index-aligned), when
+    /// the caller already paid for them. Threaded into the over-budget
+    /// error-keyword scan so it never re-serializes the array (PERF-3).
+    /// `None` falls back to on-the-fly serialization — byte-identical
+    /// detection either way.
+    pub item_strings: Option<&'a [String]>,
 }
 
 /// Top-level prioritizer. Python: `_prioritize_indices`.
@@ -194,20 +223,27 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
         effective_max,
         exclude,
         query_pinned,
+        item_strings,
     } = params;
+
+    // One shared per-index content-hash memo for the whole call: dedup,
+    // fill, and novelty ranking all consume the same md5-over-JSON hash,
+    // which used to be recomputed 3-4× per item across the passes
+    // (PERF-3). The memo serializes+hashes each index at most once.
+    let mut memo = HashMemo::new(items, exclude);
 
     // Dedup pass. Uses the field-aware stable hash (`exclude` lists
     // identity columns); empty `exclude` => byte-equal to the prior
     // whole-item dedup.
     let mut current = if config.dedup_identical_items {
-        deduplicate_indices_by_content(keep_indices, items, exclude)
+        deduplicate_indices_memo(keep_indices, &mut memo)
     } else {
         keep_indices.clone()
     };
 
     // Fill pass.
     if current.len() < effective_max && current.len() < n {
-        current = fill_remaining_slots(&current, items, n, effective_max, exclude);
+        current = fill_remaining_slots_memo(&current, n, effective_max, &mut memo);
     }
 
     if current.len() <= effective_max {
@@ -216,13 +252,25 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
 
     // Over budget — apply critical-items-first prioritization.
 
-    // Errors (keyword-detected — preservation guarantee).
-    let error_indices: BTreeSet<usize> = detect_error_items_for_preservation(items, None)
-        .into_iter()
-        .collect();
-
-    // Structural outliers (statistical — rare fields, rare statuses).
-    let outlier_indices: BTreeSet<usize> = detect_structural_outliers(items).into_iter().collect();
+    // Errors (keyword-detected — preservation guarantee) + structural
+    // outliers (statistical — rare fields, rare statuses). The analyzer
+    // already ran BOTH detections over this exact array inside
+    // `analyze_crushability` (PERF-3) — reuse its memoized indices when
+    // the caller passed the analysis. Analysis-less callers (direct API
+    // use, unit fixtures) recompute with the same functions — identical
+    // output either way; the error scan reuses the caller's pre-computed
+    // serializations instead of re-serializing every item.
+    let memoized = analysis.and_then(|a| a.crushability.as_ref());
+    let error_indices: BTreeSet<usize> = match memoized {
+        Some(c) => c.error_keyword_indices.iter().copied().collect(),
+        None => detect_error_items_for_preservation(items, item_strings)
+            .into_iter()
+            .collect(),
+    };
+    let outlier_indices: BTreeSet<usize> = match memoized {
+        Some(c) => c.structural_outlier_indices.iter().copied().collect(),
+        None => detect_structural_outliers(items).into_iter().collect(),
+    };
 
     // Numeric anomalies (>variance_threshold σ from per-field mean).
     let anomaly_indices = numeric_anomaly_indices(config, items, analysis);
@@ -327,7 +375,7 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
     // the whole-item hash, so this is well-defined on every dataset.
     if remaining > 0 {
         let others: Vec<usize> = current.difference(&prioritized).copied().collect();
-        let ranked = rank_by_novelty(&others, items, exclude);
+        let ranked = rank_by_novelty_memo(&others, &mut memo);
         for i in ranked {
             if remaining == 0 {
                 break;
@@ -434,36 +482,41 @@ fn value_signature(v: &Value) -> String {
 /// Rank `candidates` by descending NOVELTY: rarity of the row's
 /// stable-hash family across the whole array (a singleton family is
 /// maximally novel), with ascending index as a deterministic tie-break.
+#[cfg(test)]
 fn rank_by_novelty(
     candidates: &[usize],
     items: &[Value],
     exclude: &BTreeSet<String>,
 ) -> Vec<usize> {
+    let mut memo = HashMemo::new(items, exclude);
+    rank_by_novelty_memo(candidates, &mut memo)
+}
+
+/// [`rank_by_novelty`] against a shared [`HashMemo`] (PERF-3): family
+/// sizes need every index's hash, and the prioritizer's dedup/fill
+/// passes usually hashed most of them already — the memo makes the
+/// whole prioritize call hash each item at most once.
+fn rank_by_novelty_memo(candidates: &[usize], memo: &mut HashMemo<'_>) -> Vec<usize> {
     // Family sizes over the whole array (rarity signal). Hashes are
     // remembered per index so the sort below never re-serializes — the
     // comparator runs O(n log n) times and an MD5-over-JSON per
     // comparison would dominate the fill cost.
-    let mut family_size: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    let hashes: Vec<String> = items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| item_content_hash(item, i, exclude))
-        .collect();
+    let hashes: Vec<String> = (0..memo.len()).map(|i| memo.hash_at(i)).collect();
+    let mut family_size: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for h in &hashes {
-        *family_size.entry(h.clone()).or_insert(0) += 1;
+        *family_size.entry(h.as_str()).or_insert(0) += 1;
     }
 
     let mut ranked: Vec<usize> = candidates.to_vec();
     ranked.sort_by(|&a, &b| {
         let fa = hashes
             .get(a)
-            .and_then(|h| family_size.get(h))
+            .and_then(|h| family_size.get(h.as_str()))
             .copied()
             .unwrap_or(1);
         let fb = hashes
             .get(b)
-            .and_then(|h| family_size.get(h))
+            .and_then(|h| family_size.get(h.as_str()))
             .copied()
             .unwrap_or(1);
         // Smaller family first (more novel); ties broken by lower index
@@ -523,6 +576,43 @@ fn numeric_anomaly_indices(
 
 fn is_numeric_field_with_variance(stats: &FieldStats) -> bool {
     stats.field_type == "numeric" && stats.mean_val.is_some() && stats.variance.unwrap_or(0.0) > 0.0
+}
+
+/// Per-index content-hash memo shared across the prioritizer's passes
+/// (PERF-3). [`item_content_hash`] serializes + MD5-hashes an item; the
+/// dedup, fill, and novelty passes all consume the same hash, which used
+/// to be recomputed up to 3-4× per item. The memo computes each index at
+/// most once per lifetime; repeat lookups clone the memoized 16-char
+/// string (noise next to a serialize+MD5).
+struct HashMemo<'a> {
+    items: &'a [Value],
+    exclude: &'a BTreeSet<String>,
+    slots: Vec<Option<String>>,
+}
+
+impl<'a> HashMemo<'a> {
+    fn new(items: &'a [Value], exclude: &'a BTreeSet<String>) -> Self {
+        HashMemo {
+            items,
+            exclude,
+            slots: vec![None; items.len()],
+        }
+    }
+
+    /// Item count (`items.len()`) — the exclusive bound for `hash_at`.
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// The content hash for `idx`, computed on first access. Callers
+    /// bound-check against [`Self::len`] (mirrors the pre-memo code,
+    /// which skipped out-of-bounds indices before hashing).
+    fn hash_at(&mut self, idx: usize) -> String {
+        if self.slots[idx].is_none() {
+            self.slots[idx] = Some(item_content_hash(&self.items[idx], idx, self.exclude));
+        }
+        self.slots[idx].clone().unwrap_or_default()
+    }
 }
 
 /// Hash function used by all orchestration helpers.
@@ -594,6 +684,7 @@ mod tests {
             effective_max,
             exclude,
             query_pinned,
+            item_strings: None,
         }
     }
 

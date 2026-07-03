@@ -14,12 +14,13 @@ use serde_json::Value;
 
 use super::classifier::{classify_array, ArrayType};
 use super::compaction::{
-    classify_cell, emit_opaque_ccr_marker, has_serde_private_marker, try_parse_json_container,
+    classify_string, emit_opaque_ccr_marker, has_serde_private_marker, try_parse_json_container,
     CellClass, ClassifyConfig,
 };
 use super::crusher::{CrushArrayResult, SmartCrusher};
 use super::crushers::{compute_k_split, crush_number_array, crush_object, crush_string_array};
 use super::persist::ccr_sentinel_map;
+use super::route::Routed;
 use super::traits::CrushEvent;
 use super::types::{CrushResult, DroppedRef};
 
@@ -226,7 +227,21 @@ impl SmartCrusher {
                     // routes lossless-or-passthrough in this mode.
                     match arr_type {
                         ArrayType::DictArray => {
-                            let result = self.crush_array(arr, query_context, bias);
+                            let result =
+                                match self.crush_array_routed(arr, query_context, bias, true) {
+                                    // Unchanged passthrough (skip / at-limit):
+                                    // re-wrap our own borrow of the array. The
+                                    // old path deep-cloned the items into a
+                                    // `CrushArrayResult` that was immediately
+                                    // re-wrapped here (PERF-4); output bytes
+                                    // are identical — a passthrough's items
+                                    // ARE the input.
+                                    Routed::Passthrough(info) => {
+                                        info_parts.push(format!("{}({}->{})", info, n, n));
+                                        return (Value::Array(arr.clone()), info_parts.join(","));
+                                    }
+                                    Routed::Result(result) => result,
+                                };
                             // Lossless path won → substitute the array
                             // with the compacted string in place. This
                             // makes the lossless win visible to the
@@ -491,7 +506,9 @@ impl SmartCrusher {
         // verbatim; no store write happens: nothing was hidden).
         if !self.config.lossless_only {
             let cfg = ClassifyConfig::default();
-            if let CellClass::Opaque(kind) = classify_cell(&Value::String(s.to_string()), &cfg) {
+            // `classify_string` takes the borrowed str — no throwaway
+            // `Value::String` clone just to classify (PERF-5).
+            if let CellClass::Opaque(kind) = classify_string(s, &cfg) {
                 let (marker, dropped_ref) =
                     emit_opaque_ccr_marker(s, &kind, self.ccr_store.as_ref());
                 // The substitution always ships from here — surface the
@@ -585,6 +602,20 @@ impl SmartCrusher {
                     // chunks + index under a hash no surfaced marker
                     // ever names: orphan entries burning COR-4-bounded
                     // capacity.
+                    let routed = self.crush_array_routed(&values, query_context, bias, false);
+                    let result = match routed {
+                        // Passthrough: the old shape returned a full clone
+                        // of `values` as the kept set, which the canonical
+                        // matching below re-derived as "keep every index".
+                        // Skip the clone AND the match (PERF-4) — the
+                        // outcome is identical by construction.
+                        Routed::Passthrough(_) => {
+                            keep_indices.extend(&indices);
+                            strategy_parts.push(format!("dict:{}->{}", values.len(), values.len()));
+                            continue;
+                        }
+                        Routed::Result(result) => result,
+                    };
                     let CrushArrayResult {
                         items: crushed,
                         strategy_info,
@@ -592,7 +623,7 @@ impl SmartCrusher {
                         dropped_summary,
                         dropped_refs,
                         ..
-                    } = self.crush_array_inner(&values, query_context, bias, false);
+                    } = result;
                     // COR-28b (EFF-9): ship a PURE lossless win (nothing
                     // dropped, no sentinel) as ONE rendered table string
                     // at the subgroup's first position — it was

@@ -1606,8 +1606,12 @@ impl PySearchCompressor {
     /// matches Python's existing CCR plumbing and avoids dragging a
     /// second backend into the Rust crate.
     ///
-    /// (Internally the Rust CcrStore trait is used for unit tests; the
-    /// PyO3 surface stays Python-CCR-friendly.)
+    /// PERF-8: `compress_key_only` computes the key + marker with NO
+    /// store write — the old shape synthesized a throwaway 1000-cap
+    /// `InMemoryCcrStore` per call and had the core write the FULL
+    /// original into it, dropped on return. `cache_key` is byte-equal
+    /// (pinned in furl-core); the Python shim's re-persist is (and
+    /// always was) the real backing.
     #[pyo3(signature = (content, context = "", bias = 1.0))]
     fn compress(
         &self,
@@ -1616,20 +1620,13 @@ impl PySearchCompressor {
         context: &str,
         bias: f64,
     ) -> PyResult<PySearchCompressionResult> {
-        // Synthesize a tiny in-memory store so the Rust path can
-        // populate `cache_key`; the Python side reads `cache_key` and
-        // writes the original to its own `CompressionStore` if it
-        // wants persistence beyond the request lifecycle.
         let owned = content.to_string();
         let owned_ctx = context.to_string();
         // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
         let (result, stats) = py
             .detach(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let store = furl_core::ccr::InMemoryCcrStore::new();
-                    let (r, s) =
-                        self.inner
-                            .compress_with_store(&owned, &owned_ctx, bias, Some(&store));
+                    let (r, s) = self.inner.compress_key_only(&owned, &owned_ctx, bias);
                     (r, s)
                 }))
             })
@@ -1824,6 +1821,10 @@ impl PyLogCompressor {
     /// Compress `content`. Same CCR pattern as search_compressor: Rust
     /// emits the `cache_key`; the Python shim is responsible for
     /// writing the original to the production `CompressionStore`.
+    ///
+    /// PERF-8: key-only mode — no throwaway store, no dead write of the
+    /// full original. `cache_key` bytes are unchanged (pinned in
+    /// furl-core).
     #[pyo3(signature = (content, bias = 1.0))]
     fn compress(
         &self,
@@ -1836,8 +1837,7 @@ impl PyLogCompressor {
         let (result, stats) = py
             .detach(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let store = furl_core::ccr::InMemoryCcrStore::new();
-                    let (r, s) = self.inner.compress_with_store(&owned, bias, Some(&store));
+                    let (r, s) = self.inner.compress_key_only(&owned, bias);
                     (r, s)
                 }))
             })

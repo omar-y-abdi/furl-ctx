@@ -242,6 +242,7 @@ impl<'a> SmartCrusherPlanner<'a> {
             effective_max: max_items,
             exclude,
             query_pinned: &query_pinned,
+            item_strings,
         });
         plan.keep_indices = final_keep.into_iter().collect();
         plan
@@ -471,6 +472,7 @@ impl<'a> SmartCrusherPlanner<'a> {
             effective_max: max_items,
             exclude,
             query_pinned: &query_pinned,
+            item_strings,
         });
         plan.keep_indices = final_keep.into_iter().collect();
         plan
@@ -532,6 +534,7 @@ impl<'a> SmartCrusherPlanner<'a> {
             effective_max: max_items,
             exclude,
             query_pinned: &query_pinned,
+            item_strings,
         });
         plan.keep_indices = final_keep.into_iter().collect();
         plan

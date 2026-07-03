@@ -2,12 +2,13 @@
 //!
 //! # Guiding principle: information preservation > aggressive compression
 //!
-//! When in doubt, prefer keeping bytes. The fixtures lock the Python
-//! algorithm's exact behavior, so this crate cannot drop information that
-//! Python keeps. But the inverse is also true — we MUST drop everything
-//! Python drops, even when it feels lossy. Stage 3a's faithful port is
-//! parity-bound. A follow-up stage (token-budget-aware compression) is
-//! where we earn the right to keep more.
+//! When in doubt, prefer keeping bytes. These Rust implementations are
+//! canonical — the `furl_ctx.transforms.*` Python modules are thin shims
+//! wrapping this crate (the pure-Python originals and their parity
+//! fixtures are retired). The spec is the recovery contract the test
+//! suites exercise: anything a transform drops or hides must remain
+//! recoverable (CCR store write + surfaced marker), and output grammar
+//! is pinned by the in-crate unit tests plus the Python wrapper tests.
 //!
 //! Observability is the escape hatch: every transform returns a sidecar
 //! `Stats` struct with the granular metrics Python doesn't emit (e.g. which

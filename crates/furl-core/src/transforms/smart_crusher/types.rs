@@ -187,6 +187,15 @@ pub struct CrushabilityAnalysis {
     pub has_score_field: bool,
     pub error_item_count: usize,
     pub anomaly_count: usize,
+
+    // Memoized detection indices (PERF-3). `analyze_crushability`
+    // already runs both detections over the full array to derive its
+    // counts; carrying the indices lets the over-budget prioritizer
+    // reuse them instead of re-scanning (and re-serializing) every item.
+    /// Indices flagged by `detect_structural_outliers` — ascending.
+    pub structural_outlier_indices: Vec<usize>,
+    /// Indices flagged by `detect_error_items_for_preservation` — ascending.
+    pub error_keyword_indices: Vec<usize>,
 }
 
 impl CrushabilityAnalysis {
@@ -206,6 +215,8 @@ impl CrushabilityAnalysis {
             has_score_field: false,
             error_item_count: 0,
             anomaly_count: 0,
+            structural_outlier_indices: Vec::new(),
+            error_keyword_indices: Vec::new(),
         }
     }
 }

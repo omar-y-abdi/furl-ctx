@@ -179,7 +179,14 @@ def test_persist_failure_vetoes_marker(producer: str, failing_store: Any) -> Non
 def test_working_store_still_emits_marker(producer: str, working_store: Any) -> None:
     """Control: with a working store the SAME fixture DOES emit a resolvable CCR
     marker — proving the veto test asserts a behavior change on failure, not
-    that CCR is globally off."""
+    that CCR is globally off.
+
+    TEST-9 (hardened): the Python shim's re-persist is the marker's ONLY real
+    backing — since PERF-8 the Rust bridges compute the ``cache_key`` in
+    key-only mode and persist NOTHING themselves. So this control must pin the
+    full recovery contract, hard: after ``compress()``, the marker's hash
+    resolves in the production store AND the resolved entry carries the FULL
+    original content (not merely "some entry exists")."""
     original, run = _CASES[producer]()
     result = run()
 
@@ -191,6 +198,12 @@ def test_working_store_still_emits_marker(producer: str, working_store: Any) -> 
     assert result.compressed != original, (
         f"{producer}: cache_key set but content unchanged — CCR marker not actually emitted"
     )
-    assert working_store.retrieve(result.cache_key) is not None, (
-        f"{producer}: emitted cache_key does not resolve in the store"
+    entry = working_store.retrieve(result.cache_key)
+    assert entry is not None, (
+        f"{producer}: emitted cache_key does not resolve in the store — the "
+        "shim's re-persist (the marker's only backing) did not happen"
+    )
+    assert entry.original_content == original, (
+        f"{producer}: cache_key resolves but the stored payload is not the "
+        "original — retrieval would serve corrupted recovery data"
     )

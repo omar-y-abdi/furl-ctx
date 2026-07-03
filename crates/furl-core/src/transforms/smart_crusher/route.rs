@@ -31,15 +31,76 @@ use crate::transforms::adaptive_sizer::compute_optimal_k;
 ///   with it, so the store never holds entries no surfaced marker names
 ///   (P0-4). Empty under [`PersistMode::Skip`] (mixed dict arm).
 /// - **Skip** — the analyzer refused to crush the array (e.g. all-unique
-///   entities with no signal). There is NO drop alternative; the carried
-///   `CrushArrayResult` is the `skip:<reason>` passthrough, shipped only
-///   when there's also no lossless render.
+///   entities with no signal). There is NO drop alternative; only the
+///   `skip:<reason>` strategy string is carried (PERF-4: no full-array
+///   clone for a candidate that ships only when there's also no lossless
+///   render — and even then the caller re-uses its own borrow).
 enum LossyOutcome {
     Crushed {
         result: CrushArrayResult,
         pending_ccr_writes: Vec<CcrWrite>,
     },
-    Skip(CrushArrayResult),
+    Skip(String),
+}
+
+/// Routing outcome of [`SmartCrusher::crush_array_routed`] (PERF-4).
+///
+/// The pre-enum shape cloned the FULL input array into a
+/// `CrushArrayResult` on every passthrough/skip path — immediately
+/// re-wrapped (or discarded) by the caller. The enum makes "nothing
+/// changed" a first-class outcome so no kept-items Vec is materialized
+/// for it; internal callers (`process_value`'s DictArray arm, the mixed
+/// dict arm) re-use their own borrow of the array instead.
+pub(super) enum Routed {
+    /// The array ships unchanged. Carries the strategy string
+    /// (`"none:adaptive_at_limit"` / `"skip:<reason>"` /
+    /// `"skip:lossless_only"` / `""` for a reason-less skip).
+    Passthrough(String),
+    /// A real render shipped: lossless table, survivor-compacted table,
+    /// or lossy row-drop.
+    Result(CrushArrayResult),
+}
+
+/// A lossless render that cleared its gates, BEFORE materialization
+/// (PERF-4): carries everything except the `items` clone, which is
+/// deferred until the route decision actually picks this candidate —
+/// a discarded candidate never pays the full-array deep clone.
+struct LosslessCandidate {
+    rendered: String,
+    kind: &'static str,
+    dropped_refs: Vec<DroppedRef>,
+}
+
+impl LosslessCandidate {
+    /// Materialize the shipped form. The `items` clone happens HERE —
+    /// exactly once, on the winning candidate only.
+    fn into_result(self, items: &[Value]) -> CrushArrayResult {
+        CrushArrayResult {
+            items: items.to_vec(), // nothing dropped
+            strategy_info: format!("lossless:{}", self.kind),
+            ccr_hash: None,
+            dropped_summary: String::new(),
+            compacted: Some(self.rendered),
+            compaction_kind: Some(self.kind),
+            row_index_marker: None,
+            dropped_refs: self.dropped_refs,
+        }
+    }
+}
+
+/// Materialize a passthrough `CrushArrayResult` (public `crush_array`
+/// contract: `items` mirrors the unchanged input).
+fn passthrough_result(items: &[Value], strategy_info: String) -> CrushArrayResult {
+    CrushArrayResult {
+        items: items.to_vec(),
+        strategy_info,
+        ccr_hash: None,
+        dropped_summary: String::new(),
+        compacted: None,
+        compaction_kind: None,
+        row_index_marker: None,
+        dropped_refs: Vec::new(),
+    }
 }
 
 impl SmartCrusher {
@@ -63,11 +124,18 @@ impl SmartCrusher {
     /// 7. `execute_plan(plan, items)` → result.
     /// 8. Strategy info = `analysis.recommended_strategy.as_str()`.
     pub fn crush_array(&self, items: &[Value], query_context: &str, bias: f64) -> CrushArrayResult {
-        self.crush_array_inner(items, query_context, bias, true)
+        match self.crush_array_routed(items, query_context, bias, true) {
+            // Public contract: a passthrough result mirrors the unchanged
+            // input in `items`. Internal callers use the enum directly
+            // and skip this clone (PERF-4).
+            Routed::Passthrough(strategy_info) => passthrough_result(items, strategy_info),
+            Routed::Result(result) => result,
+        }
     }
 
     /// [`SmartCrusher::crush_array`] with the CCR store writes
-    /// switchable (COR-28).
+    /// switchable (COR-28) and the passthrough outcome unmaterialized
+    /// (PERF-4 — see [`Routed`]).
     ///
     /// `persist = false` — used by the mixed-array dict arm — runs the
     /// exact same pipeline and returns a byte-identical result: the
@@ -86,13 +154,13 @@ impl SmartCrusher {
     /// unpersisted hash would dangle (and trip the Python mirror's
     /// COR-5 fail-open). The pure lossless `compacted` render
     /// (`dropped_summary` empty) carries no pointer and is safe to ship.
-    pub(super) fn crush_array_inner(
+    pub(super) fn crush_array_routed(
         &self,
         items: &[Value],
         query_context: &str,
         bias: f64,
         persist: bool,
-    ) -> CrushArrayResult {
+    ) -> Routed {
         let item_strings: Vec<String> = items
             .iter()
             .map(|i| serde_json::to_string(i).unwrap_or_default())
@@ -148,30 +216,19 @@ impl SmartCrusher {
                             // construction if the gate ever changes.
                             let mut dropped_refs: Vec<DroppedRef> = Vec::new();
                             c.collect_opaque_refs(&mut dropped_refs);
-                            return CrushArrayResult {
-                                items: items.to_vec(), // nothing dropped
-                                strategy_info: format!("lossless:{kind}"),
-                                ccr_hash: None,
-                                dropped_summary: String::new(),
-                                compacted: Some(rendered),
-                                compaction_kind: Some(kind),
-                                row_index_marker: None,
-                                dropped_refs,
-                            };
+                            return Routed::Result(
+                                LosslessCandidate {
+                                    rendered,
+                                    kind,
+                                    dropped_refs,
+                                }
+                                .into_result(items),
+                            );
                         }
                     }
                 }
             }
-            return CrushArrayResult {
-                items: items.to_vec(),
-                strategy_info: "none:adaptive_at_limit".to_string(),
-                ccr_hash: None,
-                dropped_summary: String::new(),
-                compacted: None,
-                compaction_kind: None,
-                row_index_marker: None,
-                dropped_refs: Vec::new(),
-            };
+            return Routed::Passthrough("none:adaptive_at_limit".to_string());
         }
 
         // ── Lossless candidate ──
@@ -215,17 +272,14 @@ impl SmartCrusher {
                         // cells) — collect them typed (§4.2 R2). The refs
                         // ride the candidate: they ship iff it ships, and
                         // a discarded candidate's refs drop with it —
-                        // exactly like its pending store writes.
+                        // exactly like its pending store writes. The
+                        // `items` clone is deferred until the candidate
+                        // WINS (PERF-4) — see [`LosslessCandidate`].
                         let mut dropped_refs: Vec<DroppedRef> = Vec::new();
                         c.collect_opaque_refs(&mut dropped_refs);
-                        Some(CrushArrayResult {
-                            items: items.to_vec(), // nothing dropped
-                            strategy_info: format!("lossless:{kind}"),
-                            ccr_hash: None,
-                            dropped_summary: String::new(),
-                            compacted: Some(rendered),
-                            compaction_kind: Some(kind),
-                            row_index_marker: None,
+                        Some(LosslessCandidate {
+                            rendered,
+                            kind,
                             dropped_refs,
                         })
                     } else {
@@ -249,17 +303,8 @@ impl SmartCrusher {
         // row through untouched.
         if self.config.lossless_only {
             return match lossless_candidate {
-                Some(lossless) => lossless,
-                None => CrushArrayResult {
-                    items: items.to_vec(),
-                    strategy_info: "skip:lossless_only".to_string(),
-                    ccr_hash: None,
-                    dropped_summary: String::new(),
-                    compacted: None,
-                    compaction_kind: None,
-                    row_index_marker: None,
-                    dropped_refs: Vec::new(),
-                },
+                Some(lossless) => Routed::Result(lossless.into_result(items)),
+                None => Routed::Passthrough("skip:lossless_only".to_string()),
             };
         }
 
@@ -332,9 +377,12 @@ impl SmartCrusher {
             ) => match self.config.routing_policy {
                 // Lossless ships → the lossy candidate is discarded and
                 // its deferred writes drop with it (no orphans, P0-4).
-                RoutingPolicy::LosslessFirst => lossless,
+                RoutingPolicy::LosslessFirst => Routed::Result(lossless.into_result(items)),
                 RoutingPolicy::MinTokens => {
-                    let lossless_tokens = self.render_token_count(&lossless);
+                    // The lossless candidate's render IS its final
+                    // model-visible string — count it directly (PERF-4:
+                    // no materialized result, no clone, same count).
+                    let lossless_tokens = self.tokenizer.count_text(&lossless.rendered);
                     let lossy_tokens = self.render_token_count(&lossy);
                     // Lossy wins only when STRICTLY fewer tokens; ties (and
                     // lossless-fewer) → lossless: more rows visible at no
@@ -343,18 +391,18 @@ impl SmartCrusher {
                         // Lossy SHIPS → commit its recovery entries now
                         // (unconditional persist for shipped output).
                         self.commit_ccr_writes(pending_ccr_writes);
-                        lossy
+                        Routed::Result(lossy)
                     } else {
                         // Lossless ships → discarded candidate's deferred
                         // writes are dropped (no orphans, P0-4).
-                        lossless
+                        Routed::Result(lossless.into_result(items))
                     }
                 }
             },
             // Lossless render valid but the array isn't droppable (Skip):
             // ship lossless — it shows every row losslessly. (A non-
             // droppable array should never drop, and lossless never drops.)
-            (Some(lossless), LossyOutcome::Skip(_)) => lossless,
+            (Some(lossless), LossyOutcome::Skip(_)) => Routed::Result(lossless.into_result(items)),
             // Only the lossy DROP render is valid → ship it. Its recovery
             // entries are committed on the way out (same unconditional
             // guarantee as before the deferral; only the timing moved).
@@ -366,11 +414,11 @@ impl SmartCrusher {
                 },
             ) => {
                 self.commit_ccr_writes(pending_ccr_writes);
-                lossy
+                Routed::Result(lossy)
             }
             // No lossless render and the array isn't droppable → the
             // `skip:<reason>` passthrough (preserves pre-routing behavior).
-            (None, LossyOutcome::Skip(passthrough)) => passthrough,
+            (None, LossyOutcome::Skip(reason)) => Routed::Passthrough(reason),
         }
     }
 
@@ -420,7 +468,11 @@ impl SmartCrusher {
         } else {
             adaptive_k
         };
-        let mut analysis = self.analyzer.analyze_array(items);
+        // Threads the already-computed serializations into the analyzer's
+        // crushability error-keyword scan (PERF-3) — no re-serialization.
+        let mut analysis = self
+            .analyzer
+            .analyze_array_with_strings(items, Some(item_strings));
 
         // ── CCR-backed crushability override (entropy floor) ──
         //
@@ -475,23 +527,15 @@ impl SmartCrusher {
         }
 
         // Crushability gate: not safe to crush → no DROP candidate. Carry
-        // the `skip:<reason>` passthrough so the caller can ship it when
-        // there's also no lossless render.
+        // the `skip:<reason>` strategy string so the caller can ship a
+        // passthrough when there's also no lossless render (PERF-4: the
+        // unchanged items are never cloned here).
         if analysis.recommended_strategy == CompressionStrategy::Skip {
             let reason = match &analysis.crushability {
                 Some(c) => format!("skip:{}", c.reason),
                 None => String::new(),
             };
-            return LossyOutcome::Skip(CrushArrayResult {
-                items: items.to_vec(),
-                strategy_info: reason,
-                ccr_hash: None,
-                dropped_summary: String::new(),
-                compacted: None,
-                compaction_kind: None,
-                row_index_marker: None,
-                dropped_refs: Vec::new(),
-            });
+            return LossyOutcome::Skip(reason);
         }
 
         let plan = self.planner().create_plan(
@@ -653,17 +697,36 @@ impl SmartCrusher {
 
     /// Render a `CrushArrayResult` to the string `process_value`
     /// substitutes for the array (see [`SmartCrusher::render_token_count`]).
+    ///
+    /// Composes the `[item0,item1,...,sentinel?]` render element-wise —
+    /// byte-identical to `python_safe_json_dumps(&Value::Array(...))`
+    /// (the serializer is context-free; `,` separators are appended
+    /// here) — without deep-cloning the items into a temporary array
+    /// just to count tokens (PERF-4).
     fn render_result_string(&self, result: &CrushArrayResult) -> String {
+        use crate::transforms::anchor_selector::write_python_safe_json;
+
         if let Some(s) = &result.compacted {
             return s.clone();
         }
-        let mut items = result.items.clone();
-        if !result.dropped_summary.is_empty() {
-            let sentinel =
-                ccr_sentinel_map(&result.dropped_summary, result.row_index_marker.as_deref());
-            items.push(Value::Object(sentinel));
+        let sentinel = if result.dropped_summary.is_empty() {
+            None
+        } else {
+            Some(Value::Object(ccr_sentinel_map(
+                &result.dropped_summary,
+                result.row_index_marker.as_deref(),
+            )))
+        };
+        let mut out = String::new();
+        out.push('[');
+        for (i, v) in result.items.iter().chain(sentinel.iter()).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            write_python_safe_json(v, &mut out);
         }
-        crate::transforms::anchor_selector::python_safe_json_dumps(&Value::Array(items))
+        out.push(']');
+        out
     }
 }
 
@@ -820,7 +883,7 @@ fn compaction_kind_str(c: &Compaction) -> &'static str {
         Compaction::Table { .. } => "table",
         Compaction::Buckets { .. } => "buckets",
         Compaction::OpaqueRef { .. } => "ccr",
-        Compaction::Untouched(_) => "untouched",
+        Compaction::Untouched => "untouched",
     }
 }
 

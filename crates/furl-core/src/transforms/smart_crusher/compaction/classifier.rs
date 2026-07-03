@@ -79,7 +79,15 @@ pub fn classify_cell(value: &Value, cfg: &ClassifyConfig) -> CellClass {
     }
 }
 
-fn classify_string(s: &str, cfg: &ClassifyConfig) -> CellClass {
+/// Classify a string cell WITHOUT wrapping it in a `Value` first.
+///
+/// Public so string-handling call sites (`walker::walk_string`,
+/// `SmartCrusher::process_string`) can classify a borrowed `&str`
+/// directly — the old private-fn shape forced them to clone every
+/// string into a throwaway `Value::String` just to classify it (PERF-5).
+/// `classify_cell(&Value::String(s), cfg)` delegates here, so the two
+/// entry points cannot drift.
+pub fn classify_string(s: &str, cfg: &ClassifyConfig) -> CellClass {
     // Stringified-JSON check first. Cheap fast-path: must start with
     // `{` or `[` (after optional whitespace) — skip strings that
     // can't possibly be JSON containers. Parsing `"123"` would

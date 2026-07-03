@@ -145,10 +145,10 @@ pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
     use super::formatter::column_name_breaks_grammar;
 
     if items.len() < cfg.min_items {
-        return Compaction::Untouched(Value::Array(items.to_vec()));
+        return Compaction::Untouched;
     }
     if !items.iter().all(|v| matches!(v, Value::Object(_))) {
-        return Compaction::Untouched(Value::Array(items.to_vec()));
+        return Compaction::Untouched;
     }
 
     let key_freqs = compute_key_freqs(items);
@@ -160,7 +160,7 @@ pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
     // arith folds shift by a row). Decline compaction — the array keeps
     // its verbatim JSON shape and merely skips the lossless tier.
     if key_freqs.keys().any(|k| column_name_breaks_grammar(k)) {
-        return Compaction::Untouched(Value::Array(items.to_vec()));
+        return Compaction::Untouched;
     }
     let total = items.len();
     let core_threshold = (total as f64 * cfg.core_field_fraction).ceil() as usize;
@@ -269,7 +269,16 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
             // Recurse if the inner array is array-of-objects; else scalar.
             if let Value::Array(items) = v {
                 if items.iter().all(|i| matches!(i, Value::Object(_))) && items.len() >= 2 {
-                    return CellValue::Nested(Box::new(compact(items, cfg)));
+                    let sub = compact(items, cfg);
+                    if sub.was_compacted() {
+                        return CellValue::Nested(Box::new(sub));
+                    }
+                    // Inner compaction declined (`Untouched` is
+                    // payload-free, PERF-5): carry the original value —
+                    // renders byte-identically to the old
+                    // `Nested(Untouched(...))` and stays out of the
+                    // decoder-verifiable tier.
+                    return CellValue::DeclinedJson(v.clone());
                 }
             }
             CellValue::Scalar(v.clone())
@@ -279,7 +288,12 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
             // store the parsed value as a Scalar (un-escapes for free).
             if let Value::Array(items) = &parsed {
                 if items.iter().all(|i| matches!(i, Value::Object(_))) && items.len() >= 2 {
-                    return CellValue::Nested(Box::new(compact(items, cfg)));
+                    let sub = compact(items, cfg);
+                    if sub.was_compacted() {
+                        return CellValue::Nested(Box::new(sub));
+                    }
+                    // See the JsonArray arm above (PERF-5).
+                    return CellValue::DeclinedJson(parsed);
                 }
             }
             CellValue::Scalar(parsed)
@@ -1185,15 +1199,15 @@ mod tests {
     #[test]
     fn empty_or_single_is_untouched() {
         let items: Vec<Value> = vec![];
-        assert!(matches!(compact(&items, &cfg()), Compaction::Untouched(_)));
+        assert!(matches!(compact(&items, &cfg()), Compaction::Untouched));
         let items = vec![json!({"a": 1})];
-        assert!(matches!(compact(&items, &cfg()), Compaction::Untouched(_)));
+        assert!(matches!(compact(&items, &cfg()), Compaction::Untouched));
     }
 
     #[test]
     fn non_object_array_is_untouched() {
         let items = vec![json!(1), json!(2), json!(3)];
-        assert!(matches!(compact(&items, &cfg()), Compaction::Untouched(_)));
+        assert!(matches!(compact(&items, &cfg()), Compaction::Untouched));
     }
 
     #[test]
@@ -1282,9 +1296,9 @@ mod tests {
                 .map(|i| json!({"id": i, key: format!("val-{i}"), "s": "ok"}))
                 .collect();
             match compact(&items, &cfg()) {
-                Compaction::Untouched(v) => {
-                    assert_eq!(v, Value::Array(items.clone()), "verbatim for key {key:?}");
-                }
+                // Payload-free decline (PERF-5): the caller re-uses its
+                // own borrow, so "verbatim" is guaranteed by construction.
+                Compaction::Untouched => {}
                 other => panic!("key {key:?} must decline compaction, got {other:?}"),
             }
         }

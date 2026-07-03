@@ -1,9 +1,10 @@
 //! Adaptive compression sizing via information saturation detection.
 //!
-//! Direct port of `furl_ctx/transforms/adaptive_sizer.py`. Used by
-//! `smart_crusher`'s array crushers to decide *how many* items to keep —
-//! statistically, by detecting the "knee point" of an information
-//! saturation curve.
+//! This Rust implementation is canonical (the pure-Python
+//! `adaptive_sizer.py` original is retired — no cross-language pin
+//! remains). Used by `smart_crusher`'s array crushers and the log/search
+//! compressors to decide *how many* items to keep — statistically, by
+//! detecting the "knee point" of an information saturation curve.
 //!
 //! # Algorithm overview
 //!
@@ -16,28 +17,31 @@
 //!    produces a much-more-redundant subset than the full set, bump
 //!    `k` by 20%.
 //!
-//! # Parity-relevant subtleties
+//! # Implementation notes
 //!
-//! - `_simhash` hashes character 4-grams via MD5, then aggregates bits
-//!   via weighted voting. Take the first 64 bits of the MD5 digest as a
-//!   big-endian `u64` — Python does `int(hex[:16], 16)` which is exactly
-//!   that. Per-character iteration matches Python's `str` slicing
-//!   (codepoints, not bytes).
-//! - `compute_unique_bigram_curve` operates on whitespace-split words.
-//!   Single-word items emit `(word, "")`. Empty-string items emit
-//!   `("", "")`. Both languages must agree byte-for-byte on the set
-//!   cardinality.
+//! - `simhash` hashes character 4-grams (codepoint windows) with
+//!   [`FxHasher`] and aggregates bits via weighted voting. The original
+//!   used one full **MD5 digest per window** — a 10k-line log paid
+//!   ~770k MD5 calls inside `compute_optimal_k` (PERF-6). A similarity
+//!   fingerprint needs a fast, deterministic, well-mixed 64-bit hash,
+//!   not a cryptographic one. Fingerprint VALUES differ from the MD5
+//!   era; the clustering semantics (Hamming-distance grouping) are
+//!   unchanged and the outputs are pinned by the characterization
+//!   tests below + the benchmark ratio floor.
+//! - `compute_unique_bigram_curve` operates on whitespace-split words,
+//!   deduped as `(u64, u64)` word-hash pairs (PERF-6 — the old
+//!   `(String, String)` set allocated two Strings per bigram).
+//!   Single-word items emit `(word, "")`; empty items emit `("", "")`.
 //! - `find_knee` requires `> 0.05` deviation from the diagonal in
 //!   normalized space; threshold is strict (`<` returns None).
-//! - `_validate_with_zlib` uses `zlib.compress(..., level=1)`. We use
-//!   `flate2` with the default miniz_oxide backend; for typical inputs
-//!   the output length matches CPython's libz at level=1 closely enough
-//!   that the 15% ratio-diff threshold absorbs any per-byte drift.
+//! - `validate_with_zlib` mirrors `zlib.compress(..., level=1)` via
+//!   `flate2` (miniz_oxide backend); the 15% ratio-diff threshold
+//!   absorbs per-byte encoder drift.
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use md5::{Digest, Md5};
-use std::collections::HashSet;
+use rustc_hash::{FxHashSet, FxHasher};
+use std::hash::Hasher;
 use std::io::Write;
 
 /// Compute the optimal number of items to keep via information saturation.
@@ -150,25 +154,41 @@ pub fn find_knee(curve: &[usize]) -> Option<usize> {
 
 /// Cumulative unique-bigram coverage curve.
 ///
-/// Direct port of `compute_unique_bigram_curve` (Python
-/// `adaptive_sizer.py:157-182`). Each item contributes its word-level
-/// bigrams; single-word items contribute `(word, "")`. The curve at
-/// index `k` is the running count of unique bigrams after seeing
+/// Each item contributes its word-level bigrams; single-word items
+/// contribute `(word, "")`, empty items `("", "")`. The curve at index
+/// `k` is the running count of unique bigrams after seeing
 /// `items[0..=k]`.
+///
+/// Bigrams dedupe as `(u64, u64)` FxHash word pairs (PERF-6): the old
+/// `HashSet<(String, String)>` allocated two owned Strings per bigram.
+/// Set cardinality is identical up to 64-bit hash collisions —
+/// negligible against the knee detector's coarse geometry.
 pub fn compute_unique_bigram_curve(items: &[&str]) -> Vec<usize> {
-    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut seen: FxHashSet<(u64, u64)> = FxHashSet::default();
     let mut curve: Vec<usize> = Vec::with_capacity(items.len());
+    let empty_hash = hash_word("");
 
     for item in items {
         let lower = item.to_lowercase();
-        let words: Vec<&str> = lower.split_whitespace().collect();
-        if words.len() < 2 {
-            // Single word or empty: synthesize a unigram-bigram.
-            let first = words.first().copied().unwrap_or("");
-            seen.insert((first.to_string(), String::new()));
-        } else {
-            for j in 0..words.len() - 1 {
-                seen.insert((words[j].to_string(), words[j + 1].to_string()));
+        let mut words = lower.split_whitespace();
+        match words.next() {
+            // Empty item: synthesize `("", "")`.
+            None => {
+                seen.insert((empty_hash, empty_hash));
+            }
+            Some(first) => {
+                let mut prev = hash_word(first);
+                let mut saw_pair = false;
+                for w in words {
+                    let cur = hash_word(w);
+                    seen.insert((prev, cur));
+                    prev = cur;
+                    saw_pair = true;
+                }
+                // Single word: synthesize `(word, "")`.
+                if !saw_pair {
+                    seen.insert((prev, empty_hash));
+                }
             }
         }
         curve.push(seen.len());
@@ -179,13 +199,15 @@ pub fn compute_unique_bigram_curve(items: &[&str]) -> Vec<usize> {
 
 /// 64-bit SimHash fingerprint of a text string.
 ///
-/// Direct port of `_simhash` (Python `adaptive_sizer.py:185-214`).
 /// Algorithm:
-/// 1. Iterate character 4-grams (sliding window). For input shorter
-///    than 4 chars, the loop runs once with the entire string as the
-///    only "gram". Empty input still iterates once with `""`.
-/// 2. Hash each gram with MD5; take the first 64 bits as a big-endian
-///    `u64`. (Python: `int(hexdigest()[:16], 16)`.)
+/// 1. Iterate character 4-grams (sliding codepoint window). For input
+///    shorter than 4 chars, the loop runs once with the entire string
+///    as the only "gram". Empty input still iterates once with `""`.
+/// 2. Hash each gram to a `u64` with [`FxHasher`] over its UTF-8 bytes
+///    (PERF-6 — the MD5-per-window original was Python-parity ballast;
+///    a similarity fingerprint needs speed + determinism + bit mixing,
+///    not collision resistance). No per-window String is allocated:
+///    the window encodes into a 16-byte stack buffer.
 /// 3. For each bit position 0..64, increment a vote counter when the
 ///    bit is set, decrement when clear.
 /// 4. Final fingerprint: bit `j` is set iff `votes[j] > 0` (strict).
@@ -194,24 +216,25 @@ pub fn simhash(text: &str) -> u64 {
     let chars: Vec<char> = lower.chars().collect();
     let n = chars.len();
 
-    // Python: `range(max(1, len(text_lower) - 3))`. For n<=3, this is
-    // `range(1)` (single iteration on the whole string). For n>=4 it's
-    // `range(n-3)`.
+    // `max(1, n - 3)` windows: for n<=3 a single iteration over the
+    // whole (short) string; for n>=4 one window per starting index.
     let iter_count = if n <= 3 { 1 } else { n - 3 };
 
     let mut votes: [i32; 64] = [0; 64];
+    // A 4-char window is at most 16 UTF-8 bytes.
+    let mut buf = [0u8; 16];
 
     for i in 0..iter_count {
-        // 4-character window starting at char index i. For short input,
-        // this is just the whole string padded by being shorter than 4.
-        let gram: String = chars.iter().skip(i).take(4).collect();
+        // 4-character window starting at char index i, encoded into the
+        // stack buffer (for short input this is the whole string).
+        let mut len = 0usize;
+        for &c in chars.iter().skip(i).take(4) {
+            len += c.encode_utf8(&mut buf[len..]).len();
+        }
 
-        let digest = Md5::digest(gram.as_bytes());
-        // First 8 bytes of the 16-byte digest, big-endian → u64.
-        // Mirrors Python's `int(hex[:16], 16)` exactly.
-        let h = u64::from_be_bytes([
-            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
-        ]);
+        let mut hasher = FxHasher::default();
+        hasher.write(&buf[..len]);
+        let h = hasher.finish();
 
         for (j, vote) in votes.iter_mut().enumerate() {
             if (h >> j) & 1 == 1 {
@@ -229,6 +252,14 @@ pub fn simhash(text: &str) -> u64 {
         }
     }
     fingerprint
+}
+
+/// FxHash of a word's bytes — the bigram-set element (PERF-6).
+#[inline]
+fn hash_word(w: &str) -> u64 {
+    let mut hasher = FxHasher::default();
+    hasher.write(w.as_bytes());
+    hasher.finish()
 }
 
 /// Hamming distance between two 64-bit SimHash fingerprints.
@@ -331,57 +362,63 @@ fn zlib_compressed_len(bytes: &[u8]) -> usize {
 mod tests {
     use super::*;
 
-    // ---------- simhash (verified against Python reference) ----------
+    // ---------- simhash (characterization of the FxHash fingerprint) ----------
+    //
+    // PERF-6: the fingerprints below were regenerated when the per-gram
+    // hash moved MD5 → FxHash (the MD5 choice was Python-parity; the
+    // Python original is retired). The constants pin THIS
+    // implementation's determinism — cross-platform, cross-release —
+    // not an external reference. Clustering semantics are covered by
+    // the count_unique_simhash / compute_optimal_k tests, and end-to-end
+    // quality by the benchmark ratio floor (non-regression gated).
 
     #[test]
     fn simhash_empty_string() {
-        // md5("")[:16] = "d41d8cd98f00b204"
-        assert_eq!(simhash(""), 0xd41d8cd98f00b204);
+        // Single iteration over the empty gram.
+        assert_eq!(simhash(""), 0xf456d26876d72d91);
     }
 
     #[test]
     fn simhash_single_char() {
-        // md5("a")[:16] = "0cc175b9c0f1b6a8"
-        assert_eq!(simhash("a"), 0x0cc175b9c0f1b6a8);
+        assert_eq!(simhash("a"), 0xbd8e8067b4be2f50);
     }
 
     #[test]
     fn simhash_short_strings() {
-        // For n <= 3, single iteration; fp = md5(text)[:16] as u64.
-        assert_eq!(simhash("ab"), 0x187ef4436122d1cc);
-        assert_eq!(simhash("abc"), 0x900150983cd24fb0);
+        // For n <= 3, single iteration: fp = FxHash of the whole string.
+        assert_eq!(simhash("ab"), 0x9de70eed801ef68e);
+        assert_eq!(simhash("abc"), 0xe7cfbde76661213f);
     }
 
     #[test]
     fn simhash_n_eq_4_single_iteration() {
         // n=4: max(1, 4-3)=1, single iteration on full string.
-        assert_eq!(simhash("abcd"), 0xe2fc714c4727ee93);
+        assert_eq!(simhash("abcd"), 0x129d90d0160ec9ca);
     }
 
     #[test]
     fn simhash_multi_window() {
         // n>=5 → bit voting from multiple grams.
-        assert_eq!(simhash("hello"), 0x0209020130100020);
-        assert_eq!(simhash("hello world"), 0x4681260120120222);
+        assert_eq!(simhash("hello"), 0xe42508110121c8a0);
+        assert_eq!(simhash("hello world"), 0xb423895069a0a8ac);
     }
 
     #[test]
     fn simhash_unicode_codepoint_iteration() {
-        // "café" is 4 codepoints — should iterate once on the full string,
-        // hash md5 of UTF-8 bytes (5 bytes for é=2 bytes).
-        assert_eq!(simhash("café"), 0x07117fe4a1ebd544);
+        // "café" is 4 codepoints — a single window over the full string,
+        // hashing its UTF-8 bytes (5 bytes: é is 2).
+        assert_eq!(simhash("café"), 0xfc2e6df1bc20cdf8);
     }
 
     #[test]
     fn simhash_lowercases_input() {
-        // Python lowercases before hashing.
         assert_eq!(simhash("ABC"), simhash("abc"));
         assert_eq!(simhash("Hello"), simhash("hello"));
     }
 
     #[test]
     fn simhash_longer_text() {
-        assert_eq!(simhash("The quick brown fox jumps"), 0x30875e2639b3cb98);
+        assert_eq!(simhash("The quick brown fox jumps"), 0x6ac81d5154b171cd);
     }
 
     // ---------- hamming_distance ----------

@@ -43,6 +43,14 @@ flate2 = "1"
 # bring `encoding_rs` for non-UTF8 sniffing — we keep them on for
 # compatibility with arbitrary tool outputs.
 unidiff = "0.4"
+# `rustc-hash` (FxHash) powers the adaptive sizer's SimHash grams and
+# bigram-coverage sets (PERF-6). The old implementation ran one full MD5
+# digest per 4-char window — Python-parity ballast (the Python original
+# is retired; no cross-language pin remains). FxHash is a tiny,
+# deterministic, non-cryptographic 64-bit hash: exactly what a
+# similarity fingerprint needs. Already in the workspace tree
+# transitively; this makes it a direct dependency.
+rustc-hash = "2"
 # `aho-corasick` powers the Tier-3 KeywordDetector in `signals/`.
 # A single deterministic-finite-automaton scan finds every keyword
 # in a line in O(n + m) — orders of magnitude faster than running N

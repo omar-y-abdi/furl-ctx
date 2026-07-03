@@ -50,7 +50,7 @@ use std::sync::OnceLock;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use regex::Regex;
 
-use crate::ccr::persist::persist_and_mark;
+use crate::ccr::persist::{key_and_mark, persist_and_mark, MarkerBacking};
 use crate::ccr::CcrStore;
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
@@ -669,11 +669,39 @@ impl LogCompressor {
         self.compress_with_store(content, bias, None)
     }
 
+    /// Compress with the CCR `cache_key` computed but NOTHING persisted
+    /// (PERF-8). Byte-identical output (compressed bytes, marker,
+    /// `cache_key`, stats) to `compress_with_store(.., Some(store))` —
+    /// only the store write is skipped. For callers that own persistence
+    /// themselves: the PyO3 bridge's Python shim re-persists the
+    /// original into the production `CompressionStore` under this exact
+    /// key and vetoes the compression if that write fails.
+    pub fn compress_key_only(
+        &self,
+        content: &str,
+        bias: f64,
+    ) -> (LogCompressionResult, LogCompressorStats) {
+        self.compress_inner(content, bias, MarkerBacking::KeyOnly)
+    }
+
     pub fn compress_with_store(
         &self,
         content: &str,
         bias: f64,
         store: Option<&dyn CcrStore>,
+    ) -> (LogCompressionResult, LogCompressorStats) {
+        let backing = match store {
+            Some(s) => MarkerBacking::Store(s),
+            None => MarkerBacking::Disabled,
+        };
+        self.compress_inner(content, bias, backing)
+    }
+
+    fn compress_inner(
+        &self,
+        content: &str,
+        bias: f64,
+        backing: MarkerBacking<'_>,
     ) -> (LogCompressionResult, LogCompressorStats) {
         let mut stats = LogCompressorStats::default();
         let lines: Vec<&str> = content.split('\n').collect();
@@ -711,17 +739,38 @@ impl LogCompressor {
         if self.config.enable_ccr {
             if ratio >= self.config.min_compression_ratio_for_ccr {
                 stats.ccr_skip_reason = Some("compression ratio too high");
-            } else if let Some(store) = store {
-                // Shared key→put→marker tail (`ccr::persist`, ARCH-5);
-                // the leading `\n` is composed there so the marker
-                // grammar in `ccr::markers` stays newline-free.
-                let (key, marker) =
-                    persist_and_mark(store, content, original_line_count, selected.len(), "lines");
-                compressed.push_str(&marker);
-                cache_key = Some(key);
-                stats.ccr_emitted = true;
             } else {
-                stats.ccr_skip_reason = Some("no store provided");
+                // Shared key→[put]→marker tail (`ccr::persist`, ARCH-5);
+                // the leading `\n` is composed there so the marker
+                // grammar in `ccr::markers` stays newline-free. Key and
+                // marker bytes are identical across backings (PERF-8) —
+                // only whether the original is persisted differs.
+                let keyed = match backing {
+                    MarkerBacking::Store(store) => Some(persist_and_mark(
+                        store,
+                        content,
+                        original_line_count,
+                        selected.len(),
+                        "lines",
+                    )),
+                    MarkerBacking::KeyOnly => Some(key_and_mark(
+                        content,
+                        original_line_count,
+                        selected.len(),
+                        "lines",
+                    )),
+                    MarkerBacking::Disabled => None,
+                };
+                match keyed {
+                    Some((key, marker)) => {
+                        compressed.push_str(&marker);
+                        cache_key = Some(key);
+                        stats.ccr_emitted = true;
+                    }
+                    None => {
+                        stats.ccr_skip_reason = Some("no store provided");
+                    }
+                }
             }
         } else {
             stats.ccr_skip_reason = Some("ccr disabled in config");
@@ -878,28 +927,35 @@ impl LogCompressor {
         let adaptive_max =
             compute_optimal_k(&all_strings, bias, 10, Some(self.config.max_total_lines));
 
-        // Single pass to categorize (Python does 4).
-        let mut errors: Vec<LogLine> = Vec::new();
-        let mut fails: Vec<LogLine> = Vec::new();
-        let mut warnings: Vec<LogLine> = Vec::new();
-        let mut summaries: Vec<LogLine> = Vec::new();
-        let mut stack_traces: Vec<Vec<LogLine>> = Vec::new();
-        let mut current_stack: Vec<LogLine> = Vec::new();
+        // Single pass to categorize (Python does 4) — over line INDICES.
+        // A `LogLine`'s identity is its `line_number`, which equals its
+        // index in `log_lines` by construction (`parse_lines`) — the
+        // same invariant the context-window lookup below has always
+        // relied on (`log_lines[line_number]`). Running the whole
+        // selection on `usize` sets means each selected line is cloned
+        // exactly ONCE, at the output materialization — the old shape
+        // cloned every categorized line 2-3× (PERF-7).
+        let mut errors: Vec<usize> = Vec::new();
+        let mut fails: Vec<usize> = Vec::new();
+        let mut warnings: Vec<usize> = Vec::new();
+        let mut summaries: Vec<usize> = Vec::new();
+        let mut stack_traces: Vec<Vec<usize>> = Vec::new();
+        let mut current_stack: Vec<usize> = Vec::new();
 
-        for line in log_lines {
+        for (i, line) in log_lines.iter().enumerate() {
             match line.level {
-                LogLevel::Error => errors.push(line.clone()),
-                LogLevel::Fail => fails.push(line.clone()),
-                LogLevel::Warn => warnings.push(line.clone()),
+                LogLevel::Error => errors.push(i),
+                LogLevel::Fail => fails.push(i),
+                LogLevel::Warn => warnings.push(i),
                 _ => {}
             }
             if line.is_stack_trace {
-                current_stack.push(line.clone());
+                current_stack.push(i);
             } else if !current_stack.is_empty() {
                 stack_traces.push(std::mem::take(&mut current_stack));
             }
             if line.is_summary {
-                summaries.push(line.clone());
+                summaries.push(i);
             }
         }
         if !current_stack.is_empty() {
@@ -907,47 +963,47 @@ impl LogCompressor {
         }
         stats.stack_traces_seen = stack_traces.len();
 
-        let mut selected: BTreeSet<LogLine> = BTreeSet::new();
-        // BTreeSet sorts by line_number (the only field in PartialOrd).
-        // Insertion is deterministic and supports the final
-        // line-number-ordered output without an extra sort pass.
-        let _ = (); // appease style; the BTreeSet ordering relies on Ord impl below.
+        // BTreeSet<usize> over indices — identical dedup + ascending
+        // iteration semantics to the old BTreeSet<LogLine> (whose Ord
+        // was line_number-only).
+        let mut selected: BTreeSet<usize> = BTreeSet::new();
 
-        for line in self.select_with_first_last(&errors, self.config.max_errors) {
-            selected.insert(line);
-        }
-        for line in self.select_with_first_last(&fails, self.config.max_errors) {
-            selected.insert(line);
-        }
+        selected.extend(self.select_indices_with_first_last(
+            log_lines,
+            &errors,
+            self.config.max_errors,
+        ));
+        selected.extend(self.select_indices_with_first_last(
+            log_lines,
+            &fails,
+            self.config.max_errors,
+        ));
 
         let warnings = if self.config.dedupe_warnings {
-            let dedup_warnings = self.dedupe_similar(warnings);
-            stats.warnings_dropped_by_dedupe = warnings_dropped(log_lines, &dedup_warnings);
+            let dedup_warnings = self.dedupe_similar_indices(log_lines, &warnings);
+            stats.warnings_dropped_by_dedupe = warnings_dropped(log_lines, dedup_warnings.len());
             dedup_warnings
         } else {
             warnings
         };
-        for line in warnings.into_iter().take(self.config.max_warnings) {
-            selected.insert(line);
+        for &i in warnings.iter().take(self.config.max_warnings) {
+            selected.insert(i);
         }
 
         for stack in stack_traces.iter().take(self.config.max_stack_traces) {
             stats.stack_traces_kept += 1;
-            for line in stack.iter().take(self.config.stack_trace_max_lines) {
-                selected.insert(line.clone());
+            for &i in stack.iter().take(self.config.stack_trace_max_lines) {
+                selected.insert(i);
             }
         }
 
         if self.config.keep_summary_lines {
-            for line in summaries {
-                selected.insert(line);
-            }
+            selected.extend(summaries);
         }
 
         // Add context lines around every selected entry.
-        let selected_indices: BTreeSet<usize> = selected.iter().map(|l| l.line_number).collect();
         let mut context_indices: BTreeSet<usize> = BTreeSet::new();
-        for &idx in &selected_indices {
+        for &idx in &selected {
             let lo = idx.saturating_sub(self.config.error_context_lines);
             let hi = (idx + self.config.error_context_lines + 1).min(log_lines.len());
             for i in lo..hi {
@@ -957,62 +1013,97 @@ impl LogCompressor {
             }
         }
         for idx in context_indices {
-            if !selected_indices.contains(&idx) && idx < log_lines.len() {
-                selected.insert(log_lines[idx].clone());
+            if idx < log_lines.len() {
+                selected.insert(idx);
             }
         }
 
-        let mut ordered: Vec<LogLine> = selected.into_iter().collect();
+        let mut ordered: Vec<usize> = selected.into_iter().collect();
         if ordered.len() > adaptive_max {
             stats.lines_dropped_by_global_cap += ordered.len() - adaptive_max;
             // Sort by score desc, take top adaptive_max, restore line order.
-            ordered.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
+            ordered.sort_by(|&a, &b| {
+                log_lines[b]
+                    .score
+                    .partial_cmp(&log_lines[a].score)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.line_number.cmp(&b.line_number))
+                    .then_with(|| log_lines[a].line_number.cmp(&log_lines[b].line_number))
             });
             ordered.truncate(adaptive_max);
-            ordered.sort_by_key(|l| l.line_number);
+            ordered.sort_unstable_by_key(|&i| log_lines[i].line_number);
         }
-        ordered
+        // The single clone of the selection pipeline (PERF-7).
+        ordered.into_iter().map(|i| log_lines[i].clone()).collect()
     }
 
     pub fn select_with_first_last(&self, lines: &[LogLine], max_count: usize) -> Vec<LogLine> {
-        if lines.len() <= max_count {
-            return lines.to_vec();
+        let candidates: Vec<usize> = (0..lines.len()).collect();
+        self.select_indices_with_first_last(lines, &candidates, max_count)
+            .into_iter()
+            .map(|i| lines[i].clone())
+            .collect()
+    }
+
+    /// Index-set core of [`select_with_first_last`](Self::select_with_first_last)
+    /// (PERF-7): `candidates` index into `lines`; nothing is cloned.
+    /// First/last pins + score-descending fill, deduped by the line's
+    /// `line_number` — behavior-identical to the owning-Vec shape.
+    fn select_indices_with_first_last(
+        &self,
+        lines: &[LogLine],
+        candidates: &[usize],
+        max_count: usize,
+    ) -> Vec<usize> {
+        if candidates.len() <= max_count {
+            return candidates.to_vec();
         }
-        let mut out: Vec<LogLine> = Vec::with_capacity(max_count);
+        let mut out: Vec<usize> = Vec::with_capacity(max_count);
         let mut seen: BTreeSet<usize> = BTreeSet::new();
-        let push = |line: LogLine, out: &mut Vec<LogLine>, seen: &mut BTreeSet<usize>| {
-            if seen.insert(line.line_number) {
-                out.push(line);
+        let push = |idx: usize, out: &mut Vec<usize>, seen: &mut BTreeSet<usize>| {
+            if seen.insert(lines[idx].line_number) {
+                out.push(idx);
             }
         };
         if self.config.keep_first_error {
-            push(lines[0].clone(), &mut out, &mut seen);
+            push(candidates[0], &mut out, &mut seen);
         }
         if self.config.keep_last_error {
-            let last = lines.last().expect("guarded non-empty above").clone();
+            let last = *candidates.last().expect("guarded non-empty above");
             push(last, &mut out, &mut seen);
         }
         // Fill remaining with highest-scoring entries in descending score order.
         let remaining = max_count.saturating_sub(out.len());
         if remaining > 0 {
-            let mut by_score = lines.to_vec();
-            by_score.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
+            let mut by_score = candidates.to_vec();
+            by_score.sort_by(|&a, &b| {
+                lines[b]
+                    .score
+                    .partial_cmp(&lines[a].score)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.line_number.cmp(&b.line_number))
+                    .then_with(|| lines[a].line_number.cmp(&lines[b].line_number))
             });
-            for line in by_score.into_iter() {
-                if !seen.contains(&line.line_number) {
-                    push(line, &mut out, &mut seen);
+            for idx in by_score {
+                if !seen.contains(&lines[idx].line_number) {
+                    push(idx, &mut out, &mut seen);
                     if out.len() >= max_count {
                         break;
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// Index-set sibling of [`dedupe_similar`](Self::dedupe_similar)
+    /// (PERF-7): dedupes `candidates` (indices into `log_lines`) by the
+    /// normalized message prefix without cloning any line.
+    fn dedupe_similar_indices(&self, log_lines: &[LogLine], candidates: &[usize]) -> Vec<usize> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut out: Vec<usize> = Vec::with_capacity(candidates.len());
+        for &i in candidates {
+            let key = normalize_for_dedupe(&log_lines[i].content);
+            if seen.insert(key) {
+                out.push(i);
             }
         }
         out
@@ -1081,9 +1172,9 @@ fn count_level(lines: &[LogLine], level: LogLevel) -> u64 {
     lines.iter().filter(|l| l.level == level).count() as u64
 }
 
-fn warnings_dropped(all: &[LogLine], deduped: &[LogLine]) -> usize {
+fn warnings_dropped(all: &[LogLine], deduped_len: usize) -> usize {
     let original_warnings = all.iter().filter(|l| l.level == LogLevel::Warn).count();
-    original_warnings.saturating_sub(deduped.len())
+    original_warnings.saturating_sub(deduped_len)
 }
 
 // We need BTreeSet ordering on LogLine; wrap insertion ordering by
@@ -1572,6 +1663,42 @@ mod tests {
         // Below min_lines_for_ccr (50) → verbatim.
         assert_eq!(result.compressed, "a\nb\nc");
         assert_eq!(result.compression_ratio, 1.0);
+    }
+
+    #[test]
+    fn key_only_mode_is_byte_identical_to_store_mode() {
+        // PERF-8 pin: `compress_key_only` must produce byte-equal output
+        // (compressed bytes incl. marker, cache_key, counts, stats) to
+        // `compress_with_store(.., Some(store))` — the ONLY difference
+        // is that nothing is persisted.
+        use crate::ccr::InMemoryCcrStore;
+        let content: String = (0..200)
+            .map(|i| {
+                if i == 100 {
+                    "ERROR: Failed at item 100".to_string()
+                } else {
+                    format!("INFO: Processing item {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = LogCompressor::new(LogCompressorConfig::default());
+        let store = InMemoryCcrStore::new();
+        let (with_store, ws_stats) = c.compress_with_store(&content, 1.0, Some(&store));
+        let (key_only, ko_stats) = c.compress_key_only(&content, 1.0);
+        assert_eq!(
+            with_store.cache_key, key_only.cache_key,
+            "cache_key must be byte-equal"
+        );
+        assert!(with_store.cache_key.is_some(), "fixture must trigger CCR");
+        assert_eq!(with_store.compressed, key_only.compressed);
+        assert_eq!(
+            with_store.compressed_line_count,
+            key_only.compressed_line_count
+        );
+        assert_eq!(ws_stats.ccr_emitted, ko_stats.ccr_emitted);
+        assert_eq!(ws_stats.ccr_skip_reason, ko_stats.ccr_skip_reason);
+        assert_eq!(store.len(), 1, "store mode persisted exactly the original");
     }
 
     #[test]

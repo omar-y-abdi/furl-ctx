@@ -159,7 +159,10 @@ fn compaction_to_json(c: &Compaction) -> Value {
             "_size": byte_size,
             "_kind": opaque_kind_str(kind),
         }),
-        Compaction::Untouched(v) => v.clone(),
+        // Payload-free (PERF-5). A declined compaction never ships: every
+        // production caller gates on `was_compacted()` before formatting,
+        // so this arm renders only in direct-formatter (debug/test) use.
+        Compaction::Untouched => Value::Null,
     }
 }
 
@@ -189,6 +192,8 @@ fn cell_to_json(c: &CellValue) -> Value {
         CellValue::Scalar(v) => v.clone(),
         CellValue::Missing => Value::Null,
         CellValue::Nested(sub) => compaction_to_json(sub),
+        // Byte-identical to the pre-PERF-5 `Nested(Untouched(v))` render.
+        CellValue::DeclinedJson(v) => v.clone(),
         CellValue::OpaqueRef {
             ccr_hash,
             byte_size,
@@ -279,9 +284,9 @@ fn write_compaction(out: &mut String, c: &Compaction, fmt: &CsvSchemaFormatter) 
         } => {
             out.push_str(&format_ccr_marker(ccr_hash, *byte_size, kind));
         }
-        Compaction::Untouched(v) => {
-            out.push_str(&serde_json::to_string(v).unwrap_or_default());
-        }
+        // Payload-free (PERF-5); see `compaction_to_json`. Nothing to
+        // render — production callers gate on `was_compacted()`.
+        Compaction::Untouched => {}
     }
 }
 
@@ -607,6 +612,10 @@ fn format_cell(c: &CellValue) -> String {
             let nested_fmt = JsonFormatter::new();
             csv_quote(&nested_fmt.format(sub))
         }
+        // Declined sub-array: verbatim compact JSON, CSV-quoted —
+        // byte-identical to the pre-PERF-5 `Nested(Untouched(v))` render
+        // (`JsonFormatter::format(Untouched(v))` was `to_string(v)`).
+        CellValue::DeclinedJson(v) => csv_quote(&serde_json::to_string(v).unwrap_or_default()),
         CellValue::OpaqueRef {
             ccr_hash,
             byte_size,
@@ -741,9 +750,8 @@ fn write_compaction_kv(out: &mut String, c: &Compaction, fmt: &MarkdownKvFormatt
         } => {
             out.push_str(&format_ccr_marker(ccr_hash, *byte_size, kind));
         }
-        Compaction::Untouched(v) => {
-            out.push_str(&serde_json::to_string(v).unwrap_or_default());
-        }
+        // Payload-free (PERF-5); see `compaction_to_json`.
+        Compaction::Untouched => {}
     }
 }
 
@@ -791,6 +799,8 @@ fn write_kv_table(
                 CellValue::Missing => continue,
                 CellValue::Scalar(v) => kv_scalar(v),
                 CellValue::Nested(sub) => JsonFormatter::new().format(sub),
+                // Byte-identical to the old `Nested(Untouched(v))` render.
+                CellValue::DeclinedJson(v) => serde_json::to_string(v).unwrap_or_default(),
                 CellValue::OpaqueRef {
                     ccr_hash,
                     byte_size,
@@ -890,10 +900,13 @@ mod tests {
     }
 
     #[test]
-    fn json_formatter_renders_untouched_verbatim() {
-        let c = Compaction::Untouched(json!({"a": 1, "b": [2, 3]}));
+    fn json_formatter_renders_untouched_as_null() {
+        // PERF-5: `Untouched` is payload-free — production callers gate
+        // on `was_compacted()` and never format a declined compaction;
+        // direct formatter use renders an explicit JSON null.
+        let c = Compaction::Untouched;
         let out = JsonFormatter::new().format(&c);
-        assert_eq!(out, r#"{"a":1,"b":[2,3]}"#);
+        assert_eq!(out, "null");
     }
 
     #[test]
@@ -1700,27 +1713,30 @@ mod tests {
     }
 
     #[test]
-    fn csv_grammar_breaking_column_name_ships_verbatim_json() {
+    fn csv_grammar_breaking_column_name_declines_compaction() {
         // COR-15: the CSV formatter never quotes COLUMN NAMES (only
-        // cells), so the compactor declines these arrays — the rendering
-        // is the verbatim JSON array (byte-exact round-trip), with no
-        // `[N]{...}` declaration to mis-key.
+        // cells), so the compactor DECLINES these arrays — no `[N]{...}`
+        // declaration may ever ship for them. Since PERF-5 the declined
+        // `Untouched` is payload-free: the verbatim byte-exact
+        // passthrough is the CALLER's contract (every production caller
+        // gates on `was_compacted()` and re-uses its own borrow of the
+        // array — pinned by the walker/route passthrough tests), and a
+        // direct format of a declined compaction renders nothing.
         for key in ["meta:region", "a,b", "x{y"] {
             let items: Vec<Value> = (0..5)
                 .map(|i| json!({"id": i, key: format!("srv-{i:03}.internal.example.com")}))
                 .collect();
             let c = compact(&items, &cfg());
+            assert!(
+                !c.was_compacted(),
+                "key {key:?} must decline compaction, got {c:?}"
+            );
             let out = CsvSchemaFormatter::new().format(&c);
             assert!(
                 !out.contains("]{"),
                 "no `[N]{{...}}` declaration for key {key:?}: {out}"
             );
-            let parsed: Value = serde_json::from_str(&out).expect("verbatim JSON array");
-            assert_eq!(
-                parsed,
-                Value::Array(items),
-                "byte-exact round-trip for {key:?}"
-            );
+            assert!(out.is_empty(), "declined render is empty, got: {out}");
         }
     }
 

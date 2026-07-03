@@ -97,6 +97,29 @@ pub(crate) fn retrieve_more_marker_line(
     )
 }
 
+/// How a compressor backs the `Retrieve more:` marker it emits (PERF-8).
+///
+/// The FFI bridges used to synthesize a throwaway 1000-cap
+/// `InMemoryCcrStore` per call purely to make the core emit a
+/// `cache_key` — the core then wrote the FULL original into a store
+/// that was dropped on return. `KeyOnly` makes that contract explicit:
+/// key + marker are computed identically (byte-equal `cache_key`,
+/// byte-equal output), and persistence is the CALLER's job.
+#[derive(Clone, Copy)]
+pub(crate) enum MarkerBacking<'a> {
+    /// Compute the key AND persist the full original into this store.
+    Store(&'a dyn CcrStore),
+    /// Compute key + marker only — no store write. Used by the PyO3
+    /// bridges: the Python shim re-persists the original into the
+    /// production `CompressionStore` under the same key (and VETOES the
+    /// compression if that write fails), so the marker never dangles.
+    /// `tests/test_ccr_persist_failure_vetoes.py` pins both halves.
+    KeyOnly,
+    /// No CCR backing: no key, no marker
+    /// (`ccr_skip_reason = "no store provided"`).
+    Disabled,
+}
+
 /// The shared persist+mark tail (log/search): compute the MD5[:24] key
 /// over the FULL original, persist the original under it, and return
 /// `(key, marker_line)` for the caller to append/record. The store
@@ -115,8 +138,21 @@ pub(crate) fn persist_and_mark(
     kept_units: usize,
     unit: &str,
 ) -> (String, String) {
-    let key = md5_hex_24(content);
+    let (key, marker) = key_and_mark(content, original_units, kept_units, unit);
     store.put(&key, content);
+    (key, marker)
+}
+
+/// Key-only sibling of [`persist_and_mark`] (PERF-8): identical
+/// `(key, marker_line)` bytes, NO store write. The caller owns
+/// persistence — see [`MarkerBacking::KeyOnly`].
+pub(crate) fn key_and_mark(
+    content: &str,
+    original_units: usize,
+    kept_units: usize,
+    unit: &str,
+) -> (String, String) {
+    let key = md5_hex_24(content);
     let marker = retrieve_more_marker_line(original_units, kept_units, &key, unit);
     (key, marker)
 }
@@ -153,6 +189,20 @@ mod tests {
             crate::ccr::marker_for_row_index("9f3a2b", 50),
             format!("<<ccr:{} 50_chunks>>", row_index_key("9f3a2b"))
         );
+    }
+
+    #[test]
+    fn key_and_mark_matches_persist_and_mark_without_the_write() {
+        // PERF-8 byte-equality pin: the key-only tail returns the exact
+        // (key, marker) bytes the persisting tail returns.
+        let store = InMemoryCcrStore::new();
+        let persisted = persist_and_mark(&store, "orig content", 10, 3, "lines");
+        let key_only = key_and_mark("orig content", 10, 3, "lines");
+        assert_eq!(persisted, key_only);
+        assert_eq!(store.len(), 1, "persist wrote");
+        let store2 = InMemoryCcrStore::new();
+        let _ = key_and_mark("orig content", 10, 3, "lines");
+        assert_eq!(store2.len(), 0, "key-only never writes");
     }
 
     #[test]

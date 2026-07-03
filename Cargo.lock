@@ -409,6 +409,7 @@ dependencies = [
  "md-5",
  "proptest",
  "regex",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",

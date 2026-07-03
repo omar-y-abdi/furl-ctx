@@ -69,7 +69,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ccr::persist::persist_and_mark;
+use crate::ccr::persist::{key_and_mark, persist_and_mark, MarkerBacking};
 use crate::ccr::CcrStore;
 use crate::signals::{ImportanceContext, LineImportanceDetector};
 use crate::transforms::adaptive_sizer::compute_optimal_k;
@@ -271,6 +271,22 @@ impl SearchCompressor {
         self.compress_with_store(content, context, bias, None)
     }
 
+    /// Compress with the CCR `cache_key` computed but NOTHING persisted
+    /// (PERF-8). Byte-identical output (compressed bytes, marker,
+    /// `cache_key`, stats) to `compress_with_store(.., Some(store))` —
+    /// only the store write is skipped. For callers that own persistence
+    /// themselves: the PyO3 bridge's Python shim re-persists the
+    /// original into the production `CompressionStore` under this exact
+    /// key and vetoes the compression if that write fails.
+    pub fn compress_key_only(
+        &self,
+        content: &str,
+        context: &str,
+        bias: f64,
+    ) -> (SearchCompressionResult, SearchCompressorStats) {
+        self.compress_inner(content, context, bias, MarkerBacking::KeyOnly)
+    }
+
     /// Compress with optional CCR persistence. `store` is consulted only
     /// if `config.enable_ccr` is true and the compression cleared the
     /// thresholds; storage failures emit `tracing::warn!` rather than
@@ -281,6 +297,20 @@ impl SearchCompressor {
         context: &str,
         bias: f64,
         store: Option<&dyn CcrStore>,
+    ) -> (SearchCompressionResult, SearchCompressorStats) {
+        let backing = match store {
+            Some(s) => MarkerBacking::Store(s),
+            None => MarkerBacking::Disabled,
+        };
+        self.compress_inner(content, context, bias, backing)
+    }
+
+    fn compress_inner(
+        &self,
+        content: &str,
+        context: &str,
+        bias: f64,
+        backing: MarkerBacking<'_>,
     ) -> (SearchCompressionResult, SearchCompressorStats) {
         let mut stats = SearchCompressorStats::default();
         let parsed = self.parse_search_results(content, &mut stats);
@@ -319,17 +349,38 @@ impl SearchCompressor {
                 stats.ccr_skip_reason = Some("below min_matches_for_ccr");
             } else if ratio >= self.config.min_compression_ratio_for_ccr {
                 stats.ccr_skip_reason = Some("compression ratio too high");
-            } else if let Some(store) = store {
-                // Shared key→put→marker tail (`ccr::persist`, ARCH-5);
-                // the leading `\n` is composed there so the marker
-                // grammar in `ccr::markers` stays newline-free.
-                let (key, marker) =
-                    persist_and_mark(store, content, original_count, compressed_count, "matches");
-                compressed.push_str(&marker);
-                cache_key = Some(key);
-                stats.ccr_emitted = true;
             } else {
-                stats.ccr_skip_reason = Some("no store provided");
+                // Shared key→[put]→marker tail (`ccr::persist`, ARCH-5);
+                // the leading `\n` is composed there so the marker
+                // grammar in `ccr::markers` stays newline-free. Key and
+                // marker bytes are identical across backings (PERF-8) —
+                // only whether the original is persisted differs.
+                let keyed = match backing {
+                    MarkerBacking::Store(store) => Some(persist_and_mark(
+                        store,
+                        content,
+                        original_count,
+                        compressed_count,
+                        "matches",
+                    )),
+                    MarkerBacking::KeyOnly => Some(key_and_mark(
+                        content,
+                        original_count,
+                        compressed_count,
+                        "matches",
+                    )),
+                    MarkerBacking::Disabled => None,
+                };
+                match keyed {
+                    Some((key, marker)) => {
+                        compressed.push_str(&marker);
+                        cache_key = Some(key);
+                        stats.ccr_emitted = true;
+                    }
+                    None => {
+                        stats.ccr_skip_reason = Some("no store provided");
+                    }
+                }
             }
         } else {
             stats.ccr_skip_reason = Some("ccr disabled in config");
@@ -446,15 +497,18 @@ impl SearchCompressor {
             by_score.truncate(self.config.max_files);
         }
 
-        let all_match_strings: Vec<String> = by_score
+        // Feed the adaptive sizer the match CONTENT slices directly
+        // (PERF-6). The old shape materialized every match as a fresh
+        // `format!("{file}:{line}:{content}")` String purely to size the
+        // set — per-line-unique `file:line:` prefixes glued to the first
+        // content word inflated bigram uniqueness with zero information,
+        // and the allocs dominated select_matches on big result sets.
+        // The saturation signal lives in the content; the k this yields
+        // is gated by the benchmark ratio floor (non-regression).
+        let all_refs: Vec<&str> = by_score
             .iter()
-            .flat_map(|(file, fm)| {
-                fm.matches
-                    .iter()
-                    .map(move |m| format!("{}:{}:{}", file, m.line_number, m.content))
-            })
+            .flat_map(|(_file, fm)| fm.matches.iter().map(|m| m.content.as_str()))
             .collect();
-        let all_refs: Vec<&str> = all_match_strings.iter().map(|s| s.as_str()).collect();
         let adaptive_total =
             compute_optimal_k(&all_refs, bias, 5, Some(self.config.max_total_matches));
 
@@ -988,6 +1042,37 @@ src/main.py-44-context line";
         assert_eq!(result.original_match_count, 0);
         assert_eq!(result.compressed, "plain text only");
         assert_eq!(result.compression_ratio, 1.0);
+    }
+
+    #[test]
+    fn key_only_mode_is_byte_identical_to_store_mode() {
+        // PERF-8 pin: `compress_key_only` must produce byte-equal output
+        // (compressed bytes incl. marker, cache_key, counts) to
+        // `compress_with_store(.., Some(store))` — the ONLY difference
+        // is that nothing is persisted.
+        use crate::ccr::InMemoryCcrStore;
+        let content: String = (1..=200)
+            .map(|i| format!("src/file.py:{i}:line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let compressor = SearchCompressor::new(SearchCompressorConfig::default());
+        let store = InMemoryCcrStore::new();
+        let (with_store, ws_stats) =
+            compressor.compress_with_store(&content, "", 1.0, Some(&store));
+        let (key_only, ko_stats) = compressor.compress_key_only(&content, "", 1.0);
+        assert_eq!(
+            with_store.cache_key, key_only.cache_key,
+            "cache_key must be byte-equal"
+        );
+        assert!(with_store.cache_key.is_some(), "fixture must trigger CCR");
+        assert_eq!(with_store.compressed, key_only.compressed);
+        assert_eq!(
+            with_store.compressed_match_count,
+            key_only.compressed_match_count
+        );
+        assert_eq!(ws_stats.ccr_emitted, ko_stats.ccr_emitted);
+        assert_eq!(ws_stats.ccr_skip_reason, ko_stats.ccr_skip_reason);
+        assert_eq!(store.len(), 1, "store mode persisted exactly the original");
     }
 
     #[test]

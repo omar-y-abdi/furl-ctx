@@ -487,16 +487,25 @@ pub fn python_json_dumps(value: &Value) -> String {
 /// crushed output, so the Rust output bytes match Python's exactly.
 pub fn python_safe_json_dumps(value: &Value) -> String {
     let mut out = String::new();
+    write_python_safe_json(value, &mut out);
+    out
+}
+
+/// Streaming form of [`python_safe_json_dumps`]: renders `value` into
+/// `out` (identical bytes). The serializer is context-free, so callers
+/// can compose an array render element-wise — `[a,b,c]` equals the
+/// elements rendered here joined by `,` inside brackets — without
+/// materializing a temporary `Value::Array` (PERF-4).
+pub(crate) fn write_python_safe_json(value: &Value, out: &mut String) {
     write_python_json_inner(
         value,
-        &mut out,
+        out,
         JsonFmt {
             sort_keys: false,
             compact: true,
             ensure_ascii: false,
         },
     );
-    out
 }
 
 fn write_python_json_inner(value: &Value, out: &mut String, fmt: JsonFmt) {

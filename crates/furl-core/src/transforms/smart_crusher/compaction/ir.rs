@@ -181,6 +181,14 @@ pub enum CellValue {
     /// — `Missing` means the original object had no such key, while
     /// `Scalar(Value::Null)` means the key existed and was null.
     Missing,
+    /// An array-of-objects cell whose inner compaction DECLINED
+    /// (`compact` returned [`Compaction::Untouched`]). Carries the
+    /// ORIGINAL value so formatters render it verbatim as compact JSON —
+    /// byte-identical to the pre-PERF-5 `Nested(Untouched(value))`
+    /// shape — while, like [`CellValue::Nested`], keeping the containing
+    /// table OUT of the decoder-verifiable lossless tier (a CSV-quoted
+    /// JSON cell decodes to a plain string, not the array — COR-13).
+    DeclinedJson(Value),
 }
 
 /// A row of a tabular compaction. Order and length match the parent
@@ -241,9 +249,15 @@ pub enum Compaction {
         byte_size: usize,
         kind: OpaqueKind,
     },
-    /// Compactor declined to compact; pass-through original value.
-    /// The crusher will fall back to the existing lossy path.
-    Untouched(Value),
+    /// Compactor declined to compact; the input passes through
+    /// unchanged. Payload-free (PERF-5): every consumer of a declined
+    /// compaction gates on [`Compaction::was_compacted`] /
+    /// [`Compaction::is_decoder_verifiable`] and re-uses its own borrow
+    /// of the input — the old `Untouched(Value)` deep-cloned the entire
+    /// array just to be discarded. A declined NESTED sub-array (the one
+    /// place the declined payload was rendered) is carried by
+    /// [`CellValue::DeclinedJson`] instead.
+    Untouched,
 }
 
 impl Compaction {
@@ -253,7 +267,7 @@ impl Compaction {
         match self {
             Compaction::Table { rows, .. } => rows.len(),
             Compaction::Buckets { buckets, .. } => buckets.iter().map(|b| b.rows.len()).sum(),
-            Compaction::OpaqueRef { .. } | Compaction::Untouched(_) => 0,
+            Compaction::OpaqueRef { .. } | Compaction::Untouched => 0,
         }
     }
 
@@ -262,7 +276,7 @@ impl Compaction {
         match self {
             Compaction::Table { original_count, .. } => *original_count,
             Compaction::Buckets { original_count, .. } => *original_count,
-            Compaction::OpaqueRef { .. } | Compaction::Untouched(_) => 0,
+            Compaction::OpaqueRef { .. } | Compaction::Untouched => 0,
         }
     }
 
@@ -291,13 +305,20 @@ impl Compaction {
     /// coverage only.
     pub fn is_decoder_verifiable(&self) -> bool {
         fn row_has_nested(row: &Row) -> bool {
-            row.0.iter().any(|c| matches!(c, CellValue::Nested(_)))
+            // `DeclinedJson` counts as nested here: like `Nested`, its
+            // CSV-quoted JSON render decodes to a plain string, so a
+            // table carrying one must stay OUT of the lossless tier
+            // (COR-13 fail-closed — identical to the pre-PERF-5
+            // `Nested(Untouched)` verdict).
+            row.0
+                .iter()
+                .any(|c| matches!(c, CellValue::Nested(_) | CellValue::DeclinedJson(_)))
         }
         match self {
             Compaction::Table { rows, .. } => !rows.iter().any(row_has_nested),
-            Compaction::Buckets { .. }
-            | Compaction::OpaqueRef { .. }
-            | Compaction::Untouched(_) => false,
+            Compaction::Buckets { .. } | Compaction::OpaqueRef { .. } | Compaction::Untouched => {
+                false
+            }
         }
     }
 
@@ -330,7 +351,7 @@ impl Compaction {
                     byte_size: *byte_size,
                 }),
                 CellValue::Nested(sub) => sub.collect_opaque_refs(sink),
-                CellValue::Scalar(_) | CellValue::Missing => {}
+                CellValue::Scalar(_) | CellValue::Missing | CellValue::DeclinedJson(_) => {}
             }
         }
         match self {
@@ -359,7 +380,7 @@ impl Compaction {
                     }
                 }
             }
-            Compaction::Untouched(_) => {}
+            Compaction::Untouched => {}
         }
     }
 
@@ -373,7 +394,7 @@ impl Compaction {
             row.0.iter().any(|c| match c {
                 CellValue::OpaqueRef { .. } => true,
                 CellValue::Nested(sub) => sub.contains_opaque_ref(),
-                CellValue::Scalar(_) | CellValue::Missing => false,
+                CellValue::Scalar(_) | CellValue::Missing | CellValue::DeclinedJson(_) => false,
             })
         }
         match self {
@@ -382,7 +403,7 @@ impl Compaction {
             Compaction::Buckets { buckets, .. } => {
                 buckets.iter().any(|b| b.rows.iter().any(row_has_opaque))
             }
-            Compaction::Untouched(_) => false,
+            Compaction::Untouched => false,
         }
     }
 }
@@ -417,7 +438,7 @@ mod tests {
 
     #[test]
     fn untouched_is_not_compacted() {
-        let c = Compaction::Untouched(json!([1, 2, 3]));
+        let c = Compaction::Untouched;
         assert!(!c.was_compacted());
         assert_eq!(c.kept_row_count(), 0);
         assert_eq!(c.original_row_count(), 0);
@@ -583,7 +604,7 @@ mod tests {
         );
 
         let mut empty_sink = Vec::new();
-        Compaction::Untouched(json!([1, 2])).collect_opaque_refs(&mut empty_sink);
+        Compaction::Untouched.collect_opaque_refs(&mut empty_sink);
         let plain = Compaction::Table {
             schema: Schema { fields: vec![] },
             rows: vec![Row::new(vec![CellValue::Scalar(json!("x"))])],
@@ -605,7 +626,7 @@ mod tests {
             byte_size: 10,
             kind: OpaqueKind::LongString,
         };
-        let untouched = Compaction::Untouched(json!([1, 2]));
+        let untouched = Compaction::Untouched;
         assert!(!buckets.is_decoder_verifiable());
         assert!(!opaque.is_decoder_verifiable());
         assert!(!untouched.is_decoder_verifiable());
