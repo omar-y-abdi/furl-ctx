@@ -7,7 +7,6 @@ Data is lost when the process exits.
 from __future__ import annotations
 
 import sys
-import threading
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -15,15 +14,21 @@ if TYPE_CHECKING:
 
 
 class InMemoryBackend:
-    """Thread-safe in-memory storage backend.
+    """In-memory storage backend — a plain dict, no internal locking.
 
-    This is the default backend for CompressionStore. It stores entries in a
-    Python dict with thread-safe access via a lock.
+    This is the default backend for CompressionStore.
+
+    Thread-safety (ARCH-10, single ownership story): this class is NOT
+    internally synchronized. ``CompressionStore`` serializes every
+    backend call under its own lock (``CompressionStore._lock``), so the
+    per-operation lock this class used to carry was pure double-locking
+    on every hot-path op. Callers using an ``InMemoryBackend`` directly
+    from multiple threads (outside ``CompressionStore``) must provide
+    their own synchronization.
 
     Characteristics:
     - Fast: O(1) get/set/delete operations
     - Volatile: Data lost on process exit
-    - Thread-safe: All operations are protected by a lock
     - Memory-bound: Stores everything in RAM
 
     Usage:
@@ -35,7 +40,6 @@ class InMemoryBackend:
     def __init__(self) -> None:
         """Initialize the in-memory backend."""
         self._store: dict[str, CompressionEntry] = {}
-        self._lock = threading.Lock()
 
     def get(self, hash_key: str) -> CompressionEntry | None:
         """Retrieve an entry by hash key.
@@ -46,8 +50,7 @@ class InMemoryBackend:
         Returns:
             CompressionEntry if found, None otherwise.
         """
-        with self._lock:
-            return self._store.get(hash_key)
+        return self._store.get(hash_key)
 
     def set(self, hash_key: str, entry: CompressionEntry) -> None:
         """Store an entry with the given hash key.
@@ -56,8 +59,7 @@ class InMemoryBackend:
             hash_key: The unique hash identifying the entry.
             entry: The CompressionEntry to store.
         """
-        with self._lock:
-            self._store[hash_key] = entry
+        self._store[hash_key] = entry
 
     def delete(self, hash_key: str) -> bool:
         """Delete an entry by hash key.
@@ -68,14 +70,17 @@ class InMemoryBackend:
         Returns:
             True if entry was deleted, False if it didn't exist.
         """
-        with self._lock:
-            if hash_key in self._store:
-                del self._store[hash_key]
-                return True
-            return False
+        if hash_key in self._store:
+            del self._store[hash_key]
+            return True
+        return False
 
     def exists(self, hash_key: str) -> bool:
         """Check if an entry exists.
+
+        Not part of the ``CompressionStoreBackend`` protocol (ARCH-10) —
+        kept as a convenience extra; ``SqliteBackend``'s fallback tier
+        relies on it.
 
         Args:
             hash_key: The unique hash identifying the entry.
@@ -83,13 +88,11 @@ class InMemoryBackend:
         Returns:
             True if entry exists, False otherwise.
         """
-        with self._lock:
-            return hash_key in self._store
+        return hash_key in self._store
 
     def clear(self) -> None:
         """Remove all entries from storage."""
-        with self._lock:
-            self._store.clear()
+        self._store.clear()
 
     def count(self) -> int:
         """Get the number of entries in storage.
@@ -97,17 +100,19 @@ class InMemoryBackend:
         Returns:
             Number of entries currently stored.
         """
-        with self._lock:
-            return len(self._store)
+        return len(self._store)
 
     def keys(self) -> list[str]:
         """Get all hash keys in storage.
 
+        Not part of the ``CompressionStoreBackend`` protocol (ARCH-10) —
+        kept as a convenience extra; ``SqliteBackend``'s tier merge
+        relies on it.
+
         Returns:
             List of all hash keys.
         """
-        with self._lock:
-            return list(self._store.keys())
+        return list(self._store.keys())
 
     def items(self) -> list[tuple[str, CompressionEntry]]:
         """Get all entries as (hash_key, entry) pairs.
@@ -115,8 +120,7 @@ class InMemoryBackend:
         Returns:
             List of (hash_key, CompressionEntry) tuples.
         """
-        with self._lock:
-            return list(self._store.items())
+        return list(self._store.items())
 
     def get_stats(self) -> dict[str, Any]:
         """Get backend statistics.
@@ -124,22 +128,21 @@ class InMemoryBackend:
         Returns:
             Dict with stats including entry_count and memory estimate.
         """
-        with self._lock:
-            entry_count = len(self._store)
-            # Rough memory estimate
-            bytes_used = sys.getsizeof(self._store)
-            for entry in self._store.values():
-                bytes_used += sys.getsizeof(entry)
-                # ``surrogatepass``: stored content may carry lone surrogates
-                # (the store accepts them — JSON delivers them via \uD800
-                # escapes), and a strict encode would make this stats read
-                # raise UnicodeEncodeError. Identical byte counts for all
-                # valid-UTF8 content.
-                bytes_used += len(entry.original_content.encode("utf-8", "surrogatepass"))
-                bytes_used += len(entry.compressed_content.encode("utf-8", "surrogatepass"))
+        entry_count = len(self._store)
+        # Rough memory estimate
+        bytes_used = sys.getsizeof(self._store)
+        for entry in self._store.values():
+            bytes_used += sys.getsizeof(entry)
+            # ``surrogatepass``: stored content may carry lone surrogates
+            # (the store accepts them — JSON delivers them via \uD800
+            # escapes), and a strict encode would make this stats read
+            # raise UnicodeEncodeError. Identical byte counts for all
+            # valid-UTF8 content.
+            bytes_used += len(entry.original_content.encode("utf-8", "surrogatepass"))
+            bytes_used += len(entry.compressed_content.encode("utf-8", "surrogatepass"))
 
-            return {
-                "backend_type": "memory",
-                "entry_count": entry_count,
-                "bytes_used": bytes_used,
-            }
+        return {
+            "backend_type": "memory",
+            "entry_count": entry_count,
+            "bytes_used": bytes_used,
+        }

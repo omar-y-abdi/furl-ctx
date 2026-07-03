@@ -34,9 +34,9 @@ pub enum ImportanceCategory {
 
 /// Output of a single detector for a single line.
 ///
-/// `priority` is what compressors rank by; `confidence` is what the
-/// [`super::tiered::Tiered`] combinator uses to decide whether to keep
-/// asking the next tier.
+/// `priority` is what compressors rank by; `confidence` says how sure
+/// the detector is (callers composing multiple detectors can use it to
+/// decide whether to consult another one).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImportanceSignal {
     /// The category the detector matched on, if any.

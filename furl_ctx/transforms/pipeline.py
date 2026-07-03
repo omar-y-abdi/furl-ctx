@@ -154,7 +154,7 @@ class TransformPipeline:
         # (count_text, count_messages) but are different Protocol types.
         from furl_ctx.tokenizers import get_tokenizer
 
-        return Tokenizer(get_tokenizer(model), model)  # type: ignore[arg-type]
+        return Tokenizer(get_tokenizer(model), model)
 
     def _breaker_is_open(self) -> bool:
         """True while the circuit breaker cooldown window is active."""

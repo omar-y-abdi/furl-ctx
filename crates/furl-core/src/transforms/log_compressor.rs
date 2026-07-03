@@ -52,6 +52,7 @@ use regex::Regex;
 
 use crate::ccr::persist::{key_and_mark, persist_and_mark, MarkerBacking};
 use crate::ccr::CcrStore;
+use crate::ccr::RetrieveUnit;
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -751,13 +752,13 @@ impl LogCompressor {
                         content,
                         original_line_count,
                         selected.len(),
-                        "lines",
+                        RetrieveUnit::Lines,
                     )),
                     MarkerBacking::KeyOnly => Some(key_and_mark(
                         content,
                         original_line_count,
                         selected.len(),
-                        "lines",
+                        RetrieveUnit::Lines,
                     )),
                     MarkerBacking::Disabled => None,
                 };

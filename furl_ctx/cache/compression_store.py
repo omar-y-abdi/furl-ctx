@@ -70,7 +70,7 @@ CCR_TTL_SECONDS_ENV = "FURL_CCR_TTL_SECONDS"
 # Minimum length for a caller-supplied ``explicit_hash``. This is the LOOSE
 # recovery-floor contract, intentionally distinct from the STRICT consumer set
 # ``marker_grammar.HASH_WIDTHS`` ({12, 24}) that the anti-spoofing ingress
-# (``tool_injection.parse_tool_call`` + the MCP retrieve handler) enforces — see
+# (the MCP retrieve handler, via ``marker_grammar.is_valid_ccr_hash``) enforces — see
 # the "Two DISTINCT width contracts" note in ``ccr/marker_grammar.py``. The store
 # must accept any hex key a DIRECT lookup can recover (shape I, the read-lifecycle
 # marker, is recovered by direct store lookup and never by the strict scanner), so

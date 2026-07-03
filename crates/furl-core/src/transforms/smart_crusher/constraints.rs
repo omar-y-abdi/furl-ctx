@@ -11,8 +11,8 @@
 //!
 //! Both are byte-equivalent to the original hardcoded behavior — the
 //! detection logic is unchanged; the constraints are thin trait
-//! adapters so that custom Enterprise constraints can be stacked
-//! alongside or in place of these defaults.
+//! adapters so custom constraints can be stacked alongside or in
+//! place of these defaults.
 //!
 //! # The default factory
 //!

@@ -73,6 +73,7 @@ use std::collections::HashSet;
 
 use crate::ccr::persist::{md5_hex_24, retrieve_more_marker_line};
 use crate::ccr::CcrStore;
+use crate::ccr::RetrieveUnit;
 use crate::relevance::{BM25Scorer, RelevanceScorer};
 use crate::signals::{ImportanceContext, KeywordDetector, LineImportanceDetector};
 use crate::transforms::tag_protector::{protect_tags, restore_tags};
@@ -551,7 +552,8 @@ impl TextCrusher {
         // wait until after the gate or a passthrough would leave an
         // orphan store entry.
         let key = md5_hex_24(content);
-        let marker = retrieve_more_marker_line(segments.len(), kept.len(), &key, "segments");
+        let marker =
+            retrieve_more_marker_line(segments.len(), kept.len(), &key, RetrieveUnit::Segments);
         let compressed = format!("{restored}{marker}");
         let ratio = compressed.len() as f64 / content.len().max(1) as f64;
         if ratio >= self.config.max_shippable_ratio {

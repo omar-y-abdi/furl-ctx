@@ -92,10 +92,14 @@ class TestDefaultExcludeTools:
 
     def test_bash_profile_is_live_and_sane(self):
         """With Bash out of the exclusion set its DEFAULT_TOOL_PROFILES entry
-        becomes reachable — pin that it is the moderate preset."""
+        becomes reachable — pin that it is the moderate preset.
+
+        (``bias`` is the profile's only field — the unread ``min_k``/
+        ``max_k`` were deleted, API-14; the keep-floor lives in the Rust
+        adaptive sizer.)
+        """
         profile = DEFAULT_TOOL_PROFILES["Bash"]
         assert profile.bias == 1.0  # moderate: no extra keep/drop pressure
-        assert profile.min_k >= 1  # never compresses to nothing
         # And the router resolves it (the profile can actually fire now).
         router = ContentRouter(ContentRouterConfig())
         assert router._get_tool_bias("Bash") == 1.0

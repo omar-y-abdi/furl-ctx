@@ -17,13 +17,25 @@ if TYPE_CHECKING:
 class CompressionStoreBackend(Protocol):
     """Protocol for CompressionStore storage backends.
 
-    This protocol defines the minimal interface for pluggable storage backends.
-    Implementations can use any storage mechanism: memory, MongoDB, Redis, etc.
+    This protocol defines the minimal interface for pluggable storage
+    backends — exactly the operations ``CompressionStore`` calls
+    (ARCH-10: ``keys()``/``exists()`` were required but never called by
+    the store and are no longer part of the contract; implementations
+    may still offer them as extras). Implementations can use any storage
+    mechanism: memory, SQLite, Redis, etc.
 
     Design Principles:
     - Simple CRUD operations only
     - No business logic (search, feedback, eviction policies)
-    - Thread-safety is implementation's responsibility
+    - Thread-safety: NOT required of implementations.
+      ``CompressionStore`` serializes every backend call under its own
+      lock (``CompressionStore._lock``), so a backend needs no internal
+      locking for store-mediated use — that is the single ownership
+      story (ARCH-10). A backend used directly (outside
+      ``CompressionStore``) is not synchronized unless it says
+      otherwise; a backend guarding its own OS resources may still keep
+      internal state protection for its own invariants (e.g.
+      ``SqliteBackend._state_lock`` for connection/degrade state).
     - TTL handling can be delegated to backend or handled by CompressionStore
 
     Example implementation:
@@ -72,18 +84,6 @@ class CompressionStoreBackend(Protocol):
         """
         ...
 
-    def exists(self, hash_key: str) -> bool:
-        """Check if an entry exists.
-
-        Args:
-            hash_key: The unique hash identifying the entry.
-
-        Returns:
-            True if entry exists, False otherwise.
-            Does NOT check TTL - that's CompressionStore's responsibility.
-        """
-        ...
-
     def clear(self) -> None:
         """Remove all entries from storage."""
         ...
@@ -93,17 +93,6 @@ class CompressionStoreBackend(Protocol):
 
         Returns:
             Number of entries currently stored.
-        """
-        ...
-
-    def keys(self) -> list[str]:
-        """Get all hash keys in storage.
-
-        Returns:
-            List of all hash keys.
-
-        Note:
-            For large stores, consider implementing an iterator version.
         """
         ...
 

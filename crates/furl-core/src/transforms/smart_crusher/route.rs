@@ -517,7 +517,7 @@ impl SmartCrusher {
         {
             let strategy = self.analyzer.select_strategy(
                 &analysis.field_stats,
-                &analysis.detected_pattern,
+                analysis.detected_pattern,
                 items.len(),
                 None, // bypass the crushability veto: recovery is CCR-backed
             );
@@ -618,14 +618,13 @@ impl SmartCrusher {
                 let (c, rendered) = stage.run(&result);
                 if c.is_decoder_verifiable() && !c.contains_opaque_ref() {
                     let sentinel = ccr_sentinel_map(&dropped_summary, row_index_marker.as_deref());
-                    let sentinel_line = crate::transforms::anchor_selector::python_safe_json_dumps(
+                    let sentinel_line = crate::util::pyjson::python_safe_json_dumps(
                         &Value::Object(sentinel.clone()),
                     );
                     let mut json_form_items = result.clone();
                     json_form_items.push(Value::Object(sentinel));
-                    let json_form = crate::transforms::anchor_selector::python_safe_json_dumps(
-                        &Value::Array(json_form_items),
-                    );
+                    let json_form =
+                        crate::util::pyjson::python_safe_json_dumps(&Value::Array(json_form_items));
                     let compact_len = rendered.len() + 1 + sentinel_line.len();
                     if clears_lossy_survivor_floor(json_form.len().saturating_sub(compact_len)) {
                         let kind = compaction_kind_str(&c);
@@ -704,7 +703,7 @@ impl SmartCrusher {
     /// here) — without deep-cloning the items into a temporary array
     /// just to count tokens (PERF-4).
     fn render_result_string(&self, result: &CrushArrayResult) -> String {
-        use crate::transforms::anchor_selector::write_python_safe_json;
+        use crate::util::pyjson::write_python_safe_json;
 
         if let Some(s) = &result.compacted {
             return s.clone();
@@ -836,21 +835,23 @@ fn clears_lossy_survivor_floor(saved: usize) -> bool {
 ///   dicts with comparable fields) but the analyzer found no anomaly /
 ///   change-point / error-keyword to anchor the sample on, so under the
 ///   permanent-loss assumption it refused to drop. Reasons:
-///   `unique_entities_no_signal`, `medium_uniqueness_no_signal`.
+///   [`SkipReason::UniqueEntitiesNoSignal`],
+///   [`SkipReason::MediumUniquenessNoSignal`].
 /// - **structural skips** — the array is genuinely un-sampleable
 ///   (too few items, non-dict items, mixed value types). Those carry
 ///   different reasons and MUST keep skipping even with CCR backing.
 ///
 /// Only the no-signal flavor is eligible for the CCR-backed override:
 /// recovery removes the loss risk that justified the veto, and the data
-/// is structurally fine to sample. Matching on the reason string keeps
-/// this decision in lockstep with `analyze_crushability`'s own labels —
-/// a new structural reason is excluded by default (fail-closed).
+/// is structurally fine to sample. The eligibility now lives on the
+/// typed [`SkipReason::is_no_signal`] (TYPE-1) — its match is
+/// exhaustive, so a NEW reason variant is excluded by default
+/// (fail-closed), enforced by the compiler instead of a string match.
 fn skip_reason_is_no_signal(analysis: &ArrayAnalysis) -> bool {
-    matches!(
-        analysis.crushability.as_ref().map(|c| c.reason.as_str()),
-        Some("unique_entities_no_signal") | Some("medium_uniqueness_no_signal")
-    )
+    analysis
+        .crushability
+        .as_ref()
+        .is_some_and(|c| c.reason.is_no_signal())
 }
 
 /// Lossy keep budget when every dropped row is CCR-recoverable.

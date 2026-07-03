@@ -20,14 +20,13 @@
 //!    `tree-sitter` (language).
 //! 3. **ML model** — for fuzzy categories (line importance, anchor cells,
 //!    HTML extraction), a small classifier trained on labeled traffic
-//!    outperforms keywords. The canonical extension path here is a
-//!    classification head on the existing `bge-small-en-v1.5` embedder
-//!    (already loaded for `relevance`); see `signals/README.md`.
+//!    outperforms keywords.
 //!
-//! All three live behind the same per-granularity trait. Tiering is
-//! *composition* via [`tiered::Tiered`] — never inheritance. A future ML
-//! detector slots in as a new tier without touching the keyword detector
-//! or any caller.
+//! All three live behind the same per-granularity trait; a richer
+//! detector slots in as a new [`LineImportanceDetector`] impl without
+//! touching the keyword detector or any caller. (A `Tiered` chaining
+//! combinator existed here but had zero production constructions and
+//! was deleted — SIMP-5b; composition happens at the call site.)
 //!
 //! # Per-granularity, not per-domain
 //!
@@ -52,10 +51,8 @@
 
 pub mod keyword_detector;
 pub mod line_importance;
-pub mod tiered;
 
 pub use keyword_detector::{KeywordDetector, KeywordRegistry};
 pub use line_importance::{
     ImportanceCategory, ImportanceContext, ImportanceSignal, LineImportanceDetector,
 };
-pub use tiered::Tiered;

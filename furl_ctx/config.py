@@ -21,87 +21,16 @@ class CacheAlignerConfig:
     enabled: bool = False  # Disabled by default — prefix stability gains are marginal in practice
 
 
-@dataclass
-class RelevanceScorerConfig:
-    """Configuration for BM25 relevance scoring in SmartCrusher.
-
-    Relevance scoring determines which items to keep when compressing tool
-    outputs: relevance(item, context) -> [0, 1]. The Python surface is
-    BM25-only (zero dependencies, fast keyword matching) — the semantic /
-    embedding / hybrid scorers were retired with the public SDK surface.
-
-    NOTE: in the standalone build the live compression core scores items in
-    Rust with a fixed threshold; ``SmartCrusher`` raises ``NotImplementedError``
-    if a custom ``relevance_config`` / ``scorer`` is supplied. These fields are
-    the documented defaults, not per-call tunables.
-    """
-
-    tier: Literal["bm25"] = "bm25"
-
-    # BM25 parameters
-    bm25_k1: float = 1.5  # Term frequency saturation
-    bm25_b: float = 0.75  # Length normalization
-
-    # Scoring threshold
-    # Lower threshold = safer (keeps more items), higher = more aggressive.
-    relevance_threshold: float = 0.25  # Keep items above this score
-
-
-@dataclass
-class AnchorConfig:
-    """Configuration for dynamic anchor allocation in SmartCrusher.
-
-    Anchor selection determines which array positions are preserved during
-    compression. Different data patterns benefit from different anchor strategies:
-    - Search results: Front-heavy (top results are most relevant)
-    - Logs: Back-heavy (recent entries matter most)
-    - Time series: Balanced (need both ends to show trends)
-    - Generic: Distributed (no assumption about order importance)
-
-    The anchor budget is a percentage of max_items allocated to position-based
-    anchors. The remaining budget goes to relevance-scored items.
-    """
-
-    # Base anchor budget as percentage of max_items
-    anchor_budget_pct: float = 0.25  # 25% of slots for position anchors
-
-    # Minimum and maximum anchor slots
-    min_anchor_slots: int = 3
-    max_anchor_slots: int = 12
-
-    # Default distribution weights (sum to 1.0)
-    default_front_weight: float = 0.5
-    default_back_weight: float = 0.4
-    default_middle_weight: float = 0.1
-
-    # Pattern-specific overrides
-    search_front_weight: float = 0.75  # Search results: front-heavy
-    search_back_weight: float = 0.15
-    logs_front_weight: float = 0.15  # Logs: back-heavy (recent)
-    logs_back_weight: float = 0.75
-
-    # Query keyword detection for dynamic adjustment
-    recency_keywords: tuple[str, ...] = (
-        "latest",
-        "recent",
-        "last",
-        "newest",
-        "current",
-        "now",
-    )
-    historical_keywords: tuple[str, ...] = (
-        "first",
-        "oldest",
-        "earliest",
-        "original",
-        "initial",
-        "beginning",
-    )
-
-    # Information density selection
-    use_information_density: bool = True
-    candidate_multiplier: int = 3  # Consider 3x candidates per slot
-    dedup_identical_items: bool = True  # Don't waste slots on identical items
+# NOTE (API-14): the second, incompatible ``SmartCrusherConfig`` that used to
+# live in this module — together with its ``RelevanceScorerConfig`` (whose
+# ``relevance_threshold=0.25`` was never forwarded anywhere; the value the
+# engine actually receives is the reconciled 0.3 passed explicitly at the
+# bridge, see ``transforms/smart_crusher.py``) and the 80-line ``AnchorConfig``
+# (the live anchor defaults are Rust-side, ``anchor_selector.rs``) — was
+# deleted. The LIVE class is ``furl_ctx.transforms.smart_crusher.
+# SmartCrusherConfig``, which the package root re-exports; constructing the
+# old schema's kwargs against it now fails loud with ``TypeError`` instead of
+# crashing the engine later.
 
 
 # Default tools to exclude from compression (local file/code tools)
@@ -190,18 +119,21 @@ class CompressionProfile:
     via information saturation (Kneedle on unique bigram coverage). This profile
     applies a bias multiplier: >1 keeps more items (conservative), <1 keeps fewer
     (aggressive).
+
+    ``bias`` is the ONLY field: the consumer (``ContentRouter._get_tool_bias``)
+    reads nothing else. The historical ``min_k``/``max_k`` fields were unread —
+    the real keep-floor lives in the Rust adaptive sizer (API-14; the
+    "conservative" preset's ``min_k=5`` promise did nothing).
     """
 
     bias: float = 1.0  # 0.7=aggressive, 1.0=moderate, 1.5=conservative
-    min_k: int = 3  # Never keep fewer than this
-    max_k: int | None = None  # Cap (None = no cap, let statistics decide)
 
 
 # Named presets for convenience
 PROFILE_PRESETS: dict[str, CompressionProfile] = {
-    "conservative": CompressionProfile(bias=1.5, min_k=5),
-    "moderate": CompressionProfile(bias=1.0, min_k=3),
-    "aggressive": CompressionProfile(bias=0.7, min_k=3),
+    "conservative": CompressionProfile(bias=1.5),
+    "moderate": CompressionProfile(bias=1.0),
+    "aggressive": CompressionProfile(bias=0.7),
 }
 
 # Default per-tool profiles: tools not listed here use moderate (bias=1.0)
@@ -216,71 +148,6 @@ DEFAULT_TOOL_PROFILES: dict[str, CompressionProfile] = {
     "WebFetch": PROFILE_PRESETS["aggressive"],
     "webfetch": PROFILE_PRESETS["aggressive"],
 }
-
-
-@dataclass
-class SmartCrusherConfig:
-    """Configuration for smart statistical crusher (DEFAULT).
-
-    Uses statistical analysis to intelligently compress tool outputs while
-    PRESERVING THE ORIGINAL JSON SCHEMA. Output contains only items from
-    the original array - no wrappers, no generated text, no metadata.
-
-    Handles ALL JSON types:
-    - Arrays of dicts, strings, numbers, mixed types
-    - Flat objects with many keys
-    - Nested objects (recursive compression)
-
-    Safety guarantees (consistent across all types):
-    - First K, last K items always kept (K is adaptive via Kneedle algorithm)
-    - Error items never dropped
-    - Anomalous numeric items (> 2 std from mean) always kept
-    - Items matching query context via RelevanceScorer
-
-    GOTCHAS:
-    - Adds ~5-10ms overhead per tool output for statistical analysis
-    - Change point detection uses fixed window (5 items) - may miss:
-      - Very gradual changes
-      - Patterns in smaller arrays
-    - TOP_N for search results assumes higher score = more relevant
-      (may not be true for all APIs)
-
-    SAFER SETTINGS:
-    - Increase max_items_after_crush for critical data
-    - Set variance_threshold lower (1.5) to catch more change points
-    """
-
-    enabled: bool = True  # Enabled by default — sole tool-output compressor
-    min_items_to_analyze: int = 5  # Don't analyze tiny arrays
-    min_tokens_to_crush: int = 200  # Only crush if > N tokens
-    variance_threshold: float = 2.0  # Std devs for change point detection
-    uniqueness_threshold: float = 0.1  # Below this = nearly constant
-    similarity_threshold: float = 0.8  # For clustering similar strings
-    max_items_after_crush: int = 15  # Target max items in output
-    preserve_change_points: bool = True
-    include_summaries: bool = False  # Disabled - no generated text
-
-    # Relevance scoring configuration
-    relevance: RelevanceScorerConfig = field(default_factory=RelevanceScorerConfig)
-
-    # Anchor selection configuration (dynamic position-based preservation)
-    anchor: AnchorConfig = field(default_factory=AnchorConfig)
-
-    # Content deduplication - prevents wasting slots on identical items
-    # When multiple preservation mechanisms (anchors, anomalies, outliers) add
-    # the same item, only one copy is kept. This is critical for arrays where
-    # many items have identical content (e.g., repeated status messages).
-    dedup_identical_items: bool = True
-
-    # Adaptive K boundary allocation (fraction of total K for first/last items)
-    # The remaining fraction is filled by importance scoring (errors, anomalies, etc.)
-    first_fraction: float = 0.3  # 30% of K from start of array
-    last_fraction: float = 0.15  # 15% of K from end of array
-
-    # Lossless compaction only replaces the original when it saves at
-    # least this byte fraction vs the (minified) input. Mirrors the
-    # Rust default.
-    lossless_min_savings_ratio: float = 0.30
 
 
 @dataclass
@@ -329,10 +196,16 @@ class CCRConfig:
 
 @dataclass
 class FurlConfig:
-    """Main configuration for FurlClient."""
+    """Main configuration for FurlClient.
+
+    (API-14: the ``ccr: CCRConfig`` field had zero readers and was
+    deleted — the live retrieval-advertisement flags are
+    ``ContentRouterConfig.ccr_*`` via ``compressor_registry``; pass a
+    ``CCRConfig`` to ``SmartCrusher(ccr_config=...)`` directly when
+    constructing one by hand.)
+    """
 
     cache_aligner: CacheAlignerConfig = field(default_factory=CacheAlignerConfig)
-    ccr: CCRConfig = field(default_factory=CCRConfig)  # Compress-Cache-Retrieve
 
     # Cross-message dedup: replace later byte-identical tool outputs with a
     # recoverable <<ccr:HASH>> pointer to the first occurrence. Operates on

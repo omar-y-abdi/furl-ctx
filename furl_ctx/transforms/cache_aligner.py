@@ -393,7 +393,7 @@ def align_for_cache(
     """
     cfg = config or CacheAlignerConfig()
     aligner = CacheAligner(cfg)
-    tokenizer = Tokenizer(EstimatingTokenCounter())  # type: ignore[arg-type]
+    tokenizer = Tokenizer(EstimatingTokenCounter())
 
     result = aligner.apply(messages, tokenizer)
 

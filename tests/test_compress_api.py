@@ -193,7 +193,12 @@ class TestNoneToolCallsRegression:
         assert result.error is None
 
     def test_walkers_tolerate_none_tool_calls_directly(self):
-        """All three tool_calls walkers survive the present-but-None shape."""
+        """Both tool_calls walkers survive the present-but-None shape.
+
+        (read_lifecycle's per-call ``_find_tool_call_msg_index`` rescan was
+        removed — ARCH-9: the single ``_build_tool_metadata`` pass records
+        the message index itself.)
+        """
         from furl_ctx.config import ReadLifecycleConfig
         from furl_ctx.transforms.content_router import ContentRouter
         from furl_ctx.transforms.read_lifecycle import ReadLifecycleManager
@@ -202,5 +207,4 @@ class TestNoneToolCallsRegression:
 
         manager = ReadLifecycleManager(ReadLifecycleConfig())
         assert manager._build_tool_metadata([assistant_none]) == {}
-        assert manager._find_tool_call_msg_index([assistant_none], "call_x") is None
         assert ContentRouter()._build_tool_name_map([assistant_none]) == {}

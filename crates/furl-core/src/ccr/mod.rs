@@ -31,6 +31,7 @@ use std::time::Duration;
 pub use backends::InMemoryCcrStore;
 pub(crate) use markers::{
     marker_for_diff, marker_for_opaque, marker_for_row_index, marker_for_rows_offloaded,
+    RetrieveUnit,
 };
 
 /// Pluggable CCR storage backend. `Send + Sync` so it can sit behind an

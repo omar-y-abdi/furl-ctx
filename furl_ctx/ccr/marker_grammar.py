@@ -15,7 +15,7 @@ them instead of re-hardcoding the contract.
 Two DISTINCT hex notions — do not conflate them
 ===============================================
 1. ``HEX_RE`` (``[a-f0-9]``) — lowercase, case-sensitive — used by the
-   regex consumer (``tool_injection``). The producers emit lowercase hex, and
+   compiled consumer patterns below. The producers emit lowercase hex, and
    the exact-width + lowercase check is part of the spoofing guard.
 2. ``HEX_ALPHABET`` (``0123456789abcdefABCDEF``) — the char set the substring
    walkers (``smart_crusher._collect_ccr_hashes_from_string``,
@@ -27,9 +27,8 @@ Two DISTINCT hex notions — do not conflate them
 Two DISTINCT width contracts — also kept separate
 =================================================
 * ``HASH_WIDTHS = {12, 24}`` — the STRICT consumer set. The bracket-form and
-  ``<<ccr:`` regexes in ``tool_injection`` accept exactly these widths; any
-  other length is rejected as a spoofing guard. This is the set
-  ``CCR_HASH_WIDTHS`` re-exports.
+  ``<<ccr:`` regexes below accept exactly these widths; any other length is
+  rejected as a spoofing guard.
 * The recovery floor ``{6,}`` in ``tests/test_ccr_recovery_invariant.py`` is a
   deliberately LOOSER lower bound for the recovery-invariant scan and is NOT
   defined here — it is intentionally distinct from the strict consumer set.
@@ -89,10 +88,11 @@ def is_valid_ccr_hash(value: object) -> bool:
     """True iff ``value`` is a syntactically valid CCR hash key: a ``str`` of
     exactly ``HASH_WIDTHS`` (12 or 24) lowercase-hex characters.
 
-    The single width+charset spoofing guard, shared by BOTH ccr-hash ingress
-    points — ``tool_injection.parse_tool_call`` (model-emitted tool calls) and
-    the MCP ``furl_retrieve`` handler — so the two cannot drift. Rejects
-    ``None``, non-``str``, wrong width, and any non-hex character.
+    The single width+charset spoofing guard at the ccr-hash ingress —
+    the MCP ``furl_retrieve`` handler (the proxy-side
+    ``tool_injection.parse_tool_call`` twin was excised with its module,
+    SIMP-4). Rejects ``None``, non-``str``, wrong width, and any non-hex
+    character.
     """
     return (
         isinstance(value, str)
@@ -104,6 +104,14 @@ def is_valid_ccr_hash(value: object) -> bool:
 # --------------------------------------------------------------------------- #
 # Literal grammar pieces.
 # --------------------------------------------------------------------------- #
+
+# Name of the CCR retrieval tool — the consumer-side verb of this grammar.
+# The MCP server registers it (hosts alias it as
+# ``mcp__<server>__furl_retrieve``), and the router's retrieval-loop guard
+# (router_message_policy.ALWAYS_EXCLUDE_TOOLS) excludes its outputs from
+# re-compression. Re-homed here from the excised ``tool_injection`` module
+# (SIMP-4): the tool NAME is wire contract exactly like the marker shapes.
+CCR_TOOL_NAME: str = "furl_retrieve"
 
 # The double-angle marker prefix shared by shapes A-F + D.
 CCR_PREFIX: str = "<<ccr:"
@@ -123,7 +131,9 @@ _HASH_WIDTH_ALT: str = rf"({HEX_CLASS}{{24}}|{HEX_CLASS}{{12}})"
 # Compiled consumer patterns — built FROM the named parts above.
 #
 # These reproduce the original ``tool_injection._marker_patterns`` literals
-# byte-for-byte (minus the retired dead pattern). Equivalence is proven in
+# byte-for-byte (minus the retired dead pattern; the injector module itself
+# was excised — SIMP-4 — so this module is now the sole owner of the
+# consumer patterns). Equivalence is proven in
 # tests/test_ccr_marker_grammar_characterization.py against frozen copies of
 # the original literals.
 # --------------------------------------------------------------------------- #
@@ -146,13 +156,14 @@ DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{D
 
 
 def marker_patterns() -> list[re.Pattern]:
-    """The ordered consumer pattern list for ``scan_for_markers``.
+    """The ordered consumer pattern list for marker scanning.
 
     Order is preserved from the original ``_marker_patterns`` (standard
-    bracket form, generic bracket fallback, double-angle family). The scan
-    path runs every pattern and unions the extracted hashes, so order does
-    not affect the result set — but it is kept stable for clarity and to
-    match the original behavior exactly.
+    bracket form, generic bracket fallback, double-angle family). A scan
+    runs every pattern and unions the extracted hashes (last capture group
+    per match, deduped first-seen), so order does not affect the result
+    set — but it is kept stable for clarity and to match the original
+    behavior exactly.
     """
     return [
         BRACKET_RETRIEVE_PATTERN,

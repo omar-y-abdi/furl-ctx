@@ -33,7 +33,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use super::config::SmartCrusherConfig;
 use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
-use super::types::{ArrayAnalysis, FieldStats};
+use super::types::{ArrayAnalysis, FieldStats, FieldType};
 use crate::transforms::anchor_selector::stable_item_hash;
 
 /// Collapse content-duplicate indices to their lowest representative.
@@ -475,7 +475,7 @@ fn field_value_singletons(items: &[Value], exclude: &BTreeSet<String>) -> Vec<us
 fn value_signature(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        other => crate::transforms::anchor_selector::python_json_dumps_sort_keys(other),
+        other => crate::util::pyjson::python_json_dumps_sort_keys(other),
     }
 }
 
@@ -575,7 +575,9 @@ fn numeric_anomaly_indices(
 }
 
 fn is_numeric_field_with_variance(stats: &FieldStats) -> bool {
-    stats.field_type == "numeric" && stats.mean_val.is_some() && stats.variance.unwrap_or(0.0) > 0.0
+    stats.field_type == FieldType::Numeric
+        && stats.mean_val.is_some()
+        && stats.variance.unwrap_or(0.0) > 0.0
 }
 
 /// Per-index content-hash memo shared across the prioritizer's passes

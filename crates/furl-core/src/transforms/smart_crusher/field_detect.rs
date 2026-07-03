@@ -12,7 +12,7 @@
 use serde_json::Value;
 
 use super::statistics::{calculate_string_entropy, detect_sequential_pattern, is_uuid_format};
-use super::types::FieldStats;
+use super::types::{FieldStats, FieldType};
 
 /// Detect whether a field is an "ID field" — high-uniqueness column
 /// that doesn't carry semantic information.
@@ -40,7 +40,7 @@ pub fn detect_id_field_statistically(stats: &FieldStats, values: &[Value]) -> (b
     }
 
     // String-field branches.
-    if stats.field_type == "string" {
+    if stats.field_type == FieldType::String {
         // First 20 string-typed values for sampling. Python: `values[:20]`
         // then filters by `isinstance(v, str)` — order-preserving slice
         // before filter, so we mirror that.
@@ -66,7 +66,7 @@ pub fn detect_id_field_statistically(stats: &FieldStats, values: &[Value]) -> (b
     }
 
     // Numeric-field branches.
-    if stats.field_type == "numeric" {
+    if stats.field_type == FieldType::Numeric {
         // Python: passes `values` (full list, may include strings) through
         // `_detect_sequential_pattern` with default `check_order=True`.
         if detect_sequential_pattern(values, true) && stats.unique_ratio > 0.95 {
@@ -118,7 +118,7 @@ pub fn detect_id_field_statistically(stats: &FieldStats, values: &[Value]) -> (b
 /// `items` is the list of original-array dict items so we can pull the
 /// field's values in array order for the descending-sort check.
 pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> (bool, f64) {
-    if stats.field_type != "numeric" {
+    if stats.field_type != FieldType::Numeric {
         return (false, 0.0);
     }
 
@@ -231,10 +231,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn stats(name: &str, field_type: &str, unique_ratio: f64) -> FieldStats {
+    fn stats(name: &str, field_type: FieldType, unique_ratio: f64) -> FieldStats {
         FieldStats {
             name: name.to_string(),
-            field_type: field_type.to_string(),
+            field_type,
             count: 100,
             unique_count: (100.0 * unique_ratio) as usize,
             unique_ratio,
@@ -251,7 +251,7 @@ mod tests {
     }
 
     fn stats_with_range(name: &str, min_v: f64, max_v: f64) -> FieldStats {
-        let mut s = stats(name, "numeric", 1.0);
+        let mut s = stats(name, FieldType::Numeric, 1.0);
         s.min_val = Some(min_v);
         s.max_val = Some(max_v);
         // COR-24: the variation gate consults `variance`. A fixture with
@@ -266,14 +266,14 @@ mod tests {
 
     #[test]
     fn id_field_low_uniqueness_rejected() {
-        let s = stats("status", "string", 0.5);
+        let s = stats("status", FieldType::String, 0.5);
         let values: Vec<Value> = vec![json!("ok"), json!("error"), json!("ok"), json!("ok")];
         assert_eq!(detect_id_field_statistically(&s, &values), (false, 0.0));
     }
 
     #[test]
     fn id_field_uuid_strings_high_confidence() {
-        let s = stats("uid", "string", 1.0);
+        let s = stats("uid", FieldType::String, 1.0);
         let values: Vec<Value> = (0..20)
             .map(|i| json!(format!("550e8400-e29b-41d4-a716-{:012x}", i)))
             .collect();
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn id_field_high_entropy_strings() {
-        let mut s = stats("uid", "string", 1.0);
+        let mut s = stats("uid", FieldType::String, 1.0);
         s.unique_ratio = 0.96;
         // 20 random-looking hex-ish strings — high entropy.
         let values: Vec<Value> = (0..20)
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn id_field_sequential_numeric() {
-        let mut s = stats("id", "numeric", 1.0);
+        let mut s = stats("id", FieldType::Numeric, 1.0);
         s.unique_ratio = 0.96;
         s.min_val = Some(1.0);
         s.max_val = Some(100.0);
@@ -311,7 +311,7 @@ mod tests {
     fn id_field_high_uniqueness_alone_triggers_catchall() {
         // Numeric field with unique_ratio = 0.99 but no other signal.
         // Falls through to the 0.98 catch-all.
-        let mut s = stats("misc", "numeric", 0.99);
+        let mut s = stats("misc", FieldType::Numeric, 0.99);
         s.min_val = Some(0.0);
         s.max_val = Some(0.0); // zero range → numeric range branch fails
         let values: Vec<Value> = (0..100).map(|_| json!(0)).collect();
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn score_field_non_numeric_rejected() {
-        let s = stats("name", "string", 0.5);
+        let s = stats("name", FieldType::String, 0.5);
         let items: Vec<Value> = vec![
             json!({"name": "alice"}),
             json!({"name": "bob"}),
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn score_field_missing_min_max_rejected() {
-        let s = stats("score", "numeric", 1.0); // no min/max set
+        let s = stats("score", FieldType::Numeric, 1.0); // no min/max set
         let items: Vec<Value> = vec![json!({"score": 0.5})];
         let (is_score, _) = detect_score_field_statistically(&s, &items);
         assert!(!is_score);

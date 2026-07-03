@@ -159,7 +159,7 @@ impl SmartCrusher {
         // compact `(",", ":")` separators + `ensure_ascii=False`,
         // preserving object-key insertion order. Matches the Python
         // SmartCrusher output bytes exactly.
-        let result = crate::transforms::anchor_selector::python_safe_json_dumps(&crushed);
+        let result = crate::util::pyjson::python_safe_json_dumps(&crushed);
         let was_modified = result != content.trim();
         (result, was_modified, info, dropped)
     }
@@ -324,9 +324,13 @@ impl SmartCrusher {
                             // + append a CCR-Dropped sentinel whenever rows
                             // were dropped, so every distinct string is
                             // recoverable via `ccr_get(hash)` — never
-                            // silently lost. Store write is unconditional
-                            // (inside `persist_dropped`); the sentinel TEXT
-                            // is gated by `enable_ccr_marker`.
+                            // silently lost. Both the store write and the
+                            // sentinel TEXT are unconditional (inside
+                            // `persist_dropped`) — `enable_ccr_marker` gates
+                            // NEITHER; it is only the router-layer
+                            // retrieval-tool advertisement preference
+                            // (pinned by `persist.rs`'s
+                            // `non_dict_drop_surfaces_pointer_and_persists_even_with_marker_off`).
                             if let Some(sentinel) =
                                 self.ccr_dropped_sentinel_collecting(arr, &crushed_values, dropped)
                             {
@@ -804,7 +808,7 @@ impl IntoIterator for GroupBuckets {
 /// non-JSON-serializable Python values; in serde_json land everything
 /// is already JSON-native, so plain canonical JSON suffices.
 fn canonical_json_for_match(value: &Value) -> String {
-    crate::transforms::anchor_selector::python_json_dumps_sort_keys(value)
+    crate::util::pyjson::python_json_dumps_sort_keys(value)
 }
 
 // ─── Walker-integration helpers (string handling) ──────────────────────

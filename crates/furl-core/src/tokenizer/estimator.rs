@@ -1,9 +1,16 @@
 //! Character-density estimator. Used as a fallback for any tokenizer family
 //! we haven't wired in yet (Anthropic Claude, Google Gemini, Cohere, …).
 //!
-//! Mirrors `furl_ctx.tokenizers.estimator.EstimatingTokenCounter`. The formula
-//! is `ceil(chars / chars_per_token)`. `chars` is *Unicode scalar count*, not
-//! byte length, to match Python's `len(text)` semantics on str.
+//! Mirrors `furl_ctx.tokenizers.estimator.EstimatingTokenCounter` in its
+//! FIXED-ratio mode. The formula is round-half-up:
+//! `max(1, int(chars / chars_per_token + 0.5))`. `chars` is *Unicode
+//! scalar count*, not byte length, to match Python's `len(text)`
+//! semantics on str.
+//!
+//! NOT mirrored (ARCH-6): Python's AUTO mode (no fixed ratio — density
+//! auto-detection + URL/UUID overhead), which Python uses for unknown
+//! models. This estimator is always fixed-ratio; see
+//! `tokenizer/registry.rs` for the divergence note.
 
 use super::{Backend, Tokenizer};
 

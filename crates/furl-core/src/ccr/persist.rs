@@ -32,7 +32,7 @@
 use md5::{Digest as _, Md5};
 use sha2::{Digest as _, Sha256};
 
-use super::markers::marker_for_retrieve_more;
+use super::markers::{marker_for_retrieve_more, RetrieveUnit};
 use super::CcrStore;
 
 /// MD5 of `s`'s UTF-8 bytes, hex-encoded, truncated to 24 chars. Matches
@@ -89,7 +89,7 @@ pub(crate) fn retrieve_more_marker_line(
     original_units: usize,
     kept_units: usize,
     key: &str,
-    unit: &str,
+    unit: RetrieveUnit,
 ) -> String {
     format!(
         "\n{}",
@@ -136,7 +136,7 @@ pub(crate) fn persist_and_mark(
     content: &str,
     original_units: usize,
     kept_units: usize,
-    unit: &str,
+    unit: RetrieveUnit,
 ) -> (String, String) {
     let (key, marker) = key_and_mark(content, original_units, kept_units, unit);
     store.put(&key, content);
@@ -150,7 +150,7 @@ pub(crate) fn key_and_mark(
     content: &str,
     original_units: usize,
     kept_units: usize,
-    unit: &str,
+    unit: RetrieveUnit,
 ) -> (String, String) {
     let key = md5_hex_24(content);
     let marker = retrieve_more_marker_line(original_units, kept_units, &key, unit);
@@ -196,19 +196,19 @@ mod tests {
         // PERF-8 byte-equality pin: the key-only tail returns the exact
         // (key, marker) bytes the persisting tail returns.
         let store = InMemoryCcrStore::new();
-        let persisted = persist_and_mark(&store, "orig content", 10, 3, "lines");
-        let key_only = key_and_mark("orig content", 10, 3, "lines");
+        let persisted = persist_and_mark(&store, "orig content", 10, 3, RetrieveUnit::Lines);
+        let key_only = key_and_mark("orig content", 10, 3, RetrieveUnit::Lines);
         assert_eq!(persisted, key_only);
         assert_eq!(store.len(), 1, "persist wrote");
         let store2 = InMemoryCcrStore::new();
-        let _ = key_and_mark("orig content", 10, 3, "lines");
+        let _ = key_and_mark("orig content", 10, 3, RetrieveUnit::Lines);
         assert_eq!(store2.len(), 0, "key-only never writes");
     }
 
     #[test]
     fn persist_and_mark_puts_key_and_composes_marker_line() {
         let store = InMemoryCcrStore::new();
-        let (key, marker) = persist_and_mark(&store, "orig content", 10, 3, "lines");
+        let (key, marker) = persist_and_mark(&store, "orig content", 10, 3, RetrieveUnit::Lines);
         assert_eq!(key, md5_hex_24("orig content"));
         assert_eq!(store.get(&key).as_deref(), Some("orig content"));
         assert_eq!(
@@ -217,6 +217,9 @@ mod tests {
         );
         // The line helper alone matches the composed marker (text_crusher
         // uses it without the store write).
-        assert_eq!(retrieve_more_marker_line(10, 3, &key, "lines"), marker);
+        assert_eq!(
+            retrieve_more_marker_line(10, 3, &key, RetrieveUnit::Lines),
+            marker
+        );
     }
 }

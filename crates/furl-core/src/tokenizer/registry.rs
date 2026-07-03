@@ -1,12 +1,33 @@
 //! Model-name → tokenizer dispatch.
 //!
-//! Mirrors `MODEL_PATTERNS` in `furl_ctx/tokenizers/registry.py`. Two
-//! backends in priority order:
+//! Mirrors `MODEL_PATTERNS` in `furl_ctx/tokenizers/registry.py` — the
+//! pattern → backend mapping is the same on both sides (post-excision
+//! both registries are tiktoken + estimation only; the HF and
+//! mistral-common backends are gone). Two backends in priority order:
 //!
 //! 1. **Tiktoken** — OpenAI / o-series via `tiktoken-rs`. Byte-identical to
-//!    Python `tiktoken`.
+//!    Python `tiktoken` (pinned by `tests/tokenizer_python_parity.rs`,
+//!    TEST-8).
 //! 2. **Estimation** — `chars / cpt` fallback for Anthropic Claude (3.5),
 //!    Gemini / Cohere / Command (4.0), and everything else (4.0).
+//!
+//! # Known cross-language divergences (ARCH-6)
+//!
+//! For the families above the two sides agree (TEST-8 pins them). Two
+//! deliberate divergences remain — the same model name can count
+//! differently across the FFI:
+//!
+//! 1. **Unknown-model estimation**: Python's default
+//!    `EstimatingTokenCounter()` AUTO-detects a density (4.0 text /
+//!    3.5 code / 3.2 JSON, sampled prefix) and adds URL/UUID overhead;
+//!    this registry uses a FIXED 4.0 for unknown models. Code/JSON-ish
+//!    content on an unrecognized model counts higher here than in
+//!    Python.
+//! 2. **Legacy OpenAI encoding corners**: unknown members of the legacy
+//!    completion families (e.g. `davinci-002`, `babbage-002`) fall to
+//!    Python's `DEFAULT_ENCODING` (`cl100k_base`) but match the
+//!    `davinci`/`babbage` prefixes here (`r50k_base`). The exact names
+//!    in Python's `MODEL_TO_ENCODING` agree on both sides.
 
 use super::{EstimatingCounter, TiktokenCounter, Tokenizer};
 

@@ -1,25 +1,23 @@
 """CCR (Compress-Cache-Retrieve) module for reversible compression.
 
-This module provides tool injection and retrieval handling for the CCR architecture.
-When tool outputs are compressed, the LLM can retrieve more data if needed.
+When tool outputs are compressed, the LLM can retrieve the original
+content by hash. Two components live here:
 
-Key components:
-1. Tool Injection: the hook injects the furl_retrieve tool into requests
+1. ``marker_grammar`` — the single owned definition of the CCR wire
+   format (marker shapes, hash widths, the ``furl_retrieve`` tool
+   name, and the ``is_valid_ccr_hash`` spoofing guard).
+2. ``mcp_server`` — the standalone MCP server that exposes the
+   ``furl_retrieve`` tool (plus ``furl_compress``/``furl_stats``) via
+   the MCP protocol. This is the production retrieval channel.
 
-Two distribution channels for the retrieval tool:
-1. Tool Injection: the hook injects the tool into a request when compression occurs
-2. MCP Server: standalone server exposes the tool via MCP protocol
-
-When MCP is configured, tool injection is skipped to avoid duplicates.
+The historical proxy-side injection plane (``tool_injection`` —
+``CCRToolInjector``, request/system-message injection, tool-call
+parsing) had zero production callers post proxy-removal and was excised
+(SIMP-4). ``CCR_TOOL_NAME`` and the marker patterns it owned live on in
+``marker_grammar``.
 """
 
-from .tool_injection import (
-    CCR_TOOL_NAME,
-    CCRToolInjector,
-    create_ccr_tool_definition,
-    create_system_instructions,
-    parse_tool_call,
-)
+from .marker_grammar import CCR_TOOL_NAME, is_valid_ccr_hash
 
 # MCP server is optional (requires mcp package)
 try:
@@ -32,12 +30,9 @@ except ImportError:
     MCP_SERVER_AVAILABLE = False
 
 __all__ = [
-    # Tool injection
+    # Wire contract
     "CCR_TOOL_NAME",
-    "CCRToolInjector",
-    "create_ccr_tool_definition",
-    "create_system_instructions",
-    "parse_tool_call",
+    "is_valid_ccr_hash",
     # MCP server
     "FurlMCPServer",
     "create_ccr_mcp_server",

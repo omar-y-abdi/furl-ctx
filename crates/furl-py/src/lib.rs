@@ -36,7 +36,6 @@ use furl_core::transforms::{
     DiffCompressor, DiffCompressorConfig, DiffCompressorStats,
     LogCompressionResult as RustLogResult, LogCompressor as RustLogCompressor,
     LogCompressorConfig as RustLogConfig, LogCompressorStats as RustLogStats,
-    LogFormat as RustLogFormat, LogLevel as RustLogLevel,
     SearchCompressionResult as RustSearchResult, SearchCompressor as RustSearchCompressor,
     SearchCompressorConfig as RustSearchConfig, SearchCompressorStats as RustSearchStats,
     TextCrushResult as RustTextCrushResult, TextCrusher as RustTextCrusher,
@@ -526,9 +525,14 @@ impl PyDiffCompressor {
 /// Defaults match Python's dataclass byte-for-byte. The constructor
 /// accepts every dataclass field as a kwarg with the same name and type,
 /// so the Python shim passes `SmartCrusherConfig(**asdict(py_cfg), ...)` —
-/// plus two non-dataclass kwargs it injects explicitly: `relevance_threshold`
-/// (lives on `RelevanceScorerConfig`) and `enable_ccr_marker` (derived from
-/// the CCR config).
+/// plus two non-dataclass kwargs it injects explicitly:
+/// `relevance_threshold` (the reconciled 0.3 scoring threshold — the
+/// retired `RelevanceScorerConfig`'s 0.25 was never forwarded) and
+/// `enable_ccr_marker` (derived from the CCR config).
+///
+/// An unknown kwarg (including the four knobs deleted by SIMP-7:
+/// `enabled`, `uniqueness_threshold`, `similarity_threshold`,
+/// `include_summaries`) raises `TypeError` — fail-loud wire contract.
 #[pyclass(name = "SmartCrusherConfig", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
 struct PySmartCrusherConfig {
@@ -539,15 +543,11 @@ struct PySmartCrusherConfig {
 impl PySmartCrusherConfig {
     #[new]
     #[pyo3(signature = (
-        enabled = true,
         min_items_to_analyze = 5,
         min_tokens_to_crush = 200,
         variance_threshold = 2.0,
-        uniqueness_threshold = 0.1,
-        similarity_threshold = 0.8,
         max_items_after_crush = 15,
         preserve_change_points = true,
-        include_summaries = false,
         dedup_identical_items = true,
         first_fraction = 0.3,
         last_fraction = 0.15,
@@ -559,15 +559,11 @@ impl PySmartCrusherConfig {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        enabled: bool,
         min_items_to_analyze: usize,
         min_tokens_to_crush: usize,
         variance_threshold: f64,
-        uniqueness_threshold: f64,
-        similarity_threshold: f64,
         max_items_after_crush: usize,
         preserve_change_points: bool,
-        include_summaries: bool,
         dedup_identical_items: bool,
         first_fraction: f64,
         last_fraction: f64,
@@ -587,15 +583,11 @@ impl PySmartCrusherConfig {
         })?;
         Ok(Self {
             inner: RustSmartCrusherConfig {
-                enabled,
                 min_items_to_analyze,
                 min_tokens_to_crush,
                 variance_threshold,
-                uniqueness_threshold,
-                similarity_threshold,
                 max_items_after_crush,
                 preserve_change_points,
-                include_summaries,
                 dedup_identical_items,
                 first_fraction,
                 last_fraction,
@@ -604,20 +596,22 @@ impl PySmartCrusherConfig {
                 enable_ccr_marker,
                 routing_policy,
                 lossless_only,
-                // Entropy-floor crushability override: on by default so
-                // the Python `compress()` pipeline crushes near-unique
+                // Entropy-floor crushability override: FORCED true here
+                // so the Python `compress()` pipeline crushes near-unique
                 // no-signal data recoverably (deterministic, aggressive).
-                // Not exposed as a constructor arg \u2014 keeps the Python
-                // config API + parity fixtures unchanged.
+                // DELIBERATELY not exposed as a constructor kwarg (owner
+                // decision Q12: keep the comment-guarded divergence) —
+                // the Python dataclass has no such field, the parity
+                // fixtures assume it, and the one Rust-side caller that
+                // needs it off (the byte-faithful live-zone dispatcher)
+                // constructs its own core config directly. If a Python
+                // knob is ever wanted, add the dataclass field + this
+                // kwarg in ONE commit (wire-contract rule).
                 crush_unique_entities_when_recoverable: true,
             },
         })
     }
 
-    #[getter]
-    fn enabled(&self) -> bool {
-        self.inner.enabled
-    }
     #[getter]
     fn min_items_to_analyze(&self) -> usize {
         self.inner.min_items_to_analyze
@@ -631,24 +625,12 @@ impl PySmartCrusherConfig {
         self.inner.variance_threshold
     }
     #[getter]
-    fn uniqueness_threshold(&self) -> f64 {
-        self.inner.uniqueness_threshold
-    }
-    #[getter]
-    fn similarity_threshold(&self) -> f64 {
-        self.inner.similarity_threshold
-    }
-    #[getter]
     fn max_items_after_crush(&self) -> usize {
         self.inner.max_items_after_crush
     }
     #[getter]
     fn preserve_change_points(&self) -> bool {
         self.inner.preserve_change_points
-    }
-    #[getter]
-    fn include_summaries(&self) -> bool {
-        self.inner.include_summaries
     }
     #[getter]
     fn dedup_identical_items(&self) -> bool {
@@ -685,10 +667,9 @@ impl PySmartCrusherConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "SmartCrusherConfig(enabled={}, min_items_to_analyze={}, \
+            "SmartCrusherConfig(min_items_to_analyze={}, \
              min_tokens_to_crush={}, max_items_after_crush={}, \
              relevance_threshold={})",
-            self.inner.enabled,
             self.inner.min_items_to_analyze,
             self.inner.min_tokens_to_crush,
             self.inner.max_items_after_crush,
@@ -1266,39 +1247,26 @@ impl PyDetectionResult {
         self.inner.confidence
     }
 
-    /// Per-type metadata bag (e.g. `{"language": "python", "pattern_matches": 5}`
-    /// for code, `{"item_count": 3, "is_dict_array": true}` for JSON arrays).
-    /// Returned as a fresh `dict` so callers can mutate without affecting
-    /// the underlying Rust value.
+    /// Metadata bag — always an EMPTY fresh `dict` (ARCH-11).
+    ///
+    /// The only constructor of this class (`detect_content_type`)
+    /// synthesizes the legacy `DetectionResult` shape with an empty
+    /// metadata map; the detection chain carries no per-type metadata.
+    /// The getter survives purely for field-surface parity with the
+    /// Python `DetectionResult` dataclass (callers read
+    /// `.content_type` / `.confidence`; none read metadata values).
+    /// The former number-coercion ladder here (u64→i64→f64→None,
+    /// arrays→JSON strings) was dead code describing values that could
+    /// never occur.
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new(py);
-        for (k, v) in &self.inner.metadata {
-            // Convert each JSON value into the closest Python primitive.
-            // Detection metadata is always a flat dict of scalars (ints,
-            // bools, strings) so we don't need to recurse.
-            match v {
-                serde_json::Value::Bool(b) => dict.set_item(k, b)?,
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_u64() {
-                        dict.set_item(k, i)?
-                    } else if let Some(i) = n.as_i64() {
-                        dict.set_item(k, i)?
-                    } else if let Some(f) = n.as_f64() {
-                        dict.set_item(k, f)?
-                    } else {
-                        dict.set_item(k, py.None())?
-                    }
-                }
-                serde_json::Value::String(s) => dict.set_item(k, s)?,
-                serde_json::Value::Null => dict.set_item(k, py.None())?,
-                // Detection never emits arrays / objects in metadata
-                // today; if it ever does, fall through to JSON-string for
-                // visibility rather than silently dropping.
-                other => dict.set_item(k, other.to_string())?,
-            };
-        }
-        Ok(dict)
+        debug_assert!(
+            self.inner.metadata.is_empty(),
+            "detect_content_type always constructs an empty metadata map; \
+             a populated map means a new constructor exists and this \
+             getter must convert values again"
+        );
+        Ok(PyDict::new(py))
     }
 
     fn __repr__(&self) -> String {
@@ -1638,33 +1606,6 @@ impl PySearchCompressor {
     }
 }
 
-/// Parse one grep/ripgrep line into `(file, line_number, content)`. Used
-/// by the Python shim's `_parse_search_results` so the bug-fixed parser
-/// runs even when callers use the legacy internal helpers (which exist
-/// only for backwards-compat with the existing test surface).
-#[pyfunction]
-fn parse_search_lines(py: Python<'_>, content: &str) -> PyResult<Vec<(String, u64, String)>> {
-    let owned = content.to_string();
-    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7
-    // containment for the legacy parse helper — it runs the same parser
-    // as the wrapped `SearchCompressor.compress` bridge (P0-1 audit).
-    py.detach(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let compressor = RustSearchCompressor::new(RustSearchConfig::default());
-            let mut stats = RustSearchStats::default();
-            let parsed = compressor.parse_search_results(&owned, &mut stats);
-            let mut out = Vec::new();
-            for fm in parsed.values() {
-                for m in &fm.matches {
-                    out.push((m.file.clone(), m.line_number, m.content.clone()));
-                }
-            }
-            out
-        }))
-    })
-    .map_err(panic_to_pyerr)
-}
-
 // ─── log_compressor bridge (Phase 3e.5) ───────────────────────────────
 //
 // Mirrors `furl_ctx.transforms.log_compressor.LogCompressor`. Same CCR
@@ -1848,29 +1789,6 @@ impl PyLogCompressor {
         })
     }
 }
-
-/// Helper for the Python shim's `_detect_format`.
-#[pyfunction]
-fn detect_log_format(py: Python<'_>, lines: Vec<String>) -> PyResult<&'static str> {
-    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7
-    // containment for the format-detection helper (P0-1 audit).
-    py.detach(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let compressor = RustLogCompressor::new(RustLogConfig::default());
-            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-            compressor.detect_format(&refs).as_str()
-        }))
-    })
-    .map_err(panic_to_pyerr)
-}
-
-/// Suppress unused-import warnings for the LogLevel/LogFormat imports
-/// kept for future expansion (the Python shim consumes them via
-/// detect_log_format and the result format_detected getter).
-const _: fn() = || {
-    let _ = RustLogFormat::Generic;
-    let _ = RustLogLevel::Unknown;
-};
 
 // ─── text_crusher bridge (Engine P2-11) ───────────────────────────────
 //
@@ -2131,7 +2049,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySearchCompressorConfig>()?;
     m.add_class::<PySearchCompressionResult>()?;
     m.add_class::<PySearchCompressor>()?;
-    m.add_function(wrap_pyfunction!(parse_search_lines, m)?)?;
     m.add_class::<PySmartCrusherConfig>()?;
     m.add_class::<PyDroppedRef>()?;
     m.add_class::<PyCrushResult>()?;
@@ -2143,7 +2060,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTextCrusherConfig>()?;
     m.add_class::<PyTextCrushResult>()?;
     m.add_class::<PyTextCrusher>()?;
-    m.add_function(wrap_pyfunction!(detect_log_format, m)?)?;
     m.add_function(wrap_pyfunction!(protect_tags, m)?)?;
     m.add_function(wrap_pyfunction!(restore_tags, m)?)?;
     m.add_function(wrap_pyfunction!(is_html_tag, m)?)?;

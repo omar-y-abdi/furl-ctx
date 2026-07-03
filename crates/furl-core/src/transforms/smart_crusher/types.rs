@@ -6,6 +6,8 @@
 //! field-by-field translator.
 
 use serde_json::Value;
+
+use crate::transforms::anchor_selector::DataPattern;
 use std::collections::BTreeMap;
 
 use crate::ccr::marker_for_row_index;
@@ -135,6 +137,44 @@ impl CompressionStrategy {
     }
 }
 
+/// JSON type classification of a field's first non-null value (TYPE-1).
+///
+/// Internal contract between the analyzer (producer) and the
+/// field-detect / field-role / planning / orchestration consumers, which
+/// previously compared free strings in 8+ places — a producer typo
+/// silently changed routing. [`FieldType::as_str`] preserves the
+/// historical string forms byte-for-byte (they match Python's
+/// `field_type` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldType {
+    Null,
+    Boolean,
+    Numeric,
+    String,
+    Object,
+    Array,
+    /// Totality escape hatch — unreachable for parsed JSON (every
+    /// `serde_json::Value` variant maps to one of the above), kept so
+    /// the classifying `match` stays total without a panic arm.
+    Unknown,
+}
+
+impl FieldType {
+    /// Byte-identical to the historical `field_type` string literals
+    /// (which match Python's values).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FieldType::Null => "null",
+            FieldType::Boolean => "boolean",
+            FieldType::Numeric => "numeric",
+            FieldType::String => "string",
+            FieldType::Object => "object",
+            FieldType::Array => "array",
+            FieldType::Unknown => "unknown",
+        }
+    }
+}
+
 /// Statistics for a single field across array items.
 ///
 /// Mirrors the `FieldStats` dataclass at `smart_crusher.py:864-885`.
@@ -143,9 +183,9 @@ impl CompressionStrategy {
 #[derive(Debug, Clone)]
 pub struct FieldStats {
     pub name: String,
-    /// One of: `"numeric"`, `"string"`, `"boolean"`, `"object"`, `"array"`,
-    /// `"null"`. String literals match Python's `field_type` values.
-    pub field_type: String,
+    /// Typed JSON classification of the field (TYPE-1). The historical
+    /// string forms (`"numeric"`, `"string"`, ...) are `as_str()`.
+    pub field_type: FieldType,
     pub count: usize,
     pub unique_count: usize,
     pub unique_ratio: f64,
@@ -166,6 +206,81 @@ pub struct FieldStats {
     pub top_values: Vec<(String, usize)>,
 }
 
+/// Crushability verdict label — WHY `analyze_crushability` decided an
+/// array is (or is not) safe to crush (TYPE-1).
+///
+/// This is a cross-module contract, not just a debug string:
+///
+/// - `route.rs`'s entropy-floor override gate matches the two
+///   `*NoSignal` variants ([`SkipReason::is_no_signal`]) to decide
+///   whether a CCR-backed store may override the analyzer's veto.
+/// - The string form is FFI-visible: when the strategy is `Skip`, the
+///   passthrough `strategy_info` ships as `format!("skip:{}",
+///   reason.as_str())`, so [`SkipReason::as_str`] must stay
+///   byte-identical to the historical literals (pinned below).
+///
+/// A producer typo can no longer silently change routing — a new label
+/// is a new variant, and the gate's match is exhaustive (fail-closed:
+/// only the two no-signal variants are override-eligible).
+///
+/// Named `SkipReason` after its load-bearing consumer (the skip gate +
+/// the `skip:<reason>` wire string); the crushable=true verdicts carry
+/// their label through the same field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Crushable: near-constant content distinguished only by an ID
+    /// field.
+    RepetitiveContentWithIds,
+    /// Crushable: low uniqueness — safe to sample.
+    LowUniquenessSafeToSample,
+    /// NOT crushable: high uniqueness + ID field + no signal.
+    UniqueEntitiesNoSignal,
+    /// Crushable: high uniqueness but a signal anchors the sample.
+    UniqueEntitiesWithSignal,
+    /// NOT crushable: medium uniqueness + no signal.
+    MediumUniquenessNoSignal,
+    /// Crushable (with caution): medium uniqueness + signal.
+    MediumUniquenessWithSignal,
+}
+
+impl SkipReason {
+    /// Byte-identical to the historical reason strings (FFI-visible via
+    /// the `skip:<reason>` passthrough `strategy_info`; parity fixtures
+    /// pin those bytes).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::RepetitiveContentWithIds => "repetitive_content_with_ids",
+            SkipReason::LowUniquenessSafeToSample => "low_uniqueness_safe_to_sample",
+            SkipReason::UniqueEntitiesNoSignal => "unique_entities_no_signal",
+            SkipReason::UniqueEntitiesWithSignal => "unique_entities_with_signal",
+            SkipReason::MediumUniquenessNoSignal => "medium_uniqueness_no_signal",
+            SkipReason::MediumUniquenessWithSignal => "medium_uniqueness_with_signal",
+        }
+    }
+
+    /// Is this a "no SIGNAL on distinct data" verdict (as opposed to a
+    /// structural one)? Only these two are eligible for the CCR-backed
+    /// entropy-floor override in `route.rs` — the match is exhaustive
+    /// over the enum, so a NEW reason variant is excluded by default
+    /// (fail-closed), exactly like the old string gate but enforced by
+    /// the compiler.
+    pub fn is_no_signal(self) -> bool {
+        match self {
+            SkipReason::UniqueEntitiesNoSignal | SkipReason::MediumUniquenessNoSignal => true,
+            SkipReason::RepetitiveContentWithIds
+            | SkipReason::LowUniquenessSafeToSample
+            | SkipReason::UniqueEntitiesWithSignal
+            | SkipReason::MediumUniquenessWithSignal => false,
+        }
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Analysis of whether an array is safe to crush.
 ///
 /// Mirrors `CrushabilityAnalysis` at `smart_crusher.py:833-860`. The key
@@ -176,7 +291,7 @@ pub struct FieldStats {
 pub struct CrushabilityAnalysis {
     pub crushable: bool,
     pub confidence: f64,
-    pub reason: String,
+    pub reason: SkipReason,
     pub signals_present: Vec<String>,
     pub signals_absent: Vec<String>,
 
@@ -202,11 +317,11 @@ impl CrushabilityAnalysis {
     /// Helper to build a "not crushable" verdict — used in several early
     /// exits in `analyze_crushability`. Mirrors the Python pattern where
     /// `crushable=False` paths don't bother filling in detail metrics.
-    pub fn skip(reason: impl Into<String>, confidence: f64) -> Self {
+    pub fn skip(reason: SkipReason, confidence: f64) -> Self {
         CrushabilityAnalysis {
             crushable: false,
             confidence,
-            reason: reason.into(),
+            reason,
             signals_present: Vec::new(),
             signals_absent: Vec::new(),
             has_id_field: false,
@@ -254,8 +369,10 @@ impl CrushabilityAnalysis {
 pub struct ArrayAnalysis {
     pub item_count: usize,
     pub field_stats: BTreeMap<String, FieldStats>,
-    /// One of: `"time_series"`, `"logs"`, `"search_results"`, `"generic"`.
-    pub detected_pattern: String,
+    /// Typed data-pattern classification (TYPE-1). The historical string
+    /// forms (`"time_series"` / `"logs"` / `"search_results"` /
+    /// `"generic"`) are recoverable via [`DataPattern::as_str`].
+    pub detected_pattern: DataPattern,
     pub recommended_strategy: CompressionStrategy,
     pub estimated_reduction: f64,
     pub crushability: Option<CrushabilityAnalysis>,
@@ -384,10 +501,59 @@ mod tests {
 
     #[test]
     fn crushability_skip_helper() {
-        let r = CrushabilityAnalysis::skip("too small", 1.0);
+        let r = CrushabilityAnalysis::skip(SkipReason::UniqueEntitiesNoSignal, 1.0);
         assert!(!r.crushable);
         assert_eq!(r.confidence, 1.0);
-        assert_eq!(r.reason, "too small");
+        assert_eq!(r.reason, SkipReason::UniqueEntitiesNoSignal);
+    }
+
+    #[test]
+    fn skip_reason_strings_are_byte_identical_to_the_historical_literals() {
+        // The reason string is FFI-visible via the `skip:<reason>`
+        // passthrough strategy_info (route.rs) — parity fixtures pin the
+        // exact bytes. A drift here silently changes routing AND the
+        // wire-visible debug string.
+        assert_eq!(
+            SkipReason::RepetitiveContentWithIds.as_str(),
+            "repetitive_content_with_ids"
+        );
+        assert_eq!(
+            SkipReason::LowUniquenessSafeToSample.as_str(),
+            "low_uniqueness_safe_to_sample"
+        );
+        assert_eq!(
+            SkipReason::UniqueEntitiesNoSignal.as_str(),
+            "unique_entities_no_signal"
+        );
+        assert_eq!(
+            SkipReason::UniqueEntitiesWithSignal.as_str(),
+            "unique_entities_with_signal"
+        );
+        assert_eq!(
+            SkipReason::MediumUniquenessNoSignal.as_str(),
+            "medium_uniqueness_no_signal"
+        );
+        assert_eq!(
+            SkipReason::MediumUniquenessWithSignal.as_str(),
+            "medium_uniqueness_with_signal"
+        );
+        // Display mirrors as_str (used by the `skip:{}` format site).
+        assert_eq!(
+            format!("skip:{}", SkipReason::UniqueEntitiesNoSignal),
+            "skip:unique_entities_no_signal"
+        );
+    }
+
+    #[test]
+    fn skip_reason_no_signal_gate_is_exactly_the_two_no_signal_variants() {
+        // The entropy-floor override eligibility (route.rs) — fail-closed:
+        // ONLY the two no-signal verdicts qualify.
+        assert!(SkipReason::UniqueEntitiesNoSignal.is_no_signal());
+        assert!(SkipReason::MediumUniquenessNoSignal.is_no_signal());
+        assert!(!SkipReason::RepetitiveContentWithIds.is_no_signal());
+        assert!(!SkipReason::LowUniquenessSafeToSample.is_no_signal());
+        assert!(!SkipReason::UniqueEntitiesWithSignal.is_no_signal());
+        assert!(!SkipReason::MediumUniquenessWithSignal.is_no_signal());
     }
 
     #[test]

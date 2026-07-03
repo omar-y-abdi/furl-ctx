@@ -39,7 +39,7 @@ use super::field_role::compute_exclude_set;
 use super::hashing::hash_field_name;
 use super::orchestration::{prioritize_indices, PrioritizeParams};
 use super::traits::Constraint;
-use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldStats};
+use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldStats, FieldType};
 // Note: `detect_error_items_for_preservation` and `detect_structural_outliers`
 // are still imported transitively by `constraints.rs` (via `KeepErrorsConstraint`
 // and `KeepStructuralOutliersConstraint`). Planning no longer calls them
@@ -425,7 +425,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         let mut message_field: Option<&str> = None;
         let mut max_uniqueness = 0.0_f64;
         for (name, stats) in &analysis.field_stats {
-            if stats.field_type == "string"
+            if stats.field_type == FieldType::String
                 && stats.unique_ratio > max_uniqueness
                 && stats.unique_ratio > 0.3
             {
@@ -699,7 +699,7 @@ fn for_each_anomaly(
     variance_threshold: f64,
     keep: &mut BTreeSet<usize>,
 ) {
-    if stats.field_type != "numeric" {
+    if stats.field_type != FieldType::Numeric {
         return;
     }
     let (Some(mean), Some(var)) = (stats.mean_val, stats.variance) else {
@@ -830,7 +830,7 @@ mod tests {
         let analysis = ArrayAnalysis {
             item_count: 5,
             field_stats: BTreeMap::new(),
-            detected_pattern: "generic".to_string(),
+            detected_pattern: DataPattern::Generic,
             recommended_strategy: CompressionStrategy::Skip,
             estimated_reduction: 0.0,
             crushability: None,

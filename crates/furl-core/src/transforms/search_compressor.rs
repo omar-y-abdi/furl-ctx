@@ -71,6 +71,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ccr::persist::{key_and_mark, persist_and_mark, MarkerBacking};
 use crate::ccr::CcrStore;
+use crate::ccr::RetrieveUnit;
 use crate::signals::{ImportanceContext, LineImportanceDetector};
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
@@ -244,8 +245,8 @@ impl SearchCompressor {
         }
     }
 
-    /// Construct with a custom [`LineImportanceDetector`]. Use this when
-    /// stacking a `Tiered` detector (e.g. ML head + keyword fallback).
+    /// Construct with a custom [`LineImportanceDetector`] (e.g. an ML
+    /// head composed with the keyword detector).
     pub fn with_detector<D: LineImportanceDetector + 'static>(
         config: SearchCompressorConfig,
         detector: D,
@@ -361,13 +362,13 @@ impl SearchCompressor {
                         content,
                         original_count,
                         compressed_count,
-                        "matches",
+                        RetrieveUnit::Matches,
                     )),
                     MarkerBacking::KeyOnly => Some(key_and_mark(
                         content,
                         original_count,
                         compressed_count,
-                        "matches",
+                        RetrieveUnit::Matches,
                     )),
                     MarkerBacking::Disabled => None,
                 };

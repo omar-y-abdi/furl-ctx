@@ -3,6 +3,13 @@
 //! Direct port of `SmartCrusherConfig` at `smart_crusher.py:927-957`. The
 //! defaults must match Python exactly — they're consulted everywhere
 //! during compression and any drift breaks parity fixtures.
+//!
+//! Four historical knobs (`enabled`, `uniqueness_threshold`,
+//! `similarity_threshold`, `include_summaries`) were read by ZERO core
+//! paths and were deleted in lockstep across Rust + PyO3 kwargs + the
+//! Python dataclass (SIMP-7 wire-contract): passing them now fails loud
+//! with a `TypeError` at either boundary instead of silently doing
+//! nothing.
 
 /// Policy for choosing between the lossless and lossy-recoverable
 /// renderings of a compressible array when BOTH are available and both
@@ -74,26 +81,22 @@ impl RoutingPolicy {
 /// line 930-931.)
 #[derive(Debug, Clone)]
 pub struct SmartCrusherConfig {
-    pub enabled: bool,
     /// Don't analyze arrays smaller than this. Default 5.
     pub min_items_to_analyze: usize,
-    /// Only crush content with more than this many tokens. Default 200.
+    /// Floor for OBJECT key-crush only: `crush_object` passes a flat
+    /// object through when its estimated token total is below this
+    /// (`crushers.rs`). ARRAY compression IGNORES this knob — array
+    /// gating is `min_items_to_analyze` + the adaptive-K boundary (the
+    /// historical "only crush content with more than this many tokens"
+    /// wording over-promised — SIMP-7). Default 200.
     pub min_tokens_to_crush: usize,
     /// Standard deviations from the mean to count as a change point.
     /// Default 2.0.
     pub variance_threshold: f64,
-    /// Below this unique-ratio, a field is treated as nearly constant.
-    /// Default 0.1.
-    pub uniqueness_threshold: f64,
-    /// Similarity score above which strings cluster together. Default 0.8.
-    pub similarity_threshold: f64,
     /// Target maximum items in the output. Default 15.
     pub max_items_after_crush: usize,
     /// Whether to preserve detected change points. Default true.
     pub preserve_change_points: bool,
-    /// Include generated text summaries in output. Default false (disabled
-    /// — no generated text).
-    pub include_summaries: bool,
     /// Drop content-identical items before sampling. Default true.
     pub dedup_identical_items: bool,
     /// Fraction of K to allocate to the start of the array. Default 0.3.
@@ -194,15 +197,11 @@ impl Default for SmartCrusherConfig {
         // The lossless additions (`lossless_min_savings_ratio`) have no
         // Python counterpart — they govern Rust-side dispatch only.
         SmartCrusherConfig {
-            enabled: true,
             min_items_to_analyze: 5,
             min_tokens_to_crush: 200,
             variance_threshold: 2.0,
-            uniqueness_threshold: 0.1,
-            similarity_threshold: 0.8,
             max_items_after_crush: 15,
             preserve_change_points: true,
-            include_summaries: false,
             dedup_identical_items: true,
             first_fraction: 0.3,
             last_fraction: 0.15,
@@ -226,15 +225,11 @@ mod tests {
         // path and a drift would break parity. If Python ever changes a
         // default, this test must be updated in lockstep.
         let c = SmartCrusherConfig::default();
-        assert!(c.enabled);
         assert_eq!(c.min_items_to_analyze, 5);
         assert_eq!(c.min_tokens_to_crush, 200);
         assert_eq!(c.variance_threshold, 2.0);
-        assert_eq!(c.uniqueness_threshold, 0.1);
-        assert_eq!(c.similarity_threshold, 0.8);
         assert_eq!(c.max_items_after_crush, 15);
         assert!(c.preserve_change_points);
-        assert!(!c.include_summaries);
         assert!(c.dedup_identical_items);
         assert_eq!(c.first_fraction, 0.3);
         assert_eq!(c.last_fraction, 0.15);

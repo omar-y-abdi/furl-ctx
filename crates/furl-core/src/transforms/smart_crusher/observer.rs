@@ -7,10 +7,7 @@
 //! fields. Subscribers that retain `debug` get a structured per-crush
 //! event suitable for log analytics.
 //!
-//! Enterprise consumers ship richer observers — `AuditObserver` for
-//! SOC2/HIPAA decision logs, `MetricsObserver` for Datadog/Atlas
-//! gauges, `LoopTrainingObserver` to stream events to Furl Loop —
-//! all on the same trait.
+//! Richer observers (metrics, audit logs) plug into the same trait.
 
 use super::traits::{CrushEvent, Observer};
 

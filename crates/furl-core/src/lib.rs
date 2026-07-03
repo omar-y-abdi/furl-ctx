@@ -5,6 +5,7 @@ pub mod relevance;
 pub mod signals;
 pub mod tokenizer;
 pub mod transforms;
+pub mod util;
 
 /// Identity stub used by downstream crates and the Python binding to verify
 /// linkage end-to-end.

@@ -223,7 +223,7 @@ class TestSyntaxRoundTrip:
 
     def test_marker_matches_shape_h_grammar(self, working_store: Any) -> None:
         """The emitted marker must parse under the strict consumer grammar
-        (Shape H) so tool_injection / recompression pinning recognise it."""
+        (Shape H) so the marker_grammar consumer / recompression pinning recognise it."""
         from furl_ctx.transforms.code_aware_compressor import CodeAwareCompressor
 
         result = CodeAwareCompressor().compress(_python_code())

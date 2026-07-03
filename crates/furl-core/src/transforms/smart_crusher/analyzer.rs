@@ -37,7 +37,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::config::SmartCrusherConfig;
 use super::field_detect::{detect_id_field_statistically, detect_score_field_statistically};
 use super::stats_math::{mean, sample_stdev, sample_variance};
-use super::types::{ArrayAnalysis, CompressionStrategy, CrushabilityAnalysis, FieldStats};
+use super::types::{
+    ArrayAnalysis, CompressionStrategy, CrushabilityAnalysis, FieldStats, FieldType, SkipReason,
+};
+use crate::transforms::anchor_selector::DataPattern;
 
 /// Statistical analyzer for compression decisions.
 ///
@@ -75,7 +78,7 @@ impl SmartAnalyzer {
             return ArrayAnalysis {
                 item_count: items.len(),
                 field_stats: BTreeMap::new(),
-                detected_pattern: "generic".to_string(),
+                detected_pattern: DataPattern::Generic,
                 recommended_strategy: CompressionStrategy::None,
                 estimated_reduction: 0.0,
                 crushability: None,
@@ -105,7 +108,7 @@ impl SmartAnalyzer {
         let crushability = self.analyze_crushability(items, &field_stats, item_strings);
 
         let strategy =
-            self.select_strategy(&field_stats, &pattern, items.len(), Some(&crushability));
+            self.select_strategy(&field_stats, pattern, items.len(), Some(&crushability));
 
         let reduction = if strategy == CompressionStrategy::Skip {
             0.0
@@ -141,7 +144,7 @@ impl SmartAnalyzer {
         if non_null.is_empty() {
             return FieldStats {
                 name: key.to_string(),
-                field_type: "null".to_string(),
+                field_type: FieldType::Null,
                 count: values.len(),
                 unique_count: 0,
                 unique_ratio: 0.0,
@@ -162,14 +165,13 @@ impl SmartAnalyzer {
         // a subclass of int in Python. We model JSON's bool/number split
         // directly: serde_json::Value::Bool vs Value::Number.
         let field_type = match first {
-            Value::Bool(_) => "boolean",
-            Value::Number(_) => "numeric",
-            Value::String(_) => "string",
-            Value::Object(_) => "object",
-            Value::Array(_) => "array",
-            _ => "unknown",
-        }
-        .to_string();
+            Value::Bool(_) => FieldType::Boolean,
+            Value::Number(_) => FieldType::Numeric,
+            Value::String(_) => FieldType::String,
+            Value::Object(_) => FieldType::Object,
+            Value::Array(_) => FieldType::Array,
+            _ => FieldType::Unknown,
+        };
 
         // Uniqueness: stringify ALL values (including nulls), dedupe, count.
         // Python: `str(v)` for any v (None → "None"). Match exactly to keep
@@ -193,7 +195,7 @@ impl SmartAnalyzer {
 
         let mut stats = FieldStats {
             name: key.to_string(),
-            field_type: field_type.clone(),
+            field_type,
             count: values.len(),
             unique_count,
             unique_ratio,
@@ -208,8 +210,8 @@ impl SmartAnalyzer {
             top_values: Vec::new(),
         };
 
-        match field_type.as_str() {
-            "numeric" => {
+        match field_type {
+            FieldType::Numeric => {
                 // Filter to finite f64 only — Python rejects NaN/Inf via
                 // `math.isfinite`. We mirror exactly so the same set of
                 // values feeds mean/variance/change-points.
@@ -259,7 +261,7 @@ impl SmartAnalyzer {
                     }
                 }
             }
-            "string" => {
+            FieldType::String => {
                 let strs: Vec<&str> = non_null.iter().filter_map(|v| v.as_str()).collect();
                 if !strs.is_empty() {
                     let lens: Vec<f64> = strs.iter().map(|s| s.chars().count() as f64).collect();
@@ -315,22 +317,22 @@ impl SmartAnalyzer {
     }
 
     /// Pattern classifier. Mirrors `_detect_pattern` at
-    /// `smart_crusher.py:1127-1171`. Returns one of `time_series`, `logs`,
-    /// `search_results`, `generic`.
+    /// `smart_crusher.py:1127-1171`. Returns the typed [`DataPattern`]
+    /// (TYPE-1); the historical string forms are `as_str()`.
     pub fn detect_pattern(
         &self,
         field_stats: &BTreeMap<String, FieldStats>,
         items: &[Value],
-    ) -> String {
+    ) -> DataPattern {
         let has_timestamp = self.detect_temporal_field(field_stats, items);
 
         let has_numeric_with_variance = field_stats
             .values()
-            .filter(|v| v.field_type == "numeric")
+            .filter(|v| v.field_type == FieldType::Numeric)
             .any(|v| v.variance.unwrap_or(0.0) > 0.0);
 
         if has_timestamp && has_numeric_with_variance {
-            return "time_series".to_string();
+            return DataPattern::TimeSeries;
         }
 
         // logs pattern: high-cardinality string (message) + low-cardinality
@@ -338,7 +340,7 @@ impl SmartAnalyzer {
         let mut has_message_like = false;
         let mut has_level_like = false;
         for stats in field_stats.values() {
-            if stats.field_type != "string" {
+            if stats.field_type != FieldType::String {
                 continue;
             }
             let avg_len = stats.avg_length.unwrap_or(0.0);
@@ -349,18 +351,18 @@ impl SmartAnalyzer {
             }
         }
         if has_message_like && has_level_like {
-            return "logs".to_string();
+            return DataPattern::Logs;
         }
 
         // search_results: any field with score-like signal at confidence >=0.5.
         for stats in field_stats.values() {
             let (is_score, confidence) = detect_score_field_statistically(stats, items);
             if is_score && confidence >= 0.5 {
-                return "search_results".to_string();
+                return DataPattern::SearchResults;
             }
         }
 
-        "generic".to_string()
+        DataPattern::Generic
     }
 
     /// Temporal-field detector. (Ported from Python's
@@ -373,8 +375,8 @@ impl SmartAnalyzer {
         items: &[Value],
     ) -> bool {
         for (name, stats) in field_stats {
-            match stats.field_type.as_str() {
-                "string" => {
+            match stats.field_type {
+                FieldType::String => {
                     // First 10 values, str-typed only. Python: `items[:10]`.
                     let sample: Vec<&str> = items
                         .iter()
@@ -394,7 +396,7 @@ impl SmartAnalyzer {
                         return true;
                     }
                 }
-                "numeric" => {
+                FieldType::Numeric => {
                     if let (Some(mn), Some(mx)) = (stats.min_val, stats.max_val) {
                         // Unix epoch range check — BOTH ends must sit in
                         // the same plausible window (seconds or millis).
@@ -495,7 +497,7 @@ impl SmartAnalyzer {
         // 4. Numeric anomalies (>variance_threshold σ from mean).
         let mut anomaly_indices: BTreeSet<usize> = BTreeSet::new();
         for stats in field_stats.values() {
-            if stats.field_type != "numeric" {
+            if stats.field_type != FieldType::Numeric {
                 continue;
             }
             let (Some(mean_val), Some(var)) = (stats.mean_val, stats.variance) else {
@@ -534,7 +536,7 @@ impl SmartAnalyzer {
         let id_name_ref = id_field_name.as_deref();
         let string_ratios: Vec<f64> = field_stats
             .values()
-            .filter(|s| s.field_type == "string" && Some(s.name.as_str()) != id_name_ref)
+            .filter(|s| s.field_type == FieldType::String && Some(s.name.as_str()) != id_name_ref)
             .map(|s| s.unique_ratio)
             .collect();
         let avg_string_uniqueness = if string_ratios.is_empty() {
@@ -545,7 +547,7 @@ impl SmartAnalyzer {
 
         let non_id_numeric_ratios: Vec<f64> = field_stats
             .values()
-            .filter(|s| s.field_type == "numeric" && Some(s.name.as_str()) != id_name_ref)
+            .filter(|s| s.field_type == FieldType::Numeric && Some(s.name.as_str()) != id_name_ref)
             .map(|s| s.unique_ratio)
             .collect();
         let avg_non_id_numeric_uniqueness = if non_id_numeric_ratios.is_empty() {
@@ -560,7 +562,7 @@ impl SmartAnalyzer {
         // 6. Change points.
         let has_change_points = field_stats
             .values()
-            .filter(|s| s.field_type == "numeric")
+            .filter(|s| s.field_type == FieldType::Numeric)
             .any(|s| !s.change_points.is_empty());
         if has_change_points {
             signals_present.push("change_points".to_string());
@@ -571,14 +573,14 @@ impl SmartAnalyzer {
         // Decision tree — order matters; mirrors Python case-by-case.
         let make = |crushable: bool,
                     confidence: f64,
-                    reason: &str,
+                    reason: SkipReason,
                     signals_present: Vec<String>,
                     signals_absent: Vec<String>|
          -> CrushabilityAnalysis {
             CrushabilityAnalysis {
                 crushable,
                 confidence,
-                reason: reason.to_string(),
+                reason,
                 signals_present,
                 signals_absent,
                 has_id_field,
@@ -602,7 +604,7 @@ impl SmartAnalyzer {
             return make(
                 true,
                 0.85,
-                "repetitive_content_with_ids",
+                SkipReason::RepetitiveContentWithIds,
                 sp,
                 signals_absent,
             );
@@ -613,7 +615,7 @@ impl SmartAnalyzer {
             return make(
                 true,
                 0.9,
-                "low_uniqueness_safe_to_sample",
+                SkipReason::LowUniquenessSafeToSample,
                 signals_present,
                 signals_absent,
             );
@@ -624,7 +626,7 @@ impl SmartAnalyzer {
             return make(
                 false,
                 0.85,
-                "unique_entities_no_signal",
+                SkipReason::UniqueEntitiesNoSignal,
                 signals_present,
                 signals_absent,
             );
@@ -635,7 +637,7 @@ impl SmartAnalyzer {
             return make(
                 true,
                 0.7,
-                "unique_entities_with_signal",
+                SkipReason::UniqueEntitiesWithSignal,
                 signals_present,
                 signals_absent,
             );
@@ -646,7 +648,7 @@ impl SmartAnalyzer {
             return make(
                 false,
                 0.6,
-                "medium_uniqueness_no_signal",
+                SkipReason::MediumUniquenessNoSignal,
                 signals_present,
                 signals_absent,
             );
@@ -656,7 +658,7 @@ impl SmartAnalyzer {
         make(
             true,
             0.5,
-            "medium_uniqueness_with_signal",
+            SkipReason::MediumUniquenessWithSignal,
             signals_present,
             signals_absent,
         )
@@ -667,7 +669,7 @@ impl SmartAnalyzer {
     pub fn select_strategy(
         &self,
         field_stats: &BTreeMap<String, FieldStats>,
-        pattern: &str,
+        pattern: DataPattern,
         item_count: usize,
         crushability: Option<&CrushabilityAnalysis>,
     ) -> CompressionStrategy {
@@ -681,17 +683,17 @@ impl SmartAnalyzer {
             }
         }
 
-        if pattern == "time_series" {
+        if pattern == DataPattern::TimeSeries {
             let has_change_points = field_stats
                 .values()
-                .filter(|f| f.field_type == "numeric")
+                .filter(|f| f.field_type == FieldType::Numeric)
                 .any(|f| !f.change_points.is_empty());
             if has_change_points {
                 return CompressionStrategy::TimeSeries;
             }
         }
 
-        if pattern == "logs" {
+        if pattern == DataPattern::Logs {
             // Python: `next((v for k, v in field_stats.items() if "message" in k.lower()), None)`
             // We mirror — first BTreeMap iteration order match wins. With
             // sorted iteration, this is deterministic.
@@ -706,7 +708,7 @@ impl SmartAnalyzer {
             }
         }
 
-        if pattern == "search_results" {
+        if pattern == DataPattern::SearchResults {
             return CompressionStrategy::TopN;
         }
 
@@ -929,7 +931,7 @@ mod tests {
         let a = analyzer().analyze_array(&[]);
         assert_eq!(a.item_count, 0);
         assert!(a.field_stats.is_empty());
-        assert_eq!(a.detected_pattern, "generic");
+        assert_eq!(a.detected_pattern, DataPattern::Generic);
         assert_eq!(a.recommended_strategy, CompressionStrategy::None);
         assert_eq!(a.estimated_reduction, 0.0);
         assert!(a.crushability.is_none());
@@ -957,7 +959,7 @@ mod tests {
     fn analyze_field_all_null_yields_null_type_constant() {
         let items: Vec<Value> = (0..5).map(|_| json!({"x": null})).collect();
         let s = analyzer().analyze_field("x", &items);
-        assert_eq!(s.field_type, "null");
+        assert_eq!(s.field_type, FieldType::Null);
         assert!(s.is_constant);
         assert_eq!(s.unique_count, 0);
         assert_eq!(s.count, 5);
@@ -967,7 +969,7 @@ mod tests {
     fn analyze_field_numeric_basic_stats() {
         let items: Vec<Value> = (1..=10).map(|i| json!({"n": i})).collect();
         let s = analyzer().analyze_field("n", &items);
-        assert_eq!(s.field_type, "numeric");
+        assert_eq!(s.field_type, FieldType::Numeric);
         assert_eq!(s.min_val, Some(1.0));
         assert_eq!(s.max_val, Some(10.0));
         assert_eq!(s.mean_val, Some(5.5));
@@ -987,7 +989,7 @@ mod tests {
         // Two extreme opposite values: variance overflows.
         let items = vec![json!({"n": huge}), json!({"n": -huge})];
         let s = analyzer().analyze_field("n", &items);
-        assert_eq!(s.field_type, "numeric");
+        assert_eq!(s.field_type, FieldType::Numeric);
         // Per Python: min/max/mean reset to None; variance = 0 (int);
         // change_points empty.
         assert_eq!(s.min_val, None);
@@ -1021,7 +1023,7 @@ mod tests {
             json!({"s": "ok"}),
         ];
         let s = analyzer().analyze_field("s", &items);
-        assert_eq!(s.field_type, "string");
+        assert_eq!(s.field_type, FieldType::String);
         // mean(2,2,4,4,2) = 2.8
         assert_eq!(s.avg_length, Some(2.8));
         // most_common: ok=3, warn=1, fail=1 (tie order: first-occurrence)
@@ -1091,7 +1093,7 @@ mod tests {
             field_stats.insert(k.to_string(), a.analyze_field(k, &items));
         }
         let p = a.detect_pattern(&field_stats, &items);
-        assert_eq!(p, "logs");
+        assert_eq!(p, DataPattern::Logs);
     }
 
     #[test]
@@ -1104,7 +1106,7 @@ mod tests {
         }
         let p = a.detect_pattern(&fs, &items);
         // No timestamps, no logs shape, no obvious score → generic.
-        assert_eq!(p, "generic");
+        assert_eq!(p, DataPattern::Generic);
     }
 
     // ---------- detect_temporal_field ----------
@@ -1197,7 +1199,7 @@ mod tests {
         assert!(c.crushable);
         // Only "status" string field with unique_ratio=1/30=0.033 → max
         // uniqueness ≈ 0.033 < 0.3 → low_uniqueness path.
-        assert_eq!(c.reason, "low_uniqueness_safe_to_sample");
+        assert_eq!(c.reason, SkipReason::LowUniquenessSafeToSample);
     }
 
     #[test]
@@ -1214,7 +1216,7 @@ mod tests {
         }
         let c = a.analyze_crushability(&items, &fs, None);
         assert!(!c.crushable);
-        assert_eq!(c.reason, "unique_entities_no_signal");
+        assert_eq!(c.reason, SkipReason::UniqueEntitiesNoSignal);
     }
 
     #[test]
@@ -1228,7 +1230,7 @@ mod tests {
         }
         let c = a.analyze_crushability(&items, &fs, None);
         assert!(c.crushable);
-        assert_eq!(c.reason, "repetitive_content_with_ids");
+        assert_eq!(c.reason, SkipReason::RepetitiveContentWithIds);
     }
 
     // ---------- select_strategy ----------
@@ -1236,29 +1238,29 @@ mod tests {
     #[test]
     fn select_strategy_below_min_returns_none() {
         let fs = BTreeMap::new();
-        let s = analyzer().select_strategy(&fs, "generic", 3, None);
+        let s = analyzer().select_strategy(&fs, DataPattern::Generic, 3, None);
         assert_eq!(s, CompressionStrategy::None);
     }
 
     #[test]
     fn select_strategy_skip_when_not_crushable() {
         let fs = BTreeMap::new();
-        let crush = CrushabilityAnalysis::skip("nope", 0.9);
-        let s = analyzer().select_strategy(&fs, "generic", 100, Some(&crush));
+        let crush = CrushabilityAnalysis::skip(SkipReason::MediumUniquenessNoSignal, 0.9);
+        let s = analyzer().select_strategy(&fs, DataPattern::Generic, 100, Some(&crush));
         assert_eq!(s, CompressionStrategy::Skip);
     }
 
     #[test]
     fn select_strategy_search_results_returns_top_n() {
         let fs = BTreeMap::new();
-        let s = analyzer().select_strategy(&fs, "search_results", 100, None);
+        let s = analyzer().select_strategy(&fs, DataPattern::SearchResults, 100, None);
         assert_eq!(s, CompressionStrategy::TopN);
     }
 
     #[test]
     fn select_strategy_generic_returns_smart_sample() {
         let fs = BTreeMap::new();
-        let s = analyzer().select_strategy(&fs, "generic", 100, None);
+        let s = analyzer().select_strategy(&fs, DataPattern::Generic, 100, None);
         assert_eq!(s, CompressionStrategy::SmartSample);
     }
 
@@ -1281,7 +1283,7 @@ mod tests {
                 k.to_string(),
                 FieldStats {
                     name: k.to_string(),
-                    field_type: "string".to_string(),
+                    field_type: FieldType::String,
                     count: 10,
                     unique_count: 1,
                     unique_ratio: 0.1,
@@ -1308,7 +1310,7 @@ mod tests {
             "id".to_string(),
             FieldStats {
                 name: "id".to_string(),
-                field_type: "numeric".to_string(),
+                field_type: FieldType::Numeric,
                 count: 100,
                 unique_count: 100,
                 unique_ratio: 1.0,

@@ -34,10 +34,10 @@ use super::line_importance::{
     ImportanceCategory, ImportanceContext, ImportanceSignal, LineImportanceDetector,
 };
 
-/// Confidence used by the keyword tier. Below the
-/// [`super::tiered::ESCALATE_THRESHOLD`] used by [`super::tiered::Tiered`]
-/// so a future ML tier can override on borderline cases — but high
-/// enough that an unambiguous keyword match isn't second-guessed.
+/// Confidence used by the keyword detector. Deliberately below 1.0 so
+/// a caller composing a higher-precision detector can rank above it on
+/// borderline cases — but high enough that an unambiguous keyword match
+/// isn't second-guessed.
 const KEYWORD_CONFIDENCE: f32 = 0.7;
 
 /// Priority returned for a confirmed match. Compressors use this as the

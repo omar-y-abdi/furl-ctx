@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from furl_ctx import paths as _paths
-from furl_ctx.ccr.marker_grammar import is_valid_ccr_hash
+from furl_ctx.ccr.marker_grammar import CCR_TOOL_NAME, is_valid_ccr_hash
 
 # fcntl is Unix-only; on Windows we skip file locking (stats are best-effort).
 # Keep the module typed as Any so Windows mypy runs don't try to resolve Unix-only attrs.
@@ -58,7 +58,6 @@ except ImportError:
     Server = None  # type: ignore[assignment,misc]
     stdio_server = None  # type: ignore[assignment]
 
-CCR_TOOL_NAME = "furl_retrieve"
 COMPRESS_TOOL_NAME = "furl_compress"
 STATS_TOOL_NAME = "furl_stats"
 READ_TOOL_NAME = "furl_read"

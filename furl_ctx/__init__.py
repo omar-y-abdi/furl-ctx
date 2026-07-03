@@ -67,7 +67,6 @@ __all__ = [
     "FurlConfig",
     "SmartCrusherConfig",
     "CacheAlignerConfig",
-    "RelevanceScorerConfig",
     # Data models
     "Block",
     "CachePrefixMetrics",
@@ -122,9 +121,13 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "TransformError": ("furl_ctx.exceptions", "TransformError"),
     # Config
     "FurlConfig": ("furl_ctx.config", "FurlConfig"),
-    "SmartCrusherConfig": ("furl_ctx.config", "SmartCrusherConfig"),
+    # API-14: the LIVE engine config class. The top-level export used to
+    # point at a second, incompatible ``config.SmartCrusherConfig`` whose
+    # own defaults crashed the engine (TypeError: unexpected keyword
+    # argument 'relevance'); that class was deleted and this now names
+    # the class ``SmartCrusher(config=...)`` actually accepts.
+    "SmartCrusherConfig": ("furl_ctx.transforms.smart_crusher", "SmartCrusherConfig"),
     "CacheAlignerConfig": ("furl_ctx.config", "CacheAlignerConfig"),
-    "RelevanceScorerConfig": ("furl_ctx.config", "RelevanceScorerConfig"),
     # Data models
     "Block": ("furl_ctx.config", "Block"),
     "CachePrefixMetrics": ("furl_ctx.config", "CachePrefixMetrics"),

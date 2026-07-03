@@ -62,11 +62,46 @@ pub(crate) fn marker_for_diff(orig_lines: usize, comp_lines: usize, hash: &str) 
     format!("[{orig_lines} lines compressed to {comp_lines}. Retrieve full diff: hash={hash}]")
 }
 
-/// Log / search retrieval marker (no leading newline — the compressor
-/// prepends `\n` at the call site). `[{orig} {unit} compressed to
-/// {comp}. Retrieve more: hash={hash}]` where `unit` is `lines` (log) or
-/// `matches` (search).
-pub(crate) fn marker_for_retrieve_more(orig: usize, comp: usize, hash: &str, unit: &str) -> String {
+/// Unit word carried by the `Retrieve more:` marker — which countable
+/// thing the producer reduced. One variant per producer family; an
+/// invalid unit is unrepresentable (TYPE-5), so a producer typo can no
+/// longer silently change the wire text the Python consumer grammar
+/// (shape H, `marker_grammar.BRACKET_RETRIEVE_PATTERN`) matches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetrieveUnit {
+    /// Log compressor: whole log lines.
+    Lines,
+    /// Search compressor: grep/ripgrep matches.
+    Matches,
+    /// Text crusher: prose/paragraph segments.
+    Segments,
+}
+
+impl RetrieveUnit {
+    /// The wire word interpolated into the marker. Byte-identical to the
+    /// historical string literals (pinned by the byte-identity tests
+    /// below); the consumer regex captures it as the `\w+` unit token.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            RetrieveUnit::Lines => "lines",
+            RetrieveUnit::Matches => "matches",
+            RetrieveUnit::Segments => "segments",
+        }
+    }
+}
+
+/// Log / search / text retrieval marker (no leading newline — the
+/// compressor prepends `\n` at the call site). `[{orig} {unit}
+/// compressed to {comp}. Retrieve more: hash={hash}]` where `unit` is
+/// [`RetrieveUnit::Lines`] (log), [`RetrieveUnit::Matches`] (search) or
+/// [`RetrieveUnit::Segments`] (text crusher).
+pub(crate) fn marker_for_retrieve_more(
+    orig: usize,
+    comp: usize,
+    hash: &str,
+    unit: RetrieveUnit,
+) -> String {
+    let unit = unit.as_str();
     format!("[{orig} {unit} compressed to {comp}. Retrieve more: hash={hash}]")
 }
 
@@ -142,14 +177,28 @@ mod tests {
         // log_compressor.rs old (sans the \n the call site prepends):
         // "[{} lines compressed to {}. Retrieve more: hash={}]"
         assert_eq!(
-            marker_for_retrieve_more(200, 30, "0011223344556677889900aa", "lines"),
+            marker_for_retrieve_more(200, 30, "0011223344556677889900aa", RetrieveUnit::Lines),
             "[200 lines compressed to 30. Retrieve more: hash=0011223344556677889900aa]"
         );
         // search_compressor.rs old (unit = "matches"):
         assert_eq!(
-            marker_for_retrieve_more(12, 4, "0011223344556677889900aa", "matches"),
+            marker_for_retrieve_more(12, 4, "0011223344556677889900aa", RetrieveUnit::Matches),
             "[12 matches compressed to 4. Retrieve more: hash=0011223344556677889900aa]"
         );
+        // text_crusher.rs old (unit = "segments"):
+        assert_eq!(
+            marker_for_retrieve_more(40, 9, "0011223344556677889900aa", RetrieveUnit::Segments),
+            "[40 segments compressed to 9. Retrieve more: hash=0011223344556677889900aa]"
+        );
+    }
+
+    #[test]
+    fn retrieve_unit_wire_words_are_pinned() {
+        // The unit vocabulary is FFI-visible marker text the Python
+        // consumer grammar tokenizes — pin every variant's exact bytes.
+        assert_eq!(RetrieveUnit::Lines.as_str(), "lines");
+        assert_eq!(RetrieveUnit::Matches.as_str(), "matches");
+        assert_eq!(RetrieveUnit::Segments.as_str(), "segments");
     }
 
     #[test]

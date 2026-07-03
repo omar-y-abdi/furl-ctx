@@ -242,17 +242,20 @@ class SmartCrusherConfig:
 
     Field names + defaults match the Rust `SmartCrusherConfig` byte-for-
     byte; the shim copies these straight into the PyO3 constructor.
+
+    Four historical knobs (``enabled``, ``uniqueness_threshold``,
+    ``similarity_threshold``, ``include_summaries``) were read by ZERO
+    code paths on either side of the FFI and were deleted in lockstep
+    with the Rust struct + PyO3 kwargs (SIMP-7 wire-contract): passing
+    them now raises ``TypeError`` here (dataclass) and at the bridge
+    (PyO3) instead of silently doing nothing.
     """
 
-    enabled: bool = True
     min_items_to_analyze: int = 5
     min_tokens_to_crush: int = 200
     variance_threshold: float = 2.0
-    uniqueness_threshold: float = 0.1
-    similarity_threshold: float = 0.8
     max_items_after_crush: int = 15
     preserve_change_points: bool = True
-    include_summaries: bool = False
     dedup_identical_items: bool = True
     first_fraction: float = 0.3
     last_fraction: float = 0.15
@@ -383,16 +386,18 @@ class SmartCrusher(Transform):
         # set is single-sourced from the dataclass definition — adding a
         # field there flows across the FFI with no extra edit here, and
         # no field can be silently dropped by a forgotten forwarding line.
-        # `asdict` yields a flat dict of the 15 scalar fields (all
+        # `asdict` yields a flat dict of the 11 scalar fields (all
         # bool/int/float/str — no nesting), matching the pyo3 signature
         # kwargs 1:1 by name (pyo3-side kwargs not covered here fall
         # through to their pyo3 signature defaults).
         #
         # The pyo3 constructor accepts two MORE kwargs that are NOT
         # dataclass fields and so must be passed explicitly:
-        #   * `relevance_threshold` (0.3) — lives on
-        #     `RelevanceScorerConfig`, not this dataclass; the Rust crusher
-        #     needs its own default.
+        #   * `relevance_threshold` (0.3) — the RECONCILED scoring
+        #     threshold (API-14): the retired top-level
+        #     `RelevanceScorerConfig` documented 0.25 but was never
+        #     forwarded; 0.3 here is — and always was — the value the
+        #     engine actually runs with (it matches the Rust default).
         #   * `enable_ccr_marker` — derived from the CCR config, not a
         #     crusher-config field. Falling through to the pyo3 default
         #     (`true`) would ignore a caller's `CCRConfig(enabled=False)` /

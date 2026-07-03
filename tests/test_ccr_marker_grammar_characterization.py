@@ -7,18 +7,20 @@ The CCR retrieval contract has two halves that must agree byte-for-byte:
 * a PRODUCER emits a marker into a tool result, e.g.
   ``<<ccr:HASH N_rows_offloaded>>`` or ``[N lines compressed to M. ... hash=H]``,
   and stores the original under ``HASH`` in the CCR ``CompressionStore``;
-* a CONSUMER (``furl_ctx.ccr.tool_injection.CCRToolInjector.scan_for_markers``)
-  scans messages, extracts ``HASH``, and the retrieval path resolves
+* a CONSUMER (the owned patterns in ``furl_ctx.ccr.marker_grammar`` —
+  ``marker_patterns()``; the historical ``CCRToolInjector.scan_for_markers``
+  wrapper was excised with its module, SIMP-4) scans text, extracts
+  ``HASH``, and the retrieval path resolves
   ``store.retrieve(HASH).original_content`` back to the byte-exact original.
 
 The existing recovery gate (``test_ccr_recovery_invariant.py``,
 ``ccr_roundtrip.rs``) scans markers with its OWN regexes, which only cover
 shapes A (``..._rows_offloaded``) and C (``,KIND,SIZE``). It is therefore BLIND
 to a regression in the *production consumer* grammar for the other shapes
-(B/E/F/G/H/I). This test drives every distinct marker shape through the REAL
-``scan_for_markers`` extraction and asserts byte-exact recovery, so a future
-marker-grammar refactor that silently breaks a consumer pattern fails HERE,
-naming the exact shape.
+(B/E/F/G/H/I). This test drives every distinct marker shape through the REAL owned
+patterns (``marker_grammar.marker_patterns()``, union-extract semantics)
+and asserts byte-exact recovery, so a future marker-grammar refactor that
+silently breaks a consumer pattern fails HERE, naming the exact shape.
 
 THE 9 SHAPES (verified against source — file:line cited per case)
 =================================================================
@@ -62,7 +64,7 @@ Two layers of binding now exist:
 2. Standalone ``test_producer_driven_*`` tests (bottom of this file) drive the
    REAL producer through the engine end-to-end — ``ContentRouter().compress``
    for shapes A / B / C, ``DiffCompressor.compress_with_stats`` for shape G —
-   then extract via the REAL ``scan_for_markers`` and recover byte-exact from
+   then extract via the REAL owned patterns and recover byte-exact from
    the engine's store. Together with E/F's real render functions, that makes
    shapes A, B, C, E, F, G genuinely producer→consumer bound: a producer that
    emits an un-enumerated width or separator stops being surfaced by the
@@ -84,7 +86,7 @@ Two layers of binding now exist:
    (the single construction owner), not by these Python recognition tests.
 
 ★ Shape I matches NO consumer pattern (no ``compressed`` token, no ``<<ccr:``)
-  and is recovered via a DIRECT store lookup, never via ``scan_for_markers``.
+  and is recovered via a DIRECT store lookup, never via the scanner.
   We PIN that today's behavior with a dual assertion: the scanner does NOT
   surface I's hash, AND a direct ``store.retrieve`` returns the original. A
   future "unify everything through one parser" change can't silently alter it
@@ -103,7 +105,6 @@ import pytest
 
 from furl_ctx.cache.compression_store import CompressionStore
 from furl_ctx.ccr import marker_grammar
-from furl_ctx.ccr.tool_injection import CCRToolInjector
 from furl_ctx.transforms.cross_message_dedup import (
     duplicate_sentinel,
     near_duplicate_rendering,
@@ -428,29 +429,24 @@ def store() -> CompressionStore:
     return CompressionStore(max_entries=100)
 
 
-@pytest.fixture()
-def injector() -> CCRToolInjector:
-    """The REAL production consumer.
+def _scan(text: str) -> list[str]:
+    """Run the REAL owned consumer extraction over one text.
 
-    ``CCRToolInjector.scan_for_markers`` is the public extract path; its
-    ``_marker_patterns`` are the production grammar under test. We never
-    reimplement the regex here.
+    ``marker_grammar.marker_patterns()`` is the production grammar under
+    test, driven with the production union-extract semantics (every
+    pattern, LAST capture group per match, deduped first-seen). We never
+    reimplement the regex here — only the trivial union driver, which is
+    itself pinned against the frozen literals by ``_union_extract``.
     """
-    return CCRToolInjector()
-
-
-def _scan(injector: CCRToolInjector, text: str) -> list[str]:
-    """Run the REAL public consumer extraction over one message's content."""
-    return injector.scan_for_markers([{"role": "user", "content": text}])
+    return _union_extract(marker_grammar.marker_patterns(), text)
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.shape_id for c in CASES])
 def test_marker_shape_round_trips_through_production_consumer(
     case: Case,
     store: CompressionStore,
-    injector: CCRToolInjector,
 ) -> None:
-    """Each marker shape: emit -> REAL scan_for_markers -> byte-exact recovery.
+    """Each marker shape: emit -> REAL consumer patterns -> byte-exact recovery.
 
     Green by construction: it characterizes the CURRENT consumer + store
     behavior. A future grammar refactor that drops a shape from the consumer,
@@ -459,7 +455,7 @@ def test_marker_shape_round_trips_through_production_consumer(
     """
     emitted, expected_hash, original = case.build(store)
 
-    detected = _scan(injector, emitted)
+    detected = _scan(emitted)
 
     if case.expect_extracted:
         # The production consumer must surface exactly this hash...
@@ -486,11 +482,11 @@ def test_marker_shape_round_trips_through_production_consumer(
         # (a) the consumer does NOT surface I's hash...
         assert expected_hash not in detected, (
             f"{case.shape_id}: expected NO consumer extraction (direct-store-only "
-            f"recovery), but scan_for_markers surfaced it: detected={detected!r}"
+            f"recovery), but the consumer patterns surfaced it: detected={detected!r}"
         )
         # ...and in fact no marker pattern fires for this shape at all.
         assert detected == [], (
-            f"{case.shape_id}: expected scan_for_markers to fire on nothing, "
+            f"{case.shape_id}: expected the consumer patterns to fire on nothing, "
             f"got detected={detected!r}"
         )
         # (b) ...yet a DIRECT store lookup still returns the byte-exact original.
@@ -516,7 +512,7 @@ def test_24hex_space_separator_extracts_full_width() -> None:
 
     Shapes E/F are 24-hex hashes that use the SAME space separator shape A uses
     at 12-hex. The thing that guarantees full-width capture is the REQUIRED
-    delimiter in the consumer pattern (tool_injection.py:236):
+    delimiter in the consumer pattern (marker_grammar.DOUBLE_ANGLE_DELIM):
     ``<<ccr:(24|12)(?:[ ,#>]|>>)``. Because a contiguous hex run is only accepted
     when a delimiter follows, the regex cannot stop at char 12 of a 24-hex run
     (char 12 is itself hex, not a delimiter) — it backtracks to the 24-branch.
@@ -528,13 +524,10 @@ def test_24hex_space_separator_extracts_full_width() -> None:
     24-char hash. If a future refactor drops the trailing-delimiter requirement
     (e.g. ``<<ccr:(\\d{12})`` greedy without a delimiter), this fails loudly.
     """
-    injector = CCRToolInjector()
     h24 = "abcdef0123456789abcdef01"  # 24 lowercase hex
     assert len(h24) == 24
     # Shape-A-style space separator, but a 24-hex hash (the E/F width case).
-    detected = injector.scan_for_markers(
-        [{"role": "user", "content": f"<<ccr:{h24} 5_bytes_duplicate>>"}]
-    )
+    detected = _scan(f"<<ccr:{h24} 5_bytes_duplicate>>")
     assert detected == [h24], (
         "24-hex + space marker did not extract the whole 24-char hash "
         f"(truncation/whole-blob-miss regression). Got {detected!r}, expected [{h24!r}]."
@@ -613,14 +606,22 @@ def test_spec_patterns_behaviorally_identical_to_original_literals() -> None:
         )
 
 
-def test_spec_patterns_match_production_scanner_exactly() -> None:
-    """The patterns the spec exposes are EXACTLY the ones the production
-    consumer uses — no drift between the spec and ``CCRToolInjector``.
+def test_spec_pattern_list_is_the_three_named_patterns_in_order() -> None:
+    """``marker_patterns()`` is EXACTLY the three named module patterns, in
+    the stable historical order (bracket, generic fallback, double-angle).
+
+    Since the ``CCRToolInjector`` twin was excised (SIMP-4), this module is
+    the SOLE owner of the consumer grammar — this pins that the public list
+    and the named patterns cannot drift apart.
     """
-    injector = CCRToolInjector()
     spec = marker_grammar.marker_patterns()
-    assert [p.pattern for p in injector._marker_patterns] == [p.pattern for p in spec]
-    assert [p.flags for p in injector._marker_patterns] == [p.flags for p in spec]
+    named = [
+        marker_grammar.BRACKET_RETRIEVE_PATTERN,
+        marker_grammar.GENERIC_BRACKET_PATTERN,
+        marker_grammar.DOUBLE_ANGLE_PATTERN,
+    ]
+    assert [p.pattern for p in spec] == [p.pattern for p in named]
+    assert [p.flags for p in spec] == [p.flags for p in named]
 
 
 def test_dead_pattern_retired_but_hash_still_surfaces() -> None:
@@ -635,9 +636,7 @@ def test_dead_pattern_retired_but_hash_still_surfaces() -> None:
         "the dead `compressed. hash=` pattern must be retired from the spec"
     )
     # ...yet the hash is still extracted from a string only it used to match.
-    detected = CCRToolInjector().scan_for_markers(
-        [{"role": "user", "content": f"[5 items compressed. hash={h24}]"}]
-    )
+    detected = _scan(f"[5 items compressed. hash={h24}]")
     assert detected == [h24], (
         "retiring dead pattern #2 dropped a hash the generic fallback should "
         f"still surface; got {detected!r}"
@@ -693,7 +692,6 @@ def test_double_angle_separators_are_exactly_the_owned_set() -> None:
     Pins the separator half of the grammar: every producer-emitted separator
     surfaces the hash; a stray separator (`~`, `;`, `|`) does not.
     """
-    inj = CCRToolInjector()
     h12 = "9f3a2b1c4d5e"
     # Producer-emitted separators (A space, C comma, B '#', D '>>').
     for marker in (
@@ -702,23 +700,19 @@ def test_double_angle_separators_are_exactly_the_owned_set() -> None:
         f"<<ccr:{h12}#rows 7_chunks>>",  # '#'
         f"<<ccr:{h12}>>",  # bare '>>'
     ):
-        assert inj.scan_for_markers([{"role": "user", "content": marker}]) == [h12], (
-            f"owned separator did not surface the hash: {marker!r}"
-        )
+        assert _scan(marker) == [h12], f"owned separator did not surface the hash: {marker!r}"
     # Un-enumerated separators must NOT surface a hash.
     for bad in (
         f"<<ccr:{h12}~junk>>",
         f"<<ccr:{h12};junk>>",
         f"<<ccr:{h12}|junk>>",
     ):
-        assert inj.scan_for_markers([{"role": "user", "content": bad}]) == [], (
-            f"an un-enumerated separator unexpectedly surfaced a hash: {bad!r}"
-        )
+        assert _scan(bad) == [], f"an un-enumerated separator unexpectedly surfaced a hash: {bad!r}"
 
 
 # --------------------------------------------------------------------------- #
 # PRODUCER-DRIVEN E2E BINDING — drive the REAL producer through the engine,
-# extract via the REAL production consumer (``scan_for_markers``, NOT a local
+# extract via the REAL owned consumer patterns (NOT a local
 # regex), recover byte-exact from the store. THIS is the drift guard the
 # objective asks for: if a Rust/Python producer changes a separator or width,
 # the production consumer stops surfacing the hash and these FAIL — naming the
@@ -745,7 +739,7 @@ def test_producer_driven_A_rows_offloaded_binds_to_production_consumer() -> None
     router = ContentRouter(ContentRouterConfig(ccr_enabled=False, ccr_inject_marker=False))
     output = router.compress(json.dumps(items)).compressed
 
-    detected = _scan(CCRToolInjector(), output)
+    detected = _scan(output)
     assert detected, (
         "real row-drop producer emitted a marker the PRODUCTION consumer did "
         f"not surface (producer↔consumer drift).\n  output head={output[:200]!r}"
@@ -791,7 +785,7 @@ def test_producer_driven_B_row_index_binds_to_production_consumer() -> None:
     if "#rows" not in output:
         pytest.skip("granular row-index path did not fire (#rows absent) — environment gap")
 
-    detected = _scan(CCRToolInjector(), output)
+    detected = _scan(output)
     assert detected, (
         "real row-index producer emitted a '#rows' marker the PRODUCTION "
         f"consumer did not surface.\n  output head={output[:200]!r}"
@@ -839,7 +833,7 @@ def test_producer_driven_C_opaque_blob_binds_to_production_consumer() -> None:
     router = ContentRouter()
     output = router.compress(json.dumps(items)).compressed
 
-    detected = _scan(CCRToolInjector(), output)
+    detected = _scan(output)
     assert detected, (
         "real opaque-substitution producer emitted markers the PRODUCTION "
         f"consumer did not surface.\n  output head={output[:200]!r}"
@@ -886,7 +880,7 @@ def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> 
         )
 
         output = result.compressed if isinstance(result.compressed, str) else str(result.compressed)
-        detected = _scan(CCRToolInjector(), output)
+        detected = _scan(output)
         assert result.cache_key in detected, (
             "real diff producer's cache_key was NOT surfaced by the PRODUCTION "
             f"consumer.\n  cache_key={result.cache_key!r}\n  detected={detected!r}"

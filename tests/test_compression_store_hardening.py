@@ -139,7 +139,7 @@ def test_retrieve_unknown_key_returns_none() -> None:
     [
         "abcdef123456",  # 12-char (real engine default)
         "abcdef1234567890abcd",  # 20-char
-        "a" * 24,  # 24-char (tool_injection.py anti-spoof width)
+        "a" * 24,  # 24-char (marker_grammar anti-spoof width)
     ],
 )
 def test_wider_explicit_hash_accepted(h: str) -> None:

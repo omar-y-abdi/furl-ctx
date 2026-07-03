@@ -20,7 +20,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..config import (
     _MUTATING_TOOL_NAMES,
@@ -29,6 +29,21 @@ from ..config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ToolCallMeta(NamedTuple):
+    """One tool call observed while scanning assistant messages.
+
+    ``msg_index`` is recorded during the SAME single pass that extracts
+    name/path/range (ARCH-9) — the index used to be re-derived per tool
+    call by re-scanning all messages (O(reads x messages)).
+    """
+
+    name: str
+    file_path: str | None
+    offset: int | None
+    limit: int | None
+    msg_index: int
 
 
 class ReadState(str, Enum):
@@ -48,7 +63,6 @@ class FileOperation:
     tool_name: str
     file_path: str
     operation: str  # "read" | "edit" | "write"
-    content_size: int = 0  # Size of tool_result content (for reads only)
     read_offset: int | None = None  # Line offset for partial reads
     read_limit: int | None = None  # Line limit for partial reads
 
@@ -61,7 +75,6 @@ class ReadClassification:
     tool_call_id: str
     file_path: str
     state: ReadState
-    content_size: int
 
 
 def _format_read_lifecycle_transform(classification: ReadClassification) -> str:
@@ -122,9 +135,10 @@ class ReadLifecycleManager:
         if not self.config.enabled:
             return ReadLifecycleResult(messages=messages)
 
-        # Phase 1: Build tool metadata and file operation index
+        # Phase 1: Build tool metadata (with msg_index recorded in the
+        # same single pass — ARCH-9) and the file operation index
         tool_metadata = self._build_tool_metadata(messages)
-        file_ops = self._build_file_operation_index(messages, tool_metadata)
+        file_ops = self._build_file_operation_index(tool_metadata)
 
         # Phase 2: Classify each Read
         classifications = self._classify_reads(file_ops)
@@ -154,18 +168,17 @@ class ReadLifecycleManager:
         # Phase 4: Replace stale/superseded content
         return self._apply_lifecycle(messages, classifications)
 
-    def _build_tool_metadata(
-        self, messages: list[dict[str, Any]]
-    ) -> dict[str, tuple[str, str | None, int | None, int | None]]:
-        """Build tool_call_id → (tool_name, file_path) mapping.
+    def _build_tool_metadata(self, messages: list[dict[str, Any]]) -> dict[str, _ToolCallMeta]:
+        """Build tool_call_id → :class:`_ToolCallMeta` in one pass.
 
-        Scans assistant messages for tool calls, extracts name and file_path
-        from tool inputs. Handles both OpenAI and Anthropic formats.
+        Scans assistant messages for tool calls, extracting name, file_path,
+        read range AND the containing message index (ARCH-9 — the index used
+        to be re-derived by a per-tool-call rescan of all messages). Handles
+        both OpenAI and Anthropic formats.
         """
-        # Maps tool_call_id → (name, file_path, offset, limit)
-        metadata: dict[str, tuple[str, str | None, int | None, int | None]] = {}
+        metadata: dict[str, _ToolCallMeta] = {}
 
-        for msg in messages:
+        for msg_index, msg in enumerate(messages):
             if msg.get("role") != "assistant":
                 continue
 
@@ -193,7 +206,7 @@ class ReadLifecycleManager:
                     limit = args.get("limit")
                 except (json.JSONDecodeError, TypeError):
                     pass
-                metadata[tc_id] = (name, file_path, offset, limit)
+                metadata[tc_id] = _ToolCallMeta(name, file_path, offset, limit, msg_index)
 
             # Anthropic format: content blocks with type=tool_use
             content = msg.get("content", [])
@@ -215,77 +228,46 @@ class ReadLifecycleManager:
                     file_path = inp.get("file_path") or inp.get("path")
                     offset = inp.get("offset")
                     limit = inp.get("limit")
-                metadata[tc_id] = (name, file_path, offset, limit)
+                metadata[tc_id] = _ToolCallMeta(name, file_path, offset, limit, msg_index)
 
         return metadata
 
     def _build_file_operation_index(
         self,
-        messages: list[dict[str, Any]],
-        tool_metadata: dict[str, tuple[str, str | None, int | None, int | None]],
+        tool_metadata: dict[str, _ToolCallMeta],
     ) -> dict[str, list[FileOperation]]:
-        """Build file_path → [FileOperation] index in a single pass.
+        """Build file_path → [FileOperation] index from the metadata pass.
 
-        Groups all Read/Edit/Write operations by file_path for lifecycle analysis.
+        Groups all Read/Edit/Write operations by file_path for lifecycle
+        analysis. Pure regrouping — the message scan already happened in
+        :meth:`_build_tool_metadata` (ARCH-9).
         """
         file_ops: dict[str, list[FileOperation]] = defaultdict(list)
 
-        for tc_id, (name, file_path, offset, limit) in tool_metadata.items():
-            if not file_path:
+        for tc_id, meta in tool_metadata.items():
+            if not meta.file_path:
                 continue
 
-            if name in _READ_TOOL_NAMES:
+            if meta.name in _READ_TOOL_NAMES:
                 operation = "read"
-            elif name in _MUTATING_TOOL_NAMES:
+            elif meta.name in _MUTATING_TOOL_NAMES:
                 operation = "edit"
             else:
                 continue
 
-            # Find the message index where this tool_call appears
-            msg_idx = self._find_tool_call_msg_index(messages, tc_id)
-            if msg_idx is None:
-                continue
-
-            file_ops[file_path].append(
+            file_ops[meta.file_path].append(
                 FileOperation(
-                    msg_index=msg_idx,
+                    msg_index=meta.msg_index,
                     tool_call_id=tc_id,
-                    tool_name=name,
-                    file_path=file_path,
+                    tool_name=meta.name,
+                    file_path=meta.file_path,
                     operation=operation,
-                    read_offset=offset if operation == "read" else None,
-                    read_limit=limit if operation == "read" else None,
+                    read_offset=meta.offset if operation == "read" else None,
+                    read_limit=meta.limit if operation == "read" else None,
                 )
             )
 
         return dict(file_ops)
-
-    def _find_tool_call_msg_index(
-        self, messages: list[dict[str, Any]], tool_call_id: str
-    ) -> int | None:
-        """Find the message index containing a specific tool_call_id."""
-        for i, msg in enumerate(messages):
-            if msg.get("role") != "assistant":
-                continue
-
-            # OpenAI format. `or []`: the key is present-but-None in
-            # openai-python model_dump() output.
-            for tc in msg.get("tool_calls") or []:
-                if isinstance(tc, dict) and tc.get("id") == tool_call_id:
-                    return i
-
-            # Anthropic format
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if (
-                        isinstance(block, dict)
-                        and block.get("type") == "tool_use"
-                        and block.get("id") == tool_call_id
-                    ):
-                        return i
-
-        return None
 
     @staticmethod
     def _read_covers(later: FileOperation, earlier: FileOperation) -> bool:
@@ -349,7 +331,6 @@ class ReadLifecycleManager:
                         tool_call_id=read_op.tool_call_id,
                         file_path=file_path,
                         state=state,
-                        content_size=read_op.content_size,
                     )
                 )
 

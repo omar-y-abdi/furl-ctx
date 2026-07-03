@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..ccr import marker_grammar
-from ..ccr.tool_injection import CCR_TOOL_NAME
+from ..ccr.marker_grammar import CCR_TOOL_NAME
 from ..config import is_tool_excluded
 from ..utils import concat_text_parts
 from .content_detector import ContentType, DetectionResult

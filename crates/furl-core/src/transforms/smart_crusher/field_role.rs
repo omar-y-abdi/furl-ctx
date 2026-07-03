@@ -33,7 +33,7 @@ use serde_json::Value;
 
 use super::analyzer::{is_iso_date, is_iso_datetime};
 use super::statistics::{calculate_string_entropy, detect_sequential_pattern, is_uuid_format};
-use super::types::FieldStats;
+use super::types::{FieldStats, FieldType};
 
 /// Unique-ratio at or above which a field is a *candidate* identity column.
 ///
@@ -110,9 +110,9 @@ pub fn classify_field(stats: &FieldStats, sample: &[&Value]) -> FieldRole {
 
 /// True when a high-cardinality field shape-matches an identity pattern.
 fn is_identity_shaped(stats: &FieldStats, sample: &[&Value]) -> bool {
-    match stats.field_type.as_str() {
-        "string" => string_is_identity(sample),
-        "numeric" => numeric_is_identity(stats, sample),
+    match stats.field_type {
+        FieldType::String => string_is_identity(sample),
+        FieldType::Numeric => numeric_is_identity(stats, sample),
         // Objects/arrays/bools are never identity columns for hashing
         // purposes (bools can't be high-cardinality; nested containers are
         // content).
@@ -226,10 +226,10 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
-    fn stats(field_type: &str, unique_ratio: f64, is_constant: bool) -> FieldStats {
+    fn stats(field_type: FieldType, unique_ratio: f64, is_constant: bool) -> FieldStats {
         FieldStats {
             name: "f".to_string(),
-            field_type: field_type.to_string(),
+            field_type,
             count: 90,
             unique_count: if is_constant { 1 } else { 81 },
             unique_ratio,
@@ -251,14 +251,14 @@ mod tests {
 
     #[test]
     fn constant_field_is_constant_role() {
-        let s = stats("string", 0.011, true);
+        let s = stats(FieldType::String, 0.011, true);
         assert_eq!(classify_field(&s, &[]), FieldRole::Constant);
     }
 
     #[test]
     fn low_cardinality_is_content() {
         // author column: 36/90 distinct -> ratio 0.4 -> content.
-        let s = stats("string", 0.4, false);
+        let s = stats(FieldType::String, 0.4, false);
         let sample: Vec<Value> = (0..20)
             .map(|i| json!(format!("Author {}", i % 4)))
             .collect();
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn iso_datetime_high_cardinality_is_identity() {
-        let s = stats("string", 1.0, false);
+        let s = stats(FieldType::String, 1.0, false);
         let sample: Vec<Value> = (0..20)
             .map(|i| json!(format!("2026-06-12T15:01:{:02}+02:00", i)))
             .collect();
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn uuid_high_cardinality_is_identity() {
-        let s = stats("string", 1.0, false);
+        let s = stats(FieldType::String, 1.0, false);
         let sample: Vec<Value> = (0..20)
             .map(|i| json!(format!("550e8400-e29b-41d4-a716-44665544{:04x}", i)))
             .collect();
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn commit_hash_hex_run_is_identity() {
-        let s = stats("string", 1.0, false);
+        let s = stats(FieldType::String, 1.0, false);
         let sample: Vec<Value> = vec![
             json!("0795e63ede835e5398f77c72c7f0be8fdb96ab0a"),
             json!("61306fc692468047114064ef5a9c4020439384e7"),
@@ -307,7 +307,7 @@ mod tests {
     fn unique_english_subject_is_content_not_identity() {
         // A unique-per-row natural-language commit subject must NOT be
         // misclassified as identity — it is the value-bearing content.
-        let s = stats("string", 1.0, false);
+        let s = stats(FieldType::String, 1.0, false);
         let sample: Vec<Value> = vec![
             json!("feat(crusher): unconditional CCR persist kill silent loss"),
             json!("docs(engine): Phase-2 DESIGN safe dedup field-aware hash"),
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn sequential_numeric_is_identity() {
-        let s = stats("numeric", 1.0, false);
+        let s = stats(FieldType::Numeric, 1.0, false);
         let sample: Vec<Value> = (0..20).map(|i| json!(1000 + i)).collect();
         assert_eq!(
             classify_field(&s, &refs(&sample)),
@@ -339,10 +339,10 @@ mod tests {
             })
             .collect();
         let mut fs: BTreeMap<String, FieldStats> = BTreeMap::new();
-        fs.insert("commit".into(), stats("string", 1.0, false));
-        fs.insert("author".into(), stats("string", 0.044, false));
-        fs.insert("date".into(), stats("string", 1.0, false));
-        fs.insert("subject".into(), stats("string", 1.0, false));
+        fs.insert("commit".into(), stats(FieldType::String, 1.0, false));
+        fs.insert("author".into(), stats(FieldType::String, 0.044, false));
+        fs.insert("date".into(), stats(FieldType::String, 1.0, false));
+        fs.insert("subject".into(), stats(FieldType::String, 1.0, false));
 
         let exclude = compute_exclude_set(&fs, &items);
         assert!(exclude.contains("commit"), "commit hash should be excluded");
@@ -367,8 +367,8 @@ mod tests {
             })
             .collect();
         let mut fs: BTreeMap<String, FieldStats> = BTreeMap::new();
-        fs.insert("path".into(), stats("string", 0.16, false));
-        fs.insert("lines".into(), stats("string", 1.0, false));
+        fs.insert("path".into(), stats(FieldType::String, 0.16, false));
+        fs.insert("lines".into(), stats(FieldType::String, 1.0, false));
         // line_number IS sequential -> identity; that's correct and fine.
         let exclude = compute_exclude_set(&fs, &items);
         assert!(!exclude.contains("path"));

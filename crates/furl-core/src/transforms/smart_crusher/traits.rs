@@ -5,27 +5,17 @@
 //! want to override:
 //!
 //! - **`Scorer`** (already public via `crate::relevance::RelevanceScorer`):
-//!   how relevant is item *i* to query *q*? OSS default `HybridScorer`
-//!   (BM25 with a match boost). Enterprise can plug in a per-tenant
-//!   Loop-trained scorer.
+//!   how relevant is item *i* to query *q*? Default `HybridScorer`
+//!   (BM25 with a match boost).
 //! - **`Constraint`** (this module): which indices must be kept
-//!   regardless of score? OSS defaults preserve errors and structural
-//!   outliers. Enterprise can add `BusinessRuleConstraint`,
-//!   `RegulatoryConstraint`, etc.
+//!   regardless of score? Defaults preserve errors and structural
+//!   outliers.
 //! - **`Observer`** (this module): emit a structured event after each
-//!   `crush()` so telemetry, audit logs, and continuous-eval pipelines
-//!   can hook in. OSS default writes to the `tracing` crate.
+//!   `crush()`. Default writes to the `tracing` crate.
 //!
-//! # Why three, not eight
-//!
-//! The 5-stage pipeline (classify → compact → score → allocate →
-//! format) has more stage boundaries, but only three of them carry
-//! *differentiated value* to Enterprise customers — Loop scorer,
-//! business rules, audit telemetry. The other stages stay as concrete
-//! Rust types; if an Enterprise customer ever needs to plug into a
-//! different stage we can promote it to a trait at that point. We're
-//! not designing for hypothetical futures — we're naming the seams
-//! that real customers will pay for today.
+//! These are the three seams external composition can plug into; the
+//! other pipeline stages stay concrete Rust types until a real
+//! consumer needs a trait there.
 //!
 //! # Composition
 //!
@@ -42,11 +32,10 @@ use serde_json::Value;
 /// regardless of saliency score or token budget.
 ///
 /// Constraints stack — the must-keep set is the union of every
-/// constraint's `must_keep` output. OSS ships [`KeepErrorsConstraint`]
-/// and [`KeepStructuralOutliersConstraint`] (wrappers around the
-/// existing detection functions); Enterprise crates can add
-/// `BusinessRuleConstraint("amount > 10000")`,
-/// `RegulatoryConstraint::HIPAA`, and so on.
+/// constraint's `must_keep` output. The defaults are
+/// [`KeepErrorsConstraint`] and [`KeepStructuralOutliersConstraint`]
+/// (wrappers around the existing detection functions); custom
+/// constraints slot in alongside via the builder.
 ///
 /// # Contract
 ///
@@ -57,7 +46,7 @@ use serde_json::Value;
 ///   same `items` returns the same set; constraints do not own
 ///   mutable state that drifts between calls within one
 ///   `SmartCrusher::crush` invocation. (Caching across crushes is
-///   fine — see `LoopScorer` style stateful enrichers.)
+///   fine.)
 /// - **Cheap is free.** Constraints run on every dict-array crush.
 ///   A constraint that does I/O or heavy regex per-item can dominate
 ///   the crusher's cost. Aim for O(n) on items with small constants.
@@ -83,8 +72,8 @@ pub trait Constraint: Send + Sync {
 // ── Observer ──────────────────────────────────────────────────────────────
 
 /// Telemetry event emitted at the end of each `SmartCrusher::crush`
-/// call. Observers (multiple, stacked) consume these for `tracing`,
-/// audit logs, Loop training data, real-time dashboards.
+/// call. Observers (multiple, stacked) consume these — the in-tree
+/// consumer is the `tracing` observer.
 #[derive(Debug, Clone)]
 pub struct CrushEvent {
     /// Strategy debug string returned by the crusher
