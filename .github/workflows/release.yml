@@ -112,7 +112,15 @@ jobs:
             fi
             echo "value=$MANUAL_INPUT" >> "$GITHUB_OUTPUT"
           else
-            echo "value=" >> "$GITHUB_OUTPUT"
+            # PR dry-run (X2): gate against what this tree actually
+            # BUILDS — pyproject's version. The git-log derivation
+            # computes the NEXT release version, which by definition
+            # exceeds every artifact built from the PR tree, so the
+            # collect-dist gate would fail on every feat PR touching
+            # wheel paths. The dry-run's job is wheel-matrix build +
+            # smoke-import + internal version consistency, not
+            # predicting the future tag.
+            echo "value=$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Compute semantic version from canonical + release history

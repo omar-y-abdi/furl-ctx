@@ -34,7 +34,18 @@ from pathlib import Path
 from typing import Any
 
 from furl_ctx import paths as _paths
+from furl_ctx.ccr.compress_modes import (
+    CompressionMode,
+    SectionPatterns,
+    build_mode_pipeline,
+    partition_content,
+)
 from furl_ctx.ccr.marker_grammar import CCR_TOOL_NAME, is_valid_ccr_hash
+from furl_ctx.ccr.retrieve_filters import (
+    FilterError,
+    RetrieveFilters,
+    apply_filters,
+)
 
 # fcntl is Unix-only; on Windows we skip file locking (stats are best-effort).
 # Keep the module typed as Any so Windows mypy runs don't try to resolve Unix-only attrs.
@@ -582,8 +593,20 @@ class FurlMCPServer:
             )
         return self._local_store
 
-    def _compress_content(self, content: str) -> dict[str, Any]:
-        """Compress content using Furl's pipeline.
+    def _compress_content(
+        self,
+        content: str,
+        mode: CompressionMode = CompressionMode.NORMAL,
+        patterns: SectionPatterns | None = None,
+    ) -> dict[str, Any]:
+        """Compress content using Furl's pipeline (NR2-2 feature c aware).
+
+        ``mode`` selects the pipeline (``NORMAL`` uses the process default, so
+        a default call is byte-identical to before this feature).
+        ``patterns`` (``include_patterns``/``exclude_patterns``), when
+        non-empty, partition the content into eligible/protected line runs
+        (compressed independently vs. verbatim) — handled by
+        ``_compress_filtered``.
 
         Returns dict with compressed text, token counts, hash, etc.
         """
@@ -598,10 +621,21 @@ class FurlMCPServer:
         # expire granular retrieval 30 minutes into a session-long window.
         store = self._get_local_store()
 
+        # Section filtering (non-empty patterns) → run-by-run path. Delegated
+        # so the common (unfiltered) path below stays the original single-unit
+        # body, byte-identical to before this feature when mode is NORMAL.
+        if patterns is not None and not patterns.is_empty:
+            return self._compress_filtered(content, mode, patterns)
+
+        # NORMAL mode builds no pipeline (uses the process default singleton),
+        # keeping a default call byte-identical; other modes select a
+        # configured pipeline via existing ContentRouterConfig knobs.
+        pipeline = build_mode_pipeline(mode)
+
         # Wrap content as a tool message (most common compression target)
         messages = [{"role": "tool", "content": content}]
 
-        result = compress(messages, model=_MCP_TOKEN_MODEL)
+        result = compress(messages, model=_MCP_TOKEN_MODEL, pipeline=pipeline)
 
         if result.error:
             # COR-36: compress() failed open — result.messages are the
@@ -653,10 +687,115 @@ class FurlMCPServer:
             "note": f"Original stored with hash={hash_key}. Use mcp__furl__{CCR_TOOL_NAME} to get full content later.",
         }
 
+    def _compress_filtered(
+        self,
+        content: str,
+        mode: CompressionMode,
+        patterns: SectionPatterns,
+    ) -> dict[str, Any]:
+        """Compress only the pattern-eligible line runs; keep protected verbatim.
+
+        Each eligible run is compressed independently through ``_compress_content``
+        (unfiltered, so it takes the single-unit path and gets its own
+        retrievable hash); protected runs pass through unchanged. Runs are
+        rejoined in original order, so protected bytes and ordering are exact.
+        Aggregates per-run token counts into one envelope with the list of
+        hashes.
+        """
+        runs = partition_content(content, patterns)
+
+        rendered_parts: list[str] = []
+        hashes: list[str] = []
+        transforms: list[str] = []
+        total_input = 0
+        total_output = 0
+
+        for run in runs:
+            if not run.eligible or not run.text.strip():
+                # Protected run, or an eligible-but-blank run (nothing to
+                # compress) — ship verbatim. Blank runs count as zero-token
+                # passthrough, matching how a whitespace-only compress no-ops.
+                rendered_parts.append(run.text)
+                continue
+            part = self._compress_content(run.text, mode)
+            if "error" in part:
+                # A run-level fail-open: surface loudly rather than silently
+                # shipping a partial mix (the whole call reports the failure).
+                return part
+            rendered_parts.append(
+                part["compressed"]
+                if isinstance(part["compressed"], str)
+                else json.dumps(part["compressed"])
+            )
+            hashes.append(part["hash"])
+            transforms.extend(part.get("transforms", []))
+            total_input += part["original_tokens"]
+            total_output += part["compressed_tokens"]
+
+        rendered = "\n".join(rendered_parts)
+        tokens_saved = max(0, total_input - total_output)
+        savings_pct = round(tokens_saved / total_input * 100, 1) if total_input > 0 else 0
+
+        return {
+            "compressed": rendered,
+            "mode": mode.value,
+            "filtered": True,
+            "hashes": hashes,
+            "compressed_runs": len(hashes),
+            "original_tokens": total_input,
+            "compressed_tokens": total_output,
+            "tokens_saved": tokens_saved,
+            "savings_percent": savings_pct,
+            "transforms": transforms,
+            "note": (
+                f"Pattern-filtered compression: {len(hashes)} eligible run(s) compressed, "
+                f"protected lines passed through verbatim. Retrieve any run via "
+                f"mcp__furl__{CCR_TOOL_NAME} with its hash."
+            ),
+        }
+
+    async def _search_all_content(self, query: str) -> dict[str, Any]:
+        """Cross-store full-text search (NR2-2 feature a).
+
+        Ranks EVERY live entry against ``query`` via BM25 and returns the top
+        matches as ``(hash, score, preview)`` so the caller can follow up with
+        a per-hash retrieve. With the durable SQLite backend this spans
+        cross-session / cross-process entries. Previews are redacted at the
+        store so this surface never leaks a secret a per-hash retrieval would
+        have masked. Pure read — no retrieval is booked (the caller retrieves
+        by hash next), so no ``record_retrieval`` here.
+        """
+        store = self._get_local_store()
+        matches = store.search_all(query)
+        return {
+            "source": "cross_store",
+            "query": query,
+            "count": len(matches),
+            "matches": [
+                {
+                    "hash": match.hash,
+                    "score": round(match.score, 4),
+                    "preview": match.preview,
+                    "tool_name": match.tool_name,
+                }
+                for match in matches
+            ],
+            "note": (
+                "Ranked matches across all stored entries. Call furl_retrieve with a "
+                "hash to get its full original content."
+            )
+            if matches
+            else (
+                "No stored entry matched the query. The store may be empty, or no "
+                "entry contains the query terms."
+            ),
+        }
+
     async def _retrieve_content(
         self,
         hash_key: str,
         query: str | None,
+        filters: RetrieveFilters | None = None,
     ) -> dict[str, Any]:
         """Retrieve content from the local CCR store.
 
@@ -667,6 +806,11 @@ class FurlMCPServer:
         fires only when results shipped, COR-37). No second emission here:
         the store is the single honest choke point, and a handler-level
         emission would double-count every retrieval.
+
+        ``filters`` (NR2-2 feature b) narrow the no-query full retrieve
+        (regex/line-range over text, field projection over JSON arrays). They
+        are mutually exclusive with ``query`` at the handler boundary, so a
+        non-empty ``filters`` is only ever passed on the no-query path.
         """
         store = self._get_local_store()
         if query:
@@ -705,6 +849,8 @@ class FurlMCPServer:
             entry = store.retrieve(hash_key)
             if entry:
                 self._stats.record_retrieval(hash_key)
+                if filters is not None and not filters.is_empty:
+                    return self._apply_retrieve_filters(hash_key, entry, filters)
                 return {
                     "hash": hash_key,
                     "source": "local",
@@ -735,6 +881,38 @@ class FurlMCPServer:
             "session using the configured CCR TTL.",
         }
 
+    def _apply_retrieve_filters(
+        self,
+        hash_key: str,
+        entry: Any,
+        filters: RetrieveFilters,
+    ) -> dict[str, Any]:
+        """Project a retrieved entry through validated filters (NR2-2 b).
+
+        A shape mismatch (``fields`` on a non-array original) comes back from
+        ``apply_filters`` as a ``FilterError`` — surfaced as a structured error
+        envelope, never a crash or a silently-empty success.
+        """
+        outcome = apply_filters(entry.original_content, filters)
+        if isinstance(outcome, FilterError):
+            return {
+                "error": outcome.reason,
+                "hash": hash_key,
+                "source": "local",
+            }
+        return {
+            "hash": hash_key,
+            "source": "local",
+            "filtered": True,
+            "filter_kind": outcome.kind,
+            "filtered_content": outcome.content,
+            "matched_count": outcome.matched_count,
+            "total_count": outcome.total_count,
+            "original_item_count": entry.original_item_count,
+            "compressed_item_count": entry.compressed_item_count,
+            "retrieval_count": entry.retrieval_count,
+        }
+
     def _setup_handlers(self) -> None:
         """Register all MCP tool handlers."""
 
@@ -748,7 +926,9 @@ class FurlMCPServer:
                         "Use this on large tool outputs, file contents, search results, "
                         "or any content you want to shrink before reasoning over it. "
                         f"The original is stored and can be retrieved later via mcp__furl__{CCR_TOOL_NAME}. "
-                        "Returns compressed text + a hash for retrieval."
+                        "Returns compressed text + a hash for retrieval. Optional 'mode' "
+                        "controls aggressiveness; optional include/exclude patterns limit "
+                        "which lines are compressed."
                     ),
                     inputSchema={
                         "type": "object",
@@ -758,6 +938,38 @@ class FurlMCPServer:
                                 "description": (
                                     "The content to compress. Can be any text: file contents, "
                                     "JSON, search results, logs, code, etc."
+                                ),
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["lossless_only", "normal", "aggressive"],
+                                "description": (
+                                    "Compression aggressiveness (default 'normal' = current "
+                                    "behavior). 'lossless_only': only proven-lossless "
+                                    "transforms run — nothing is dropped or substituted, so "
+                                    "the output carries no retrieval markers (larger, fully "
+                                    "reversible). 'aggressive': keep fewer items per crush and "
+                                    "accept marginal compressions the default would reject "
+                                    "(smaller output; all drops stay CCR-recoverable)."
+                                ),
+                            },
+                            "include_patterns": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Glob-or-regex patterns (regex tried first, glob "
+                                    "fallback). When set, ONLY content lines matching at "
+                                    "least one pattern are eligible for compression; all "
+                                    "other lines pass through verbatim."
+                                ),
+                            },
+                            "exclude_patterns": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Glob-or-regex patterns. Any content line matching one is "
+                                    "PROTECTED — passed through verbatim, never compressed. "
+                                    "Applied on top of include_patterns."
                                 ),
                             },
                         },
@@ -770,24 +982,74 @@ class FurlMCPServer:
                         "Retrieve original uncompressed content by hash. "
                         "Use this when you need full details from previously compressed content. "
                         "The hash comes from furl_compress results or from compression "
-                        "markers like [N items compressed... hash=abc123]."
+                        "markers like [N items compressed... hash=abc123].\n"
+                        "Two extra modes: (1) OMIT hash and pass query to search across "
+                        "ALL stored entries (returns ranked hash/score/preview matches to "
+                        "retrieve individually); (2) pass hash with pattern/fields/line_range "
+                        "to project just part of the original. Filters cannot be combined "
+                        "with query."
                     ),
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "hash": {
                                 "type": "string",
-                                "description": "Hash key from compression (e.g., 'abc123' from hash=abc123)",
+                                "description": (
+                                    "Hash key from compression (e.g., 'abc123' from "
+                                    "hash=abc123). Omit to search across all entries via "
+                                    "'query'."
+                                ),
                             },
                             "query": {
                                 "type": "string",
                                 "description": (
-                                    "Optional search query to filter results. "
-                                    "If provided, returns only items matching the query."
+                                    "Search query. WITH a hash: return only items in that "
+                                    "entry matching the query. WITHOUT a hash: full-text "
+                                    "search (BM25-ranked) across every stored entry, "
+                                    "returning top matches as hash/score/preview. Mutually "
+                                    "exclusive with pattern/fields/line_range."
+                                ),
+                            },
+                            "pattern": {
+                                "type": "string",
+                                "description": (
+                                    "Regex applied line-by-line to the full original "
+                                    "(requires a hash, no query). Returns matching lines "
+                                    "(prefixed with 1-based line numbers) plus "
+                                    "'context_lines' lines of surrounding context. Invalid "
+                                    "regex returns an error."
+                                ),
+                            },
+                            "context_lines": {
+                                "type": "integer",
+                                "description": (
+                                    "Lines of context to include on each side of a "
+                                    "'pattern' match (default 0, max 50)."
+                                ),
+                            },
+                            "line_range": {
+                                "type": "array",
+                                "items": {"type": ["integer", "null"]},
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": (
+                                    "[start, end] 1-based inclusive line window over the "
+                                    "full original (requires a hash, no query). Either bound "
+                                    "may be null for an open end. Composes with 'pattern' "
+                                    "(the range is applied first)."
+                                ),
+                            },
+                            "fields": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "For a JSON-array original: project only these keys out "
+                                    "of each object element (requires a hash, no query). "
+                                    "Errors if the original is not a JSON array. Cannot be "
+                                    "combined with pattern/line_range."
                                 ),
                             },
                         },
-                        "required": ["hash"],
                     },
                 ),
                 Tool(
@@ -947,16 +1209,57 @@ class FurlMCPServer:
                 )
             ]
 
+        # NR2-2 feature c: aggressiveness/filter mode. Both default to today's
+        # behavior (mode=normal, no patterns), so a plain call is byte-identical.
+        mode = CompressionMode.parse(arguments.get("mode"))
+        if isinstance(mode, str):
+            return [TextContent(type="text", text=json.dumps({"error": mode}))]
+
+        patterns = SectionPatterns.parse(arguments)
+        if isinstance(patterns, str):
+            return [TextContent(type="text", text=json.dumps({"error": patterns}))]
+
         # Run compression in thread pool (it's CPU-bound)
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, self._compress_content, content)
+        result = await loop.run_in_executor(None, self._compress_content, content, mode, patterns)
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     async def _handle_retrieve(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_retrieve tool call."""
+        query = arguments.get("query")
+        # Parameter-error treatment for a non-string query — the caller's
+        # mistake, not an internal failure (API-15). Checked BEFORE the hash so
+        # the no-hash cross-store-search route (feature a) sees a valid query.
+        if query is not None and not isinstance(query, str):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"error": f"query parameter must be a string, got {type(query).__name__}"}
+                    ),
+                )
+            ]
+
         hash_key = arguments.get("hash")
         if not hash_key:
+            # Cross-store search (NR2-2 feature a): no hash + a query → rank all
+            # stored entries. No hash AND no query stays the original loud
+            # parameter error (a bare retrieve needs a target).
+            if query:
+                logger.info("event=mcp_search_all_started")
+                logger.debug("event=mcp_search_all_started_detail query_len=%d", len(query))
+                result = await self._search_all_content(query)
+                response_text = json.dumps(result, indent=2, allow_nan=False)
+                logger.info(
+                    "event=mcp_search_all_completed matches=%d result_chars=%d",
+                    result.get("count", 0),
+                    len(response_text),
+                )
+                return [TextContent(type="text", text=response_text)]
+            # No hash and no query: unchanged from before this feature — a bare
+            # retrieve needs a target. Kept byte-identical (the cross-store
+            # search route is discoverable via the tool schema, not this error).
             return [
                 TextContent(
                     type="text",
@@ -984,30 +1287,48 @@ class FurlMCPServer:
         # "evicted/never stored" error.
         hash_key = hash_key.lower()
 
-        query = arguments.get("query")
-        # Same parameter-error treatment as the hash guard above: a non-string
-        # query is the caller's mistake, not an internal failure (API-15).
-        if query is not None and not isinstance(query, str):
+        # Parse per-hash filters (NR2-2 feature b). Filters narrow the no-query
+        # full retrieve and are mutually exclusive with a query — a query
+        # already selects items within the entry, and the two describe
+        # incompatible views. Validation lives in the smart constructor, so any
+        # bad regex / range / field list is a structured error here, never a
+        # crash downstream.
+        filters = RetrieveFilters.parse(arguments)
+        if isinstance(filters, FilterError):
+            return [TextContent(type="text", text=json.dumps({"error": filters.reason}))]
+        if query is not None and not filters.is_empty:
             return [
                 TextContent(
                     type="text",
                     text=json.dumps(
-                        {"error": f"query parameter must be a string, got {type(query).__name__}"}
+                        {
+                            "error": (
+                                "filters (pattern/fields/line_range) cannot be combined "
+                                "with query; use a query to search within the entry, or "
+                                "filters to project the full original"
+                            )
+                        }
                     ),
                 )
             ]
+
         # INFO: the hash is a content-address (validated 12/24-hex above), safe
         # to log; the query is a user-supplied search string and the result can
         # carry the retrieved ORIGINAL content — neither is logged verbatim. The
         # DEBUG line records whether a query was present and its length only.
         has_query = query is not None
-        logger.info("event=mcp_retrieve_started hash=%s has_query=%s", hash_key, has_query)
+        logger.info(
+            "event=mcp_retrieve_started hash=%s has_query=%s has_filters=%s",
+            hash_key,
+            has_query,
+            not filters.is_empty,
+        )
         logger.debug(
             "event=mcp_retrieve_started_detail hash=%s query_len=%s",
             hash_key,
             len(query) if isinstance(query, str) else 0,
         )
-        result = await self._retrieve_content(hash_key, query)
+        result = await self._retrieve_content(hash_key, query, filters)
         try:
             response_text = json.dumps(result, indent=2, allow_nan=False)
         except ValueError:

@@ -82,6 +82,10 @@ CCR_TTL_SECONDS_ENV = "FURL_CCR_TTL_SECONDS"
 _MIN_EXPLICIT_HASH_LEN = 6
 
 _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
+# Preview-snippet length for cross-store search (``search_all``) hits. Short by
+# design: the snippet is a disambiguation preview so the caller can pick a hash
+# to retrieve in full, not a content channel. Redacted before truncation.
+_CROSS_STORE_PREVIEW_CHARS = 200
 # Match ``<sensitive-key><sep><value>`` in both plain (``api_key=...``) and JSON
 # quoted-key (``"api_key": "..."``) form. Group 2 allows an OPTIONAL closing quote
 # before the separator: in JSON the key's own closing ``"`` sits between the key
@@ -282,6 +286,26 @@ class RetrievalEvent:
     tool_name: str | None
     timestamp: float
     retrieval_type: str  # "full" or "search"
+
+
+@dataclass(frozen=True)
+class CrossStoreMatch:
+    """One ranked hit from a cross-store full-text search (``search_all``).
+
+    Carries only what a caller needs to decide whether to follow up with a
+    per-hash retrieve: the content-address ``hash``, the BM25 ``score`` used
+    for ranking, and a short ``preview`` snippet of the entry's original
+    content. The preview is REDACTED at source with the same rules the
+    retrieval-log preview uses (``_redact_retrieval_log_payload``) so a
+    cross-store search can never surface a credential a per-hash retrieval's
+    log path would have masked. ``tool_name`` is the entry's originating tool
+    (``None`` when unknown), included so a caller can disambiguate hits.
+    """
+
+    hash: str
+    score: float
+    preview: str
+    tool_name: str | None
 
 
 class CompressionStore:
@@ -725,6 +749,105 @@ class CompressionStore:
         )
 
         return results
+
+    def search_all(
+        self,
+        query: str,
+        max_results: int = 10,
+        score_threshold: float = 0.0,
+    ) -> list[CrossStoreMatch]:
+        """Full-text search across ALL live entries, ranked by BM25.
+
+        Unlike :meth:`search` (which searches WITHIN one hash's original),
+        this ranks every live entry as a single document against ``query`` and
+        returns the top ``max_results`` as ``CrossStoreMatch`` records —
+        ``(hash, score, preview, tool_name)`` — so the caller can follow up
+        with a per-hash :meth:`retrieve`. With the durable SQLite backend this
+        spans cross-session / cross-process entries (they live in the shared
+        file), so a query can surface originals another agent stored.
+
+        Redaction: each ``preview`` is passed through the same credential
+        redaction the retrieval-log preview uses, so a cross-store search never
+        leaks a secret a per-hash retrieval's log path would have masked. The
+        BM25 SCORE is computed over the raw original (a float, not content — no
+        leak) so ranking quality is unaffected by redaction.
+
+        Expiry: TTL is the store's responsibility, and ``backend.items()``
+        returns expired-but-unreaped rows, so each candidate is filtered
+        through ``is_expired`` against the store clock — an evicted/expired
+        entry can never appear in results.
+
+        This is a pure read: it neither bumps ``retrieval_count`` nor logs a
+        retrieval event (nothing is actually retrieved — the caller retrieves
+        by hash next), mirroring the side-effect-free ``_get_entry_for_search``
+        rationale (COR-37).
+
+        Args:
+            query: Free-text search query.
+            max_results: Maximum number of ranked hits to return.
+            score_threshold: Minimum BM25 score to include (default 0.0 —
+                any positive-scoring match qualifies; a term must still match).
+
+        Returns:
+            Up to ``max_results`` ``CrossStoreMatch`` records, highest score
+            first. Empty when the query is blank, the store is empty, or no
+            entry scores above the threshold.
+        """
+        if not query or not query.strip():
+            return []
+
+        now = self._now()
+        with self._lock:
+            live_entries = [
+                (hash_key, entry)
+                for hash_key, entry in self._backend.items()
+                if not entry.is_expired(now)
+            ]
+
+        if not live_entries:
+            return []
+
+        # Score every live entry as ONE document. Batch scoring builds a real
+        # corpus IDF map, so a discriminative term (a UUID/ID) outranks a term
+        # common to many entries — the property that makes this BM25 rather
+        # than raw term-frequency ranking.
+        documents = [entry.original_content for _hash, entry in live_entries]
+        scores = self._scorer.score_batch(documents, query)
+
+        ranked = sorted(
+            (
+                (live_entries[i][0], live_entries[i][1], scores[i].score)
+                for i in range(len(live_entries))
+                if scores[i].score > score_threshold
+            ),
+            key=lambda triple: triple[2],
+            reverse=True,
+        )
+
+        return [
+            CrossStoreMatch(
+                hash=hash_key,
+                score=score,
+                preview=self._cross_store_preview(entry.original_content),
+                tool_name=entry.tool_name,
+            )
+            for hash_key, entry, score in ranked[:max_results]
+        ]
+
+    @staticmethod
+    def _cross_store_preview(original_content: str) -> str:
+        """Redacted, truncated preview of an original for a cross-store hit.
+
+        Redact FIRST, then truncate: truncating first could sever a credential
+        mid-token and leave a recognizable head un-redacted. The redaction
+        rules are shared with the retrieval-log preview so both surfaces mask
+        exactly the same secret shapes.
+        """
+        redacted = _redact_retrieval_log_payload(original_content)
+        preview = redacted[:_CROSS_STORE_PREVIEW_CHARS]
+        if len(redacted) > len(preview):
+            preview = preview + "…"
+        return preview
 
     def _log_retrieval_payload(
         self,

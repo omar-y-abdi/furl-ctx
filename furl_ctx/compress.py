@@ -401,6 +401,7 @@ def compress(
     optimize: bool = True,
     hooks: CompressionHooks | None = None,
     config: CompressConfig | None = None,
+    pipeline: Any | None = None,
     **kwargs: Any,
 ) -> CompressResult:
     """Compress messages using Furl's full compression pipeline.
@@ -415,6 +416,13 @@ def compress(
         optimize: Whether to actually compress (False = passthrough for A/B testing).
         hooks: Optional CompressionHooks instance for custom behavior.
         config: Compression options (CompressConfig). Overrides defaults.
+        pipeline: Pre-built ``TransformPipeline`` to run instead of the shared
+            default singleton. Default ``None`` uses the process-wide singleton
+            (unchanged behavior). Supplying one lets a caller select a
+            differently-configured pipeline (e.g. a ``lossless_only`` or more
+            aggressive ``ContentRouter``) for THIS call without disturbing the
+            global default — the fail-open, token-counting, and hook wiring
+            around it are identical either way.
         **kwargs: Shorthand for CompressConfig fields. These override config:
             compress_user_messages, compress_system_messages, protect_recent,
             protect_analysis_context, min_tokens_to_compress.
@@ -488,7 +496,7 @@ def compress(
         # `error` set instead of letting it escape to the host. (Nothing is
         # cached on failure, so a later fixed environment recovers without
         # a restart.)
-        pipeline = _get_pipeline()
+        pipeline = pipeline if pipeline is not None else _get_pipeline()
         pipeline_extensions = PipelineExtensionManager(hooks=hooks)
 
         # Compute biases from hooks if provided. The user query is extracted
