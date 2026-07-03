@@ -41,7 +41,7 @@ serde = { version = "1", features = ["derive"] }
 # whitespace, key order, or escape preferences the producer chose.
 # Enabled here in Phase A so PR-B2 can land as a pure consumer change.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 pyo3 = { version = "0.24", features = ["abi3-py310"] }
 # NOTE: the proxy-era workspace deps (clap, tokio, axum, tower, reqwest,
