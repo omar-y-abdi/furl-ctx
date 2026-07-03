@@ -88,6 +88,25 @@ impl LosslessCandidate {
     }
 }
 
+/// Render the raw array exactly as the walker ships a passthrough —
+/// element-wise through the python-safe writer, byte-identical to
+/// `python_safe_json_dumps(&Value::Array(items.to_vec()))` without the
+/// deep clone (PERF-4 style). This is the token baseline the small-zone
+/// lossy candidate must strictly beat when no lossless candidate exists.
+fn render_array_string(items: &[Value]) -> String {
+    use crate::util::pyjson::write_python_safe_json;
+    let mut out = String::new();
+    out.push('[');
+    for (i, v) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_python_safe_json(v, &mut out);
+    }
+    out.push(']');
+    out
+}
+
 /// Materialize a passthrough `CrushArrayResult` (public `crush_array`
 /// contract: `items` mirrors the unchanged input).
 fn passthrough_result(items: &[Value], strategy_info: String) -> CrushArrayResult {
@@ -116,7 +135,9 @@ impl SmartCrusher {
     /// 1. Compute `item_strings` once (used as input to adaptive
     ///    sizing and downstream relevance scoring).
     /// 2. `compute_optimal_k` → `adaptive_k`.
-    /// 3. If `n <= adaptive_k`, return passthrough.
+    /// 3. If `n <= adaptive_k`, route the tier-1 zone
+    ///    (`small_array_route`): lossless candidate vs the EFF-3
+    ///    CCR-backed lossy candidate vs passthrough.
     /// 4. `analyzer.analyze_array(items)` → `analysis`.
     /// 5. If `analysis.recommended_strategy == Skip`, return passthrough
     ///    with a `skip:<reason>` strategy string.
@@ -174,61 +195,19 @@ impl SmartCrusher {
         };
         let adaptive_k = compute_optimal_k(&item_str_refs, bias, 3, max_k);
 
-        // Tier-1 boundary: array already small enough — nothing to
-        // drop. Still worth a LOSSLESS look: a cleanly-tabular small
-        // array (df/ps-style tool output) shrinks 30%+ with zero loss,
-        // and small arrays are the COMMON case for tool output. Four
-        // gates protect the passthrough default beyond the big-array
-        // ratio check:
-        // - decoder-verifiable shape only (COR-13, fail-closed): the
-        //   lossless claim is "exact reconstruction through the
-        //   reference decoder", which today covers flat `Table`s only —
-        //   `Buckets` renders and `Nested` cells DECLINE to passthrough
-        //   until the decoder covers them;
-        // - no `OpaqueRef` substitution anywhere — on a small array
-        //   every value must stay verbatim in the visible output
-        //   (substituting a file's content with a CCR pointer would
-        //   hide exactly what the model was asked to read);
-        // - absolute saving ≥ `SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES` —
-        //   the schema line must pay for itself; toy arrays stay
-        //   passthrough;
-        // - the same `lossless_min_savings_ratio` gate as the
-        //   big-array attempt.
+        // Tier-1 boundary: the array fits inside the adaptive budget.
+        // Historically this zone was LOSSLESS-OR-PASSTHROUGH only; EFF-3
+        // adds the lossy-recoverable candidate (CCR-store-backed, default
+        // MinTokens policy only) so small arrays — the COMMON case for
+        // real tool output — can offload too. See `small_array_route`.
         if items.len() <= adaptive_k {
-            if items.len() >= 2 {
-                if let Some(stage) = &self.compaction {
-                    let (c, rendered) = stage.run(items);
-                    if c.is_decoder_verifiable() && !c.contains_opaque_ref() {
-                        let input_bytes = estimate_array_bytes(&item_strings);
-                        let saved = input_bytes.saturating_sub(rendered.len());
-                        let savings_ratio = if input_bytes > 0 {
-                            saved as f64 / input_bytes as f64
-                        } else {
-                            0.0
-                        };
-                        if clears_small_array_lossless_floor(saved)
-                            && savings_ratio >= self.config.lossless_min_savings_ratio
-                        {
-                            let kind = compaction_kind_str(&c);
-                            // The `!contains_opaque_ref` gate above means
-                            // this collects nothing today; collecting
-                            // anyway keeps the typed carrier correct by
-                            // construction if the gate ever changes.
-                            let mut dropped_refs: Vec<DroppedRef> = Vec::new();
-                            c.collect_opaque_refs(&mut dropped_refs);
-                            return Routed::Result(
-                                LosslessCandidate {
-                                    rendered,
-                                    kind,
-                                    dropped_refs,
-                                }
-                                .into_result(items),
-                            );
-                        }
-                    }
-                }
-            }
-            return Routed::Passthrough("none:adaptive_at_limit".to_string());
+            return self.small_array_route(
+                items,
+                &item_strings,
+                adaptive_k,
+                query_context,
+                persist,
+            );
         }
 
         // ── Lossless candidate ──
@@ -419,6 +398,218 @@ impl SmartCrusher {
             // No lossless render and the array isn't droppable → the
             // `skip:<reason>` passthrough (preserves pre-routing behavior).
             (None, LossyOutcome::Skip(reason)) => Routed::Passthrough(reason),
+        }
+    }
+
+    /// Route an array inside the tier-1 zone (`items.len() <= adaptive_k`).
+    ///
+    /// Historically this zone was LOSSLESS-OR-PASSTHROUGH: a cleanly-
+    /// tabular small array (df/ps-style tool output) ships the verified
+    /// lossless render, everything else passes through — small arrays
+    /// NEVER produced a lossy-recoverable candidate, capping the most
+    /// common real tool-output size at the lossless ceiling (EFF-3:
+    /// disk@9 landed 50% where its size-90 twin reached 91%+).
+    ///
+    /// The zone now builds up to TWO candidates and arbitrates:
+    ///
+    /// - **Lossless** — same four gates as before, extracted verbatim
+    ///   into [`SmartCrusher::small_array_lossless_candidate`].
+    /// - **Lossy-recoverable** (EFF-3) — the same row-drop candidate the
+    ///   big-array path builds, eligible ONLY when every guarantee
+    ///   holds:
+    ///   - `lossless_only` is off (strict mode never builds lossy);
+    ///   - the policy is `MinTokens` (`LosslessFirst` keeps the legacy
+    ///     lossless-or-passthrough zone — the lossless round-trip suite
+    ///     asserts that shape directly);
+    ///   - a CCR store is configured — a small-zone drop MUST be
+    ///     recoverable. Unlike the big path there is NO storeless legacy
+    ///     mode here: pre-EFF-3 this zone never dropped, so a storeless
+    ///     drop would be a brand-new unrecoverable loss;
+    ///   - a drop is actually possible under the CCR-backed keep budget
+    ///     (floor 5): `items.len() > ccr_backed_keep_budget(adaptive_k)`.
+    ///
+    ///   Query pins and critical rows (errors / outliers / anomalies)
+    ///   are respected by construction — the candidate is built by the
+    ///   same `crush_array_lossy` planner path whose
+    ///   `prioritize_indices` pins them beyond budget.
+    ///
+    /// Arbitration (MinTokens semantics, ties → more rows visible):
+    /// - both candidates → lossy ships IFF strictly fewer tokens than
+    ///   the lossless render;
+    /// - lossy only → lossy ships IFF strictly fewer tokens than the RAW
+    ///   passthrough render (the sentinel must pay for itself — a
+    ///   token-inflating drop never ships);
+    /// - lossless only → lossless ships (pre-EFF-3 contract, unchanged);
+    /// - neither → passthrough (`"none:adaptive_at_limit"`).
+    ///
+    /// P0-4 semantics carry over: the lossy candidate's store writes are
+    /// deferred ([`PersistMode::Collect`]) and committed IFF it ships —
+    /// a discarded candidate leaves no orphan entries. `persist = false`
+    /// (COR-28 mixed dict arm) still means [`PersistMode::Skip`]: no
+    /// writes ever, routing byte-identical.
+    fn small_array_route(
+        &self,
+        items: &[Value],
+        item_strings: &[String],
+        adaptive_k: usize,
+        query_context: &str,
+        persist: bool,
+    ) -> Routed {
+        let (lossless_candidate, lossless_uses_opaque) =
+            self.small_array_lossless_candidate(items, item_strings);
+
+        // Strict lossless-or-passthrough: the lossy candidate is NEVER
+        // BUILT (no drops, no markers, no store writes) — same rule as
+        // the big-array path, same passthrough strategy string this
+        // zone always used.
+        if self.config.lossless_only {
+            return match lossless_candidate {
+                Some(lossless) => Routed::Result(lossless.into_result(items)),
+                None => Routed::Passthrough("none:adaptive_at_limit".to_string()),
+            };
+        }
+
+        let lossy_eligible = self.config.routing_policy == RoutingPolicy::MinTokens
+            && self.ccr_store.is_some()
+            && items.len() > ccr_backed_keep_budget(adaptive_k);
+        let lossy = if lossy_eligible {
+            let persist_mode = if persist {
+                PersistMode::Collect
+            } else {
+                PersistMode::Skip
+            };
+            // `!lossless_uses_opaque` mirrors the big path: when the
+            // compactor wants opaque-blob substitution for this array
+            // (a render the small zone REJECTS as a candidate — values
+            // must stay verbatim), the entropy-floor override stands
+            // down so blob-bearing rows are not hijacked into a
+            // row-drop render instead.
+            Some(self.crush_array_lossy(
+                items,
+                query_context,
+                item_strings,
+                adaptive_k,
+                !lossless_uses_opaque,
+                persist_mode,
+            ))
+        } else {
+            None
+        };
+
+        match (lossless_candidate, lossy) {
+            (
+                Some(lossless),
+                Some(LossyOutcome::Crushed {
+                    result: lossy,
+                    pending_ccr_writes,
+                }),
+            ) => {
+                let lossless_tokens = self.tokenizer.count_text(&lossless.rendered);
+                let lossy_tokens = self.render_token_count(&lossy);
+                // Lossy wins only when STRICTLY fewer tokens; ties (and
+                // lossless-fewer) → lossless: more rows visible at no
+                // extra token cost. Same rule as the big-array race.
+                if lossy_tokens < lossless_tokens {
+                    self.commit_ccr_writes(pending_ccr_writes);
+                    Routed::Result(lossy)
+                } else {
+                    Routed::Result(lossless.into_result(items))
+                }
+            }
+            // Lossless cleared its gates and no drop render exists (or
+            // the analyzer refused) → ship lossless, pre-EFF-3 contract.
+            (Some(lossless), _) => Routed::Result(lossless.into_result(items)),
+            (
+                None,
+                Some(LossyOutcome::Crushed {
+                    result: lossy,
+                    pending_ccr_writes,
+                }),
+            ) => {
+                // No lossless candidate: the alternative is the RAW
+                // passthrough, so the drop render must strictly beat
+                // THAT — near the keep floor a sentinel can cost more
+                // than the rows it hides.
+                let passthrough_tokens = self.tokenizer.count_text(&render_array_string(items));
+                let lossy_tokens = self.render_token_count(&lossy);
+                if lossy_tokens < passthrough_tokens {
+                    self.commit_ccr_writes(pending_ccr_writes);
+                    Routed::Result(lossy)
+                } else {
+                    Routed::Passthrough("none:adaptive_at_limit".to_string())
+                }
+            }
+            (None, Some(LossyOutcome::Skip(_)) | None) => {
+                Routed::Passthrough("none:adaptive_at_limit".to_string())
+            }
+        }
+    }
+
+    /// The small-array LOSSLESS attempt (pre-EFF-3 gate logic, extracted
+    /// verbatim). Returns the candidate plus whether the compacted form
+    /// relies on `OpaqueRef` substitution (the big path's
+    /// `lossless_uses_opaque`, consumed by the override stand-down).
+    ///
+    /// Four gates protect the passthrough default beyond the big-array
+    /// ratio check:
+    /// - decoder-verifiable shape only (COR-13, fail-closed): the
+    ///   lossless claim is "exact reconstruction through the reference
+    ///   decoder", which today covers flat `Table`s only — `Buckets`
+    ///   renders and `Nested` cells DECLINE until the decoder covers
+    ///   them;
+    /// - no `OpaqueRef` substitution anywhere — on a small array every
+    ///   value must stay verbatim in the visible output (substituting a
+    ///   file's content with a CCR pointer would hide exactly what the
+    ///   model was asked to read);
+    /// - absolute saving ≥ `SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES` — the
+    ///   schema line must pay for itself; toy arrays stay passthrough;
+    /// - the same `lossless_min_savings_ratio` gate as the big-array
+    ///   attempt. (EFF-4 measured relaxing this gate to 0.15 for the
+    ///   small zone: exactly neutral on every benchmark dataset — the
+    ///   EFF-3 lossy candidate out-arbitrates mid-window lossless
+    ///   renders under `MinTokens` — so the relaxation was reverted.)
+    fn small_array_lossless_candidate(
+        &self,
+        items: &[Value],
+        item_strings: &[String],
+    ) -> (Option<LosslessCandidate>, bool) {
+        if items.len() < 2 {
+            return (None, false);
+        }
+        let Some(stage) = self.compaction.as_ref() else {
+            return (None, false);
+        };
+        let (c, rendered) = stage.run(items);
+        let uses_opaque = c.contains_opaque_ref();
+        if !c.is_decoder_verifiable() || uses_opaque {
+            return (None, uses_opaque);
+        }
+        let input_bytes = estimate_array_bytes(item_strings);
+        let saved = input_bytes.saturating_sub(rendered.len());
+        let savings_ratio = if input_bytes > 0 {
+            saved as f64 / input_bytes as f64
+        } else {
+            0.0
+        };
+        if clears_small_array_lossless_floor(saved)
+            && savings_ratio >= self.config.lossless_min_savings_ratio
+        {
+            let kind = compaction_kind_str(&c);
+            // The `!contains_opaque_ref` gate above means this collects
+            // nothing today; collecting anyway keeps the typed carrier
+            // correct by construction if the gate ever changes.
+            let mut dropped_refs: Vec<DroppedRef> = Vec::new();
+            c.collect_opaque_refs(&mut dropped_refs);
+            (
+                Some(LosslessCandidate {
+                    rendered,
+                    kind,
+                    dropped_refs,
+                }),
+                uses_opaque,
+            )
+        } else {
+            (None, uses_opaque)
         }
     }
 
@@ -901,7 +1092,7 @@ fn estimate_array_bytes(item_strings: &[String]) -> usize {
 mod tests {
     use super::super::builder::SmartCrusherBuilder;
     use super::super::config::SmartCrusherConfig;
-    use super::super::crusher::test_support::{crusher, lossless_only_crusher};
+    use super::super::crusher::test_support::{crusher, crusher_with_store, lossless_only_crusher};
     use super::super::persist::canonical_array_json;
     use super::*;
     use crate::ccr::CcrStore;
@@ -1001,17 +1192,11 @@ mod tests {
         assert_eq!(result.items.len(), 4);
     }
 
-    #[test]
-    fn small_array_with_nested_cells_stays_passthrough() {
-        // COR-13 fail-closed: an array-of-objects cell becomes
-        // `CellValue::Nested`, whose CSV-quoted IR-JSON rendering the
-        // reference decoder cannot invert — the small-array lossless
-        // zone must DECLINE it (verbatim passthrough), never ship it as
-        // "lossless"-verified. The long constant columns make the
-        // render clear both byte-savings gates, so only the
-        // decoder-coverage gate keeps this shape out.
-        let c = crusher();
-        let items: Vec<Value> = (0..6)
+    /// The COR-13 nested-cell fixture: long constant columns clear both
+    /// byte-savings gates, so ONLY the decoder-coverage gate keeps the
+    /// shape out of the lossless tier.
+    fn nested_cell_items() -> Vec<Value> {
+        (0..6)
             .map(|i| {
                 json!({
                     "id": i,
@@ -1022,7 +1207,24 @@ mod tests {
                     "children": [{"k": i}, {"k": i + 1}],
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn small_array_with_nested_cells_stays_passthrough_without_store() {
+        // COR-13 fail-closed: an array-of-objects cell becomes
+        // `CellValue::Nested`, whose CSV-quoted IR-JSON rendering the
+        // reference decoder cannot invert — the small-array lossless
+        // zone must DECLINE it (verbatim passthrough), never ship it as
+        // "lossless"-verified. Storeless crusher: the EFF-3 lossy
+        // candidate is ineligible too, so the decline lands on plain
+        // passthrough — pinning the lossless gate in isolation.
+        let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
+            .with_default_oss_setup()
+            .with_default_compaction()
+            .build();
+        assert!(c.ccr_store.is_none(), "fixture: no store");
+        let items = nested_cell_items();
         let result = c.crush_array(&items, "", 1.0);
         assert_eq!(
             result.strategy_info, "none:adaptive_at_limit",
@@ -1030,6 +1232,36 @@ mod tests {
         );
         assert!(result.compacted.is_none());
         assert_eq!(result.items.len(), 6, "nothing may be dropped");
+    }
+
+    #[test]
+    fn small_array_with_nested_cells_never_claims_lossless_with_store() {
+        // Same COR-13 shape WITH a store: the EFF-3 small-zone lossy
+        // candidate may legitimately drop rows (recoverably!), but the
+        // lossless claim must still be declined — no `lossless:*`
+        // strategy and no compacted render (nested cells also fail the
+        // survivor-render decoder gate). Any drop must stay CCR-backed.
+        let (c, store) = crusher_with_store();
+        let items = nested_cell_items();
+        let result = c.crush_array(&items, "", 1.0);
+        assert!(
+            !result.strategy_info.starts_with("lossless:"),
+            "a Nested-cell table must never ship under the lossless claim, got {}",
+            result.strategy_info
+        );
+        assert!(
+            result.compacted.is_none(),
+            "nested cells fail the decoder gate for every compacted render"
+        );
+        if result.items.len() < items.len() {
+            let h = result.ccr_hash.as_ref().expect("hash on drop");
+            assert!(result.dropped_summary.contains("<<ccr:"));
+            let recovered = store.get(h).expect("dropped payload retrievable");
+            assert_eq!(recovered, canonical_array_json(&items));
+        } else {
+            assert!(result.ccr_hash.is_none());
+            assert_eq!(store.len(), 0, "no drop → no store writes (P0-4)");
+        }
     }
 
     #[test]
@@ -1076,7 +1308,12 @@ mod tests {
     }
 
     #[test]
-    fn small_array_without_compaction_stage_stays_passthrough() {
+    fn small_array_without_compaction_stage_never_ships_compacted() {
+        // No compaction stage → no lossless candidate can exist, so the
+        // small zone routes lossy-vs-passthrough only. Whatever ships,
+        // `compacted` stays None (there is nothing to render it with)
+        // and any drop is CCR-backed (`without_compaction` installs the
+        // default store).
         let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
         let items: Vec<Value> = (0..8)
             .map(|i| {
@@ -1090,8 +1327,308 @@ mod tests {
             })
             .collect();
         let result = c.crush_array(&items, "", 1.0);
-        assert_eq!(result.strategy_info, "none:adaptive_at_limit");
         assert!(result.compacted.is_none());
+        assert!(result.compaction_kind.is_none());
+        assert!(
+            !result.strategy_info.starts_with("lossless:"),
+            "no stage → no lossless claim, got {}",
+            result.strategy_info
+        );
+        if result.items.len() < items.len() {
+            // EFF-3: the small zone may now drop here — recoverably.
+            assert!(result.ccr_hash.is_some(), "drops must be CCR-backed");
+            assert!(result.dropped_summary.contains("<<ccr:"));
+        } else {
+            assert_eq!(result.strategy_info, "none:adaptive_at_limit");
+        }
+    }
+
+    // ---------- EFF-3: small-array lossy-recoverable candidate ----------
+    //
+    // The tier-1 zone (`items.len() <= adaptive_k`) historically shipped
+    // lossless-or-passthrough ONLY — small arrays never produced a
+    // lossy-recoverable candidate, capping disk@9-style tool output at
+    // the lossless ceiling (~50%) while size-90 twins reached 91%+.
+    // These tests pin the EFF-3 contract: WITH a CCR store, under the
+    // default MinTokens policy, the small zone also builds the drop
+    // candidate (keep-budget floor 5, query pins / critical rows
+    // respected) and ships it iff strictly fewer tokens; `lossless_only`
+    // still suppresses it entirely; without a store nothing ever drops.
+
+    /// One high-entropy small-zone row: distinct at BOTH ends and
+    /// hex-dominated in the middle, defeating every lossless fold
+    /// (constant/arith/iso/decimal/dict/head-dict/affix) — only the two
+    /// short keys fold (~10% savings, far under the ratio gate with
+    /// margin even for future relaxations) — while each cell stays
+    /// below the 256-byte opaque-substitution threshold (an opaque
+    /// render would stand the entropy-floor override down). Heavy
+    /// enough (~60 tokens/row) that dropping one row decisively
+    /// out-earns the ~40-token sentinel. 8 of these are GUARANTEED
+    /// tier-1 (`compute_optimal_k` returns `n` for `n <= 8`, so
+    /// `items.len() <= adaptive_k` always).
+    fn high_entropy_small_row(i: usize) -> Value {
+        // Full-width odd multipliers: every hex segment fills its width
+        // with a DISTINCT leading digit (no shared zero-padding for the
+        // `__affix` fold to harvest — that fold alone once pushed this
+        // fixture over the relaxed ratio gate).
+        json!({
+            "trace_id": format!(
+                "{:032x}",
+                (i as u128 + 7).wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835)
+            ),
+            "message": format!(
+                "{:x} rebalance {:x} attempt-{} lease {:016x} epoch {:x} fence {:08x} seq-{}",
+                (i as u128 + 5).wrapping_mul(0xC2B2_AE3D_27D4_EB4F_1656_67B1_2525_2521),
+                (i as u128 + 17).wrapping_mul(0x2545_F491_4F6C_DD1D_8446_F35B_7A3B_9525),
+                i * 7 + 13,
+                (i as u64 + 3).wrapping_mul(6_364_136_223_846_793_005),
+                (i as u64 + 11).wrapping_mul(2_862_933_555_777_941_757),
+                (i as u32 + 29).wrapping_mul(2_654_435_761),
+                i * 4096 + 512
+            ),
+        })
+    }
+
+    #[test]
+    fn small_array_with_store_emits_lossy_candidate_and_recovers_byte_exact() {
+        // 8 high-entropy rows: the lossless render can't fold genuine
+        // entropy (fails the 0.30 gate), so pre-EFF-3 this passed
+        // through untouched. With every drop CCR-backed, the small zone
+        // now drops to the keep budget and wins the MinTokens race.
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..8).map(high_entropy_small_row).collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert!(
+            result.items.len() < items.len(),
+            "small-zone lossy candidate must ship for high-entropy rows, \
+             got {} of {} (strategy {})",
+            result.items.len(),
+            items.len(),
+            result.strategy_info
+        );
+        assert!(
+            result.items.len() >= 5,
+            "keep-budget floor is 5, got {}",
+            result.items.len()
+        );
+        // Recovery invariant: pointer surfaced + whole original stored.
+        let h = result.ccr_hash.as_ref().expect("hash on drop");
+        assert!(
+            result.dropped_summary.contains(&format!("<<ccr:{h}")),
+            "sentinel must carry the recovery pointer, got: {}",
+            result.dropped_summary
+        );
+        let recovered = store.get(h).expect("dropped payload retrievable");
+        assert_eq!(
+            recovered,
+            canonical_array_json(&items),
+            "whole-blob recovery must be byte-exact"
+        );
+        // Granular row chunks resolve byte-exact too.
+        let dropped = items.len() - result.items.len();
+        let index_raw = store
+            .get(&format!("{h}#rows"))
+            .expect("row index committed on ship");
+        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
+        assert_eq!(row_hashes.len(), dropped, "one chunk per dropped row");
+        for rh in &row_hashes {
+            let chunk = store.get(rh).expect("row chunk retrievable");
+            let arr: Vec<Value> = serde_json::from_str(&chunk).unwrap();
+            assert_eq!(arr.len(), 1, "each chunk holds exactly one row");
+            assert!(
+                items.contains(&arr[0]),
+                "chunk must be byte-exact one original row"
+            );
+        }
+        // MinTokens honored: strictly fewer tokens than the raw array.
+        let shipped_tokens = c.render_token_count(&result);
+        let raw = crate::util::pyjson::python_safe_json_dumps(&Value::Array(items.clone()));
+        let raw_tokens = c.tokenizer.count_text(&raw);
+        assert!(
+            shipped_tokens < raw_tokens,
+            "shipped render must be strictly fewer tokens (shipped={shipped_tokens}, raw={raw_tokens})"
+        );
+    }
+
+    #[test]
+    fn small_array_lossless_only_suppresses_lossy_candidate() {
+        // Strict mode: the small-zone lossy candidate must never be
+        // BUILT — no drops, no markers of any shape, no store writes.
+        let (c, store) = lossless_only_crusher(SmartCrusherConfig {
+            lossless_only: true,
+            ..SmartCrusherConfig::default()
+        });
+        let items: Vec<Value> = (0..8).map(high_entropy_small_row).collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert_eq!(result.items.len(), 8, "no row may be dropped");
+        assert_eq!(result.strategy_info, "none:adaptive_at_limit");
+        assert!(result.ccr_hash.is_none());
+        assert!(result.dropped_summary.is_empty());
+        assert!(result.compacted.is_none());
+        assert_eq!(store.len(), 0, "strict mode must not write the store");
+    }
+
+    #[test]
+    fn small_array_query_pinned_rows_survive_lossy_candidate() {
+        // A deterministic query anchor ("req-7f3a", quoted) names exactly
+        // one row. Whatever render ships out of the small zone, that row
+        // must stay visible — query pins are exempt from the keep budget.
+        let (c, _store) = crusher_with_store();
+        let mut items: Vec<Value> = (0..8).map(high_entropy_small_row).collect();
+        items[3] = json!({
+            "trace_id": format!("{:032x}", 424_242u128),
+            "message": "003-worker checkout handler saw req-7f3a retry storm and shed load",
+        });
+
+        let result = c.crush_array(&items, "why did \"req-7f3a\" fail", 1.0);
+
+        // Precondition: the lossy candidate actually shipped (a drop
+        // happened) — otherwise survival is vacuous.
+        assert!(
+            result.ccr_hash.is_some() && result.items.len() < items.len(),
+            "fixture must take the small-zone drop path, got {} of {} (strategy {})",
+            result.items.len(),
+            items.len(),
+            result.strategy_info
+        );
+        let rendered = {
+            // The final model-visible string, whatever form shipped.
+            let mut out = String::new();
+            match &result.compacted {
+                Some(s) => out.push_str(s),
+                None => {
+                    out = crate::util::pyjson::python_safe_json_dumps(&Value::Array(
+                        result.items.clone(),
+                    ))
+                }
+            }
+            out
+        };
+        assert!(
+            rendered.contains("req-7f3a"),
+            "query-pinned row must survive the small-zone drop, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn small_array_without_store_stays_passthrough() {
+        // No CCR store → a small-zone drop would be UNRECOVERABLE, so
+        // the lossy candidate must not exist: both high-entropy and
+        // low-uniqueness shapes pass through untouched.
+        let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
+            .with_default_oss_setup()
+            .with_default_compaction()
+            .build();
+        assert!(c.ccr_store.is_none(), "this crusher must have no store");
+
+        let unique: Vec<Value> = (0..8).map(high_entropy_small_row).collect();
+        let r_unique = c.crush_array(&unique, "", 1.0);
+        assert_eq!(r_unique.items.len(), 8, "no unrecoverable drop");
+        assert_eq!(r_unique.strategy_info, "none:adaptive_at_limit");
+        assert!(r_unique.ccr_hash.is_none());
+
+        // Low-uniqueness twin: crushable WITHOUT the entropy-floor
+        // override — the store gate alone must keep it whole (the
+        // lossless render may ship; that drops nothing).
+        let dupes: Vec<Value> = (0..8)
+            .map(|_| json!({"status": "ok", "note": "identical row"}))
+            .collect();
+        let r_dupes = c.crush_array(&dupes, "", 1.0);
+        assert_eq!(r_dupes.items.len(), 8, "no unrecoverable drop");
+        assert!(r_dupes.ccr_hash.is_none());
+        assert!(r_dupes.dropped_summary.is_empty());
+    }
+
+    #[test]
+    fn small_array_lossless_first_policy_keeps_legacy_passthrough() {
+        // LosslessFirst is the legacy policy: the small zone stays
+        // lossless-or-passthrough — no lossy candidate, no arbitration.
+        use crate::ccr::InMemoryCcrStore;
+        let store = Arc::new(InMemoryCcrStore::new());
+        let store_dyn: Arc<dyn CcrStore> = Arc::clone(&store) as Arc<dyn CcrStore>;
+        let c = SmartCrusherBuilder::new(SmartCrusherConfig {
+            routing_policy: RoutingPolicy::LosslessFirst,
+            ..SmartCrusherConfig::default()
+        })
+        .with_default_oss_setup()
+        .with_default_compaction()
+        .with_ccr_store(store_dyn)
+        .build();
+        let items: Vec<Value> = (0..8).map(high_entropy_small_row).collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert_eq!(result.items.len(), 8, "legacy small zone never drops");
+        assert_eq!(result.strategy_info, "none:adaptive_at_limit");
+        assert!(result.ccr_hash.is_none());
+        assert_eq!(store.len(), 0, "no store writes on the legacy path");
+    }
+
+    #[test]
+    fn small_array_lossy_declined_when_not_fewer_tokens() {
+        // 6 tiny rows: the drop candidate exists (6 > keep floor 5) but
+        // dropping ONE ~5-token row cannot pay for the ~40-token
+        // sentinel — MinTokens must decline it and pass through.
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..6).map(|i| json!({"id": i})).collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert_eq!(
+            result.items.len(),
+            6,
+            "a token-inflating drop must not ship (strategy {})",
+            result.strategy_info
+        );
+        assert_eq!(result.strategy_info, "none:adaptive_at_limit");
+        assert!(result.ccr_hash.is_none());
+        assert!(result.dropped_summary.is_empty());
+        assert_eq!(
+            store.len(),
+            0,
+            "declined candidate's deferred writes must be dropped (P0-4)"
+        );
+    }
+
+    #[test]
+    fn small_array_lossless_win_leaves_no_orphan_store_writes() {
+        // Constant-heavy tabular rows: the lossless render folds the
+        // heavy constant columns once and ditto-marks the rest, beating
+        // the drop render (which pays a ~40-token sentinel to hide 3
+        // low-residue rows). The discarded lossy candidate's deferred
+        // writes must drop with it (P0-4 Collect semantics) — the store
+        // stays empty on a lossless win.
+        let (c, store) = crusher_with_store();
+        let items: Vec<Value> = (0..8)
+            .map(|i| {
+                json!({
+                    "host": format!("web-{i:02}"),
+                    "region": "eu-central-1a",
+                    "image": "registry.example.com/platform/api-gateway:2026-06-15-rc4-9f31c2",
+                    "status": "healthy",
+                    "port": 8080,
+                })
+            })
+            .collect();
+
+        let result = c.crush_array(&items, "", 1.0);
+
+        assert!(
+            result.strategy_info.starts_with("lossless:table"),
+            "precondition: lossless must win this shape, got {}",
+            result.strategy_info
+        );
+        assert_eq!(result.items.len(), 8, "lossless drops nothing");
+        assert!(result.ccr_hash.is_none());
+        assert_eq!(
+            store.len(),
+            0,
+            "discarded small-zone lossy candidate must not commit store writes"
+        );
     }
 
     #[test]
