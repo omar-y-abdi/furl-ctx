@@ -285,7 +285,6 @@ def test_opaque_blob_recovers_from_output_marker(
     )
 
 
-
 @pytest.mark.parametrize("ccr_enabled, ccr_inject_marker", _MARKER_OFF_MATRIX)
 def test_lossy_survivor_table_recovers_100pct(ccr_enabled: bool, ccr_inject_marker: bool) -> None:
     # The lossy-survivor CSV rendering (drop + sentinel LINE inside a JSON

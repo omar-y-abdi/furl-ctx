@@ -39,8 +39,6 @@ from tests._fixtures import make_large_diff as _make_large_diff  # TEST-19 share
 # ---------------------------------------------------------------------------
 
 
-
-
 def _make_tiny_diff() -> str:
     """A one-line diff — well below the CCR threshold."""
     return textwrap.dedent("""\

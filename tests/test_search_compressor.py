@@ -237,9 +237,7 @@ class TestCompressionBehavior:
         )
         result = compressor.compress(content)
 
-        assert result.compression_ratio == pytest.approx(
-            len(result.compressed) / len(content)
-        )
+        assert result.compression_ratio == pytest.approx(len(result.compressed) / len(content))
         assert result.compression_ratio < 1.0
 
 

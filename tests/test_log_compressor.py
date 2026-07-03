@@ -483,9 +483,7 @@ class TestMinLinesBoundary:
     """
 
     def _compress(self, n_lines: int) -> "LogCompressionResult":
-        compressor = LogCompressor(
-            config=LogCompressorConfig(min_lines_for_ccr=5, enable_ccr=True)
-        )
+        compressor = LogCompressor(config=LogCompressorConfig(min_lines_for_ccr=5, enable_ccr=True))
         return compressor.compress("\n".join(f"INFO line {i}" for i in range(n_lines)))
 
     def test_below_floor_is_verbatim(self):

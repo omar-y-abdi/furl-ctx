@@ -66,8 +66,6 @@ from tests._fixtures import FailingStore as _FailingStore
 _ROW_DROP_ITEMS = [f"log-line-{i}-payload" for i in range(1000)]
 
 
-
-
 @pytest.fixture
 def store_writes_fail(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """Patch ``get_compression_store`` so the singleton's ``.store`` raises.

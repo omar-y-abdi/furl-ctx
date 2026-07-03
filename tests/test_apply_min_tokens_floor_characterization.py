@@ -93,6 +93,5 @@ def test_raw_apply_sub_50_stays_untouched(tok) -> None:
     out = _router().apply([{"role": "tool", "content": payload}], tok)
 
     assert out.messages[0]["content"] == payload, (
-        f"a {tokens}-token array is below the raw-caller floor of 50 and must "
-        "not be compressed"
+        f"a {tokens}-token array is below the raw-caller floor of 50 and must not be compressed"
     )
