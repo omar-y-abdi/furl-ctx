@@ -5,7 +5,8 @@
   ██╔══╝   ██║   ██║ ██╔══██╗ ██║
    ██║      ╚██████╔╝ ██║  ██║ ███████╗
    ╚═╝       ╚═════╝  ╚═╝  ╚═╝ ╚══════╝
- The context compression layer for AI agents
+ The context compression layer for AI agents 
+  <img src="typing.svg" width="42" /> 
 </pre></div>
 
 
