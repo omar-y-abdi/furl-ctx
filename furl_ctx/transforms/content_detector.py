@@ -5,7 +5,10 @@ appropriate compressor. SmartCrusher handles JSON arrays, but coding tasks
 produce many other formats that need specialized handling.
 
 Supported content types:
-- JSON_ARRAY: Structured JSON data (existing SmartCrusher)
+- JSON_ARRAY: Structured JSON data (existing SmartCrusher). Raw
+  delimiter-consistent CSV also detects as JSON_ARRAY (tabular
+  ingestion — see ``_try_detect_csv``); the dispatcher converts it to
+  records before SmartCrusher sees it.
 - SOURCE_CODE: Python, JavaScript, TypeScript, Go, etc.
 - SEARCH_RESULTS: grep/ripgrep output (file:line:content)
 - BUILD_OUTPUT: Compiler, test, lint logs
@@ -19,6 +22,8 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+
+from .csv_ingest import sniff_csv
 
 
 class ContentType(Enum):
@@ -148,6 +153,15 @@ def detect_content_type(content: str) -> DetectionResult:
     if search_result and search_result.confidence >= 0.6:
         return search_result
 
+    # 3.5. Check for delimiter-consistent CSV (tabular ingestion). Runs
+    # BEFORE the log/code detectors: a uniform field count across ≥ 90 %
+    # of lines is a stronger structural signal than per-line keyword
+    # hits, and a timestamp-leading CSV would otherwise be claimed by
+    # the log patterns and routed to a lossy line-dropper.
+    csv_result = _try_detect_csv(content)
+    if csv_result:
+        return csv_result
+
     # 4. Check for build/log output
     log_result = _try_detect_log(content)
     if log_result and log_result.confidence >= 0.5:
@@ -225,6 +239,36 @@ def _try_detect_diff(content: str) -> DetectionResult | None:
         ContentType.GIT_DIFF,
         confidence,
         {"header_matches": header_matches, "change_lines": change_matches},
+    )
+
+
+def _try_detect_csv(content: str) -> DetectionResult | None:
+    """Try to detect raw CSV for the tabular-ingestion path.
+
+    Routes as ``JSON_ARRAY`` — deliberately NOT a new ``ContentType``
+    member: after conversion the content IS a JSON array of records, and
+    the existing JSON_ARRAY → SmartCrusher strategy mapping is exactly
+    where it must land, with zero churn to the public enum, the Rust
+    detector's tag translation, or the strategy/inverse mappings. The
+    ``tabular_csv`` metadata flag records the real provenance.
+
+    Detection and the dispatch-time conversion share ONE predicate
+    (:func:`~.csv_ingest.sniff_csv` — delimiter-consistency sniff,
+    ≥ 5 data rows / ≥ 200 bytes floors, rectangular parse, fail-open on
+    any ambiguity), so a detection claim can never reach a conversion
+    that then disagrees.
+    """
+    table = sniff_csv(content)
+    if table is None:
+        return None
+    return DetectionResult(
+        ContentType.JSON_ARRAY,
+        0.9,
+        {
+            "tabular_csv": True,
+            "row_count": table.row_count,
+            "delimiter": table.delimiter,
+        },
     )
 
 

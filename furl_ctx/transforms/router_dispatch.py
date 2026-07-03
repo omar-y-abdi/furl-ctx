@@ -9,6 +9,13 @@ text compressor is itself replaced); when the arm is gated off
 (``enable_text_crusher=False`` or ``lossless_only``) it resolves to
 passthrough, so the dispatch stays total.
 
+The SMART_CRUSHER arm additionally owns tabular ingestion (raw CSV →
+records → SmartCrusher, via :mod:`.csv_ingest`): non-JSON content that
+sniffs as delimiter-consistent CSV is converted to records first, and its
+fail-open outcomes (no savings / store veto) resolve to a raw-bytes
+passthrough with the LOG fallback suppressed — a detected table must
+never fall through to a lossy line-dropper.
+
 This is a TRUE leaf module: it imports nothing from ``content_router`` at
 runtime (so there is no import cycle) and never receives the router. Every
 dependency is injected explicitly:
@@ -35,6 +42,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .csv_ingest import compress_tabular_csv, sniff_csv
 from .router_policy import CompressionStrategy
 
 if TYPE_CHECKING:
@@ -147,6 +155,10 @@ class StrategyDispatcher:
         compressor_name = strategy.value
         decision_reason = "strategy_not_enabled_or_unavailable"
         strategy_chain: list[str] = [strategy.value]
+        # Set by the tabular-CSV sub-branch when it already resolved a
+        # fail-open passthrough: the generic SMART_CRUSHER → LOG fallback
+        # must NOT re-route a detected table through a lossy line-dropper.
+        suppress_no_savings_fallback = False
 
         # Compressor exceptions propagate: a bug in a compressor must stay
         # loud, not degrade into a silent passthrough (#4-upstream). Any
@@ -166,12 +178,53 @@ class StrategyDispatcher:
                 crusher = get_smart_crusher()
                 if crusher:
                     compressor_name = type(crusher).__name__
-                    crush_result = crusher.crush(content, query=context, bias=bias)
-                    compressed, compressed_tokens = (
-                        crush_result.compressed,
-                        count(crush_result.compressed),
-                    )
-                    decision_reason = "smart_crusher"
+                    # Tabular ingestion: raw CSV → records → SmartCrusher.
+                    # Attempted only for content that cannot be JSON (the
+                    # arm's normal input) and never under ``lossless_only``
+                    # — the conversion is a visible, CCR-recoverable
+                    # substitution of the raw bytes, exactly what strict
+                    # mode forbids. ``sniff_csv`` is the SAME predicate the
+                    # detector used, so the two can never disagree; a
+                    # ``None`` here keeps the historical crush path
+                    # byte-identical.
+                    table = None
+                    if not self.config.lossless_only and not content.lstrip().startswith(
+                        ("[", "{")
+                    ):
+                        table = sniff_csv(content)
+                    if table is not None:
+                        shipped = compress_tabular_csv(
+                            content,
+                            table,
+                            crusher,
+                            context=context,
+                            bias=bias,
+                            token_counter=count,
+                        )
+                        if shipped is not None:
+                            compressed, compressed_tokens = shipped, count(shipped)
+                            decision_reason = "smart_crusher_tabular_csv"
+                        else:
+                            # Fail-open: no savings, or the raw-recovery
+                            # store write vetoed — the raw CSV ships
+                            # byte-exact. The LOG fallback is suppressed:
+                            # lossy line-dropping is never an acceptable
+                            # fallback for a detected table (the engine's
+                            # reversible CCR offload still applies
+                            # downstream).
+                            compressed, compressed_tokens = content, original_tokens
+                            actual_strategy = CompressionStrategy.PASSTHROUGH
+                            compressor_name = "Passthrough"
+                            decision_reason = "tabular_csv_passthrough"
+                            strategy_chain.append(CompressionStrategy.PASSTHROUGH.value)
+                            suppress_no_savings_fallback = True
+                    else:
+                        crush_result = crusher.crush(content, query=context, bias=bias)
+                        compressed, compressed_tokens = (
+                            crush_result.compressed,
+                            count(crush_result.compressed),
+                        )
+                        decision_reason = "smart_crusher"
 
         elif strategy == CompressionStrategy.SEARCH:
             if self.config.enable_search_compressor and not self.config.lossless_only:
@@ -266,7 +319,11 @@ class StrategyDispatcher:
         # If compression succeeded, run the no-savings fallback chain
         if compressed is not None and compressed_tokens is not None:
             fallback_no_savings = compressed == content or compressed_tokens >= original_tokens
-            if strategy == CompressionStrategy.SMART_CRUSHER and fallback_no_savings:
+            if (
+                strategy == CompressionStrategy.SMART_CRUSHER
+                and fallback_no_savings
+                and not suppress_no_savings_fallback
+            ):
                 if compressed_tokens > original_tokens:
                     # Never ship an EXPANDED result — revert to the original
                     # bytes. (Historically the not-installed ML fallback
