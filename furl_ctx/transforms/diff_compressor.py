@@ -38,6 +38,14 @@ class DiffCompressorConfig:
     always_keep_deletions: bool = True
     enable_ccr: bool = True
     min_lines_for_ccr: int = 50
+    #: Elide noise hunks before compression: lockfile churn
+    #: (package-lock.json / Cargo.lock / uv.lock / yarn.lock) and
+    #: whitespace-only hunks, each file summarized with one
+    #: ``[noise hunk elided: <path> (+A/-B)]`` line. The CCR marker (when
+    #: emitted) backs the FULL original diff, so elided hunks stay
+    #: byte-exact recoverable; the store-write veto below still applies.
+    #: Default False — output byte-identical to the previous behavior.
+    drop_noise_hunks: bool = False
 
 
 @dataclass
@@ -103,6 +111,7 @@ class DiffCompressor:
                 always_keep_deletions=cfg.always_keep_deletions,
                 enable_ccr=cfg.enable_ccr,
                 min_lines_for_ccr=cfg.min_lines_for_ccr,
+                drop_noise_hunks=cfg.drop_noise_hunks,
             )
         )
 

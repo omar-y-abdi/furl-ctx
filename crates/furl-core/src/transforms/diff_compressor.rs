@@ -109,7 +109,36 @@ pub struct DiffCompressorConfig {
     /// compression before we bother emitting the marker. **Rust-only knob**
     /// — Python hardcodes 0.8. Default: 0.8 (matches Python).
     pub min_compression_ratio_for_ccr: f64,
+    /// Drop "noise" hunks before compression (upstream's DiffNoise,
+    /// restored per ENGINE-COMPARISON P2-14). When enabled, two hunk
+    /// classes are elided from the output:
+    ///
+    /// 1. **Lockfile churn** — every hunk in a file whose basename is one
+    ///    of [`NOISE_LOCKFILE_BASENAMES`] (`package-lock.json`,
+    ///    `Cargo.lock`, `uv.lock`, `yarn.lock`).
+    /// 2. **Whitespace-only hunks** — hunks with at least one `+`/`-`
+    ///    line where EVERY changed line's content (after the `+`/`-`
+    ///    prefix) is empty or whitespace.
+    ///
+    /// Each file with elisions gets one summary line in its section:
+    /// `[noise hunk elided: <path> (+A/-B)]`, where A/B total the elided
+    /// additions/deletions. Elided hunks count toward `hunks_removed`
+    /// (and the `N hunks omitted` footer); their +/- counts are carried
+    /// on the noise line rather than the footer totals. Elision runs
+    /// BEFORE the `max_files` sort so a 5000-line lockfile churn can't
+    /// crowd real files out of the cap. Recovery discipline is unchanged:
+    /// the CCR marker (when emitted) backs the FULL original diff,
+    /// including elided hunks, and the Python shim's store-write veto
+    /// still applies. Default: false — output byte-identical to the
+    /// parity contract.
+    pub drop_noise_hunks: bool,
 }
+
+/// Basenames whose diffs are lockfile churn under `drop_noise_hunks`.
+/// Matching is by exact basename (path segments split on `/` and `\`),
+/// so `frontend/package-lock.json` matches and `Cargo.lock.bak` does not.
+pub const NOISE_LOCKFILE_BASENAMES: [&str; 4] =
+    ["package-lock.json", "Cargo.lock", "uv.lock", "yarn.lock"];
 
 impl Default for DiffCompressorConfig {
     fn default() -> Self {
@@ -122,6 +151,7 @@ impl Default for DiffCompressorConfig {
             enable_ccr: true,
             min_lines_for_ccr: 50,
             min_compression_ratio_for_ccr: 0.8,
+            drop_noise_hunks: false,
         }
     }
 }
@@ -198,6 +228,14 @@ pub struct DiffCompressorStats {
     /// emitter hardcodes `Binary files differ`, dropping the filename
     /// detail. This stat surfaces what was lost.
     pub binary_files_simplified: Vec<String>,
+
+    /// Hunks elided by the `drop_noise_hunks` pass (lockfile churn +
+    /// whitespace-only hunks). Always 0 when the flag is off. These are
+    /// included in `hunks_dropped` so `hunks_total == hunks_kept +
+    /// hunks_dropped` still holds; this counter attributes how many of
+    /// the drops were noise elisions rather than `max_hunks_per_file`
+    /// cap drops.
+    pub noise_hunks_elided: usize,
 
     /// Non-fatal parser hiccups: unrecognized line patterns, malformed
     /// hunk headers, etc. Surfacing them rather than dropping silently.
@@ -331,6 +369,15 @@ impl DiffCompressor {
             );
         }
 
+        // Noise elision (DiffNoise, P2-14; config-gated, default off).
+        // Runs BEFORE scoring and the max_files sort so lockfile churn
+        // can't dominate the total-changes ranking and crowd out real
+        // files. The elided hunks stay recoverable: the CCR marker below
+        // (when emitted) backs the FULL original `content`.
+        if self.config.drop_noise_hunks {
+            elide_noise_hunks(&mut diff_files, &mut stats);
+        }
+
         // Score hunks by relevance to the user query (used only if
         // `max_hunks_per_file` fires).
         score_hunks(&mut diff_files, context);
@@ -428,6 +475,11 @@ impl DiffCompressor {
 
             hunks_kept_total += compressed_hunks.len();
             hunks_removed_total += original_hunk_count - compressed_hunks.len();
+            // Noise-elided hunks are removed hunks too: keeps the
+            // `hunks_total == hunks_kept + hunks_dropped` identity and
+            // the `N hunks omitted` footer honest. (0 when the flag is
+            // off — `noise_elision` is only ever set by the gated pass.)
+            hunks_removed_total += file.noise_elision.as_ref().map_or(0, |n| n.hunks);
 
             compressed_files.push(DiffFile {
                 hunks: compressed_hunks,
@@ -567,6 +619,25 @@ struct DiffFile {
     /// Full original `Binary files X and Y differ` line if present.
     /// Captured so we can detect when emit simplifies to `Binary files differ`.
     original_binary_line: Option<String>,
+    /// Populated by the `drop_noise_hunks` pass when hunks were elided
+    /// from this file. `None` when the flag is off or nothing matched.
+    noise_elision: Option<NoiseElision>,
+}
+
+/// Summary of the noise hunks elided from one file (`drop_noise_hunks`).
+/// Rendered as `[noise hunk elided: <path> (+A/-B)]` in the file's section.
+#[derive(Debug, Clone)]
+struct NoiseElision {
+    /// Bare new-side path (from the `diff --git a/X b/Y` header's b-side,
+    /// or the `--combined`/`--cc` single path) — also what the lockfile
+    /// basename match ran against.
+    path: String,
+    /// Number of hunks elided.
+    hunks: usize,
+    /// Total `+` lines across the elided hunks.
+    additions: usize,
+    /// Total `-` lines across the elided hunks.
+    deletions: usize,
 }
 
 impl DiffFile {
@@ -718,6 +789,7 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
                 original_new_file_mode_line: None,
                 original_deleted_file_mode_line: None,
                 original_binary_line: None,
+                noise_elision: None,
             });
             continue;
         }
@@ -880,6 +952,90 @@ fn score_hunks(files: &mut [DiffFile], context: &str) {
             }
             hunk.score = score;
         }
+    }
+}
+
+// ─── Noise elision (drop_noise_hunks, P2-14) ───────────────────────────────
+
+/// Bare new-side path for a file section: the `b/` side of a
+/// `diff --git a/X b/Y` header (renames report the new name), or the
+/// single path of a `diff --combined` / `diff --cc` header. Falls back to
+/// the `+++ b/<path>` line, then the raw header — total: always returns
+/// SOMETHING to display, and the fallbacks can't accidentally match a
+/// lockfile basename check because they carry their prefixes.
+fn file_display_path(file: &DiffFile) -> String {
+    if let Some(caps) = diff_git_regex().captures(&file.header) {
+        if let Some(m) = caps.get(2) {
+            return m.as_str().to_string();
+        }
+    }
+    if let Some(caps) = diff_combined_regex().captures(&file.header) {
+        if let Some(m) = caps.get(1) {
+            return m.as_str().to_string();
+        }
+    }
+    if let Some(caps) = diff_cc_regex().captures(&file.header) {
+        if let Some(m) = caps.get(1) {
+            return m.as_str().to_string();
+        }
+    }
+    if let Some(rest) = file.new_file.strip_prefix("+++ b/") {
+        return rest.to_string();
+    }
+    file.header.clone()
+}
+
+/// True when the path's basename is one of [`NOISE_LOCKFILE_BASENAMES`].
+/// Split on both separators so Windows-style paths match too. Exact
+/// basename equality — `Cargo.lock.bak` is NOT a lockfile.
+fn is_lockfile_path(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    NOISE_LOCKFILE_BASENAMES.contains(&base)
+}
+
+/// True for hunks with at least one `+`/`-` line where EVERY changed
+/// line's content (after the one-byte prefix) is empty or whitespace —
+/// blank-line churn. Pure-context hunks (no changes at all) are NOT
+/// noise: there is nothing to elide and the context trim already
+/// handles them.
+fn is_whitespace_only_hunk(hunk: &DiffHunk) -> bool {
+    if hunk.additions + hunk.deletions == 0 {
+        return false;
+    }
+    hunk.lines.iter().all(|line| {
+        let is_change = (line.starts_with('+') && !line.starts_with("+++"))
+            || (line.starts_with('-') && !line.starts_with("---"));
+        // `line[1..]` is char-boundary-safe: the prefix is ASCII.
+        !is_change || line[1..].trim().is_empty()
+    })
+}
+
+/// The `drop_noise_hunks` pass: strip lockfile-churn and whitespace-only
+/// hunks from each file, recording a per-file [`NoiseElision`] summary
+/// that `format_output` renders as `[noise hunk elided: <path> (+A/-B)]`.
+/// Recoverability is owned by the caller: the CCR layer stores the FULL
+/// original diff, so elided hunks remain byte-exact retrievable whenever
+/// the marker ships.
+fn elide_noise_hunks(files: &mut [DiffFile], stats: &mut DiffCompressorStats) {
+    for file in files.iter_mut() {
+        let path = file_display_path(file);
+        let lockfile = is_lockfile_path(&path);
+        if !lockfile && !file.hunks.iter().any(is_whitespace_only_hunk) {
+            continue;
+        }
+        let (noise, kept): (Vec<DiffHunk>, Vec<DiffHunk>) = std::mem::take(&mut file.hunks)
+            .into_iter()
+            .partition(|h| lockfile || is_whitespace_only_hunk(h));
+        if !noise.is_empty() {
+            stats.noise_hunks_elided += noise.len();
+            file.noise_elision = Some(NoiseElision {
+                path,
+                hunks: noise.len(),
+                additions: noise.iter().map(|h| h.additions).sum(),
+                deletions: noise.iter().map(|h| h.deletions).sum(),
+            });
+        }
+        file.hunks = kept;
     }
 }
 
@@ -1103,6 +1259,17 @@ fn format_output(
                 out_lines.push(l.clone());
             }
         }
+
+        // Noise-elision summary (drop_noise_hunks): one line per file,
+        // after its kept hunks — mirrors the search compressor's
+        // "content, then omission summary" convention. `+A/-B` totals
+        // the elided additions/deletions for the file.
+        if let Some(n) = &f.noise_elision {
+            out_lines.push(format!(
+                "[noise hunk elided: {} (+{}/-{})]",
+                n.path, n.additions, n.deletions
+            ));
+        }
     }
 
     // Summary footer — only when we touched at least one file.
@@ -1170,6 +1337,7 @@ fn emit_span_and_return(stats: DiffCompressorStats) -> DiffCompressorStats {
         hunks_total = stats.hunks_total,
         hunks_kept = stats.hunks_kept,
         hunks_dropped = stats.hunks_dropped,
+        noise_hunks_elided = stats.noise_hunks_elided,
         context_lines_trimmed = stats.context_lines_trimmed,
         largest_hunk_kept_lines = stats.largest_hunk_kept_lines,
         largest_hunk_dropped_lines = stats.largest_hunk_dropped_lines,
@@ -1730,5 +1898,187 @@ mod tests {
         assert!(r.compressed.contains("diff --git a/x.py b/x.py"));
         assert!(r.compressed.contains("-a"));
         assert!(r.compressed.contains("+b"));
+    }
+
+    // ─── drop_noise_hunks (DiffNoise, P2-14) ───────────────────────────────
+
+    /// A mixed diff: one real code change, one whitespace-only hunk in the
+    /// same file, and a lockfile with two churn hunks.
+    fn build_noise_diff() -> String {
+        "diff --git a/src/app.py b/src/app.py\n\
+         --- a/src/app.py\n\
+         +++ b/src/app.py\n\
+         @@ -1,4 +1,4 @@\n\
+         \x20ctx_head\n\
+         -real_old_logic\n\
+         +real_new_logic\n\
+         \x20ctx_tail\n\
+         @@ -20,4 +20,4 @@\n\
+         \x20ctx_ws_a\n\
+         -\t\n\
+         +\n\
+         \x20ctx_ws_b\n\
+         diff --git a/Cargo.lock b/Cargo.lock\n\
+         --- a/Cargo.lock\n\
+         +++ b/Cargo.lock\n\
+         @@ -10,4 +10,5 @@\n\
+         \x20[[package]]\n\
+         -version = \"1.0.0\"\n\
+         +version = \"1.0.1\"\n\
+         +checksum = \"abc123\"\n\
+         \x20name = \"serde\"\n\
+         @@ -100,3 +101,3 @@\n\
+         \x20[[package]]\n\
+         -version = \"2.4.0\"\n\
+         +version = \"2.5.0\"\n"
+            .to_string()
+    }
+
+    #[test]
+    fn drop_noise_hunks_defaults_off_and_noise_survives() {
+        assert!(!DiffCompressorConfig::default().drop_noise_hunks);
+        let cfg = DiffCompressorConfig {
+            min_lines_for_ccr: 5,
+            ..Default::default()
+        };
+        let r = DiffCompressor::new(cfg).compress(&build_noise_diff(), "");
+        // Default OFF: lockfile churn and the whitespace hunk are emitted
+        // verbatim, no elision marker anywhere.
+        assert!(r.compressed.contains("+version = \"1.0.1\""));
+        assert!(r.compressed.contains("@@ -20,4 +20,4 @@"));
+        assert!(!r.compressed.contains("[noise hunk elided:"));
+    }
+
+    #[test]
+    fn lockfile_hunks_elided_when_enabled() {
+        let cfg = DiffCompressorConfig {
+            min_lines_for_ccr: 5,
+            drop_noise_hunks: true,
+            ..Default::default()
+        };
+        let r = DiffCompressor::new(cfg).compress(&build_noise_diff(), "");
+        // Both Cargo.lock hunks elided → one per-file summary line with
+        // summed +3/-2 (hunk1: +2/-1, hunk2: +1/-1).
+        assert!(
+            r.compressed
+                .contains("[noise hunk elided: Cargo.lock (+3/-2)]"),
+            "missing noise line:\n{}",
+            r.compressed
+        );
+        assert!(!r.compressed.contains("+version = \"1.0.1\""));
+        assert!(!r.compressed.contains("+checksum = \"abc123\""));
+        // The lockfile section header survives so the reader still sees
+        // WHICH file changed.
+        assert!(r
+            .compressed
+            .contains("diff --git a/Cargo.lock b/Cargo.lock"));
+    }
+
+    #[test]
+    fn whitespace_only_hunk_elided_when_enabled() {
+        let cfg = DiffCompressorConfig {
+            min_lines_for_ccr: 5,
+            drop_noise_hunks: true,
+            ..Default::default()
+        };
+        let r = DiffCompressor::new(cfg).compress(&build_noise_diff(), "");
+        // The whitespace-only hunk (`-\t` / `+`) in src/app.py is gone…
+        assert!(
+            !r.compressed.contains("@@ -20,4 +20,4 @@"),
+            "whitespace hunk not elided:\n{}",
+            r.compressed
+        );
+        assert!(!r.compressed.contains("ctx_ws_a"));
+        // …replaced by its own per-file noise line (+1/-1).
+        assert!(
+            r.compressed
+                .contains("[noise hunk elided: src/app.py (+1/-1)]"),
+            "missing per-file noise line:\n{}",
+            r.compressed
+        );
+    }
+
+    #[test]
+    fn mixed_diff_keeps_real_hunks_and_accounts_elisions() {
+        let cfg = DiffCompressorConfig {
+            min_lines_for_ccr: 5,
+            drop_noise_hunks: true,
+            ..Default::default()
+        };
+        let (r, stats) = DiffCompressor::new(cfg).compress_with_stats(&build_noise_diff(), "");
+        // The real code hunk survives intact.
+        assert!(r.compressed.contains("-real_old_logic"));
+        assert!(r.compressed.contains("+real_new_logic"));
+        // 4 hunks total: 1 kept, 3 elided (1 whitespace + 2 lockfile).
+        assert_eq!(stats.hunks_total, 4);
+        assert_eq!(stats.noise_hunks_elided, 3);
+        assert_eq!(r.hunks_kept, 1);
+        assert_eq!(r.hunks_removed, 3, "elided hunks count as removed");
+        assert_eq!(
+            stats.hunks_total,
+            stats.hunks_kept + stats.hunks_dropped,
+            "hunk accounting identity must hold with elision"
+        );
+        // Footer totals describe the KEPT hunks; the noise lines carry
+        // the elided counts.
+        assert!(r
+            .compressed
+            .contains("[2 files changed, +1 -1 lines, 3 hunks omitted]"));
+    }
+
+    #[test]
+    fn noise_elision_lockfile_matches_nested_path_not_suffix() {
+        let mk = |path: &str| {
+            format!(
+                "diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1,3 +1,3 @@\n\
+                 \x20ctx\n-old_dep_pin\n+new_dep_pin\n\x20ctx2\n",
+                p = path
+            )
+        };
+        let cfg = DiffCompressorConfig {
+            min_lines_for_ccr: 1,
+            drop_noise_hunks: true,
+            ..Default::default()
+        };
+        // Nested lockfile path → basename matches → elided.
+        let nested =
+            DiffCompressor::new(cfg.clone()).compress(&mk("frontend/package-lock.json"), "");
+        assert!(nested
+            .compressed
+            .contains("[noise hunk elided: frontend/package-lock.json (+1/-1)]"));
+        assert!(!nested.compressed.contains("+new_dep_pin"));
+        // Suffix-only lookalike → NOT a lockfile → kept.
+        let lookalike = DiffCompressor::new(cfg).compress(&mk("Cargo.lock.bak"), "");
+        assert!(!lookalike.compressed.contains("[noise hunk elided:"));
+        assert!(lookalike.compressed.contains("+new_dep_pin"));
+    }
+
+    #[test]
+    fn noise_elision_recovery_is_byte_exact_via_store() {
+        use crate::ccr::InMemoryCcrStore;
+        // Pad the mixed diff so compression clears the CCR ratio: the
+        // elided lockfile bulk IS the savings.
+        let mut input = build_noise_diff();
+        for i in 0..40 {
+            input.push_str(&format!(
+                "@@ -{0},3 +{0},4 @@\n version{1}\n-old{1}\n+new{1}\n+extra{1}\n",
+                200 + i * 10,
+                i
+            ));
+        }
+        let cfg = DiffCompressorConfig {
+            min_lines_for_ccr: 5,
+            drop_noise_hunks: true,
+            ..Default::default()
+        };
+        let store = InMemoryCcrStore::new();
+        let (r, stats) = DiffCompressor::new(cfg).compress_with_store(&input, "", Some(&store));
+        let key = r.cache_key.expect("CCR must fire on this shape");
+        assert!(stats.cache_key_emitted);
+        // The store holds the FULL original — including every elided
+        // noise hunk — byte-exact. Elision never reduces recoverability.
+        assert_eq!(store.get(&key).as_deref(), Some(input.as_str()));
+        assert!(store.get(&key).unwrap().contains("+checksum = \"abc123\""));
+        assert!(r.compressed.contains(&format!("hash={key}")));
     }
 }

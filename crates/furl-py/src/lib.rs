@@ -122,7 +122,11 @@ fn build_crush_array_dict<'py>(
 /// Defaults match Python; constructor accepts every field as a kwarg with
 /// the same name and type as the Python dataclass for drop-in
 /// compatibility.
-#[pyclass(name = "DiffCompressorConfig", module = "furl_ctx._core")]
+#[pyclass(
+    name = "DiffCompressorConfig",
+    module = "furl_ctx._core",
+    from_py_object
+)]
 #[derive(Clone)]
 struct PyDiffCompressorConfig {
     inner: DiffCompressorConfig,
@@ -140,6 +144,7 @@ impl PyDiffCompressorConfig {
         enable_ccr = true,
         min_lines_for_ccr = 50,
         min_compression_ratio_for_ccr = 0.8,
+        drop_noise_hunks = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -151,6 +156,7 @@ impl PyDiffCompressorConfig {
         enable_ccr: bool,
         min_lines_for_ccr: usize,
         min_compression_ratio_for_ccr: f64,
+        drop_noise_hunks: bool,
     ) -> Self {
         Self {
             inner: DiffCompressorConfig {
@@ -162,6 +168,7 @@ impl PyDiffCompressorConfig {
                 enable_ccr,
                 min_lines_for_ccr,
                 min_compression_ratio_for_ccr,
+                drop_noise_hunks,
             },
         }
     }
@@ -199,12 +206,16 @@ impl PyDiffCompressorConfig {
     fn min_compression_ratio_for_ccr(&self) -> f64 {
         self.inner.min_compression_ratio_for_ccr
     }
+    #[getter]
+    fn drop_noise_hunks(&self) -> bool {
+        self.inner.drop_noise_hunks
+    }
 
     fn __repr__(&self) -> String {
         format!(
             "DiffCompressorConfig(max_context_lines={}, max_hunks_per_file={}, max_files={}, \
              always_keep_additions={}, always_keep_deletions={}, enable_ccr={}, \
-             min_lines_for_ccr={}, min_compression_ratio_for_ccr={})",
+             min_lines_for_ccr={}, min_compression_ratio_for_ccr={}, drop_noise_hunks={})",
             self.inner.max_context_lines,
             self.inner.max_hunks_per_file,
             self.inner.max_files,
@@ -213,6 +224,7 @@ impl PyDiffCompressorConfig {
             self.inner.enable_ccr,
             self.inner.min_lines_for_ccr,
             self.inner.min_compression_ratio_for_ccr,
+            self.inner.drop_noise_hunks,
         )
     }
 }
@@ -362,6 +374,10 @@ impl PyDiffCompressorStats {
         self.inner.hunks_dropped_per_file.clone()
     }
     #[getter]
+    fn noise_hunks_elided(&self) -> usize {
+        self.inner.noise_hunks_elided
+    }
+    #[getter]
     fn context_lines_input(&self) -> usize {
         self.inner.context_lines_input
     }
@@ -447,12 +463,12 @@ impl PyDiffCompressor {
     ) -> PyResult<PyDiffCompressionResult> {
         let content = content.to_string();
         let context = context.to_string();
-        // catch_unwind inside allow_threads: keep the GIL released during the
+        // catch_unwind inside detach: keep the GIL released during the
         // Rust compute, catch any panic there, convert after re-acquiring so an
         // engine bug becomes a catchable PyRuntimeError instead of a
         // BaseException that crashes the host (COR-7).
         let inner = py
-            .allow_threads(|| {
+            .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.inner.compress(&content, &context)
                 }))
@@ -474,12 +490,12 @@ impl PyDiffCompressor {
     ) -> PyResult<(PyDiffCompressionResult, PyDiffCompressorStats)> {
         let content = content.to_string();
         let context = context.to_string();
-        // catch_unwind inside allow_threads (see `panic_to_pyerr`): the
+        // catch_unwind inside detach (see `panic_to_pyerr`): the
         // sidecar path parses the same diff as `compress` and can hit the
         // same unidiff panics (e.g. orphaned `+++` headers) — same COR-7
         // containment (P0-1).
         let (result, stats) = py
-            .allow_threads(|| {
+            .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.inner.compress_with_stats(&content, &context)
                 }))
@@ -501,7 +517,7 @@ impl PyDiffCompressor {
 /// plus two non-dataclass kwargs it injects explicitly: `relevance_threshold`
 /// (lives on `RelevanceScorerConfig`) and `enable_ccr_marker` (derived from
 /// the CCR config).
-#[pyclass(name = "SmartCrusherConfig", module = "furl_ctx._core")]
+#[pyclass(name = "SmartCrusherConfig", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
 struct PySmartCrusherConfig {
     inner: RustSmartCrusherConfig,
@@ -807,10 +823,10 @@ impl PySmartCrusher {
     ) -> PyResult<PyCrushResult> {
         let content = content.to_string();
         let query = query.to_string();
-        // catch_unwind inside allow_threads (see `panic_to_pyerr`): a panic in
+        // catch_unwind inside detach (see `panic_to_pyerr`): a panic in
         // the recursive crush becomes a catchable PyRuntimeError (COR-7).
         let inner = py
-            .allow_threads(|| {
+            .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.inner.crush(&content, &query, bias)
                 }))
@@ -834,8 +850,8 @@ impl PySmartCrusher {
     ) -> PyResult<(String, bool, String)> {
         let content = content.to_string();
         let query = query.to_string();
-        // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
-        py.allow_threads(|| {
+        // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
+        py.detach(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.inner.smart_crush_content(&content, &query, bias)
             }))
@@ -884,7 +900,7 @@ impl PySmartCrusher {
         // (`map_err(panic_to_pyerr)?`), the inner is the existing input-validation
         // `PyErr` (`?`).
         let (kept_json, ccr_hash, dropped_summary, strategy_info, compacted, compaction_kind) = py
-            .allow_threads(|| {
+            .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // COR-44: decline magic-key payloads before from_str so
                     // serde_json's arbitrary_precision / raw_value promotions
@@ -959,7 +975,7 @@ impl PySmartCrusher {
         // catch_unwind wraps the GIL-free walker compute (COR-7). Flatten the
         // panic Result (`map_err(panic_to_pyerr)?`) over the existing
         // input-validation `PyErr` (`?`).
-        py.allow_threads(|| {
+        py.detach(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // COR-44: decline magic-key payloads before from_str so
                 // serde_json's arbitrary_precision / raw_value promotions
@@ -1023,7 +1039,7 @@ impl PySmartCrusher {
 /// `content_type` is exposed as the lowercase string tag (e.g.
 /// `"json_array"`). The Python wrapper translates it back into the
 /// `ContentType` enum so the call-site looks identical.
-#[pyclass(name = "DetectionResult", module = "furl_ctx._core")]
+#[pyclass(name = "DetectionResult", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
 struct PyDetectionResult {
     inner: RustDetectionResult,
@@ -1111,9 +1127,9 @@ impl PyDetectionResult {
 #[pyfunction]
 fn detect_content_type(py: Python<'_>, content: &str) -> PyResult<PyDetectionResult> {
     let owned = content.to_string();
-    // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
+    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
     let content_type = py
-        .allow_threads(move || {
+        .detach(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rust_detect_chain(&owned)))
         })
         .map_err(panic_to_pyerr)?;
@@ -1175,7 +1191,7 @@ fn category_to_str(cat: ImportanceCategory) -> &'static str {
 /// P0-1 panic-containment audit wrapped it in `PyResult` for the COR-7
 /// catch_unwind, and the lint no longer fires on this shape.)
 ///
-/// No `allow_threads` here: this is called per line in tight Python
+/// No `detach` here: this is called per line in tight Python
 /// loops and the compute is a single aho-corasick scan — releasing and
 /// reacquiring the GIL per call would cost more than the scan itself.
 #[pyfunction]
@@ -1196,7 +1212,7 @@ fn score_line(line: &str, context: &str) -> PyResult<Option<(Option<&'static str
 
 /// Lax substring check: does `text` contain any error indicator? Mirrors
 /// Python `error_detection.content_has_error_indicators`. Same
-/// no-`allow_threads` rationale as `score_line`.
+/// no-`detach` rationale as `score_line`.
 #[pyfunction]
 fn content_has_error_indicators(text: &str) -> PyResult<bool> {
     // catch_unwind → PyRuntimeError (see `panic_to_pyerr`): COR-7 (P0-1 audit).
@@ -1237,7 +1253,11 @@ fn keyword_registry_snapshot(py: Python<'_>) -> Py<PyDict> {
 // store. This avoids dragging a second CCR backend into Rust before the
 // Phase 3g pipeline formalization owns CCR end-to-end.
 
-#[pyclass(name = "SearchCompressorConfig", module = "furl_ctx._core")]
+#[pyclass(
+    name = "SearchCompressorConfig",
+    module = "furl_ctx._core",
+    from_py_object
+)]
 #[derive(Clone)]
 struct PySearchCompressorConfig {
     inner: RustSearchConfig,
@@ -1257,6 +1277,7 @@ impl PySearchCompressorConfig {
         enable_ccr = true,
         min_matches_for_ccr = 10,
         min_compression_ratio_for_ccr = 0.8,
+        group_by_file = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1270,6 +1291,7 @@ impl PySearchCompressorConfig {
         enable_ccr: bool,
         min_matches_for_ccr: usize,
         min_compression_ratio_for_ccr: f64,
+        group_by_file: bool,
     ) -> Self {
         Self {
             inner: RustSearchConfig {
@@ -1283,6 +1305,7 @@ impl PySearchCompressorConfig {
                 enable_ccr,
                 min_matches_for_ccr,
                 min_compression_ratio_for_ccr,
+                group_by_file,
             },
         }
     }
@@ -1390,9 +1413,9 @@ impl PySearchCompressor {
         // wants persistence beyond the request lifecycle.
         let owned = content.to_string();
         let owned_ctx = context.to_string();
-        // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
+        // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
         let (result, stats) = py
-            .allow_threads(move || {
+            .detach(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let store = furl_core::ccr::InMemoryCcrStore::new();
                     let (r, s) =
@@ -1416,10 +1439,10 @@ impl PySearchCompressor {
 #[pyfunction]
 fn parse_search_lines(py: Python<'_>, content: &str) -> PyResult<Vec<(String, u64, String)>> {
     let owned = content.to_string();
-    // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7
+    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7
     // containment for the legacy parse helper — it runs the same parser
     // as the wrapped `SearchCompressor.compress` bridge (P0-1 audit).
-    py.allow_threads(move || {
+    py.detach(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let compressor = RustSearchCompressor::new(RustSearchConfig::default());
             let mut stats = RustSearchStats::default();
@@ -1442,7 +1465,11 @@ fn parse_search_lines(py: Python<'_>, content: &str) -> PyResult<Vec<(String, u6
 // pattern as search_compressor: Rust emits a `cache_key`, Python shim
 // writes the original to the production `CompressionStore`.
 
-#[pyclass(name = "LogCompressorConfig", module = "furl_ctx._core")]
+#[pyclass(
+    name = "LogCompressorConfig",
+    module = "furl_ctx._core",
+    from_py_object
+)]
 #[derive(Clone)]
 struct PyLogCompressorConfig {
     inner: RustLogConfig,
@@ -1596,9 +1623,9 @@ impl PyLogCompressor {
         bias: f64,
     ) -> PyResult<PyLogCompressionResult> {
         let owned = content.to_string();
-        // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
+        // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
         let (result, stats) = py
-            .allow_threads(move || {
+            .detach(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let store = furl_core::ccr::InMemoryCcrStore::new();
                     let (r, s) = self.inner.compress_with_store(&owned, bias, Some(&store));
@@ -1616,9 +1643,9 @@ impl PyLogCompressor {
 /// Helper for the Python shim's `_detect_format`.
 #[pyfunction]
 fn detect_log_format(py: Python<'_>, lines: Vec<String>) -> PyResult<&'static str> {
-    // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7
+    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7
     // containment for the format-detection helper (P0-1 audit).
-    py.allow_threads(move || {
+    py.detach(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let compressor = RustLogCompressor::new(RustLogConfig::default());
             let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -1645,7 +1672,7 @@ const _: fn() = || {
 // VETOES the compression (serves the original) if that write fails —
 // the marker never ships dangling.
 
-#[pyclass(name = "TextCrusherConfig", module = "furl_ctx._core")]
+#[pyclass(name = "TextCrusherConfig", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
 struct PyTextCrusherConfig {
     inner: RustTextCrusherConfig,
@@ -1801,9 +1828,9 @@ impl PyTextCrusher {
     ) -> PyResult<PyTextCrushResult> {
         let owned = content.to_string();
         let owned_ctx = context.to_string();
-        // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
+        // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
         let (result, stats) = py
-            .allow_threads(move || {
+            .detach(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let store = furl_core::ccr::InMemoryCcrStore::new();
                     let (r, s) =
@@ -1842,8 +1869,8 @@ fn protect_tags(
     compress_tagged_content: bool,
 ) -> PyResult<(String, Vec<(String, String)>)> {
     let owned = text.to_string();
-    // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
-    py.allow_threads(move || {
+    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
+    py.detach(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (cleaned, blocks, _stats) = rust_protect_tags(&owned, compress_tagged_content);
             (cleaned, blocks)
@@ -1858,8 +1885,8 @@ fn protect_tags(
 #[pyfunction]
 fn restore_tags(py: Python<'_>, text: &str, blocks: Vec<(String, String)>) -> PyResult<String> {
     let owned = text.to_string();
-    // catch_unwind inside allow_threads (see `panic_to_pyerr`): COR-7.
-    py.allow_threads(move || {
+    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
+    py.detach(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             rust_restore_tags(&owned, &blocks)
         }))

@@ -91,6 +91,12 @@ class SearchCompressorConfig:
     boost_errors: bool = True
     enable_ccr: bool = True
     min_matches_for_ccr: int = 10
+    #: Render one ``file:`` header per file with matches nested under it
+    #: (``  line:content``) instead of the flat ``file:line:content`` list.
+    #: Better token economics when many matches concentrate in few files
+    #: (the common rg shape). Selection, caps, and CCR are unchanged.
+    #: Default False — output byte-identical to the flat rendering.
+    group_by_file: bool = False
 
 
 @dataclass
@@ -160,6 +166,7 @@ class SearchCompressor:
                 enable_ccr=cfg.enable_ccr,
                 min_matches_for_ccr=cfg.min_matches_for_ccr,
                 min_compression_ratio_for_ccr=0.8,
+                group_by_file=cfg.group_by_file,
             )
         )
 

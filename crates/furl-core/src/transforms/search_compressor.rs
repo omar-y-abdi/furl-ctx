@@ -32,7 +32,10 @@
 //! 5. Per-file selection: always-keep first/last (configurable), fill
 //!    remaining slots by score, sort survivors back to line order.
 //! 6. Format `file:line:content` lines + `[... and N more matches in
-//!    file]` summaries.
+//!    file]` summaries. With `group_by_file` (default off) the file
+//!    path is emitted once as a `file:` header and match lines nest
+//!    under it as `  line:content` — better token economics when many
+//!    matches concentrate in few files (the common rg shape).
 //! 7. Optional CCR storage when `min_matches_for_ccr` cleared and
 //!    compression ratio < 0.8 — appends standard CCR marker.
 //!
@@ -140,6 +143,23 @@ pub struct SearchCompressorConfig {
     /// to a config field here (Python had it inline) so a future
     /// pipeline can tune per-content-type.
     pub min_compression_ratio_for_ccr: f64,
+    /// Render matches grouped under one header line per file (upstream's
+    /// `group_by_file` mode, restored per ENGINE-COMPARISON P2-15):
+    ///
+    /// ```text
+    /// src/main.py:
+    ///   42:def main():
+    ///   43:    pass
+    ///   [... and 3 more matches in src/main.py]
+    /// ```
+    ///
+    /// The file path is emitted once instead of per match — better token
+    /// economics for the common rg shape (many matches across few files).
+    /// Selection, caps, stats attribution (COR-41 3-way scheme) and CCR
+    /// persistence are all unchanged; only the rendering differs.
+    /// Default: `false` — flat `file:line:content` output, byte-identical
+    /// to the pre-existing behavior.
+    pub group_by_file: bool,
 }
 
 impl Default for SearchCompressorConfig {
@@ -155,6 +175,7 @@ impl Default for SearchCompressorConfig {
             enable_ccr: true,
             min_matches_for_ccr: 10,
             min_compression_ratio_for_ccr: 0.8,
+            group_by_file: false,
         }
     }
 }
@@ -540,6 +561,14 @@ impl SearchCompressor {
         selected
     }
 
+    /// Render the selected matches. Two modes:
+    ///
+    /// - Flat (default): grep-shaped `file:line:content` per match —
+    ///   byte-identical to the original output contract.
+    /// - Grouped (`config.group_by_file`): one `file:` header per file,
+    ///   match lines nested under it as `  line:content` (P2-15). The
+    ///   per-file omission summary nests too. Same selection, same caps,
+    ///   same summaries map keys — only the rendering differs.
     pub fn format_output(
         &self,
         selected: &BTreeMap<String, FileMatches>,
@@ -547,15 +576,27 @@ impl SearchCompressor {
     ) -> (String, BTreeMap<String, String>) {
         let mut lines: Vec<String> = Vec::new();
         let mut summaries: BTreeMap<String, String> = BTreeMap::new();
+        let grouped = self.config.group_by_file;
 
         for (file, fm) in selected {
+            if grouped {
+                lines.push(format!("{}:", file));
+            }
             for m in &fm.matches {
-                lines.push(format!("{}:{}:{}", m.file, m.line_number, m.content));
+                if grouped {
+                    lines.push(format!("  {}:{}", m.line_number, m.content));
+                } else {
+                    lines.push(format!("{}:{}:{}", m.file, m.line_number, m.content));
+                }
             }
             if let Some(orig_fm) = original.get(file) {
                 if orig_fm.matches.len() > fm.matches.len() {
                     let omitted = orig_fm.matches.len() - fm.matches.len();
-                    let summary = format!("[... and {} more matches in {}]", omitted, file);
+                    let summary = if grouped {
+                        format!("  [... and {} more matches in {}]", omitted, file)
+                    } else {
+                        format!("[... and {} more matches in {}]", omitted, file)
+                    };
                     lines.push(summary.clone());
                     summaries.insert(file.clone(), summary);
                 }
@@ -996,6 +1037,123 @@ src/main.py-44-context line";
         assert!(!stats.ccr_emitted);
         assert_eq!(stats.ccr_skip_reason, Some("below min_matches_for_ccr"));
         assert_eq!(store.len(), 0);
+    }
+
+    // ─── group_by_file mode (P2-15) ─────────────────────────────────────
+
+    #[test]
+    fn group_by_file_defaults_off_and_flat_output_is_byte_identical() {
+        // The flag must default OFF, and the flat rendering must stay the
+        // exact grep shape: when nothing is dropped the output reproduces
+        // the input byte-for-byte.
+        assert!(!SearchCompressorConfig::default().group_by_file);
+        let compressor = SearchCompressor::new(SearchCompressorConfig {
+            enable_ccr: false,
+            ..Default::default()
+        });
+        let content = "src/a.py:1:alpha\nsrc/a.py:2:beta\nsrc/b.py:7:gamma";
+        let (result, _) = compressor.compress(content, "", 1.0);
+        assert_eq!(result.compressed, content);
+    }
+
+    #[test]
+    fn group_by_file_renders_one_header_per_file_with_nested_matches() {
+        let compressor = SearchCompressor::new(SearchCompressorConfig {
+            group_by_file: true,
+            enable_ccr: false,
+            ..Default::default()
+        });
+        let content = "src/a.py:1:alpha\nsrc/a.py:2:beta\nsrc/b.py:7:gamma";
+        let (result, _) = compressor.compress(content, "", 1.0);
+        assert_eq!(
+            result.compressed,
+            "src/a.py:\n  1:alpha\n  2:beta\nsrc/b.py:\n  7:gamma"
+        );
+    }
+
+    #[test]
+    fn group_by_file_honors_caps_and_emits_nested_summaries() {
+        let compressor = SearchCompressor::new(SearchCompressorConfig {
+            group_by_file: true,
+            max_matches_per_file: 2,
+            max_total_matches: 6,
+            max_files: 2,
+            enable_ccr: false,
+            ..Default::default()
+        });
+        let mut content = String::new();
+        for f in ["a.py", "b.py", "c.py"] {
+            for i in 1..=5 {
+                content.push_str(&format!("{}:{}:line {}\n", f, i, i));
+            }
+        }
+        let (result, stats) = compressor.compress(&content, "", 1.0);
+
+        // max_files=2 → exactly two file headers (unindented, `path:`).
+        let headers: Vec<&str> = result
+            .compressed
+            .lines()
+            .filter(|l| !l.starts_with(' ') && l.ends_with(':'))
+            .collect();
+        assert_eq!(headers.len(), 2, "output:\n{}", result.compressed);
+        assert!(stats.files_dropped >= 1);
+
+        // Per-file cap: at most 2 nested match lines per file.
+        let mut per_file: usize = 0;
+        for line in result.compressed.lines() {
+            if !line.starts_with(' ') {
+                per_file = 0;
+            } else if !line.trim_start().starts_with('[') {
+                per_file += 1;
+                assert!(
+                    per_file <= 2,
+                    "per-file cap violated:\n{}",
+                    result.compressed
+                );
+            }
+        }
+
+        // Summaries: 3 of 5 unique matches omitted per surviving file,
+        // rendered nested under the file header and recorded in the map.
+        assert!(result
+            .compressed
+            .contains("  [... and 3 more matches in a.py]"));
+        assert_eq!(result.summaries.len(), 2);
+        for (file, summary) in &result.summaries {
+            assert_eq!(summary, &format!("  [... and 3 more matches in {}]", file));
+        }
+
+        // COR-41 3-way attribution unchanged by the rendering mode: the
+        // 3 omitted per surviving file are per-file-cap drops.
+        assert_eq!(stats.matches_dropped_by_dedup, 0);
+        assert_eq!(stats.matches_dropped_by_per_file_cap, 6);
+        assert_eq!(stats.matches_dropped_by_global_cap, 0);
+    }
+
+    #[test]
+    fn group_by_file_ccr_roundtrip_via_store() {
+        let compressor = SearchCompressor::new(SearchCompressorConfig {
+            group_by_file: true,
+            max_matches_per_file: 2,
+            max_total_matches: 4,
+            min_matches_for_ccr: 5,
+            min_compression_ratio_for_ccr: 0.95,
+            ..Default::default()
+        });
+        let mut content = String::new();
+        for i in 1..=12 {
+            content.push_str(&format!("src/main.py:{}:line content {}\n", i, i));
+        }
+        let store = InMemoryCcrStore::new();
+        let (result, stats) = compressor.compress_with_store(&content, "", 1.0, Some(&store));
+        assert!(stats.ccr_emitted);
+        assert!(result.compressed.starts_with("src/main.py:\n"));
+        // CCR marker grammar unchanged in grouped mode.
+        assert!(result.compressed.contains("[12 matches compressed to"));
+        // Round-trip: store holds the byte-exact ORIGINAL (flat grep
+        // output), not the grouped rendering.
+        let key = result.cache_key.as_ref().unwrap();
+        assert_eq!(store.get(key).unwrap(), content);
     }
 
     #[test]

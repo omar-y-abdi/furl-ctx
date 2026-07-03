@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -64,6 +64,16 @@ Issues = "https://github.com/omar-y-abdi/furl/issues"
 mcp = [
     "mcp>=1.0.0",
     "httpx>=0.24.0",
+]
+# Opt-in AST-verified code compression (transforms.code_aware_compressor,
+# Engine P2-12; enable via ContentRouterConfig.enable_code_aware=True).
+# Deliberately NOT a default dependency (lean-core mandate): the grammar
+# pack adds ~50MB. Missing extra → the compressor fails open (passthrough
+# + one WARN). tree-sitter>=0.23 pins the `parser.language =` setter API
+# and the unsendable-parser contract the thread-local cache satisfies.
+code = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-language-pack>=0.7.0",
 ]
 # Development dependencies
 dev = [
