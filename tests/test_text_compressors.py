@@ -436,6 +436,6 @@ class TestSmartCrusherTextIntegration:
             f"lossy crush must drop rows: kept {len(parsed)} of {len(items)}"
         )
         # The drop is CCR-recoverable, not silent: the sentinel rides along.
-        assert any(
-            isinstance(row, dict) and "_ccr_dropped" in row for row in parsed
-        ), "dropped rows must leave a _ccr_dropped recovery sentinel"
+        assert any(isinstance(row, dict) and "_ccr_dropped" in row for row in parsed), (
+            "dropped rows must leave a _ccr_dropped recovery sentinel"
+        )

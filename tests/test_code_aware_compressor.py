@@ -83,8 +83,6 @@ def _javascript_code(n_funcs: int = 8, body_lines: int = 14) -> str:
     return "\n".join(parts)
 
 
-
-
 @pytest.fixture
 def working_store() -> Any:
     real = CompressionStore(max_entries=500, enable_feedback=False)

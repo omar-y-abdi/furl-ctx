@@ -241,9 +241,7 @@ class TestResultCacheCCRDivergence:
             recovered_rows = json.loads(entry.original_content)
             if not isinstance(recovered_rows, list):
                 recovered_rows = [recovered_rows]
-            foreign = [
-                row for row in recovered_rows if canonical_repr(row) not in original_reprs
-            ]
+            foreign = [row for row in recovered_rows if canonical_repr(row) not in original_reprs]
             assert not foreign, (
                 f"hash {h!r}: {len(foreign)} recovered row(s) are not byte-exact "
                 f"originals (recovery-invariant subset check); first: {foreign[:1]!r}"
