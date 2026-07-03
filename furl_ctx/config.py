@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -111,6 +113,8 @@ class AnchorConfig:
 # Read/Glob/Grep contain exact file contents/search results the agent needs for edits.
 # Write/Edit record what changes were made — compressing them causes duplicate/conflicting edits.
 # Bash is NOT excluded — its outputs (build logs, test output) are ideal compression targets.
+# Entries are matched via is_tool_excluded(): case-insensitive, fnmatch-style
+# globs supported (e.g. "mcp__*").
 DEFAULT_EXCLUDE_TOOLS: frozenset[str] = frozenset(
     {
         "Read",
@@ -118,16 +122,36 @@ DEFAULT_EXCLUDE_TOOLS: frozenset[str] = frozenset(
         "Grep",
         "Write",
         "Edit",
-        "Bash",
         # Lowercase variants for case-insensitive matching
         "read",
         "glob",
         "grep",
         "write",
         "edit",
-        "bash",
     }
 )
+
+
+def is_tool_excluded(tool_name: str, exclude_tools: Collection[str]) -> bool:
+    """Total, pure exclusion check: does *tool_name* match any entry?
+
+    Restores the upstream matching semantics that plain ``in`` lost:
+
+    * **Exact entries** keep working unchanged (fast-path membership test).
+    * **Case-insensitive**: ``"READ"`` matches an entry ``"Read"``.
+    * **fnmatch-style globs**: an entry like ``"mcp__*"`` matches every
+      MCP-prefixed tool name, case-insensitively.
+
+    An empty *tool_name* never matches — an unnamed tool cannot be excluded
+    by name (and must not match a bare ``"*"`` entry by accident).
+    """
+    if not tool_name:
+        return False
+    if tool_name in exclude_tools:
+        return True
+    folded = tool_name.casefold()
+    return any(fnmatch.fnmatchcase(folded, pattern.casefold()) for pattern in exclude_tools)
+
 
 # Tool names recognized as Read/Edit/Write for lifecycle tracking
 _READ_TOOL_NAMES: frozenset[str] = frozenset({"Read", "read"})
@@ -281,7 +305,7 @@ class CCRConfig:
     - Zero-risk compression: worst case = LLM retrieves what it needs
 
     GOTCHAS:
-    - Cache has TTL (default 300 seconds) - retrieval fails after expiration
+    - Cache has TTL (default 1800 seconds) - retrieval fails after expiration
     - Memory usage: ~1KB per cached entry
     - Only works with array compression (not string truncation)
     """

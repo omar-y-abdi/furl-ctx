@@ -44,11 +44,13 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..ccr import marker_grammar
+from ..ccr.tool_injection import CCR_TOOL_NAME
 from ..config import (
     DEFAULT_EXCLUDE_TOOLS,
     CompressRequest,
     ReadLifecycleConfig,
     TransformResult,
+    is_tool_excluded,
 )
 from ..tokenizer import Tokenizer
 from ..utils import concat_text_parts
@@ -113,6 +115,27 @@ _RETRIEVE_HINT_PATTERN = re.compile(
 # eligibility set so the router's protection gates (excluded tools, error
 # outputs, tool bias) fire for BOTH shapes (COR-48).
 _TOOL_ROLES = frozenset({"tool", "function"})
+
+# Retrieval-loop guard (P0-5): the CCR retrieval tool's outputs ARE the
+# originals the engine previously compressed. Compressing them again would
+# mint a fresh retrieval marker for content the model just asked to see —
+# a compress → retrieve → compress ping-pong. These names are excluded
+# UNCONDITIONALLY: unioned into every effective exclusion set (even a
+# caller-supplied ``exclude_tools`` override, including ``set()``) and
+# immune to the read-protection-window age decay. Covers both retrieval
+# channels: direct tool injection (``furl_retrieve``) and the MCP server
+# under any server alias (``mcp__<server>__furl_retrieve``).
+ALWAYS_EXCLUDE_TOOLS: frozenset[str] = frozenset(
+    {
+        CCR_TOOL_NAME,
+        f"mcp__*__{CCR_TOOL_NAME}",
+    }
+)
+
+
+def _is_retrieval_tool(tool_name: str) -> bool:
+    """True iff *tool_name* is the CCR retrieval tool on any channel."""
+    return is_tool_excluded(tool_name, ALWAYS_EXCLUDE_TOOLS)
 
 
 def _word_count(text: str) -> int:
@@ -514,7 +537,11 @@ class ContentRouterConfig:
     ccr_offload_fallback: bool = True
 
     # Tools to exclude from compression (output passed through unmodified)
-    # Set to None to use DEFAULT_EXCLUDE_TOOLS, or provide custom set
+    # Set to None to use DEFAULT_EXCLUDE_TOOLS, or provide custom set.
+    # Entries match case-insensitively and may be fnmatch-style globs
+    # (e.g. "mcp__*"). The CCR retrieval tool (ALWAYS_EXCLUDE_TOOLS) is
+    # excluded unconditionally on top of whatever is configured here —
+    # overriding this field cannot re-enable retrieval-output compression.
     exclude_tools: set[str] | None = None
 
     # Read lifecycle management (stale/superseded detection)
@@ -1412,14 +1439,21 @@ class ContentRouter(Transform):
         # Build tool name map for exclusion checking
         tool_name_map = self._build_tool_name_map(messages)
 
-        # Compute excluded tool IDs based on config
+        # Compute excluded tool IDs based on config. The CCR retrieval tool
+        # is unioned in UNCONDITIONALLY (retrieval-loop guard) — a caller
+        # override, even ``exclude_tools=set()``, must not re-enable
+        # compress→retrieve→compress ping-pong. New frozenset: the caller's
+        # set is never mutated. Matching is case-insensitive with
+        # fnmatch-style glob support (is_tool_excluded).
         exclude_tools = (
-            self.config.exclude_tools
+            frozenset(self.config.exclude_tools)
             if self.config.exclude_tools is not None
             else DEFAULT_EXCLUDE_TOOLS
-        )
+        ) | ALWAYS_EXCLUDE_TOOLS
         excluded_tool_ids = {
-            tool_id for tool_id, name in tool_name_map.items() if name in exclude_tools
+            tool_id
+            for tool_id, name in tool_name_map.items()
+            if is_tool_excluded(name, exclude_tools)
         }
 
         # --- Adaptive parameters based on context pressure ---
@@ -1533,8 +1567,13 @@ class ContentRouter(Transform):
                     )
                     if (
                         tool_call_id in excluded_tool_ids
-                        or (tool_name and tool_name in exclude_tools)
-                    ) and messages_from_end <= read_protection_window:
+                        or (tool_name and is_tool_excluded(tool_name, exclude_tools))
+                    ) and (
+                        messages_from_end <= read_protection_window
+                        # Retrieval-loop guard: retrieval outputs never age
+                        # out of protection (recompression re-opens the loop).
+                        or _is_retrieval_tool(tool_name)
+                    ):
                         result_slots[i] = message
                         transforms_applied.append("router:excluded:tool")
                         route_counts["excluded_tool"] += 1
@@ -1579,9 +1618,13 @@ class ContentRouter(Transform):
                 tool_name = tool_name_map.get(tool_call_id, "") or str(
                     message.get("name", "") or ""
                 )
-                if tool_call_id in excluded_tool_ids or (tool_name and tool_name in exclude_tools):
-                    if messages_from_end <= read_protection_window:
-                        # Recent — protect as before
+                if tool_call_id in excluded_tool_ids or (
+                    tool_name and is_tool_excluded(tool_name, exclude_tools)
+                ):
+                    if messages_from_end <= read_protection_window or _is_retrieval_tool(tool_name):
+                        # Recent — protect as before. Retrieval-tool outputs
+                        # are protected regardless of age: recompressing them
+                        # re-opens the compress→retrieve→compress loop.
                         result_slots[i] = message
                         transforms_applied.append("router:excluded:tool")
                         route_counts["excluded_tool"] += 1
@@ -1918,7 +1961,7 @@ class ContentRouter(Transform):
                 bump("ratio_too_high", "cache_hit")
                 return _SERVE_ORIGINAL
             # Invariant: every <<ccr:HASH>> in a served output must be backed by
-            # a live CCR store entry. Both CCR stores (Rust + Python, 300s TTL)
+            # a live CCR store entry. Both CCR stores (Rust + Python, 1800s TTL)
             # expire independently of this result cache (30-min TTL). Re-mirror
             # to refresh the backing; if a sentinel is unbackable (both CCR
             # stores expired), DO NOT serve the stale dead pointer — evict and
@@ -2207,8 +2250,11 @@ class ContentRouter(Transform):
                 # Check if tool is excluded from compression
                 tool_use_id = block.get("tool_use_id", "")
                 if tool_use_id in excluded_tool_ids:
-                    if messages_from_end <= read_protection_window:
-                        # Recent — protect as before
+                    if messages_from_end <= read_protection_window or _is_retrieval_tool(
+                        (tool_name_map or {}).get(tool_use_id, "")
+                    ):
+                        # Recent — protect as before. Retrieval-tool outputs
+                        # never age out (retrieval-loop guard).
                         new_blocks.append(block)
                         transforms_applied.append("router:excluded:tool")
                         if route_counts is not None:
