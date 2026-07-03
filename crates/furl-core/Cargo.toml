@@ -11,14 +11,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tiktoken-rs = "0.11"
+tiktoken-rs = "0.12"
 # `md5` for the CCR cache_key. Python's compression_store hashes the original
 # diff with MD5 truncated to 24 hex chars; we must match byte-for-byte.
 md-5 = "0.10"
 # `sha2` for `hash_field_name` (SHA256 truncated to 8 hex chars) and the
 # crusher's row hashes (sha256[:6]). Python uses `hashlib.sha256` so we
 # need byte-exact parity.
-sha2 = "0.10"
+sha2 = "0.11"
 # `dashmap` for the CCR storage backend. Concurrent HashMap with sharded
 # locking — distinct keys hashed to different shards never contend, so
 # concurrent multi-threaded load doesn't queue on a single Mutex. Lock-free
