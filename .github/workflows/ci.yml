@@ -64,7 +64,13 @@ jobs:
               - 'Cargo.lock'
               - 'tests/**'
               - 'scripts/**'
-              - '.github/workflows/ci.yml'
+              # ALL workflow files, not just ci.yml: the main ruleset
+              # requires lint/build-wheel/test to CONCLUDE on every PR,
+              # and a skipped required check does NOT satisfy a ruleset
+              # — a workflow-only PR (e.g. release.yml) would otherwise
+              # sit BLOCKED forever with everything green-or-skipped
+              # (first hit: PR #15).
+              - '.github/workflows/**'
 
   lint:
     needs: changes
