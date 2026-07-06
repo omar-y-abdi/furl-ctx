@@ -1,13 +1,25 @@
 """Content-level compression engine for the content router.
 
-Extracted from ``content_router.py`` (§4.1 S5). Owns compressing ONE string:
-strategy determination, the pure/mixed paths, the per-strategy dispatch (via
-the owned :class:`StrategyDispatcher` + :class:`CompressorRegistry`), the
-empty-output guard, the reversible CCR-offload fallback, and the observer
-plumbing (the TOIN successor — one ``record_compression`` per routing
-decision). Zero message/dict knowledge; stateless per call. The engine's
-result types (:class:`RoutingDecision` / :class:`RouterCompressionResult`)
-live here and are re-exported by ``content_router`` for back-compat.
+Extracted from ``content_router.py`` (§4.1 S5). :class:`ContentCompressionEngine`
+owns compressing ONE string: strategy determination, the pure/mixed paths, the
+per-strategy dispatch (via the owned :class:`StrategyDispatcher` +
+:class:`CompressorRegistry`), the empty-output guard, the reversible CCR-offload
+fallback, and the observer plumbing (the TOIN successor — one
+``record_compression`` per routing decision). That class has zero message/dict
+knowledge and is stateless per call. The engine's result types
+(:class:`RoutingDecision` / :class:`RouterCompressionResult`) live here and are
+re-exported by ``content_router`` for back-compat.
+
+This module ALSO hosts :func:`run_router_passes` — the message-level ``apply()``
+orchestration (the Pass-1 ``classify_message`` walk, the parallel Pass-2/3
+executor call, and the result-assembly/summary tail). It is a sibling FREE
+FUNCTION, deliberately NOT a method of :class:`ContentCompressionEngine`: it
+takes the router facade as ``hooks`` and mutates message/dict/counter state, so
+folding it into the engine would break that class's zero-message-knowledge
+contract. Like the engine, it late-binds ``content_router`` module globals
+(``_detect_content`` / ``_result_cache_key`` / ``_APPLY_ALLOWED_KWARGS`` /
+``logger``) through :func:`_cr` so the test suite's module-level monkeypatches
+keep biting.
 
 Two injection planes keep every existing monkeypatch biting:
 
@@ -36,13 +48,39 @@ Two injection planes keep every existing monkeypatch biting:
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ..config import (
+    DEFAULT_EXCLUDE_TOOLS,
+    CompressRequest,
+    TransformResult,
+    is_tool_excluded,
+)
+from ..tokenizer import Tokenizer
 from .compressor_registry import CompressorRegistry
-from .content_detector import ContentType
+from .content_detector import ContentType, DetectionResult
+from .net_mutation_gain import MutationContext, net_mutation_gain
+from .router_cache import (
+    CacheKey,
+    Recompute,
+    ServeCached,
+    ServeOriginal,
+)
 from .router_dispatch import StrategyDispatcher
+from .router_message_policy import (
+    ALWAYS_EXCLUDE_TOOLS,
+    AlreadyCompressed,
+    Compressible,
+    ContentBlocks,
+    Frozen,
+    NonString,
+    ProtectedMsg,
+    Small,
+    classify_message,
+)
 from .router_policy import CompressionStrategy
 
 if TYPE_CHECKING:
@@ -50,8 +88,7 @@ if TYPE_CHECKING:
 
     from .base import CompressionObserver
     from .code_aware_compressor import CodeAwareCompressor
-    from .content_detector import DetectionResult
-    from .content_router import ContentRouterConfig
+    from .content_router import ContentRouter, ContentRouterConfig
     from .diff_compressor import DiffCompressor
     from .log_compressor import LogCompressor
     from .search_compressor import SearchCompressor
@@ -808,3 +845,438 @@ class ContentCompressionEngine:
             get_code_aware_compressor=hooks._get_code_aware_compressor,
             token_counter=token_counter,
         )
+
+
+def run_router_passes(
+    hooks: ContentRouter,
+    messages: list[dict[str, Any]],
+    tokenizer: Tokenizer,
+    **kwargs: Any,
+) -> TransformResult:
+    """Apply intelligent routing to messages.
+
+    Args:
+        messages: Messages to transform.
+        tokenizer: Tokenizer for counting.
+        **kwargs: Additional arguments (context).
+
+    Returns:
+        TransformResult with routed and compressed messages.
+
+    Raises:
+        TypeError: If ``kwargs`` contains a key not in
+            ``_APPLY_ALLOWED_KWARGS``. Catches silent typos (e.g.
+            ``protect_recents``) that would otherwise be dropped by the
+            ``kwargs.get(...)`` reads below.
+    """
+    # Reject unknown kwargs up front so a typo fails loudly instead of
+    # being silently ignored. See _APPLY_ALLOWED_KWARGS for the two
+    # sources of the allow-list (keys read here ∪ keys broadcast by the
+    # pipeline to every transform).
+    for k in kwargs:
+        if k not in _cr()._APPLY_ALLOWED_KWARGS:
+            raise TypeError(f"ContentRouter.apply() got an unexpected keyword argument {k!r}")
+
+    # Pre-process: Read lifecycle management (stale/superseded detection)
+    if hooks.config.read_lifecycle.enabled:
+        from .read_lifecycle import ReadLifecycleManager
+
+        lifecycle_mgr = ReadLifecycleManager(
+            hooks.config.read_lifecycle,
+            compression_store=kwargs.get("compression_store"),
+        )
+        lifecycle_result = lifecycle_mgr.apply(
+            messages,
+            frozen_message_count=kwargs.get("frozen_message_count", 0),
+        )
+        messages = lifecycle_result.messages
+        # lifecycle transforms tracked separately, merged at the end
+        lifecycle_transforms = lifecycle_result.transforms_applied
+        lifecycle_ccr_hashes = lifecycle_result.ccr_hashes
+    else:
+        lifecycle_transforms = []
+        lifecycle_ccr_hashes = []
+
+    # Runtime overrides from CompressConfig (via kwargs from compress())
+    # These override hooks.config defaults for this call only.
+    skip_user = kwargs.get("compress_user_messages") is not True and hooks.config.skip_user_messages
+    skip_system = kwargs.get("compress_system_messages") is not True
+    protect_recent = kwargs.get("protect_recent", hooks.config.protect_recent_code)
+    protect_analysis = kwargs.get("protect_analysis_context", hooks.config.protect_analysis_context)
+    # Read the per-request min-token floor from the typed CompressRequest
+    # built once at the TransformPipeline boundary. That boundary unifies
+    # the two PUBLIC entry paths — compress() and
+    # TransformPipeline.apply(**kwargs) — to one default (250), fixing the
+    # divergence where direct-pipeline callers silently got 50.
+    compress_request = kwargs.get("compress_request")
+    if isinstance(compress_request, CompressRequest):
+        min_tokens = compress_request.min_tokens_to_compress
+    else:
+        # Raw ContentRouter.apply() (no pipeline boundary, e.g. low-level
+        # tests): preserve the historical direct-caller floor of 50. This
+        # path is behavior-identical to before — the worker-options pinning
+        # test compresses 122-token fixtures through it and depends on the
+        # 50 floor letting compression happen.
+        min_tokens = kwargs.get("min_tokens_to_compress", 50)
+    # Cache-safety knobs for content-block (Anthropic-format) handling:
+    compress_assistant_text_blocks = kwargs.get(
+        "compress_assistant_text_blocks",
+        hooks.config.compress_assistant_text_blocks,
+    )
+    min_chars_for_block_compression = kwargs.get(
+        "min_chars_for_block_compression",
+        hooks.config.min_chars_for_block_compression,
+    )
+
+    # Real message-shape counting (COR-39): ``count_messages`` handles
+    # block-list content part-by-part (text payloads, image budgets,
+    # tool_result payloads). The old ``count_text(str(content))`` tokenized
+    # the Python repr of block lists — inflated fictions that also skewed
+    # the context_pressure → min_ratio derivation below.
+    tokens_before = tokenizer.count_messages(messages)
+    context = kwargs.get("context", "")
+    hook_biases: dict[int, float] = kwargs.get("biases") or {}
+
+    # Build tool name map for exclusion checking
+    tool_name_map = hooks._build_tool_name_map(messages)
+
+    # Compute excluded tool IDs based on config. The CCR retrieval tool
+    # is unioned in UNCONDITIONALLY (retrieval-loop guard) — a caller
+    # override, even ``exclude_tools=set()``, must not re-enable
+    # compress→retrieve→compress ping-pong. New frozenset: the caller's
+    # set is never mutated. Matching is case-insensitive with
+    # fnmatch-style glob support (is_tool_excluded).
+    exclude_tools = (
+        frozenset(hooks.config.exclude_tools)
+        if hooks.config.exclude_tools is not None
+        else DEFAULT_EXCLUDE_TOOLS
+    ) | ALWAYS_EXCLUDE_TOOLS
+    excluded_tool_ids = {
+        tool_id for tool_id, name in tool_name_map.items() if is_tool_excluded(name, exclude_tools)
+    }
+
+    # --- Adaptive parameters based on context pressure ---
+    num_messages = len(messages)
+    model_limit = kwargs.get("model_limit", 0)
+
+    # net_mutation_gain (NR2-4): one reversed cumulative sum of
+    # per-message token counts, computed ONLY when the gate is enabled
+    # (zero cost when off). suffix_tokens[i] = tokens AFTER message i —
+    # what loses its provider cache discount if message i's bytes change.
+    suffix_tokens: list[int] | None = None
+    if hooks.config.enable_net_mutation_gate:
+        per_msg = [tokenizer.count_messages([m]) for m in messages]
+        suffix_tokens = [0] * num_messages
+        running = 0
+        for j in range(num_messages - 1, -1, -1):
+            suffix_tokens[j] = running
+            running += per_msg[j]
+
+    # Adaptive Read protection: protect a fraction of recent messages
+    if hooks.config.protect_recent_reads_fraction > 0:
+        # Scale: at 10 msgs protect 5, at 50 msgs protect 25, at 200 msgs protect 100
+        # But cap at a reasonable floor so very short convos still protect everything
+        read_protection_window = max(
+            4,  # always protect at least last 4 messages
+            int(num_messages * hooks.config.protect_recent_reads_fraction),
+        )
+    else:
+        read_protection_window = num_messages  # 0.0 = protect all (old behavior)
+    runtime_read_protection_window = kwargs.get("read_protection_window")
+    if runtime_read_protection_window is not None:
+        read_protection_window = max(0, int(runtime_read_protection_window))
+
+    # Adaptive compression ratio: scale with context pressure
+    if model_limit > 0:
+        context_pressure = min(1.0, tokens_before / model_limit)
+    else:
+        context_pressure = 0.5  # default: moderate
+
+    min_ratio = hooks._adaptive_min_ratio(context_pressure)
+
+    if context_pressure > 0.3:
+        _cr().logger.debug(
+            "content_router adaptive: pressure=%.2f, min_ratio=%.2f, "
+            "read_protect_window=%d/%d msgs",
+            context_pressure,
+            min_ratio,
+            read_protection_window,
+            num_messages,
+        )
+
+    transforms_applied: list[str] = []
+    warnings: list[str] = []
+    compressor_timing: dict[str, float] = {}  # strategy → cumulative ms
+
+    # Routing reason counters for summary logging (TYPE-4: a
+    # ``Counter[str]`` makes every ``+=`` total — conditionally-booked
+    # keys need no ``setdefault`` seeding). The eight hot lanes stay
+    # PRE-SEEDED at zero: the observer receives this object (a dict
+    # subclass) and the whole-dict route_counts pins depend on the zero
+    # keys being present exactly as before.
+    route_counts: Counter[str] = Counter(
+        {
+            "excluded_tool": 0,
+            "user_msg": 0,
+            "small": 0,
+            "recent_code": 0,
+            "analysis_ctx": 0,
+            "ratio_too_high": 0,
+            "non_string": 0,
+            "content_blocks": 0,
+        }
+    )
+    compressed_details: list[str] = []  # e.g. ["smart_crusher:0.42", "log:0.65"]
+
+    # Check for analysis intent in the most recent user message
+    analysis_intent = False
+    if hooks.config.protect_analysis_context:
+        analysis_intent = hooks._detect_analysis_intent(messages)
+
+    frozen_message_count = kwargs.get("frozen_message_count", 0)
+
+    # ------------------------------------------------------------------
+    # Two-pass parallel compression.
+    #
+    # Pass 1 (sequential): categorise every message — frozen, protected,
+    #   cached, small, etc. are resolved immediately.  Cache-miss messages
+    #   that need full compression are collected into *pending_tasks*.
+    #
+    # Pass 2 (parallel): all cache-miss compressions run concurrently in
+    #   a thread pool.  Each hooks.compress() call is independent.
+    #
+    # Pass 3 (sequential): results are stitched back into message order,
+    #   caches updated, and counters incremented.
+    # ------------------------------------------------------------------
+
+    # Pre-allocate result slots — None means "pending compression".
+    result_slots: list[dict[str, Any] | None] = [None] * num_messages
+
+    # Tasks: (slot_index, content, context, bias, content_key, detection)
+    # — ``detection`` is the classify-time DetectionResult when a Pass-1
+    # gate already paid for it, else None (PERF-2c).
+    _PendingTask = tuple[int, str, str, float, CacheKey, DetectionResult | None]
+    pending_tasks: list[_PendingTask] = []
+
+    # Pass 1 dispatches on the MessageDisposition ADT: WHAT happens to a
+    # message is decided by the pure gate chain in
+    # ``router_message_policy.classify_message`` (order preserved verbatim
+    # — it is behavior); HOW it happens (slot assignment, transform
+    # strings, counters, the cache gate, Pass-2 deferral) stays here.
+    # The injected callables are resolved fresh on every call so the test
+    # suite's monkeypatches — ``content_router_module._detect_content``,
+    # ``router._get_tool_bias`` — keep biting.
+    for i, message in enumerate(messages):
+        content = message.get("content", "")
+        disposition = classify_message(
+            message,
+            index=i,
+            num_messages=num_messages,
+            frozen_message_count=frozen_message_count,
+            tool_name_map=tool_name_map,
+            excluded_tool_ids=excluded_tool_ids,
+            exclude_tools=exclude_tools,
+            read_protection_window=read_protection_window,
+            skip_user=skip_user,
+            skip_system=skip_system,
+            min_tokens=min_tokens,
+            protect_recent=protect_recent,
+            protect_analysis=protect_analysis,
+            analysis_intent=analysis_intent,
+            hook_biases=hook_biases,
+            config=hooks.config,
+            count_text=tokenizer.count_text,
+            detect_content=_cr()._detect_content,
+            get_tool_bias=hooks._get_tool_bias,
+            get_feedback_hints=hooks._get_feedback_hints,
+            result_cache_key=_cr()._result_cache_key,
+        )
+        match disposition:
+            case Frozen():
+                # In the provider's prefix cache: byte-identical, no
+                # bookkeeping of any kind.
+                result_slots[i] = message
+            case ProtectedMsg(transform=transform, counter=counter):
+                result_slots[i] = message
+                transforms_applied.append(transform)
+                route_counts[counter] += 1
+            case ContentBlocks():
+                # Anthropic-format block list — walk the blocks.
+                result_slots[i] = hooks._process_content_blocks(
+                    message,
+                    content,
+                    context,
+                    transforms_applied,
+                    excluded_tool_ids,
+                    tool_name_map=tool_name_map,
+                    route_counts=route_counts,
+                    compressed_details=compressed_details,
+                    min_ratio=min_ratio,
+                    read_protection_window=read_protection_window,
+                    messages_from_end=num_messages - i,
+                    compressor_timing=compressor_timing,
+                    min_chars=min_chars_for_block_compression,
+                    skip_user=skip_user,
+                    skip_system=skip_system,
+                    compress_assistant_text_blocks=compress_assistant_text_blocks,
+                    token_counter=tokenizer.count_text,
+                )
+                route_counts["content_blocks"] += 1
+            case NonString():
+                result_slots[i] = message
+                route_counts["non_string"] += 1
+            case Small():
+                result_slots[i] = message
+                route_counts["small"] += 1
+            case AlreadyCompressed():
+                result_slots[i] = message
+                route_counts["already_compressed"] += 1
+            case Compressible(bias=msg_bias, content_key=content_key, detection=detection):
+                # Two-tier compression cache. The lookup DECISION — Tier-1
+                # skip, Tier-2 ratio-gate, CCR-backing check, plus every
+                # cache mutation and routing-counter bump — is shared with
+                # the content-block path in _lookup_cached_disposition.
+                # Only what genuinely differs stays here: this path formats
+                # a flat ``router:{strategy}:{ratio}`` transform and DEFERS
+                # recompute to the batched ThreadPoolExecutor pass below
+                # (pending_tasks → Pass 2/3), whereas
+                # _compress_content_block threads a
+                # ``router:{label}:{strategy}`` format and recompresses
+                # inline. Outcomes pinned in
+                # test_content_router_cache_lookup_paths.py +
+                # test_result_cache_ccr_divergence.py. The key carries the
+                # per-request bias and a length guard — see
+                # _result_cache_key (COR-18).
+                match hooks._lookup_cached_disposition(
+                    content_key, context, min_ratio, route_counts
+                ):
+                    case ServeOriginal():
+                        result_slots[i] = message
+                    case ServeCached(compressed=served, strategy=strategy, ratio=ratio):
+                        # net_mutation_gain gate ALSO applies to cache
+                        # hits: the result cache is content-keyed but the
+                        # gate is POSITION-dependent (same bytes, larger
+                        # suffix → different economics), so it must be
+                        # re-evaluated at every serve site.
+                        gate_gain = (
+                            net_mutation_gain(
+                                tokenizer.count_text(content) - tokenizer.count_text(served),
+                                MutationContext(suffix_tokens[i]),
+                                hooks.config.cached_token_rate,
+                            )
+                            if suffix_tokens is not None
+                            else None
+                        )
+                        if gate_gain is not None and gate_gain <= 0:
+                            result_slots[i] = message
+                            route_counts["net_mutation_gate"] += 1
+                        else:
+                            result_slots[i] = {**message, "content": served}
+                            transforms_applied.append(f"router:{strategy}:{ratio:.2f}")
+                            compressed_details.append(f"{strategy}:{ratio:.2f}")
+                    case Recompute():
+                        # Defer to the parallel compression pass (Pass 2/3).
+                        pending_tasks.append(
+                            (i, content, context, msg_bias, content_key, detection)
+                        )
+                    case other:
+                        raise RuntimeError(
+                            f"_lookup_cached_disposition returned unexpected "
+                            f"CacheDisposition {other!r}"
+                        )
+            case other:
+                raise RuntimeError(
+                    f"classify_message returned unexpected MessageDisposition {other!r}"
+                )
+
+    # --- Pass 2/3: parallel compression of all cache-miss messages,
+    # merged back in message order (extracted executor — §4.1 S6).
+    if pending_tasks:
+        hooks._compress_pending(
+            pending_tasks,
+            messages,
+            result_slots,
+            min_ratio=min_ratio,
+            token_counter=tokenizer.count_text,
+            transforms_applied=transforms_applied,
+            compressed_details=compressed_details,
+            route_counts=route_counts,
+            compressor_timing=compressor_timing,
+            suffix_tokens=suffix_tokens,
+        )
+
+    # Build final message list from slots
+    transformed_messages = [m for m in result_slots if m is not None]
+
+    tokens_after = tokenizer.count_messages(transformed_messages)
+
+    # Log routing summary
+    parts = []
+    if compressed_details:
+        parts.append(f"{len(compressed_details)} compressed ({', '.join(compressed_details)})")
+    if route_counts["excluded_tool"]:
+        parts.append(f"{route_counts['excluded_tool']} excluded (Read/Glob)")
+    if route_counts["user_msg"]:
+        parts.append(f"{route_counts['user_msg']} skipped (user)")
+    if route_counts["small"]:
+        parts.append(f"{route_counts['small']} skipped (<50 words)")
+    if route_counts["recent_code"]:
+        parts.append(f"{route_counts['recent_code']} protected (recent code)")
+    if route_counts["analysis_ctx"]:
+        parts.append(f"{route_counts['analysis_ctx']} protected (analysis ctx)")
+    if route_counts.get("already_compressed"):
+        parts.append(f"{route_counts['already_compressed']} pinned (already compressed)")
+    if route_counts.get("error_protected"):
+        parts.append(f"{route_counts['error_protected']} protected (error output)")
+    if route_counts.get("feedback_skip"):
+        parts.append(f"{route_counts['feedback_skip']} protected (retrieval feedback)")
+    if route_counts["ratio_too_high"]:
+        parts.append(f"{route_counts['ratio_too_high']} unchanged (ratio>={min_ratio:.2f})")
+    if route_counts.get("net_mutation_gate"):
+        parts.append(f"{route_counts['net_mutation_gate']} unchanged (net mutation gate)")
+    if route_counts["content_blocks"]:
+        parts.append(f"{route_counts['content_blocks']} content-block msgs")
+    if route_counts.get("nested_blocks"):
+        parts.append(f"{route_counts['nested_blocks']} nested-block tool_results")
+    if route_counts["non_string"]:
+        parts.append(f"{route_counts['non_string']} non-string")
+    if route_counts.get("cache_hit"):
+        parts.append(f"{route_counts['cache_hit']} cache hits")
+    if route_counts.get("cache_miss"):
+        parts.append(f"{route_counts['cache_miss']} cache misses")
+    cs = hooks._cache.stats
+    if cs["cache_size"] > 0 or cs["cache_skip_size"] > 0:
+        parts.append(
+            f"cache[{cs['cache_size']} results, {cs['cache_skip_size']} skips, "
+            f"{cs['cache_avg_lookup_ns']:.0f}ns avg]"
+        )
+    if parts:
+        _cr().logger.info(
+            "content_router: %d msgs — %s",
+            num_messages,
+            ", ".join(parts),
+        )
+
+    # Forward route_counts to the observer so `/stats` can surface a
+    # session-level protection breakdown. The observer
+    # may not implement this method on older versions; ignore
+    # AttributeError so a non-conforming observer doesn't poison
+    # routing.
+    if hooks._observer is not None and route_counts:
+        try:
+            hooks._observer.record_router_route_counts(route_counts)
+        except AttributeError:
+            pass
+        except Exception as e:  # pragma: no cover - defensive
+            _cr().logger.debug("Router observer raised (non-fatal): %s", e)
+
+    all_transforms = lifecycle_transforms + transforms_applied
+    return TransformResult(
+        messages=transformed_messages,
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        transforms_applied=all_transforms if all_transforms else ["router:noop"],
+        markers_inserted=lifecycle_ccr_hashes,
+        warnings=warnings,
+        timing=compressor_timing,
+    )
