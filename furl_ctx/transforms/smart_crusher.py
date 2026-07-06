@@ -81,47 +81,16 @@ _CONTEXT_MAX_ASSISTANT_MESSAGES = 10  # assistant tool-call-argument scans
 _CONTEXT_MAX_TOTAL_CHARS = 8000  # hard bound on collected query-context chars
 
 
-# ─── §4.2 R5: typed-refs union safety net ─────────────────────────────────
+# ─── §4.2 typed-refs recovery ─────────────────────────────────────────────
 #
-# All six mirror sites consume TYPED refs (``dropped_refs`` /
+# Every fresh-output mirror site consumes TYPED refs (``dropped_refs`` /
 # ``smart_crush_content_typed`` / ``compact_document_json_typed``) as the
-# primary recovery path. For ONE RELEASE each site additionally runs the
-# legacy text scrape and mirrors the UNION (typed ∪ scraped): any hash
-# the scrape finds that the typed path did not carry is a typed-path bug
-# caught loudly (``logger.error`` + this counter) BEFORE it could become
-# silent recovery loss — and the net still mirrors it best-effort, so
-# recovery behavior never regresses while the net is up. It must never
-# fire, with one documented exception: payloads QUOTING literal
-# ``<<ccr:...>>`` text (the scrape's false-positive class — the engine
-# never emitted those markers, so the typed path rightly omits them; the
-# best-effort mirror then misses the fake hash in the Rust store and
-# debug-skips, exactly like the pre-§4.2 scrape did).
-#
-# §4.2 R6 (deliberately deferred one release) deletes the net and the
-# then-orphaned scrape machinery.
-
-_SCRAPE_ONLY_HASH_COUNT = 0
-
-
-def get_scrape_only_hash_count() -> int:
-    """Number of scrape-only hashes the §4.2 R5 union net has caught in
-    this process (see the net's comment block above). Nonzero means
-    either a typed-path bug (investigate!) or payloads quoting literal
-    ``<<ccr:...>>`` text. Exposed for tests and operational checks."""
-    return _SCRAPE_ONLY_HASH_COUNT
-
-
-def _record_scrape_only_hash(site: str, ccr_hash: str) -> None:
-    """Count + loudly log one scrape-only hash (typed-path bug detector)."""
-    global _SCRAPE_ONLY_HASH_COUNT
-    _SCRAPE_ONLY_HASH_COUNT += 1
-    logger.error(
-        "CCR typed-refs union net: %s found scrape-only hash %s — the typed "
-        "path did not carry it. Either a typed-path bug (report it) or the "
-        "payload quotes literal <<ccr:...>> text. Mirroring best-effort.",
-        site,
-        ccr_hash,
-    )
+# sole recovery path — the engine surfaces exactly the hashes it dropped,
+# so nothing is re-parsed out of rendered text. (§4.2 R6 removed the
+# one-release union safety net that briefly cross-checked a legacy text
+# scrape; the soak counter stayed 0, confirming the typed path is complete.
+# The text scrape survives ONLY as the result-cache re-mirror bridge below,
+# where cached rendered prompt text carries no typed refs.)
 
 
 class CcrMirrorError(RuntimeError):
@@ -474,21 +443,11 @@ class SmartCrusher(Transform):
         # propagate by design) to `compress()`'s fail-open boundary, which
         # reverts to the ORIGINAL uncompressed messages so the reduction
         # never stands without a recovery copy.
-        typed_keys = self._mirror_typed_refs(
+        self._mirror_typed_refs(
             r.dropped_refs,
             strategy="smart_crusher_row_drop",
             query_context=query,
             tool_name=None,
-        )
-        # One-release union net: scrape-only hashes are a typed-path bug
-        # alarm (see the module-level net comment block).
-        self._mirror_union_scrape_net(
-            r.compressed,
-            typed_keys,
-            strategy=r.strategy,
-            query_context=query,
-            tool_name=None,
-            site="crush",
         )
         return CrushResult(
             compressed=r.compressed,
@@ -503,11 +462,9 @@ class SmartCrusher(Transform):
         strategy: str,
         query_context: str,
         tool_name: str | None,
-    ) -> set[str]:
+    ) -> None:
         """Mirror every typed ``DroppedRef`` into the Python
-        compression_store (§4.2 R5) and return the set of store keys the
-        refs cover (hashes + bare ``HASH#rows`` index keys) for the union
-        net's scrape comparison.
+        compression_store (§4.2 R5).
 
         Row-drop refs mirror the whole-blob hash and expand the granular
         row index (proportional retrieval); opaque refs mirror the
@@ -515,9 +472,7 @@ class SmartCrusher(Transform):
         surfaced these refs, so a Rust store miss is a dangling marker —
         `CcrMirrorError`, not a debug-skip (COR-5).
         """
-        covered: set[str] = set()
         for ref in refs:
-            covered.add(ref.hash)
             self._mirror_single_hash_to_python_store(
                 ref.hash,
                 strategy=strategy,
@@ -527,7 +482,6 @@ class SmartCrusher(Transform):
             )
             index_key = ref.row_index_key
             if index_key is not None:
-                covered.add(index_key)
                 self._mirror_row_index_to_python_store(
                     index_key,
                     strategy=strategy,
@@ -535,41 +489,6 @@ class SmartCrusher(Transform):
                     tool_name=tool_name,
                     typed=True,
                 )
-        return covered
-
-    def _mirror_union_scrape_net(
-        self,
-        rendered: str,
-        typed_keys: set[str],
-        strategy: str,
-        query_context: str,
-        tool_name: str | None,
-        site: str,
-    ) -> None:
-        """One-release §4.2 R5 union net: scrape ``rendered`` with the
-        full legacy walker and, for every hash the typed refs did NOT
-        cover, alarm (`logger.error` + counter) and mirror it best-effort
-        (``typed=False`` — the graceful-miss semantics the scrape always
-        had). Typed ∪ scraped is therefore mirrored while the net is up;
-        a scrape-only hash must never occur (see the module-level net
-        comment for the one documented false-positive class)."""
-        # Cheap pre-filter — most outputs carry no marker at all.
-        if "<<ccr:" not in rendered:
-            return
-        scraped: set[str] = set()
-        try:
-            parsed = json.loads(rendered)
-            self._collect_ccr_hashes(parsed, scraped)
-        except (json.JSONDecodeError, ValueError):
-            self._collect_ccr_hashes_from_string(rendered, scraped)
-        for h in sorted(scraped - typed_keys):
-            _record_scrape_only_hash(site, h)
-            self._mirror_single_hash_to_python_store(
-                h,
-                strategy=strategy,
-                query_context=query_context,
-                tool_name=tool_name,
-            )
 
     def crush_array_json(
         self,
@@ -593,33 +512,12 @@ class SmartCrusher(Transform):
         # `compacted` — arrives TYPED on `dropped_refs` (§4.2 R5). Mirror
         # them directly; nothing is re-parsed out of the rendered text.
         strategy = str(result.get("strategy_info") or "smart_crusher_row_drop")
-        typed_keys = self._mirror_typed_refs(
+        self._mirror_typed_refs(
             list(result.get("dropped_refs") or []),
             strategy=strategy,
             query_context=query,
             tool_name=None,
         )
-        # One-release union net over both rendered forms.
-        kept_json = result.get("items")
-        if isinstance(kept_json, str):
-            self._mirror_union_scrape_net(
-                kept_json,
-                typed_keys,
-                strategy=strategy,
-                query_context=query,
-                tool_name=None,
-                site="crush_array_json.items",
-            )
-        compacted = result.get("compacted")
-        if isinstance(compacted, str):
-            self._mirror_union_scrape_net(
-                compacted,
-                typed_keys,
-                strategy=strategy,
-                query_context=query,
-                tool_name=None,
-                site="crush_array_json.compacted",
-            )
         return result
 
     def compact_document_json(self, doc_json: str) -> str:
@@ -638,19 +536,11 @@ class SmartCrusher(Transform):
         # including the ones column-encoding folds hide from the raw-text
         # scrape (see tests/typed_dropped_refs.rs for that discovery).
         compacted, refs = self._rust.compact_document_json_typed(doc_json)
-        typed_keys = self._mirror_typed_refs(
+        self._mirror_typed_refs(
             list(refs),
             strategy="smart_crusher_compact_document",
             query_context="",
             tool_name=None,
-        )
-        self._mirror_union_scrape_net(
-            compacted,
-            typed_keys,
-            strategy="smart_crusher_compact_document",
-            query_context="",
-            tool_name=None,
-            site="compact_document_json",
         )
         result: str = compacted
         return result
@@ -694,24 +584,16 @@ class SmartCrusher(Transform):
         `SmartCrusher.apply()` path — historically the last 100%-scrape
         site — now receives every recovery ref typed (row-drops with
         bare index keys AND opaque substitutions) and mirrors them
-        directly; the one-release union net guards the transition.
+        directly; nothing is re-parsed out of the rendered text.
         """
         crushed, was_modified, info, refs = self._rust.smart_crush_content_typed(
             content, query_context, bias
         )
-        typed_keys = self._mirror_typed_refs(
+        self._mirror_typed_refs(
             list(refs),
             strategy=info or "smart_crusher",
             query_context=query_context,
             tool_name=tool_name,
-        )
-        self._mirror_union_scrape_net(
-            crushed,
-            typed_keys,
-            strategy=info or "smart_crusher",
-            query_context=query_context,
-            tool_name=tool_name,
-            site="smart_crush_content",
         )
         return crushed, was_modified, info
 
@@ -724,12 +606,12 @@ class SmartCrusher(Transform):
     # is a different store. Without an explicit bridge, every retrieve
     # call for a marker emitted by the Rust crusher misses.
     #
-    # Since §4.2 R5 the SIX fresh-output mirror sites consume TYPED refs
-    # (`_mirror_typed_refs` + the one-release `_mirror_union_scrape_net`)
-    # — the scrape below is no longer their primary path. It remains the
-    # bridge for the RESULT-CACHE plane (`router_ccr_mirror.CcrMirror`
-    # re-mirrors hashes parsed out of CACHED prompt text, where no typed
-    # refs exist) and supplies the union net's comparison walker.
+    # Since §4.2 the fresh-output mirror sites consume TYPED refs
+    # (`_mirror_typed_refs`) exclusively — the scrape below is NOT on that
+    # path at all. It survives ONLY as the bridge for the RESULT-CACHE
+    # plane (`router_ccr_mirror.CcrMirror` re-mirrors hashes parsed out of
+    # CACHED prompt text, where no typed refs exist). (§4.2 R6 removed the
+    # one-release union net that briefly also fed this walker.)
     #
     # The bridge is straight Rust→Python mirror: extract every
     # `<<ccr:HASH>>` hash from the rendered output, fetch the canonical
@@ -757,8 +639,8 @@ class SmartCrusher(Transform):
         first; if that fails we fall back to a non-regex token scan.
 
         Caller: the result-cache re-mirror plane
-        (`router_ccr_mirror.CcrMirror.remirror`), which parses CACHED
-        prompt text — typed refs do not exist there.
+        (`router_ccr_mirror.CcrMirror.ensure_ccr_backed`), which parses
+        CACHED prompt text — typed refs do not exist there.
         """
         # Cheap pre-filter — most outputs have no marker at all.
         if "<<ccr:" not in rendered:
@@ -875,12 +757,12 @@ class SmartCrusher(Transform):
 
     # ── OPAQUE-only scrape (comma shape) ──────────────────────────────────
     #
-    # Retained for the union net's tests and the typed-parity suite: the
-    # comma-delimited walk distinguishes the opaque marker shape
-    # (`<<ccr:HASH,KIND,SIZE>>`) from the space-delimited row-drop and
-    # `#rows` shapes. No production mirror path calls it since §4.2 R5 —
-    # all six fresh-output sites consume typed refs; the union net
-    # scrapes ALL shapes at once via `_collect_ccr_hashes`.
+    # Retained for the typed-parity suite: the comma-delimited walk
+    # distinguishes the opaque marker shape (`<<ccr:HASH,KIND,SIZE>>`)
+    # from the space-delimited row-drop and `#rows` shapes. No production
+    # mirror path calls it since §4.2 — all fresh-output sites consume
+    # typed refs; the result-cache bridge scrapes ALL shapes at once via
+    # `_collect_ccr_hashes`.
 
     @staticmethod
     def _collect_opaque_ccr_hashes_from_string(s: str, sink: set[str]) -> None:

@@ -590,7 +590,7 @@ kept as content (58 distinct latency-families remain).
 
 The core "same answers" claim — *every distinct item the engine drops or
 substitutes is recoverable by a consumer holding only the output* — was tested by
-an adversarial refute loop (`headroom-recoverability-refute` workflow: parallel
+an adversarial recoverability refutation loop (parallel
 skeptics each trying to construct a silent-loss counterexample, refute-by-default).
 It ran to convergence (loop-until-dry):
 

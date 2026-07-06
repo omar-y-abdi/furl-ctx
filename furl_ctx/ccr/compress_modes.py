@@ -44,9 +44,36 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+# ── ReDoS guards (SEC-1) ────────────────────────────────────────────────────
+# The include/exclude patterns are caller-supplied and run over caller-supplied
+# content, line by line. A catastrophically-backtracking pattern (e.g.
+# ``(a+)+$``) over a long line can wedge the single-threaded MCP process. This
+# is a single-principal stdio server, so the proportionate defense is a pair of
+# cheap, dependency-free caps rather than a wall-clock timeout (which would need
+# the third-party ``regex`` module):
+#
+# * ``_MAX_PATTERN_CHARS`` / the nested-quantifier heuristic reject pathological
+#   *patterns* at parse time (see ``_validate_pattern``);
+# * ``_MAX_REGEX_LINE_CHARS`` bounds the *input* any single match ever sees, so
+#   worst-case backtracking is finite and small.
+#
+# Both bounds sit far past realistic filter usage, so normal patterns and normal
+# content are matched byte-identically to before.
+_MAX_REGEX_LINE_CHARS = 10_000
+_MAX_PATTERN_CHARS = 200
+
+# Detects nested unbounded quantifiers — a quantified group whose body itself
+# ends in an unbounded quantifier — e.g. ``(a+)+``, ``(a*)*``, ``(a+)*``,
+# ``(.*)+``. This is the classic exponential-backtracking shape. Heuristic, not
+# a proof: it catches the common single-nesting forms, not every pathological
+# construction. The input cap above is the real backstop; this just fails the
+# obvious cases loudly at parse time instead of at match time.
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
 
 
 class CompressionMode(Enum):
@@ -175,42 +202,129 @@ class SectionPatterns:
             return False
         return any(_pattern_matches(pattern, tool_name) for pattern in self.exclude)
 
-    def line_is_eligible(self, line: str) -> bool:
+    def _resolve_matchers(self) -> _ResolvedMatchers:
+        """Compile every pattern to a matcher ONCE (SEC-1).
+
+        ``partition_content`` resolves these a single time per call and reuses
+        them across all lines, so a long input is not re-resolved per line.
+        """
+        return _ResolvedMatchers(
+            include=tuple(_resolve_matcher(p) for p in self.include),
+            exclude=tuple(_resolve_matcher(p) for p in self.exclude),
+        )
+
+    def line_is_eligible(self, line: str, matchers: _ResolvedMatchers | None = None) -> bool:
         """Whether a content line is eligible for compression.
 
         Protected (ineligible) when it matches any exclude pattern, or when
         ``include`` is non-empty and it matches none of the include patterns.
+        Pass pre-resolved ``matchers`` in a hot loop to avoid re-resolving the
+        patterns per line; when omitted they are resolved from ``self`` so a
+        direct one-off call still works.
+
+        ReDoS input bound (SEC-1): a line longer than ``_MAX_REGEX_LINE_CHARS``
+        is never matched (the pattern would backtrack over unbounded input), so
+        it is treated as PROTECTED — the conservative choice that ships it
+        verbatim rather than silently compressing an unfilterable line or
+        dropping a user's intended exclude-protection. Realistic content lines
+        are far under the cap, so this never fires in normal use.
         """
-        if any(_pattern_matches(pattern, line) for pattern in self.exclude):
+        if len(line) > _MAX_REGEX_LINE_CHARS:
             return False
-        if self.include:
-            return any(_pattern_matches(pattern, line) for pattern in self.include)
+        resolved = matchers if matchers is not None else self._resolve_matchers()
+        if any(match(line) for match in resolved.exclude):
+            return False
+        if resolved.include:
+            return any(match(line) for match in resolved.include)
         return True
 
 
 def _parse_pattern_list(raw: Any, name: str) -> tuple[tuple[str, ...], str | None]:
-    """Validate one optional pattern-list argument into a tuple of strings."""
+    """Validate one optional pattern-list argument into a tuple of strings.
+
+    Beyond the type check, each pattern is screened for the ReDoS-pathological
+    shapes (over-long / nested unbounded quantifier); a rejected pattern yields
+    the same error-reason string channel as a wrong type, so the handler renders
+    it as a structured parameter error instead of the process wedging later.
+    """
     if raw is None:
         return (), None
     if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
         return (), f"{name} must be a list of strings"
+    for pattern in raw:
+        reason = _validate_pattern(pattern, name)
+        if reason is not None:
+            return (), reason
     return tuple(raw), None
 
 
-def _pattern_matches(pattern: str, text: str) -> bool:
-    """Match ``text`` against ``pattern`` as regex-first, glob-fallback.
+def _validate_pattern(pattern: str, name: str) -> str | None:
+    """Reject a pathological pattern at parse time; ``None`` when acceptable.
+
+    Two cheap, dependency-free screens (SEC-1): an over-long pattern and the
+    nested-unbounded-quantifier shape that drives exponential backtracking. This
+    is a heuristic — it does not catch every catastrophic construction — but it
+    turns the obvious wedges into a clear typed error, and the per-line input cap
+    bounds whatever slips through. Normal filters (``ERROR.*``, ``*.py``,
+    ``^\\d+$``) have neither shape and pass untouched.
+    """
+    if len(pattern) > _MAX_PATTERN_CHARS:
+        return f"{name} pattern too long (>{_MAX_PATTERN_CHARS} chars): {pattern[:40]!r}…"
+    if _NESTED_QUANTIFIER_RE.search(pattern):
+        return (
+            f"{name} pattern rejected: nested unbounded quantifier "
+            f"(catastrophic-backtracking risk): {pattern!r}"
+        )
+    return None
+
+
+def _resolve_matcher(pattern: str) -> Callable[[str], bool]:
+    """Resolve ``pattern`` ONCE to a line matcher (regex-first, glob-fallback).
 
     A pattern that compiles as a regex is applied with ``re.search`` (partial
     match, the natural "does this line contain X" semantics). A pattern that
     does NOT compile as a regex (e.g. ``*.py``, whose leading ``*`` is invalid
     regex) is matched with ``fnmatch`` glob semantics. Deterministic: the same
     pattern always resolves to the same matcher.
+
+    ReDoS input bound (SEC-1): a line longer than ``_MAX_REGEX_LINE_CHARS`` is
+    NOT fed to the matcher at all — it resolves to ``False`` (no match). The cap
+    is applied before BOTH branches because ``fnmatch`` also translates to a
+    regex under the hood, so an adversarial 10 000-char line cannot trigger
+    unbounded backtracking. This is a raw match verdict only; how an over-long
+    line is *treated* for eligibility (protected, not compressed) is decided by
+    ``line_is_eligible``, which caps the line independently. Realistic filter
+    content is far shorter, so this never fires in normal use.
     """
     try:
         compiled = re.compile(pattern)
     except re.error:
-        return fnmatch.fnmatch(text, pattern)
-    return compiled.search(text) is not None
+        return lambda text: len(text) <= _MAX_REGEX_LINE_CHARS and fnmatch.fnmatch(text, pattern)
+    return lambda text: len(text) <= _MAX_REGEX_LINE_CHARS and compiled.search(text) is not None
+
+
+def _pattern_matches(pattern: str, text: str) -> bool:
+    """Match ``text`` against ``pattern`` (regex-first, glob-fallback).
+
+    Thin wrapper over :func:`_resolve_matcher` so there is a single matching
+    code path; kept for the per-pattern call sites and the unit tests. Hot loops
+    resolve the matcher once via :func:`_resolve_matcher` instead of re-resolving
+    per line.
+    """
+    return _resolve_matcher(pattern)(text)
+
+
+@dataclass(frozen=True)
+class _ResolvedMatchers:
+    """Include/exclude patterns compiled to line matchers once (SEC-1).
+
+    Built by :meth:`SectionPatterns._resolve_matchers` and threaded through the
+    per-line loop so the compilation cost (and the input-cap wrapper) is paid a
+    single time per ``partition_content`` call, not once per line.
+    """
+
+    include: tuple[Callable[[str], bool], ...]
+    exclude: tuple[Callable[[str], bool], ...]
 
 
 @dataclass(frozen=True)
@@ -229,12 +343,13 @@ def partition_content(content: str, patterns: SectionPatterns) -> list[_LineRun]
     between lines), so protected bytes and overall order are preserved.
     """
     lines = content.split("\n")
+    matchers = patterns._resolve_matchers()  # compile once, reuse per line (SEC-1)
     runs: list[_LineRun] = []
     current_eligible: bool | None = None
     current: list[str] = []
 
     for line in lines:
-        eligible = patterns.line_is_eligible(line)
+        eligible = patterns.line_is_eligible(line, matchers)
         if current_eligible is None:
             current_eligible = eligible
         if eligible != current_eligible:

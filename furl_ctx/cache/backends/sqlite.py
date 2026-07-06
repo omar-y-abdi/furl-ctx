@@ -528,7 +528,12 @@ class SqliteBackend:
         if self._db_path.exists():
             os.chmod(self._db_path, 0o600)
             return
-        fd = os.open(self._db_path, os.O_CREAT | os.O_RDWR, 0o600)
+        # O_NOFOLLOW (SEC-3, defense-in-depth): refuse to create-through a
+        # pre-planted symlink at the db path, so a symlink in the workspace can't
+        # redirect the open to an attacker-chosen target. getattr keeps this
+        # portable to platforms lacking the flag (it degrades to 0 = no-op).
+        create_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self._db_path, create_flags, 0o600)
         os.close(fd)
         # os.open's mode is umask-masked; normalize to exactly 0600.
         os.chmod(self._db_path, 0o600)

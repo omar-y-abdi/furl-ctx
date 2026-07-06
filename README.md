@@ -72,7 +72,7 @@ Furl compresses everything your AI agent reads — tool outputs, logs, RAG chunk
 
 ```bash
 # 1 — Install
-pip install "furl-ctx[all]"          # everything
+pip install "furl-ctx[all]"          # MCP server + full CCR
 # or: pip install "furl-ctx[mcp]"     # just the MCP server
 ```
 
@@ -89,7 +89,7 @@ result = compress(messages, model="claude-sonnet-4")
 python -m furl_ctx.ccr.mcp_server       # exposes furl_compress / _retrieve / _stats
 ```
 
-Granular extras: `[mcp]` (MCP server), `[dev]`. Requires **Python 3.10+**.
+Granular extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code compression, ~50 MB, opt-in), `[dev]`. Requires **Python 3.10+**.
 
 ## Proof
 
@@ -179,10 +179,10 @@ hitting. Two rules keep caching and compression compatible:
 ## Install
 
 ```bash
-pip install "furl-ctx[all]"          # everything
+pip install "furl-ctx[all]"          # MCP server + full CCR
 ```
 
-Granular extras: `[mcp]` (MCP server), `[dev]`. Requires **Python 3.10+**.
+Granular extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code compression, ~50 MB, opt-in), `[dev]`. Requires **Python 3.10+**.
 
 Using `pipx`? Choose a supported interpreter explicitly:
 
@@ -249,7 +249,7 @@ Furl runs **locally**, covers **every** content type, and is **reversible**.
 ## Contributing
 
 ```bash
-git clone <your-fork-url> && cd furl
+git clone <your-fork-url> && cd <repo-dir>
 pip install -e ".[dev]" && pytest
 ```
 

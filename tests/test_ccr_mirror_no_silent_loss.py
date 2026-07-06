@@ -19,11 +19,11 @@ The fix makes the loss-causing branch FAIL-SAFE: the mirror raises
 (compress.py:386). Fail-open discards the lossy output and returns the ORIGINAL
 uncompressed messages — so the lossy drop never stands without a recovery copy.
 
-Call-stack (verified; §4.2 R5 moved the mirror onto typed refs — the
+Call-stack (verified; §4.2 moved the mirror onto typed refs — the
 raise still rides the same boundary)::
 
     _mirror_single_hash_to_python_store  (store.store() except -> raise)
-      -> _mirror_typed_refs / _mirror_union_scrape_net
+      -> _mirror_typed_refs
       -> _smart_crush_content              (smart_crusher.py, NOT wrapped)
       -> SmartCrusher.apply                (smart_crusher.py:1040/1067, NOT wrapped)
       -> TransformPipeline.apply           (pipeline.py:287 -> _breaker_record_failure(); raise)

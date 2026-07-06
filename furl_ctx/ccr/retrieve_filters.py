@@ -43,6 +43,30 @@ from typing import Any
 # match" need while keeping the projected output bounded.
 _MAX_CONTEXT_LINES = 50
 
+# ── ReDoS guards (SEC-2) ────────────────────────────────────────────────────
+# ``pattern`` is caller-supplied and, in ``_filter_lines``, run line by line
+# over a retrieved original of arbitrary size (up to the store's per-entry
+# limit). A catastrophically-backtracking pattern (e.g. ``(a+)+$``) over a long
+# line can wedge the single-threaded MCP process. This is a single-principal
+# stdio server, so the proportionate, dependency-free defense (no ``regex``
+# module for a wall-clock timeout) mirrors ``compress_modes``:
+#
+# * ``_MAX_PATTERN_CHARS`` + the nested-quantifier heuristic reject pathological
+#   patterns at parse time (a ``FilterError``);
+# * ``_MAX_REGEX_LINE_CHARS`` bounds the input any single ``search`` sees, so a
+#   line longer than the cap is skipped from pattern selection (the conservative
+#   reading — it simply does not match) and backtracking stays finite.
+#
+# Both bounds sit far past realistic usage, so normal patterns over normal
+# content behave byte-identically.
+_MAX_REGEX_LINE_CHARS = 10_000
+_MAX_PATTERN_CHARS = 200
+
+# Nested unbounded quantifier — the classic exponential-backtracking shape
+# (``(a+)+``, ``(a*)*``, ``(a+)*``, ``(.*)+``). Heuristic, not a proof; the
+# input cap above is the real backstop.
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
+
 
 @dataclass(frozen=True)
 class FilterError:
@@ -100,6 +124,9 @@ class RetrieveFilters:
         if pattern_raw is not None:
             if not isinstance(pattern_raw, str):
                 return FilterError(f"pattern must be a string, got {type(pattern_raw).__name__}")
+            reject = _reject_pathological_pattern(pattern_raw)
+            if reject is not None:
+                return reject
             try:
                 pattern = re.compile(pattern_raw)
             except re.error as exc:
@@ -144,6 +171,29 @@ class RetrieveFilters:
             line_end=line_end,
             fields=fields,
         )
+
+
+def _reject_pathological_pattern(pattern: str) -> FilterError | None:
+    """Reject a ReDoS-pathological pattern at parse time; ``None`` if fine.
+
+    Two cheap, dependency-free screens (SEC-2): an over-long pattern and the
+    nested-unbounded-quantifier shape driving exponential backtracking. Heuristic
+    — it does not catch every catastrophic construction — but it turns the
+    obvious wedges into a ``FilterError`` (the caller's to fix, never a hang),
+    and the per-line input cap bounds whatever slips through. Normal patterns
+    have neither shape and pass untouched.
+    """
+    if len(pattern) > _MAX_PATTERN_CHARS:
+        return FilterError(
+            f"pattern too long (>{_MAX_PATTERN_CHARS} chars); "
+            "narrow the pattern to avoid catastrophic backtracking"
+        )
+    if _NESTED_QUANTIFIER_RE.search(pattern):
+        return FilterError(
+            "pattern rejected: nested unbounded quantifier "
+            "(catastrophic-backtracking risk); rewrite without a nested +/*"
+        )
+    return None
 
 
 def _parse_line_range(
@@ -263,7 +313,14 @@ def _select_matching_with_context(
     range filter is a hard boundary the context cannot leak past — the two
     filters compose without one silently overriding the other.
     """
-    match_indices = [idx for idx, (_num, text) in enumerate(windowed) if pattern.search(text)]
+    # SEC-2 input bound: a line longer than the cap is skipped from matching
+    # (conservative "no match") so an adversarial pattern cannot backtrack over
+    # an unbounded line. Realistic content lines are far shorter than the cap.
+    match_indices = [
+        idx
+        for idx, (_num, text) in enumerate(windowed)
+        if len(text) <= _MAX_REGEX_LINE_CHARS and pattern.search(text)
+    ]
     if not match_indices:
         return []
     keep: set[int] = set()

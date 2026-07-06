@@ -1,9 +1,11 @@
 //! Field-name hashing for preserve-field lookups.
 //!
-//! Direct port of `_hash_field_name` (Python `smart_crusher.py:171-177`).
+//! Rust is the SOLE owner of field-name hashing — the Python
+//! `_hash_field_name` this was once ported from no longer exists (the
+//! consolidation removed the Python copy; there is no parity twin to
+//! keep in lockstep, only the Rust unit tests that pin the exact digest).
 //! `preserve_fields` entries are anonymized field names stored as
-//! **SHA-256[:8]** for privacy (per the Python doc-comment at
-//! `smart_crusher.py:174-175`), so lookups will silently miss if the
+//! **SHA-256[:8]** for privacy, so lookups will silently miss if the
 //! truncation length drifts.
 //!
 //! # 16 vs 8 — got it wrong once, now pinned

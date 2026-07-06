@@ -11,6 +11,7 @@ the repo's "domain logic testable without mocks" rule:
 from __future__ import annotations
 
 import json
+import time
 
 from furl_ctx.ccr.compress_modes import (
     CompressionMode,
@@ -24,6 +25,13 @@ from furl_ctx.ccr.retrieve_filters import (
     RetrieveFilters,
     apply_filters,
 )
+
+# A generous wall-clock ceiling: the ReDoS guards make these paths return in
+# microseconds. A real catastrophic backtrack would take many seconds/minutes,
+# so < 1s cleanly separates "guarded" from "hung" without being flaky on a
+# loaded CI box.
+_REDOS_DEADLINE_S = 1.0
+_CATASTROPHIC = r"(a+)+$"  # classic exponential-backtracking pattern
 
 # ─── RetrieveFilters.parse ──────────────────────────────────────────────────
 
@@ -197,3 +205,108 @@ def test_partition_alternating_runs() -> None:
         (True, "comp1\ncomp2"),
         (False, "keep2"),
     ]
+
+
+# ─── SEC-1/SEC-2: ReDoS guards ──────────────────────────────────────────────
+# Two complementary guards, both exercised here:
+#   (a) an input cap so a catastrophic pattern over a LONG line returns at once
+#       instead of backtracking (the matcher never sees the over-cap line);
+#   (b) a parse-time heuristic that rejects the pathological pattern shape as a
+#       typed error before it is ever compiled/run.
+
+
+def test_compress_catastrophic_pattern_over_long_line_returns_fast() -> None:
+    # _pattern_matches bypasses parse (the unit/tool-name path), so the INPUT
+    # CAP is what protects it: a 20k-char line is past the 10k cap → no match,
+    # no backtracking. Without the cap, (a+)+$ over this line hangs for minutes.
+    long_line = "a" * 20_000
+    start = time.monotonic()
+    result = _pattern_matches(_CATASTROPHIC, long_line)
+    assert time.monotonic() - start < _REDOS_DEADLINE_S
+    assert result is False  # over-cap line resolves conservatively to no-match
+
+
+def test_compress_section_filter_over_long_line_is_protected_and_fast() -> None:
+    # Same guard through the public partition path: an over-cap line stays fast
+    # (the matcher never runs on it) AND, per the conservative safety choice, is
+    # treated as PROTECTED — an unfilterable line ships verbatim rather than
+    # being compressed. The short line is ordinary (eligible).
+    long_line = "a" * 20_000
+    content = "short ok line\n" + long_line
+    patterns = SectionPatterns(include=(), exclude=(_CATASTROPHIC,))
+    start = time.monotonic()
+    runs = partition_content(content, patterns)
+    assert time.monotonic() - start < _REDOS_DEADLINE_S
+    # Byte-exact reassembly still holds regardless of the split.
+    assert "\n".join(run.text for run in runs) == content
+    # The over-long line is protected (ineligible); it must not be compressed.
+    assert patterns.line_is_eligible(long_line) is False
+    long_run = next(run for run in runs if long_line in run.text)
+    assert long_run.eligible is False
+
+
+def test_compress_over_long_line_protected_even_with_include_filter() -> None:
+    # With an include filter present, an over-long line is still protected — the
+    # length guard fires before include matching, so the conservative outcome is
+    # consistent regardless of which filter family is in play.
+    long_line = "b" * 20_000
+    patterns = SectionPatterns(include=("keepme",), exclude=())
+    assert patterns.line_is_eligible(long_line) is False
+
+
+def test_compress_parse_rejects_nested_quantifier_pattern() -> None:
+    out = SectionPatterns.parse({"include_patterns": [_CATASTROPHIC]})
+    assert isinstance(out, str)  # the parse-error channel (not a hang, not a crash)
+    assert "nested unbounded quantifier" in out
+
+
+def test_compress_parse_rejects_overlong_pattern() -> None:
+    out = SectionPatterns.parse({"exclude_patterns": ["a" * 201]})
+    assert isinstance(out, str)
+    assert "too long" in out
+
+
+def test_retrieve_catastrophic_pattern_over_long_line_returns_fast() -> None:
+    # A benign compiled pattern over a single 50k-char line: the input cap skips
+    # the over-cap line from selection, so the per-line search never runs on it.
+    # (A catastrophic pattern is rejected at parse — covered below — so the cap
+    # is the guard for lines that slip past a heuristic-safe pattern.)
+    content = "a" * 50_000
+    spec = RetrieveFilters.parse({"pattern": "zzz"})
+    assert isinstance(spec, RetrieveFilters)
+    start = time.monotonic()
+    out = apply_filters(content, spec)
+    assert time.monotonic() - start < _REDOS_DEADLINE_S
+    assert isinstance(out, FilteredContent)
+    assert out.matched_count == 0  # over-cap line skipped from pattern selection
+
+
+def test_retrieve_parse_rejects_nested_quantifier_pattern() -> None:
+    out = RetrieveFilters.parse({"pattern": _CATASTROPHIC})
+    assert isinstance(out, FilterError)
+    assert "nested unbounded quantifier" in out.reason
+
+
+def test_retrieve_parse_rejects_overlong_pattern() -> None:
+    out = RetrieveFilters.parse({"pattern": "a" * 201})
+    assert isinstance(out, FilterError)
+    assert "too long" in out.reason
+
+
+def test_redos_guards_preserve_normal_patterns_byte_identically() -> None:
+    # The must-preserve normal patterns are neither over-long nor nested, so
+    # they parse and match exactly as before the guards.
+    assert _pattern_matches("ERROR.*", "line with ERROR here") is True
+    assert _pattern_matches("*.py", "module.py") is True  # glob fallback intact
+    assert _pattern_matches(r"^\d+$", "12345") is True
+    assert _pattern_matches(r"^\d+$", "12a45") is False
+    spec = RetrieveFilters.parse({"pattern": "ERROR.*"})
+    assert isinstance(spec, RetrieveFilters)  # not rejected
+    section = SectionPatterns.parse({"include_patterns": ["*.py"], "exclude_patterns": ["ERROR.*"]})
+    assert isinstance(section, SectionPatterns)  # not rejected
+
+
+def test_regex_line_char_cap_boundary() -> None:
+    # Exactly at the cap the line is still matched; one char over, it is skipped.
+    assert _pattern_matches("a+", "a" * 10_000) is True
+    assert _pattern_matches("a+", "a" * 10_001) is False

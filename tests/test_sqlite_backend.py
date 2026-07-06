@@ -341,6 +341,38 @@ def test_db_file_created_0600(tmp_path) -> None:
     assert stat.S_IMODE(os.stat(db).st_mode) == 0o600
 
 
+def test_db_create_uses_o_nofollow(tmp_path, monkeypatch) -> None:
+    # SEC-3 (defense-in-depth): the create-path open must carry O_NOFOLLOW so a
+    # pre-planted symlink at the db path cannot redirect the open. Capture the
+    # flags os.open is called with on the create branch.
+    captured: dict[str, int] = {}
+    real_open = os.open
+
+    def _spy_open(path, flags, *args, **kwargs):
+        captured["flags"] = flags
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _spy_open)
+    SqliteBackend(db_path=tmp_path / "nofollow.sqlite3")
+    assert "flags" in captured, "create path did not call os.open"
+    assert captured["flags"] & os.O_NOFOLLOW, "O_NOFOLLOW not set on db create"
+
+
+@pytest.mark.skipif(getattr(os, "O_NOFOLLOW", 0) == 0, reason="platform lacks O_NOFOLLOW")
+def test_db_create_refuses_to_follow_planted_symlink(tmp_path) -> None:
+    # A dangling symlink at the db path (so the create branch runs) must NOT be
+    # followed: O_NOFOLLOW makes os.open raise, the backend fails open to the
+    # in-memory fallback, and the symlink's target is never created.
+    target = tmp_path / "attacker_target.sqlite3"  # dangling — does not exist yet
+    db_link = tmp_path / "db.sqlite3"
+    os.symlink(target, db_link)
+
+    backend = SqliteBackend(db_path=db_link)
+
+    assert backend._degraded, "backend should degrade rather than follow the symlink"
+    assert not target.exists(), "O_NOFOLLOW must prevent creating the symlink target"
+
+
 def test_existing_db_file_tightened_to_0600(tmp_path) -> None:
     db = tmp_path / "loose.sqlite3"
     db.touch(mode=0o644)
