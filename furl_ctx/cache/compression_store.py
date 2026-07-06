@@ -343,6 +343,7 @@ class CompressionStore:
         enable_feedback: bool = True,
         backend: CompressionStoreBackend | None = None,
         now_fn: Callable[[], float] | None = None,
+        spill: CompressionStoreBackend | None = None,
     ):
         """Initialize the compression store.
 
@@ -363,11 +364,25 @@ class CompressionStore:
             now_fn: Clock used for entry timestamps and TTL-expiry checks
                     (TEST-20). Defaults to ``time.time``; tests inject a fake
                     clock so TTL cases advance time without real ``sleep``.
+            spill: Optional durable SPILL tier (Q10 retention). When set, an
+                   entry evicted from ``backend`` under capacity pressure is
+                   DEMOTED to this backend (best-effort) instead of being lost,
+                   and ``retrieve`` falls through primary→spill so a
+                   ``<<ccr:HASH>>`` marker stays resolvable past the in-memory
+                   eviction window. Default ``None`` keeps single-tier behavior
+                   byte-identical: no spill site fires, retrieval never consults
+                   a spill. Reuses the ``SqliteBackend`` (its own cap + TTL
+                   backstop bound the spill); a spill read/write error is
+                   fail-open (logged, never breaks the primary or compression).
+                   Retrieval from spill is read-only — the entry is NOT promoted
+                   back into ``backend`` and its access bookkeeping is untouched,
+                   so a spill hit is byte-identical to the value that was evicted.
         """
         # Import here to avoid circular imports
         from .backends import InMemoryBackend
 
         self._backend: CompressionStoreBackend = backend or InMemoryBackend()
+        self._spill: CompressionStoreBackend | None = spill
         self._lock = threading.Lock()
         self._max_entries = max_entries
         self._default_ttl = default_ttl
@@ -589,7 +604,12 @@ class CompressionStore:
             entry = self._backend.get(hash_key)
 
             if entry is None:
-                return None
+                # Primary miss: fall through to the durable spill tier (Q10). A
+                # spill hit is returned as-is (no promotion back into the
+                # primary, no access bookkeeping) so it is byte-identical to the
+                # evicted value. Spill-off (``self._spill is None``)
+                # short-circuits to today's loud miss.
+                return self._recover_from_spill(hash_key)
 
             if entry.is_expired(self._now()):
                 self._backend.delete(hash_key)
@@ -1279,9 +1299,63 @@ class CompressionStore:
         """Clear all entries. Mainly for testing."""
         with self._lock:
             self._backend.clear()
+            # Q10 spill tier: clear the durable spill too, so ``clear`` empties
+            # every place an entry can live. Fail-open — a spill clear error
+            # must not break the primary reset.
+            if self._spill is not None:
+                try:
+                    self._spill.clear()
+                except Exception as exc:  # noqa: BLE001 — fail-open, logged below
+                    logger.warning("CCR spill clear failed (non-fatal): %s", exc)
             self._retrieval_events.clear()
             self._eviction_heap.clear()  # Clear heap too
             self._stale_heap_entries = 0  # CRITICAL FIX: Reset stale counter
+
+    def _spill_evicted(self, hash_key: str, entry: CompressionEntry) -> None:
+        """Demote a capacity-evicted (still-live) entry to the spill tier.
+
+        Called with the store lock held, immediately before the primary
+        ``delete``. No-op when the spill is disabled. Best-effort and fail-open:
+        a spill write error is logged and swallowed so eviction (and thus the
+        primary's capacity accounting) always proceeds — the entry simply
+        reverts to today's loud-miss behavior for that one key.
+        """
+        if self._spill is None:
+            return
+        try:
+            self._spill.set(hash_key, entry)
+        except Exception as exc:  # noqa: BLE001 — fail-open, logged below
+            logger.warning("CCR spill write failed (non-fatal): %s", exc)
+
+    def _recover_from_spill(self, hash_key: str) -> CompressionEntry | None:
+        """Resolve a primary miss against the durable spill tier (Q10).
+
+        Called with the store lock held from the ``retrieve`` primary-miss
+        branch. Returns ``None`` (today's loud miss) when the spill is disabled,
+        the key is absent, or the spilled row has expired — TTL is still honored
+        in the spill exactly as in the primary. A hit is returned as an
+        independent copy WITHOUT promoting it back into the primary or touching
+        access bookkeeping, so it is byte-identical to the evicted value. Fail-open:
+        a spill read error is logged and treated as a miss.
+        """
+        if self._spill is None:
+            return None
+        try:
+            entry = self._spill.get(hash_key)
+        except Exception as exc:  # noqa: BLE001 — fail-open, logged below
+            logger.warning("CCR spill read failed (non-fatal): %s", exc)
+            return None
+        if entry is None:
+            return None
+        if entry.is_expired(self._now()):
+            try:
+                self._spill.delete(hash_key)
+            except Exception as exc:  # noqa: BLE001 — fail-open, logged below
+                logger.warning("CCR spill delete of expired row failed (non-fatal): %s", exc)
+            return None
+        # Copy the mutable field so a caller cannot mutate the spilled entry
+        # (mirrors the primary-hit copy in ``retrieve``).
+        return replace(entry, search_queries=list(entry.search_queries))
 
     def _evict_if_needed(self) -> None:
         """Evict old entries if at capacity. Must be called with lock held.
@@ -1332,7 +1406,13 @@ class CompressionStore:
             created_at, hash_key = heapq.heappop(self._eviction_heap)
             entry = self._backend.get(hash_key)
             if entry is not None and entry.created_at == created_at:
-                # Real oldest entry — evict it.
+                # Real oldest entry — evict it. Q10 spill tier: demote the
+                # (still-live: ``_clean_expired`` ran above) entry to the durable
+                # spill BEFORE dropping it from the primary, so the marker stays
+                # resolvable past this eviction. The primary delete is
+                # unconditional — capacity MUST be freed even if the spill write
+                # fails (best-effort), or this loop would not make progress.
+                self._spill_evicted(hash_key, entry)
                 self._backend.delete(hash_key)
                 rebuilt_since_progress = False  # made progress
             else:
@@ -1500,6 +1580,37 @@ def _create_default_ccr_backend() -> CompressionStoreBackend | None:
     return backend
 
 
+CCR_SPILL_ENV = "FURL_CCR_SPILL"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _create_spill_backend_from_env(
+    primary: CompressionStoreBackend | None,
+) -> CompressionStoreBackend | None:
+    """Build the durable SPILL tier from env (``FURL_CCR_SPILL``), Q10 retention.
+
+    Returns ``None`` (spill disabled → single-tier, byte-identical) unless
+    ``FURL_CCR_SPILL`` is truthy (``1``/``true``/``yes``/``on``). When enabled,
+    the spill is a ``SqliteBackend`` (its own row cap + TTL backstop bound it).
+
+    Redundant-combo guard: if the PRIMARY is already durable (the operator set
+    ``FURL_CCR_BACKEND=sqlite`` → ``primary`` is a ``SqliteBackend``), a spill
+    would demote sqlite→sqlite for no benefit, so this returns ``None`` and the
+    store stays single-tier durable. Spill mode is designed as fast in-memory
+    primary + durable sqlite spill.
+    """
+    flag = (os.environ.get(CCR_SPILL_ENV) or "").strip().lower()
+    if flag not in _TRUTHY:
+        return None
+
+    from .backends.sqlite import SqliteBackend
+
+    if isinstance(primary, SqliteBackend):
+        # Primary already durable — spill is redundant. Unsupported combo.
+        return None
+    return SqliteBackend()
+
+
 def get_compression_store(
     max_entries: int = 1000,
     default_ttl: int | None = None,
@@ -1534,10 +1645,12 @@ def get_compression_store(
                 effective_default_ttl = (
                     default_ttl if default_ttl is not None else _get_env_default_ttl_seconds()
                 )
+                spill = _create_spill_backend_from_env(backend)
                 _compression_store = CompressionStore(
                     max_entries=max_entries,
                     default_ttl=effective_default_ttl,
                     backend=backend,
+                    spill=spill,
                 )
     return _compression_store
 
