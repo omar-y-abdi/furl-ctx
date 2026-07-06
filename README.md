@@ -91,6 +91,28 @@ python -m furl_ctx.ccr.mcp_server       # exposes furl_compress / _retrieve / _s
 
 Granular extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code compression, ~50 MB, opt-in), `[dev]`. Requires **Python 3.10+**.
 
+## Claude Code plugin
+
+Furl ships as a Claude Code plugin (`plugins/furl/`) that bundles the MCP server, an
+automatic compression hook, and a how-it-works skill. Two commands:
+
+```bash
+# 1 — install Furl into the python Claude Code uses
+pip install "furl-ctx[mcp]"
+```
+
+```
+# 2 — add + install the plugin (these are /slash commands inside Claude Code)
+/plugin marketplace add /path/to/headroom/plugins/furl
+/plugin install furl@furl
+```
+
+You get the `furl_compress` / `furl_retrieve` / `furl_stats` tools **plus** a
+fail-open `PostToolUse` hook that compresses large external tool outputs (`Bash`,
+`WebFetch`, `WebSearch`, `Task`) before they land in context —
+originals stay retrievable via `<<ccr:HASH>>` markers. Disable the hook anytime with
+`FURL_HOOK_ENABLED=0`. Full setup, tuning, and structure: [`plugins/furl/README.md`](plugins/furl/README.md).
+
 ## Proof
 
 **Token reduction on real captured data** — reproducible; inputs committed under `benchmarks/data/`, captured by `benchmarks/run_bench.py` into [BASELINE.md](benchmarks/BASELINE.md). Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable — visible in the output or via CCR):
@@ -104,7 +126,7 @@ Granular extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code c
 | search        |    90 |  4,102 |    318 |       92% | lossy (CCR) |           100% |
 | repeated logs |    90 |  3,621 |    120 |       97% | lossy (CCR) |           100% |
 
-<sub>**Regime** — *lossless*: the compressed output is self-contained (zero rows dropped). *lossy (CCR)*: rows are offloaded to the local CCR store and replaced with `<<ccr:HASH>>` markers — smaller output, and **every dropped row is byte-exactly recoverable on demand** (100% info retention, within the configured TTL). `code` (large distinct source files that no compressor can shrink) takes the reversible CCR-offload fallback: an identity preview (paths + first lines) plus a retrieval marker ships in place of the full files. The same offload covers any large, low-redundancy tool output the compressors can't shrink — not just file reads.</sub>
+<sub>**Regime** — *lossless*: the compressed output is self-contained (zero rows dropped). *lossy (CCR)*: rows are offloaded to the local CCR store and replaced with `<<ccr:HASH>>` markers — smaller output, and **every dropped row is byte-exactly recoverable on demand** (100% info retention, within the configured TTL). `code` (large distinct source files that no compressor can shrink) takes the reversible CCR-offload fallback: an identity preview (paths + first lines) plus a retrieval marker ships in place of the full files. The same offload covers any large, low-redundancy tool output the compressors can't shrink. Note the `code` row measures CCR-offload of file **content** fed as tool output — this is not "your code shrinks 99%": an agent's own `Read`/`Glob` file access is deliberately left untouched by default, so those stay at 0%.</sub>
 
 These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). Across the whole corpus the table sums to **94% fewer tokens** (72,903 → 4,016) at 100% information retention; the **60–95%** headline maps to this table's lossy-CCR range. Full methodology and the 6-seed adversarial sweep live in [BENCHMARKS.md](BENCHMARKS.md).
 

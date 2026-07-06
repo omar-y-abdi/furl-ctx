@@ -1,0 +1,20 @@
+{
+  "PostToolUse": [
+    {
+      "matcher": "Bash|WebFetch|WebSearch|Task",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py\"",
+          "timeout": 30,
+          "env": {
+            "FURL_CCR_BACKEND": "sqlite",
+            "FURL_CCR_TTL_SECONDS": "86400"
+          }
+        }
+      ],
+      "description": "Furl: compress large tool outputs before they enter context (fail-open; disable with FURL_HOOK_ENABLED=0)",
+      "id": "furl:post:compress-tool-output"
+    }
+  ]
+}

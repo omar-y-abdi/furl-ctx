@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "furl",
+  "owner": {
+    "name": "Furl",
+    "url": "https://github.com/omar-y-abdi/furl"
+  },
+  "metadata": {
+    "description": "Furl context compression for Claude Code — MCP server + compression hook + how-it-works skill."
+  },
+  "plugins": [
+    {
+      "name": "furl",
+      "source": "./",
+      "description": "Furl context compression: the Furl MCP server (furl_compress / furl_retrieve / furl_stats) plus a fail-open PostToolUse hook that shrinks large tool outputs before they enter context.",
+      "version": "0.1.0",
+      "category": "productivity"
+    }
+  ]
+}

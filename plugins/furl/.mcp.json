@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "furl": {
+      "command": "python",
+      "args": ["-m", "furl_ctx.ccr.mcp_server"],
+      "env": {
+        "FURL_CCR_BACKEND": "sqlite",
+        "FURL_CCR_TTL_SECONDS": "86400"
+      }
+    }
+  }
+}
