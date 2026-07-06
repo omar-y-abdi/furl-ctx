@@ -26,11 +26,12 @@
 //! compressed body is composed HERE (not in the grammar module), so the
 //! grammar stays newline-free and composable.
 
-// NOTE: md-5 (digest 0.10) and sha2 (digest 0.11) ride DIFFERENT digest
-// trait versions in this tree — each hasher needs its own `Digest` in
-// scope, imported anonymously to avoid a name clash.
+// NOTE: md-5 and sha2 both ride digest 0.11 in this tree, so both re-export
+// the *same* `digest::Digest` trait. One anonymous import brings its methods
+// (`new`/`update`/`finalize`) into scope for both `Md5` and `Sha256`; a second
+// `Digest` import would be a redundant-import warning.
 use md5::{Digest as _, Md5};
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 
 use super::markers::{marker_for_retrieve_more, RetrieveUnit};
 use super::CcrStore;

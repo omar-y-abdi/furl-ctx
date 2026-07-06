@@ -446,7 +446,10 @@ impl<'a> SmartCrusherPlanner<'a> {
                     .unwrap_or("");
                 let truncated: String = msg.chars().take(50).collect();
                 let digest = Md5::digest(truncated.as_bytes());
-                let hash = format!("{:x}", digest)[..8].to_string();
+                // Per-byte `{:02x}` (digest 0.11 `Array` has no `LowerHex`);
+                // byte-identical to the old `format!("{:x}", digest)[..8]`
+                // (8 hex chars = first 4 digest bytes).
+                let hash: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
                 clusters.entry(hash).or_default().push(i);
             }
             // Keep up to 2 representatives from each cluster.

@@ -644,7 +644,10 @@ fn item_content_hash(item: &Value, idx: usize, exclude: &BTreeSet<String>) -> St
             _ => format!("__idx_{}__", idx),
         };
         let digest = Md5::digest(content.as_bytes());
-        format!("{:x}", digest)[..16].to_string()
+        // Per-byte `{:02x}` (digest 0.11 `Array` has no `LowerHex`);
+        // byte-identical to the old `format!("{:x}", digest)[..16]`
+        // (16 hex chars = first 8 digest bytes).
+        digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
     }
 }
 

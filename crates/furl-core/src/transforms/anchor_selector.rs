@@ -365,8 +365,12 @@ fn calculate_structural_uniqueness(item: &Value, all_items: &[Value]) -> f64 {
 pub fn compute_item_hash(item: &Value) -> String {
     let content = python_json_dumps_sort_keys(item);
     let digest = Md5::digest(content.as_bytes());
-    let hex = format!("{:x}", digest);
-    hex[..16].to_string()
+    // Per-byte `{:02x}` (mirrors the sha2 sites) instead of
+    // `format!("{:x}", digest)`: digest 0.11 returns `hybrid_array::Array`,
+    // which does not implement `LowerHex` (the old `GenericArray` did).
+    // Byte-identical: 16 hex chars = first 8 digest bytes, and `LowerHex`
+    // on the array was zero-padded per-byte hex — exactly `{:02x}`.
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Field-aware **stable-projection** hash (DESIGN.md Improvement 2).
@@ -392,8 +396,9 @@ pub fn stable_item_hash(item: &Value, exclude: &BTreeSet<String>) -> String {
     }
     let out = python_json_dumps_sort_keys_filtered(item, exclude);
     let digest = Md5::digest(out.as_bytes());
-    let hex = format!("{:x}", digest);
-    hex[..16].to_string()
+    // Per-byte `{:02x}` (digest 0.11 `Array` has no `LowerHex`); byte-identical
+    // to the old `format!("{:x}", digest)[..16]` — see `compute_item_hash`.
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 // ============================================================================
