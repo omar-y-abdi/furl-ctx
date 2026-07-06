@@ -32,6 +32,7 @@ from furl_ctx.transforms.content_detector import ContentType, detect_content_typ
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 from furl_ctx.transforms.csv_ingest import (
     _coerce_cell,
+    _pick_delimiter,
     raw_recovery_hash,
     sniff_csv,
 )
@@ -221,6 +222,55 @@ def test_conversion_rfc4180_quoted_cells() -> None:
 def test_coercion_exact_round_trip_rule(cell: str, expected: object) -> None:
     assert _coerce_cell(cell) == expected
     assert type(_coerce_cell(cell)) is type(expected)
+
+
+def test_raw_recovery_hash_is_pinned_md5_prefix() -> None:
+    # Fixed vector (not recomputed with hashlib in-test): the recovery key is
+    # the first 24 hex chars of md5(content). Pinned against a known-good literal
+    # so a mutation to the slice width, digest, or encoding is caught here — the
+    # store-wiring test recomputes with the same fn and would not see such a bug.
+    assert raw_recovery_hash("the quick brown fox\n") == "73ab1c2afe3a63b8ab4d7da2"
+    assert len(raw_recovery_hash("anything")) == 24  # shape-H marker width
+
+
+# ─── Sniff boundaries (floors + consistency) ─────────────────────────────────
+
+
+def test_min_data_rows_boundary_sniffs_at_exactly_five() -> None:
+    # Complements test_floor_min_rows (4 rows → None): exactly MIN_DATA_ROWS
+    # data rows must sniff, straddling `len(rows) < 1 + MIN_DATA_ROWS`. Rows are
+    # padded so the byte floor is cleared and only the row floor is in play.
+    lines = ["id,status,latency_ms,endpoint"]
+    for i in range(csv_ingest.MIN_DATA_ROWS):
+        lines.append(f"{i + 1},ok,0.{53 + i:03d},api/v1/resource-longname-{i}")
+    content = "\n".join(lines) + "\n"
+    assert len(content) >= csv_ingest.MIN_BYTES
+    table = sniff_csv(content)
+    assert table is not None
+    assert table.row_count == csv_ingest.MIN_DATA_ROWS
+
+
+def _lines_with_match_ratio(total: int, matching: int) -> list[str]:
+    # header + (matching-1) two-field lines + the rest three-field lines, so
+    # exactly `matching`/`total` lines repeat the header's 2-field count.
+    out = ["h1,h2"]
+    for i in range(total - 1):
+        out.append(f"a{i},b{i}" if i < matching - 1 else f"a{i},b{i},c{i}")
+    return out
+
+
+@pytest.mark.parametrize(
+    ("matching", "expected_delim"),
+    [
+        (9, ","),  # 9/10 == 0.90: exactly at _CONSISTENCY_FLOOR → viable
+        (8, None),  # 8/10 == 0.80: below the floor → not viable
+    ],
+)
+def test_consistency_floor_boundary(matching: int, expected_delim: str | None) -> None:
+    # `ratio < _CONSISTENCY_FLOOR` rejects below the floor; a `<` → `<=` mutation
+    # would drop the exactly-0.90 case. Pinned at the _pick_delimiter seam so the
+    # ratio (not the byte/row floors sniff_csv adds) is the one thing under test.
+    assert _pick_delimiter(_lines_with_match_ratio(10, matching)) == expected_delim
 
 
 # ─── Recovery invariant (raw bytes, marker, veto) ────────────────────────────

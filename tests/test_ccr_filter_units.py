@@ -13,10 +13,13 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from furl_ctx.ccr.compress_modes import (
     CompressionMode,
     SectionPatterns,
     _pattern_matches,
+    build_mode_pipeline,
     partition_content,
 )
 from furl_ctx.ccr.retrieve_filters import (
@@ -79,6 +82,53 @@ def test_parse_accepts_open_ended_range() -> None:
     assert spec.line_end is None
 
 
+# ─── RetrieveFilters.parse — comparison boundaries ──────────────────────────
+# One accepted/rejected pair straddling every ``<``/``>``/``<``-derived bound in
+# the smart constructor, so a mutated operator (``>`` → ``>=`` etc.) is caught.
+
+
+@pytest.mark.parametrize(
+    ("context_lines", "accepted"),
+    [(-1, False), (0, True), (50, True), (51, False)],  # cap is _MAX_CONTEXT_LINES=50
+)
+def test_context_lines_boundary(context_lines: int, accepted: bool) -> None:
+    out = RetrieveFilters.parse({"context_lines": context_lines})
+    assert isinstance(out, RetrieveFilters if accepted else FilterError)
+
+
+@pytest.mark.parametrize(
+    ("pattern_len", "accepted"),
+    [(200, True), (201, False)],  # cap is _MAX_PATTERN_CHARS=200
+)
+def test_pattern_length_boundary(pattern_len: int, accepted: bool) -> None:
+    out = RetrieveFilters.parse({"pattern": "a" * pattern_len})
+    assert isinstance(out, RetrieveFilters if accepted else FilterError)
+
+
+@pytest.mark.parametrize(
+    ("line_bound", "accepted"),
+    [(0, False), (1, True)],  # bound must be >= 1
+)
+def test_line_range_lower_bound_boundary(line_bound: int, accepted: bool) -> None:
+    out = RetrieveFilters.parse({"line_range": [line_bound, None]})
+    assert isinstance(out, RetrieveFilters if accepted else FilterError)
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "accepted"),
+    [(3, 3, True), (3, 2, False)],  # end must be >= start; equality is the edge
+)
+def test_line_range_end_vs_start_boundary(start: int, end: int, accepted: bool) -> None:
+    out = RetrieveFilters.parse({"line_range": [start, end]})
+    assert isinstance(out, RetrieveFilters if accepted else FilterError)
+
+
+@pytest.mark.parametrize("raw", [[1], [1, 2, 3]])
+def test_line_range_must_be_length_two(raw: list[int]) -> None:
+    out = RetrieveFilters.parse({"line_range": raw})
+    assert isinstance(out, FilterError)
+
+
 # ─── apply_filters totality ─────────────────────────────────────────────────
 
 
@@ -107,6 +157,47 @@ def test_apply_fields_skips_non_object_elements() -> None:
     assert out.total_count == 4  # all array elements
 
 
+# ─── apply_filters line-window boundaries ───────────────────────────────────
+# The clamp arithmetic (``start > total`` → empty; ``end = min(total, end)``)
+# lives only in ``_filter_lines`` and is unreachable from the parse tests.
+
+_THREE_LINES = "l1\nl2\nl3"
+
+
+def test_apply_line_range_start_past_eof_is_empty() -> None:
+    # start (5) > total (3): the window begins past the last line → no lines,
+    # but total_count still reports the whole original (not a crash, not an error).
+    spec = RetrieveFilters.parse({"line_range": [5, None]})
+    assert isinstance(spec, RetrieveFilters)
+    out = apply_filters(_THREE_LINES, spec)
+    assert isinstance(out, FilteredContent)
+    assert out.content == ""
+    assert out.matched_count == 0
+    assert out.total_count == 3
+
+
+def test_apply_line_range_end_past_eof_clamps() -> None:
+    # end (99) is clamped to total (3); start (2) is in range → lines 2..3 only.
+    spec = RetrieveFilters.parse({"line_range": [2, 99]})
+    assert isinstance(spec, RetrieveFilters)
+    out = apply_filters(_THREE_LINES, spec)
+    assert isinstance(out, FilteredContent)
+    assert out.content == "2:l2\n3:l3"
+    assert out.matched_count == 2
+    assert out.total_count == 3
+
+
+def test_apply_pattern_numbers_matched_lines() -> None:
+    # Pattern selection over the full window keeps original 1-based line numbers.
+    spec = RetrieveFilters.parse({"pattern": "ERROR"})
+    assert isinstance(spec, RetrieveFilters)
+    out = apply_filters("alpha\nERROR two\ngamma", spec)
+    assert isinstance(out, FilteredContent)
+    assert out.content == "2:ERROR two"
+    assert out.matched_count == 1
+    assert out.total_count == 3
+
+
 # ─── CompressionMode.parse ──────────────────────────────────────────────────
 
 
@@ -122,6 +213,40 @@ def test_mode_parse_unknown_is_error_string() -> None:
     out = CompressionMode.parse("turbo")
     assert isinstance(out, str)
     assert "unknown mode" in out
+
+
+# ─── build_mode_pipeline: mode → router config (behavior, not readback) ──────
+# The mode's whole point is that it changes the ContentRouterConfig the pipeline
+# carries. Pin each mode's config to a fixed vector so a swapped/dropped knob is
+# caught here (the MCP tests only observe the emergent token delta downstream).
+
+
+def test_normal_mode_uses_default_pipeline() -> None:
+    # NORMAL returns None so the caller reuses the process default singleton —
+    # this is what keeps a default compress call byte-identical.
+    assert build_mode_pipeline(CompressionMode.NORMAL) is None
+
+
+def test_lossless_only_pipeline_config() -> None:
+    pipeline = build_mode_pipeline(CompressionMode.LOSSLESS_ONLY)
+    assert pipeline is not None
+    config = pipeline.transforms[-1].config  # ContentRouter is the last transform
+    assert config.lossless_only is True
+    # The other knobs stay at their defaults for lossless_only.
+    assert config.min_ratio_relaxed == 0.85
+    assert config.min_ratio_aggressive == 0.95
+
+
+def test_aggressive_pipeline_config() -> None:
+    pipeline = build_mode_pipeline(CompressionMode.AGGRESSIVE)
+    assert pipeline is not None
+    config = pipeline.transforms[-1].config
+    assert config.lossless_only is False
+    # Turned-up acceptance thresholds + a low kept-items cap distinguish
+    # aggressive from both default (0.85/0.95/None) and lossless_only.
+    assert config.smart_crusher_max_items_after_crush == 5
+    assert config.min_ratio_relaxed == 0.98
+    assert config.min_ratio_aggressive == 0.99
 
 
 # ─── _pattern_matches: regex-first, glob-fallback ───────────────────────────

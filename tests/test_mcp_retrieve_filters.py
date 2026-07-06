@@ -116,13 +116,15 @@ async def test_line_range_open_end(server) -> None:
 async def test_inverted_line_range_errors(server) -> None:
     _seed(server, "a" * 12, _TEXT)
     env = _envelope(await server._handle_retrieve({"hash": "a" * 12, "line_range": [5, 2]}))
-    assert "must be >= start" in env["error"]
+    # Exact: the interpolated bounds must survive to the caller (a message that
+    # dropped or swapped start/end would pass a bare substring check).
+    assert env["error"] == "line_range end (2) must be >= start (5)"
 
 
 async def test_line_range_below_one_errors(server) -> None:
     _seed(server, "a" * 12, _TEXT)
     env = _envelope(await server._handle_retrieve({"hash": "a" * 12, "line_range": [0, 3]}))
-    assert "must be >= 1" in env["error"]
+    assert env["error"] == "line_range start must be >= 1, got 0"
 
 
 # ─── pattern + line_range compose ───────────────────────────────────────────
@@ -227,4 +229,4 @@ async def test_context_lines_over_cap_errors(server) -> None:
     env = _envelope(
         await server._handle_retrieve({"hash": "a" * 12, "pattern": "ERROR", "context_lines": 999})
     )
-    assert "context_lines must be <=" in env["error"]
+    assert env["error"] == "context_lines must be <= 50, got 999"

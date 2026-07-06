@@ -119,7 +119,8 @@ async def test_unknown_mode_errors(server) -> None:
 
 async def test_non_string_mode_errors(server) -> None:
     env = await _compress(server, {"content": _PAYLOAD, "mode": 5})
-    assert env["error"].startswith("mode must be a string")
+    # Exact: the interpolated type name must reach the caller (an int, here).
+    assert env["error"] == "mode must be a string, got int"
 
 
 # ─── section filtering ──────────────────────────────────────────────────────

@@ -98,10 +98,31 @@ class TestMiningAndHeader:
         total_lines = len(text.splitlines())
         assert enc.templated_lines + enc.verbatim_lines == total_lines
 
-    def test_min_support_is_enforced(self) -> None:
-        # MIN_TEMPLATE_SUPPORT - 1 identical lines: no template may form.
-        text = "\n".join(["ERR disk full on /dev/sda1"] * (MIN_TEMPLATE_SUPPORT - 1)) + "\n"
-        assert encode(text) is None
+    @pytest.mark.parametrize(
+        ("line_count", "should_encode"),
+        [
+            (MIN_TEMPLATE_SUPPORT - 1, False),  # 2 lines: below support → no template
+            (MIN_TEMPLATE_SUPPORT, True),  # 3 lines: exactly at support → template forms
+        ],
+    )
+    def test_min_support_boundary(self, line_count: int, should_encode: bool) -> None:
+        # Straddles `count >= MIN_TEMPLATE_SUPPORT`: a `>` mutation would stop the
+        # exactly-at-threshold corpus from encoding. Lines share a fixed skeleton
+        # with two variable positions (id, port) so a wildcard template can form.
+        text = (
+            "\n".join(
+                f"INFO connection established from host alpha id={1000 + i} port {40000 + i}"
+                for i in range(line_count)
+            )
+            + "\n"
+        )
+        enc = encode(text)
+        if should_encode:
+            assert enc is not None
+            assert enc.template_count == 1
+            assert decode(enc.wire) == text  # still lossless at the boundary
+        else:
+            assert enc is None
 
     def test_params_with_structural_bytes_are_escaped(self) -> None:
         # Params containing the param separator, tabs, backslashes and the
@@ -199,17 +220,28 @@ class TestEncodeContract:
     def test_structureless_input_declines(self, text: str) -> None:
         assert encode(text) is None
 
-    def test_growth_declines(self) -> None:
-        # High parameter density: wire (header + params) cannot beat the
-        # original, encoder must decline rather than inflate.
+    def test_no_shared_structure_declines(self) -> None:
+        # Every line's FIRST token differs (distinct hex ids), so each lands in
+        # its own prefix bucket, no cluster reaches MIN_TEMPLATE_SUPPORT, and the
+        # support gate declines. Deterministically None — pinning the branch (not
+        # `is None or smaller`) so a broken support gate that emitted an encoding
+        # would fail here.
         text = (
             "\n".join(
                 f"{i:08x} {i * 3:08x} {i * 5:08x} {i * 7:08x} {i * 11:08x}" for i in range(20)
             )
             + "\n"
         )
-        enc = encode(text)
-        assert enc is None or len(enc.wire) < len(text)
+        assert encode(text) is None
+
+    def test_size_gate_declines_when_wire_would_grow(self) -> None:
+        # A template DOES form here (3 lines share the 4-token prefix "A B C D",
+        # so support == MIN_TEMPLATE_SUPPORT), but the per-record framing overhead
+        # makes the wire larger than the tiny input. This reaches the SIZE gate
+        # (`len(wire) >= len(text)`) — distinct from the support-gate path above —
+        # which must decline rather than ship an inflated encoding.
+        text = "\n".join(f"A B C D {i:02x} {(i * 2) & 0xFF:02x}" for i in range(3)) + "\n"
+        assert encode(text) is None
 
     def test_encoding_carries_honest_stats(self) -> None:
         enc = encode(ip_port_log(50))

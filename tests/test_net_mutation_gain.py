@@ -53,6 +53,23 @@ class TestNetMutationGainModel:
     def test_zero_suffix_means_gain_equals_savings(self) -> None:
         assert net_mutation_gain(42, MutationContext(0), 0.1) == pytest.approx(42.0)
 
+    @pytest.mark.parametrize(
+        ("saved", "expected_gain"),
+        [
+            # penalty = 100 * (1 - 0.1) = 90, so saved=90 lands EXACTLY on 0.
+            (91, 1.0),  # just above the crossing
+            (90, 0.0),  # exactly on it
+            (89, -1.0),  # just below it
+        ],
+    )
+    def test_gain_value_at_zero_crossing(self, saved: int, expected_gain: float) -> None:
+        # Pins the exact gain at and around the net==0 crossing, so an arithmetic
+        # mutation (wrong penalty factor / dropped subtraction) is caught. The
+        # router treats net <= 0 as skip; the exact `<= 0` vs `< 0` decision at
+        # net==0 is a documented residual (see module note) — no realistic
+        # real-token router scenario lands exactly on 0 to exercise it.
+        assert net_mutation_gain(saved, MutationContext(100), 0.1) == pytest.approx(expected_gain)
+
     def test_unknowable_context_returns_none(self) -> None:
         assert net_mutation_gain(100, MutationContext(None), 0.1) is None
 
