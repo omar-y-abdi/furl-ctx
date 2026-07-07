@@ -100,11 +100,16 @@ class TestNetMutationGainModel:
 
 def compressible_log() -> str:
     """Tool output the LOG arm reliably compresses under the real tokenizer
-    (same shape as test_log_template_dispatch's templatable fixture)."""
+    (same shape as test_log_template_dispatch's templatable fixture).
+
+    200 lines: ratio ≈ 0.896 in o200k_base (< min_ratio 0.90 → accepted).
+    40 lines was sufficient with the old 3.5-cpt estimate but the BPE
+    template wire overhead requires more repetition to break even (Q1).
+    """
     lines = [
         f"INFO [worker-{i % 4}] processed batch id={1000 + i} "
         f"rows={i * 3} status=ok latency={i}.{i}ms"
-        for i in range(40)
+        for i in range(200)
     ]
     return "\n".join(lines)
 

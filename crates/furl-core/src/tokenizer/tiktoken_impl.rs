@@ -109,8 +109,10 @@ impl Tokenizer for TiktokenCounter {
 fn encoding_for(model: &str) -> Result<&'static str, TiktokenError> {
     let m = model.to_ascii_lowercase();
 
-    // o200k_base: GPT-4o + o1/o3 reasoning families.
-    if m.starts_with("gpt-4o") || m.starts_with("o1") || m.starts_with("o3") {
+    // o200k_base: GPT-4o + o1/o3 reasoning families + Claude (Q1).
+    // Claude's tokenizer is not public; o200k_base is the closest public BPE
+    // and far more accurate than the old 3.5 chars/token estimate.
+    if m.starts_with("gpt-4o") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("claude-") {
         return Ok("o200k_base");
     }
 
@@ -236,6 +238,10 @@ mod tests {
             ("gpt-4o-2024-08-06", "o200k_base"),
             ("o1-preview", "o200k_base"),
             ("o3-mini", "o200k_base"),
+            // claude-* → o200k_base (Q1)
+            ("claude-3-opus", "o200k_base"),
+            ("claude-sonnet-4-6", "o200k_base"),
+            ("claude-haiku-4-5", "o200k_base"),
             ("gpt-4", "cl100k_base"),
             ("gpt-4-turbo", "cl100k_base"),
             ("gpt-3.5-turbo", "cl100k_base"),
@@ -257,7 +263,8 @@ mod tests {
 
     #[test]
     fn unknown_model_returns_error() {
-        let r = TiktokenCounter::for_model("claude-3-opus");
+        // Use a genuinely-unknown model name — claude-* now maps to o200k_base (Q1).
+        let r = TiktokenCounter::for_model("llama-3-70b");
         assert!(matches!(r, Err(TiktokenError::UnknownEncoding(_))));
     }
 

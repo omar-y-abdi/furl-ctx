@@ -177,7 +177,11 @@ async def test_cache_hit_counters_surface_in_stats_dict(server, tmp_path) -> Non
 
 
 async def test_read_original_tokens_uses_tokenizer_not_word_count(server, tmp_path) -> None:
-    content = "alpha beta gamma delta epsilon"  # 30 chars, 5 words
+    # Structured log line: word-split gives 3 "words" but tiktoken produces
+    # 15 tokens (punctuation, path separators, number literals each get their
+    # own token). This divergence proves we're using the real tokenizer, not
+    # a word count. Pin is in o200k_base (claude-* uses it since Q1).
+    content = "HTTP/2.0 status_code=404 path=/api/v1/users"  # 3 words, 15 o200k tokens
     f = tmp_path / "counted.txt"
     f.write_text(content)
 
@@ -190,10 +194,9 @@ async def test_read_original_tokens_uses_tokenizer_not_word_count(server, tmp_pa
 
     expected = get_tokenizer(_SERVER_MODEL).count_text(content)
     word_count = len(content.split())
-    # Known-string pin: the server's model maps to the Claude-calibrated
-    # counter (3.5 chars/token) → 30 chars ≈ 9 tokens, NOT 5 words. The pin
-    # distinguishes the tokenizer scheme from the old word-count scheme.
-    assert expected == 9
+    # Known-string pin: claude-* now uses o200k_base (Q1).
+    # "HTTP/2.0 status_code=404 path=/api/v1/users" → 15 tokens, 3 words.
+    assert expected == 15
     assert expected != word_count
     assert entry.original_tokens == expected
     assert entry.original_tokens != word_count

@@ -10,7 +10,8 @@ agree without adding tokenizer FFI surface.
 
 Families covered (the ones that SHOULD agree):
 - OpenAI tiktoken: ``gpt-4o`` (o200k_base) and ``gpt-4`` (cl100k_base).
-- Anthropic estimation at 3.5 chars/token.
+- Anthropic tiktoken: ``claude-*`` (o200k_base) — byte-identical to
+  gpt-4o counts (Q1, same encoding on both sides).
 - Gemini/Cohere estimation at 4.0 chars/token.
 
 Known divergences deliberately NOT covered (documented in both
@@ -82,6 +83,8 @@ def test_tiktoken_counts_match_rust_reference(
 ) -> None:
     assert TiktokenCounter("gpt-4o").count_text(text) == want_4o, f"gpt-4o/o200k: {name}"
     assert TiktokenCounter("gpt-4").count_text(text) == want_4, f"gpt-4/cl100k: {name}"
+    # claude-* uses o200k_base (Q1) — byte-identical to gpt-4o (same encoding).
+    assert get_tokenizer("claude-sonnet-4-6").count_text(text) == want_4o, f"claude/o200k: {name}"
 
 
 @pytest.mark.parametrize(("name", "text", "_w4o", "_w4", "want_35", "want_40"), _CORPUS, ids=_IDS)
@@ -98,8 +101,8 @@ def test_estimation_counts_match_rust_formula(
 def test_registry_dispatch_uses_the_agreeing_fixed_ratio_counters(
     name: str, text: str, _w4o: int, _w4: int, want_35: int, want_40: int
 ) -> None:
-    """The registry's family dispatch (not just the raw counters) lands on
-    the fixed-ratio calibrations the Rust registry mirrors."""
-    assert get_tokenizer("claude-sonnet-4-6").count_text(text) == want_35, name
+    """The registry's estimation-family dispatch lands on the fixed-ratio
+    calibrations the Rust registry mirrors. (claude-* now uses tiktoken
+    o200k_base and is covered by test_tiktoken_counts_match_rust_reference.)"""
     assert get_tokenizer("gemini-1.5-pro").count_text(text) == want_40, name
     assert get_tokenizer("command-r-plus").count_text(text) == want_40, name

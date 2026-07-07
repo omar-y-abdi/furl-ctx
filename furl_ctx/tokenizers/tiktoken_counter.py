@@ -173,6 +173,10 @@ def get_encoding_for_model(model: str) -> str:
         ("gpt-3.5", "cl100k_base"),
         ("o1", "o200k_base"),
         ("o3", "o200k_base"),
+        # Claude models: o200k_base is the closest public encoding (Q1).
+        # Anthropic's tokenizer is not publicly available; o200k_base is far
+        # more accurate than the old 3.5-chars/token flat estimate.
+        ("claude-", "o200k_base"),
     ):
         if model.startswith(prefix):
             return encoding

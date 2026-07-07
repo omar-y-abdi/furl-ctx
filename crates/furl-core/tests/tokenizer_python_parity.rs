@@ -11,7 +11,8 @@
 //! Families covered (the ones that SHOULD agree — see the divergence
 //! notes in `src/tokenizer/registry.rs` for the ones that don't):
 //! - OpenAI tiktoken: `gpt-4o` (o200k_base) and `gpt-4` (cl100k_base).
-//! - Anthropic estimation at 3.5 chars/token.
+//! - Anthropic tiktoken: `claude-*` (o200k_base) — byte-identical to
+//!   gpt-4o counts (Q1, same encoding on both sides).
 //! - Gemini/Cohere estimation at 4.0 chars/token.
 
 use furl_core::tokenizer::get_tokenizer;
@@ -70,22 +71,25 @@ fn blob_construction_matches_python_twin() {
 fn tiktoken_counts_match_python_reference() {
     let gpt4o = get_tokenizer("gpt-4o");
     let gpt4 = get_tokenizer("gpt-4");
+    let claude = get_tokenizer("claude-sonnet-4-6");
     for (name, text, want_4o, want_4, _, _) in corpus() {
         assert_eq!(gpt4o.count_text(&text), want_4o, "gpt-4o/o200k: {name}");
         assert_eq!(gpt4.count_text(&text), want_4, "gpt-4/cl100k: {name}");
+        // claude-* uses o200k_base (Q1) — byte-identical to gpt-4o.
+        assert_eq!(claude.count_text(&text), want_4o, "claude/o200k: {name}");
     }
 }
 
 #[test]
 fn estimation_counts_match_python_formula() {
-    // Anthropic family → 3.5 chars/token; Gemini/Cohere → 4.0. Python's
-    // fixed-ratio EstimatingTokenCounter computes
-    // `max(1, int(chars / cpt + 0.5))` — same constants pinned there.
-    let claude = get_tokenizer("claude-sonnet-4-6");
+    // Gemini/Cohere → 4.0 chars/token. Python's fixed-ratio
+    // EstimatingTokenCounter computes `max(1, int(chars / cpt + 0.5))` —
+    // same constants pinned there.
+    // (claude-* now uses tiktoken o200k_base (Q1) and is covered by
+    // tiktoken_counts_match_python_reference above.)
     let gemini = get_tokenizer("gemini-1.5-pro");
     let cohere = get_tokenizer("command-r-plus");
-    for (name, text, _, _, want_35, want_40) in corpus() {
-        assert_eq!(claude.count_text(&text), want_35, "claude est@3.5: {name}");
+    for (name, text, _, _, _, want_40) in corpus() {
         assert_eq!(gemini.count_text(&text), want_40, "gemini est@4.0: {name}");
         assert_eq!(cohere.count_text(&text), want_40, "cohere est@4.0: {name}");
     }

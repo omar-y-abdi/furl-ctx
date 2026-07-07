@@ -424,9 +424,45 @@ class TestTokenizerRegistry:
         assert isinstance(tokenizer, TiktokenCounter)
 
     def test_get_anthropic_model(self):
-        """Test getting tokenizer for Anthropic model."""
+        """claude-* models use TiktokenCounter with o200k_base (Q1)."""
         tokenizer = get_tokenizer("claude-3-sonnet")
-        assert isinstance(tokenizer, EstimatingTokenCounter)
+        assert isinstance(tokenizer, TiktokenCounter)
+        assert tokenizer.encoding_name == "o200k_base"
+
+    def test_claude_tiktoken_count_differs_from_3pt5_estimate(self):
+        """o200k_base CJK count != 3.5-cpt estimate, proving real tokenizer (Q1)."""
+        # CJK: est@3.5=9, o200k_base=24 — a 2.7x difference ensures we'd
+        # never accidentally pass this with the old EstimatingTokenCounter.
+        TokenizerRegistry.clear_cache()
+        cjk = "东京タワーは高いです。北京烤鸭很好吃。한국어 텍스트도 있다."
+        tokenizer = get_tokenizer("claude-sonnet-4-6")
+        assert tokenizer.count_text(cjk) == 24  # o200k_base, not est@3.5 (9)
+
+    def test_claude_tiktoken_importerror_fallback(self, monkeypatch):
+        """ImportError in tiktoken falls back to EstimatingTokenCounter(3.5) (Q1).
+
+        The _create_anthropic factory does ``from .tiktoken_counter import
+        TiktokenCounter`` inside a try/except ImportError. We verify the fallback
+        by hiding furl_ctx.tokenizers.tiktoken_counter from sys.modules so the
+        dynamic import raises ImportError.
+        """
+        import sys
+
+        import furl_ctx.tokenizers.registry as reg
+
+        # Remove tiktoken_counter from sys.modules so the dynamic import inside
+        # _create_anthropic raises ImportError. We restore it in the finally block.
+        tc_module = sys.modules.pop("furl_ctx.tokenizers.tiktoken_counter", None)
+        try:
+            # Also block the top-level tiktoken so TiktokenCounter cannot re-import.
+            monkeypatch.setitem(sys.modules, "tiktoken", None)
+            TokenizerRegistry.clear_cache()
+            tokenizer = reg.get_tokenizer("claude-3-sonnet")
+            assert isinstance(tokenizer, EstimatingTokenCounter)
+        finally:
+            if tc_module is not None:
+                sys.modules["furl_ctx.tokenizers.tiktoken_counter"] = tc_module
+            TokenizerRegistry.clear_cache()
 
     def test_get_unknown_model_fallback(self):
         """Test fallback for unknown model."""

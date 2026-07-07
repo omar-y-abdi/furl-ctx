@@ -34,9 +34,10 @@ logger = logging.getLogger(__name__)
 # backend mapping, and the agreeing families are pinned cross-language by
 # TEST-8 (tests/test_tokenizer_rust_parity.py ↔ Rust
 # tests/tokenizer_python_parity.rs): OpenAI/tiktoken counts are
-# byte-identical; the anthropic (3.5 cpt) and google/cohere (4.0 cpt)
-# FIXED-ratio estimations match exactly. Two divergences remain — the
-# same model name can count differently across the FFI:
+# byte-identical; Anthropic claude-* now also uses tiktoken o200k_base
+# (byte-identical across FFI, Q1); google/cohere (4.0 cpt) FIXED-ratio
+# estimations match exactly. Two divergences remain — the same model name
+# can count differently across the FFI:
 #   1. Unknown-model estimation: _create_estimation returns the AUTO
 #      EstimatingTokenCounter (density auto-detection 4.0/3.5/3.2 +
 #      URL/UUID overhead); Rust uses a FIXED 4.0.
@@ -57,7 +58,7 @@ MODEL_PATTERNS: list[tuple[str, str]] = [
     (r"^curie", "tiktoken"),
     (r"^babbage", "tiktoken"),
     (r"^ada", "tiktoken"),
-    # Anthropic models -> estimation (Claude uses custom tokenizer)
+    # Anthropic models -> tiktoken o200k_base (closest public BPE, Q1)
     (r"^claude-", "anthropic"),
     # Google models -> estimation (Gemini uses SentencePiece)
     (r"^gemini", "google"),
@@ -82,13 +83,25 @@ def _create_tiktoken(model: str) -> TokenCounter:
 
 
 def _create_anthropic(model: str) -> TokenCounter:
-    """Create Anthropic tokenizer.
+    """Create Anthropic tokenizer using tiktoken o200k_base (Q1).
 
-    Anthropic uses a custom tokenizer that's not publicly available.
-    We use estimation calibrated for Claude models.
+    Anthropic's tokenizer is not publicly available. o200k_base (the GPT-4o
+    encoding) is the closest public BPE and far more accurate than the old
+    3.5-chars/token flat estimate, especially for CJK and emoji content.
+
+    Falls back to EstimatingTokenCounter(3.5) only when tiktoken is absent
+    (ImportError), preserving cold-path safety on minimal installs.
     """
-    # Claude models use ~3.5 chars per token on average
-    return EstimatingTokenCounter(chars_per_token=3.5)
+    try:
+        from .tiktoken_counter import TiktokenCounter
+
+        return TiktokenCounter(model)
+    except ImportError:
+        logger.warning(
+            "tiktoken not installed — claude-* falling back to 3.5-cpt estimation. "
+            "Install with: pip install tiktoken"
+        )
+        return EstimatingTokenCounter(chars_per_token=3.5)
 
 
 def _create_google(model: str) -> TokenCounter:
