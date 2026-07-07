@@ -148,7 +148,11 @@ mod tests {
     #[test]
     fn claude_models_pick_tiktoken() {
         // claude-* routes to tiktoken o200k_base (Q1).
-        for m in ["claude-3-opus", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"] {
+        for m in [
+            "claude-3-opus",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+        ] {
             assert_eq!(detect_backend(m), Backend::Tiktoken, "{m}");
         }
     }

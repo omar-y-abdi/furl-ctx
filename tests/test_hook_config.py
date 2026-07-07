@@ -7,11 +7,7 @@ import os
 from pathlib import Path
 
 _HOOK_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "plugins"
-    / "furl"
-    / "hooks"
-    / "compress_tool_output.py"
+    Path(__file__).resolve().parents[1] / "plugins" / "furl" / "hooks" / "compress_tool_output.py"
 )
 
 

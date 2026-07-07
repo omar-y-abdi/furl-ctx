@@ -106,9 +106,7 @@ def compress_envelope(
     ).compressed
     key = raw_recovery_hash(content)
     other_json = (
-        json.dumps(view.other, ensure_ascii=False, separators=(",", ":"))
-        if view.other
-        else ""
+        json.dumps(view.other, ensure_ascii=False, separators=(",", ":")) if view.other else ""
     )
     marker = f"[{len(view.inner)} items compressed to 0. Retrieve more: hash={key}]"
     candidate = "\n".join(part for part in (crushed, other_json, marker) if part)

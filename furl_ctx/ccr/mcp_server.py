@@ -528,9 +528,7 @@ class SessionStats:
             else 0
         )
         # Rough cost estimate; FURL_COST_RATE_USD_PER_MTOK overrides the ~$3/1M default.
-        cost_saved = round(
-            self.total_tokens_saved * _cost_rate_per_mtok() / 1_000_000, 4
-        )
+        cost_saved = round(self.total_tokens_saved * _cost_rate_per_mtok() / 1_000_000, 4)
 
         return {
             "session_duration_seconds": round(time.time() - self.started_at),

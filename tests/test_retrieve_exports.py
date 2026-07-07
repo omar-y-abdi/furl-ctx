@@ -10,9 +10,7 @@ from furl_ctx.transforms.csv_ingest import raw_recovery_hash
 
 
 def _envelope(n: int = 200) -> str:
-    return json.dumps(
-        {"data": [{"id": i, "value": f"row-{i}"} for i in range(n)], "total": n}
-    )
+    return json.dumps({"data": [{"id": i, "value": f"row-{i}"} for i in range(n)], "total": n})
 
 
 def test_retrieve_unknown_hash_is_none() -> None:
@@ -43,9 +41,7 @@ def test_resolve_markers_expands_marker_to_original() -> None:
         result = compress([{"role": "tool", "content": env}], model="gpt-4o")
         h = raw_recovery_hash(env)
         restored = resolve_markers(result.messages)
-        text = "\n".join(
-            m["content"] for m in restored if isinstance(m.get("content"), str)
-        )
+        text = "\n".join(m["content"] for m in restored if isinstance(m.get("content"), str))
         assert f"hash={h}" not in text  # marker expanded, not left dangling
         assert env in text  # original envelope content restored inline
         assert h in result.ccr_hashes  # input result unmutated (still scannable)

@@ -112,7 +112,11 @@ fn encoding_for(model: &str) -> Result<&'static str, TiktokenError> {
     // o200k_base: GPT-4o + o1/o3 reasoning families + Claude (Q1).
     // Claude's tokenizer is not public; o200k_base is the closest public BPE
     // and far more accurate than the old 3.5 chars/token estimate.
-    if m.starts_with("gpt-4o") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("claude-") {
+    if m.starts_with("gpt-4o")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("claude-")
+    {
         return Ok("o200k_base");
     }
 

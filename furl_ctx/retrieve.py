@@ -41,9 +41,7 @@ def resolve_markers(
                 # lazy: bulk expansion does NOT feed the retrieval-feedback loop
                 # (record_feedback_signal=False) — it mechanically restores every
                 # marker, not the model selectively fetching one.
-                entry = active.retrieve(
-                    hash_of_match(match), record_feedback_signal=False
-                )
+                entry = active.retrieve(hash_of_match(match), record_feedback_signal=False)
                 return entry.original_content if entry is not None else match.group(0)
 
             text = pattern.sub(_sub, text)

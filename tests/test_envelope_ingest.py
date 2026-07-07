@@ -24,8 +24,7 @@ def _envelope(n: int = 60) -> str:
     return json.dumps(
         {
             "data": [
-                {"id": i, "name": f"item-{i}", "score": i * 2, "tag": "alpha"}
-                for i in range(n)
+                {"id": i, "name": f"item-{i}", "score": i * 2, "tag": "alpha"} for i in range(n)
             ],
             "total": n,
             "next_cursor": "cursor-xyz",

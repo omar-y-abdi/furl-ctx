@@ -190,9 +190,7 @@ class StrategyDispatcher:
                     # detector used, so the two can never disagree; a
                     # ``None`` here keeps the historical crush path
                     # byte-identical.
-                    view = (
-                        None if self.config.lossless_only else sniff_envelope(content)
-                    )
+                    view = None if self.config.lossless_only else sniff_envelope(content)
                     table = None
                     if not self.config.lossless_only and not content.lstrip().startswith(
                         ("[", "{")

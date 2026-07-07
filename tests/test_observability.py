@@ -11,11 +11,7 @@ from pathlib import Path
 from furl_ctx.ccr.mcp_server import _cost_rate_per_mtok
 
 _HOOK = (
-    Path(__file__).resolve().parents[1]
-    / "plugins"
-    / "furl"
-    / "hooks"
-    / "compress_tool_output.py"
+    Path(__file__).resolve().parents[1] / "plugins" / "furl" / "hooks" / "compress_tool_output.py"
 )
 
 
