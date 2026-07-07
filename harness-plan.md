@@ -10,9 +10,23 @@ already exists in the code but is gated off, unwired, or unexported.
   named subagent. The orchestrator reviews the diff as the harshest critic, and on
   any smell re-initiates the **same** subagent with a continuous-review prompt until
   clean. Only then: commit + push.
-- **Quality bar — lazy senior-dev:** minimal diff, no overengineering, no speculative
-  abstraction, no config/flags not asked for, match existing patterns exactly. Every
-  changed line traces to the item. TDD (test first, red→green), types per `RULES.md`.
+- **Quality bar — lazy senior-dev (user, 2026-07-07). "The best code is the code never
+  written." The Ladder — stop at the first rung that holds, per item AND per sub-part:**
+  1. Does this need to exist at all? Speculative → skip it, say so in one line (YAGNI).
+  2. Stdlib does it? Use it. (CLI → `argparse`; HTML → `html.parser`; not a new dep.)
+  3. Native/platform feature covers it? Use it.
+  4. Already-installed dependency solves it? Use it. Never add a NEW dep for what a few
+     lines do. (Reuse `benchmarks/`, `verify/`, `tiktoken` — don't reinvent.)
+  5. One line? One line.
+  6. Only then: the minimum code that works.
+  Deletion over addition. Boring over clever. Fewest files. No unrequested abstractions/
+  flags/config. Mark intentional shortcuts with a `lazy:` comment naming the ceiling +
+  upgrade path. NOT lazy about: input validation at trust boundaries, data-loss-preventing
+  error handling, security, anything explicitly requested.
+- **Testing (lazy):** non-trivial logic leaves **ONE runnable check** — the smallest thing
+  that fails if the logic breaks (an assert-based self-check or one small test file; no
+  frameworks/fixtures). Trivial one-liners need no test. The full suite (`pytest tests/`)
+  must stay green regardless.
 - **Verify-first:** subagents must confirm each grounding claim against the real code
   before changing anything — the doc's `file:line` are a starting point, not gospel.
 - **Green gate (every item):** `uv run ruff check .` + `uv run mypy furl_ctx
@@ -29,6 +43,8 @@ already exists in the code but is gated off, unwired, or unexported.
 
 ## Critic checklist (reject + re-initiate the SAME subagent on ANY hit)
 
+- Ladder skipped — reinvents stdlib / an already-installed dep / a few-lines job, or a
+  sub-part that fails rung 1 (YAGNI) → **reject**.
 - New dependency (esp. heavy) → **reject**, log as blocker-question instead.
 - Speculative param/flag/abstraction/config not in the item spec → reject.
 - Stub / TODO / placeholder → reject.
@@ -46,10 +62,13 @@ already exists in the code but is gated off, unwired, or unexported.
       Rust registry so FFI parity is byte-identical (claude asserted == gpt-4o/o200k both
       sides). No new dep; Anthropic-API exact-tokens deferred (blocker-question). Bench pins
       gpt-4o → neutral. 1585 pass, cargo/ruff/mypy green.
-- [ ] **Q2 — `compress_to(messages, max_tokens=N, model=...)`** (#8, M). No
-      `compress_to`/`max_tokens` today. Greedy loop over the existing stack: compress →
-      measure (tokenizer) → tighten `CompressionProfile.bias`/`protect_recent` →
-      CCR-offload fallback → repeat until under budget. *Needs Q1.*
+- [x] **Q2 — `compress_to(messages, max_tokens=N)`** (#8, M) — `furl_ctx/compress_to.py`.
+      Thin bounded greedy orchestrator over compress(): fixed 5-rung kwargs ladder
+      (protect_recent→0, compress_user_messages, min_tokens→50, protect_analysis→False),
+      first rung that fits wins; unreachable budget → smallest result + warning (never
+      raises/loops/over-budget). Measures the real tokenizer per rung, not the fail-open
+      `tokens_after`. No engine change → bench-neutral. 1589 pass. *(PM-implemented: 2
+      subagent stream-idle-timeouts on big-file reads; ~55-LOC item, sanctioned small edit.)*
 - [ ] **Q3 — API-envelope unwrap** `{"data":[...],"meta":{}}` (#1, S). `content_detector`
       only detects `JSON_ARRAY` when the top level *is* a list. Add one unwrap pass over
       common keys (`data/results/items/hits/records/edges/rows/documents`) → SmartCrusher
