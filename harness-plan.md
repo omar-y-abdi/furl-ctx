@@ -126,6 +126,45 @@ already exists in the code but is gated off, unwired, or unexported.
 - [ ] **B5 — Eval / recall harness** (#13, M). `benchmarks/` + `verify/needle_recall.py`
       exist internally; expose `furl eval <corpus> --recall` (the trust gate). *Uses Q4, Q8.*
 
+## HANDOFF — B2–B5 (context limit reached at B1; resume in a fresh session)
+
+Q1–Q8 merged (PR #36, on main). B1 on branch `c7/harness-bigbets` (PR pending). B2–B5
+remain — all substantial (L/L/M/M). Baseline **1619 pass**. Gate per item: `uv run ruff
+check . && uv run ruff format . && uv run mypy furl_ctx --ignore-missing-imports && uv run
+pytest tests/ -q` (+ `cargo fmt --all && cargo test --workspace` if Rust). Routing items →
+also confirm bench-neutral (grep bench data for matches) or run `uv run python -m verify.run`.
+
+**Reusable recovery pattern (CSV → envelope → HTML all follow it):** `sniff_x` predicate →
+transform → `persist_to_python_ccr(original, candidate, raw_recovery_hash(original), ...)` →
+ship `candidate + [N word compressed to 0. Retrieve more: hash=<24hex>]` marker → fail-open
+veto (persist fail / no-savings → return None → serve raw, never a dangling marker). Recovery
+scans `BRACKET_RETRIEVE_PATTERN`; `retrieve()`/`resolve_markers()`/`ccr_hashes` (Q4) resolve it.
+
+- **B2 — CCR durable-retention epic (L).** Spill tier (Q5) already covers demote-not-delete.
+  Remaining, scope to minimal: `session_id`/`agent_id` namespacing on `compress()` +
+  `FURL_CCR_NAMESPACE` (shared with B3) for per-tenant store isolation; `ccr_export(path)` /
+  `ccr_import(path)` for cross-session checkpointing. Files: `furl_ctx/cache/compression_store.py`
+  (`get_compression_store` + `_request_ccr_store` ContextVar at ~:1493 already exists for
+  request-scoping — reuse it for namespacing). **Defer** (flag): TTL-on-access promotion,
+  pin-forever. Security-adjacent — careful.
+- **B3 — Redaction + purge + namespace + audit + encryption (L).** Minimal core: `CompressConfig.
+  redactor: Callable[[str],str] | None` applied **fail-CLOSED before** the store write (outside
+  compress()'s `except BaseException` fail-open boundary — `compress.py` ~:490-510); `furl_purge`
+  MCP tool + `furl purge <hash>` CLI (store has `delete`/`clear` at `sqlite.py:295/327`, unsurfaced);
+  `FURL_CCR_NAMESPACE`. **Defer as blocker-questions**: at-rest encryption (needs SQLCipher/crypto
+  dep — which?), `audit.jsonl` format (fields/rotation?). `secret_keep_rail` currently guarantees
+  secrets reach the store byte-exact — redaction is the fix.
+- **B4 — Cross-turn / whole-history wiring (M).** Activate the idle `ReadLifecycleManager`
+  (`furl_ctx/transforms/read_lifecycle.py` — needs multi-turn context the single-message hook never
+  passes). Add a `compress_chat_history(messages, ...)` preset (= `compress` with
+  `compress_user_messages=True`, `protect_recent=2`, retrieval feedback on) + a
+  `compress_with_cache(messages, freeze_up_to_n)` prompt-cache-aware helper. Library-only (no hook
+  change). Files: `compress.py` / a new small `chat.py`. Bench-neutral (new surface).
+- **B5 — Eval / recall harness (M).** Mostly REUSE: `benchmarks/needle_recall.py` +
+  `verify/measure.py` exist. Add `furl eval <corpus> --recall` to `furl_ctx/cli.py` (extend the Q8
+  argparse) that runs the existing needle-recall over a user corpus and prints ratio + recall%.
+  Thin wrapper; no engine change.
+
 ## Blocker questions (fill during the run; ask after everything is done)
 
 - **Subagent delegation is broken in this environment** — 3 consecutive `general-purpose`
