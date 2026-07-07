@@ -85,10 +85,13 @@ already exists in the code but is gated off, unwired, or unexported.
       primary → spill active; sqlite primary → redundant-guard off) + tested
       (`test_ccr_spill_tier.py`). Only gap was docs → added `FURL_CCR_SPILL` to LIBRARY.md.
       `FURL_CCR_SPILL_BACKEND` (configurable spill backend) = speculative YAGNI, skipped.
-- [ ] **Q6 — Hook wires shipped config** (#2, S). Hook calls `compress()` with bare
-      defaults, ignoring `DEFAULT_TOOL_PROFILES`, `is_tool_excluded()`, and `tool_name`.
-      Map tool→profile bias, use the exclusion helper, accept a model; expose
-      `FURL_HOOK_MODE` / `FURL_HOOK_EXCLUDE_TOOLS`.
+- [x] **Q6 — Hook wires shipped config** (#2, S) — `FURL_HOOK_EXCLUDE_TOOLS` (via engine
+      `is_tool_excluded`, glob-aware; replaces the substring self-guard, fail-open) +
+      `FURL_HOOK_MODE=aggressive` (protect_recent=0 + min_tokens=50). Verified end-to-end
+      (subprocess: Bash compresses, furl_/excluded pass through). Docs in SKILL/README. 1607
+      pass. **Deferred** (need engine levers): per-tool bias (router needs assistant-tool_call
+      linkage the single-message hook lacks) + `lossless_only` (no clean pipeline lever;
+      FurlConfig has no `lossless_only` field — = separate roadmap #9). *(PM-implemented.)*
 - [ ] **Q7 — Observability bundle** (#3, S). Hook writes nothing on success;
       `mcp_server` hardcodes `$3.0/Mtok`; stats keep a 2h window; `furl_stats` is
       pull-only. Add opt-in stderr annotation (`FURL_HOOK_VERBOSE`), a real per-model cost

@@ -32,6 +32,8 @@ from typing import Any, NoReturn
 _ENABLED_ENV = "FURL_HOOK_ENABLED"
 _MIN_CHARS_ENV = "FURL_HOOK_MIN_CHARS"
 _MODEL_ENV = "FURL_HOOK_MODEL"
+_EXCLUDE_ENV = "FURL_HOOK_EXCLUDE_TOOLS"
+_MODE_ENV = "FURL_HOOK_MODE"
 
 _DEFAULT_MIN_CHARS = 2000
 _DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
@@ -46,9 +48,10 @@ _CCR_MARKER = "<<ccr:"
 os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
 os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")
 
-# Tool names whose output must never be recompressed (would double-compress or
-# compress content the model just retrieved). Furl's own MCP tools are namespaced
-# ``mcp__<server>__furl_*`` by the host.
+# Furl's own tool output must never be recompressed (would double-compress or
+# compress content the model just retrieved). Furl's MCP tools are namespaced
+# ``mcp__<server>__furl_*`` by the host. This is the built-in loop-guard base
+# (as a glob, always excluded); operators add more via FURL_HOOK_EXCLUDE_TOOLS.
 _SELF_TOOL_SUBSTR = "furl_"
 
 
@@ -105,6 +108,38 @@ def _extract_text(tool_response: Any) -> str | None:
     return None
 
 
+def _exclude_tools() -> set[str]:
+    """Tools to never (re)compress: Furl's own output (loop guard) plus any the
+    operator lists in FURL_HOOK_EXCLUDE_TOOLS (comma-separated; exact names or
+    fnmatch globs like ``mcp__*``, per furl_ctx.config.is_tool_excluded)."""
+    user = os.environ.get(_EXCLUDE_ENV, "")
+    return {f"*{_SELF_TOOL_SUBSTR}*", *(t.strip() for t in user.split(",") if t.strip())}
+
+
+def _excluded(tool_name: str) -> bool:
+    """True if *tool_name* is excluded from compression. Uses the engine's
+    glob-aware is_tool_excluded, falling back to the built-in loop guard if
+    furl_ctx cannot be imported (the same fail-open posture as compression)."""
+    if not tool_name:
+        return False
+    try:
+        from furl_ctx.config import is_tool_excluded
+
+        return is_tool_excluded(tool_name, _exclude_tools())
+    except Exception:
+        return _SELF_TOOL_SUBSTR in tool_name.lower()
+
+
+def _mode_kwargs() -> dict[str, object]:
+    """FURL_HOOK_MODE -> compress() overrides. ``aggressive`` also compresses code
+    in the blob and squeezes smaller outputs; ``normal`` (default) keeps the
+    shipped behavior. (``lossless_only`` is not yet wired — it needs an engine-side
+    pipeline lever; see harness-plan.md.)"""
+    if os.environ.get(_MODE_ENV, "").strip().lower() == "aggressive":
+        return {"protect_recent": 0, "min_tokens_to_compress": 50}
+    return {}
+
+
 def _compress_text(text: str) -> str | None:
     """Compress one tool-output blob via Furl's public pipeline.
 
@@ -119,7 +154,7 @@ def _compress_text(text: str) -> str | None:
 
     model = os.environ.get(_MODEL_ENV, "").strip() or _DEFAULT_MODEL
     try:
-        result = compress([{"role": "tool", "content": text}], model=model)
+        result = compress([{"role": "tool", "content": text}], model=model, **_mode_kwargs())
     except Exception:
         return None
 
@@ -166,9 +201,9 @@ def main() -> None:
     if not _flag_enabled(os.environ.get(_ENABLED_ENV)):
         _passthrough()
 
-    # --- loop guard: never (re)compress Furl's own tool traffic ---
+    # --- loop guard + operator exclusions (FURL_HOOK_EXCLUDE_TOOLS) ---
     tool_name = payload.get("tool_name")
-    if isinstance(tool_name, str) and _SELF_TOOL_SUBSTR in tool_name.lower():
+    if isinstance(tool_name, str) and _excluded(tool_name):
         _passthrough()
 
     # --- extract text; bail on non-text / empty payloads ---

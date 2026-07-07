@@ -82,6 +82,8 @@ output), so a compression problem can never break your tool call.
 | `FURL_HOOK_ENABLED` | on | `0`/`false`/`off` disables the hook (MCP tools stay). |
 | `FURL_HOOK_MIN_CHARS` | `2000` | Size threshold before compressing. |
 | `FURL_HOOK_MODEL` | `claude-sonnet-4-5-20250929` | Model name for token counting. |
+| `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tools never to compress — exact or `mcp__db__*` globs. |
+| `FURL_HOOK_MODE` | `normal` | `aggressive` compresses more (code + smaller outputs). |
 
 The full `FURL_*` reference is in [`LIBRARY.md`](../../LIBRARY.md) → "Configuration".
 
