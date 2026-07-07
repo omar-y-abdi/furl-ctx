@@ -5,25 +5,18 @@ the same engine is a plain Python library you can drop into any app or MCP host.
 
 ## Install
 
-Prebuilt wheels ship on the GitHub Release — **no Rust toolchain**, and pip
-auto-selects your platform's wheel (macOS arm64/x86_64, Linux arm64/x86_64):
+Prebuilt wheels ship on [PyPI](https://pypi.org/project/furl-ctx/) — **no Rust
+toolchain**, and pip auto-selects your platform's wheel (macOS arm64/x86_64,
+Linux arm64/x86_64):
 
 ```bash
-pip install "furl-ctx[all]" --only-binary furl-ctx \
-  --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0
+pip install "furl-ctx[all]"
 ```
 
-Once Furl is on PyPI this shortens to `pip install "furl-ctx[all]"`. Granular
-extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code
+Granular extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code
 compression, ~50 MB, opt-in), `[dev]`. Requires **Python 3.10+**.
 
-Using `pipx`? Pass the release index through and choose an interpreter:
-
-```bash
-pipx install --python python3.13 \
-  --pip-args "--only-binary furl-ctx --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0" \
-  "furl-ctx[all]"
-```
+Using `pipx`? `pipx install --python python3.13 "furl-ctx[all]"`.
 
 ## Use it
 
@@ -153,8 +146,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && rustup default
 winget install Rustlang.Rustup && rustup default stable
 ```
 
-Restart your shell, then re-run the install. Simplest of all: use the prebuilt wheel
-(the `--find-links` command above), which skips the Rust build — and this whole issue — entirely.
+Restart your shell, then re-run the install. Simplest of all: install the prebuilt
+wheel from PyPI (`pip install "furl-ctx[all]"`), which skips the Rust build — and this
+whole issue — entirely.
 
 One runtime asset is fetched over TLS; if it is blocked, trust your corporate CA via
 `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` / `CURL_CA_BUNDLE`:

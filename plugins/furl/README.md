@@ -33,8 +33,7 @@ First use triggers a one-time wheel download (a few seconds).
 
 > **From a local clone instead of GitHub:** `/plugin marketplace add /path/to/headroom`
 > (the repo root ships `.claude-plugin/marketplace.json` pointing at `./plugins/furl`),
-> then `/plugin install furl@furl`. Once Furl is on PyPI, `uv` will resolve it
-> without the `--find-links` release index.
+> then `/plugin install furl@furl`.
 
 ## What each piece does
 
@@ -47,7 +46,7 @@ through `uv`, which fetches Furl on first use — no prior install:
 ```json
 { "mcpServers": { "furl": {
   "command": "sh",
-  "args": ["-lc", "exec uv run --no-project --with 'furl-ctx[mcp]' --find-links <release-url> python -m furl_ctx.ccr.mcp_server"],
+  "args": ["-lc", "exec uv run --no-project --with 'furl-ctx[mcp]' python -m furl_ctx.ccr.mcp_server"],
   "env": { "FURL_CCR_BACKEND": "sqlite", "FURL_CCR_TTL_SECONDS": "86400" }
 }}}
 ```

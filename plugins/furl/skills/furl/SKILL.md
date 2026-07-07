@@ -69,7 +69,7 @@ is in [`LIBRARY.md`](../../../../LIBRARY.md) → "Configuration".
 ## Prerequisite
 
 Both the hook and the MCP server launch through [`uv`](https://docs.astral.sh/uv/)
-(`uv run --with "furl-ctx[mcp]" --find-links <release> …`), which fetches Furl from
-the prebuilt release wheels on first use — no `pip install`, no Rust toolchain. The
+(`uv run --with "furl-ctx[mcp]" …`), which fetches Furl from PyPI on first use — no
+`pip install`, no Rust toolchain. The
 only requirement is `uv` on the PATH. If `uv` is missing, the MCP server won't start
 and the hook fails open (passes output through unchanged).
