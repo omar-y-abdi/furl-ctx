@@ -84,6 +84,7 @@ output), so a compression problem can never break your tool call.
 | `FURL_HOOK_MODEL` | `claude-sonnet-4-5-20250929` | Model name for token counting. |
 | `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tools never to compress — exact or `mcp__db__*` globs. |
 | `FURL_HOOK_MODE` | `normal` | `aggressive` compresses more (code + smaller outputs). |
+| `FURL_HOOK_VERBOSE` | off | `1` prints a one-line per-compression savings summary to stderr. |
 
 The full `FURL_*` reference is in [`LIBRARY.md`](../../LIBRARY.md) → "Configuration".
 

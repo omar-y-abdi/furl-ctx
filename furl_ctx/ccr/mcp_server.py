@@ -426,6 +426,22 @@ def _read_shared_events(window_seconds: int = SESSION_WINDOW_SECONDS) -> list[di
     return events
 
 
+_DEFAULT_COST_RATE_USD_PER_MTOK = 3.0
+
+
+def _cost_rate_per_mtok() -> float:
+    """Blended $/1M-token rate for the savings estimate. FURL_COST_RATE_USD_PER_MTOK
+    overrides the ~$3 default; an invalid or negative value falls back to it."""
+    raw = os.environ.get("FURL_COST_RATE_USD_PER_MTOK", "").strip()
+    if not raw:
+        return _DEFAULT_COST_RATE_USD_PER_MTOK
+    try:
+        rate = float(raw)
+    except ValueError:
+        return _DEFAULT_COST_RATE_USD_PER_MTOK
+    return rate if rate >= 0 else _DEFAULT_COST_RATE_USD_PER_MTOK
+
+
 @dataclass
 class SessionStats:
     """Track compression statistics for the current MCP session.
@@ -511,8 +527,10 @@ class SessionStats:
             if self.total_input_tokens > 0
             else 0
         )
-        # Rough cost estimate (blended rate ~$3/1M input tokens)
-        cost_saved = round(self.total_tokens_saved * 3.0 / 1_000_000, 4)
+        # Rough cost estimate; FURL_COST_RATE_USD_PER_MTOK overrides the ~$3/1M default.
+        cost_saved = round(
+            self.total_tokens_saved * _cost_rate_per_mtok() / 1_000_000, 4
+        )
 
         return {
             "session_duration_seconds": round(time.time() - self.started_at),

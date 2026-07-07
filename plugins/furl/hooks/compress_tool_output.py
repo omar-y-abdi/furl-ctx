@@ -34,6 +34,7 @@ _MIN_CHARS_ENV = "FURL_HOOK_MIN_CHARS"
 _MODEL_ENV = "FURL_HOOK_MODEL"
 _EXCLUDE_ENV = "FURL_HOOK_EXCLUDE_TOOLS"
 _MODE_ENV = "FURL_HOOK_MODE"
+_VERBOSE_ENV = "FURL_HOOK_VERBOSE"
 
 _DEFAULT_MIN_CHARS = 2000
 _DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
@@ -223,6 +224,14 @@ def main() -> None:
     compressed = _compress_text(text)
     if compressed is None:
         _passthrough()
+
+    # --- optional one-line stderr annotation (FURL_HOOK_VERBOSE) ---
+    if _flag_enabled(os.environ.get(_VERBOSE_ENV)):
+        saved_pct = round((1 - len(compressed) / len(text)) * 100)
+        sys.stderr.write(
+            f"furl: {tool_name or '?'} "
+            f"{len(text) / 1024:.1f} KB -> {len(compressed) / 1024:.1f} KB  -{saved_pct}%\n"
+        )
 
     # --- replace the tool output the model sees ---
     output = {

@@ -92,12 +92,12 @@ already exists in the code but is gated off, unwired, or unexported.
       pass. **Deferred** (need engine levers): per-tool bias (router needs assistant-tool_call
       linkage the single-message hook lacks) + `lossless_only` (no clean pipeline lever;
       FurlConfig has no `lossless_only` field — = separate roadmap #9). *(PM-implemented.)*
-- [ ] **Q7 — Observability bundle** (#3, S). Hook writes nothing on success;
-      `mcp_server` hardcodes `$3.0/Mtok`; stats keep a 2h window; `furl_stats` is
-      pull-only. Add opt-in stderr annotation (`FURL_HOOK_VERBOSE`), a real per-model cost
-      model (`FURL_COST_RATE_USD_PER_MTOK` + tokenizer), append-only JSONL
-      (`FURL_STATS_LOG_PATH`), `per_message_stats` on `CompressResult`, opt-in `timing`.
-      *After Q6 (same hook file).*
+- [x] **Q7 — Observability bundle** (#3, S) — `FURL_HOOK_VERBOSE` one-line stderr savings
+      summary per compression (hook ran blind before) + `FURL_COST_RATE_USD_PER_MTOK`
+      (replaces the hardcoded $3/Mtok in `furl_stats`). Verified (subprocess verbose +
+      cost-rate fallback). Docs in SKILL/README/LIBRARY. 1611 pass. **Scoped out** (lazy):
+      durable JSONL (`shared_stats_file` already appends cross-process) + `per_message_stats`/
+      `timing` on `CompressResult` (speculative surface, no consumer). *(PM-implemented.)*
 - [ ] **Q8 — `furl` CLI** (#7, M). No `[project.scripts]`. Thin
       `furl_ctx.cli:main` over the library: `compress [file|-]` (`--json`,
       `--lossless-only`, `--model`), `retrieve <hash>`, `stats`, `doctor`. *Uses Q4, Q1.*
