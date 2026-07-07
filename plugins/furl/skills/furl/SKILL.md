@@ -59,7 +59,7 @@ Set these in the plugin's `hooks/hooks.json` / `.mcp.json` env, or your shell:
 | `FURL_CCR_TTL_SECONDS` | `86400` (set by the plugin) | How long offloaded originals stay retrievable. |
 
 The full `FURL_*` reference (workspace dir, store paths, row caps, circuit breaker)
-is in the Furl README's "Configuration" section.
+is in [`LIBRARY.md`](../../../../LIBRARY.md) → "Configuration".
 
 ## How to disable
 
@@ -68,11 +68,8 @@ is in the Furl README's "Configuration" section.
 
 ## Prerequisite
 
-Both the hook and the MCP server run `python3 -m furl_ctx.ccr.mcp_server` / import
-`furl_ctx`, so the `python3` on PATH must have Furl installed. Prebuilt wheels ship
-on the GitHub Release (no Rust toolchain needed):
-
-```bash
-pip install "furl-ctx[mcp]" --only-binary furl-ctx \
-  --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0
-```
+Both the hook and the MCP server launch through [`uv`](https://docs.astral.sh/uv/)
+(`uv run --with "furl-ctx[mcp]" --find-links <release> …`), which fetches Furl from
+the prebuilt release wheels on first use — no `pip install`, no Rust toolchain. The
+only requirement is `uv` on the PATH. If `uv` is missing, the MCP server won't start
+and the hook fails open (passes output through unchanged).

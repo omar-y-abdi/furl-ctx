@@ -5,7 +5,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py\"",
+          "command": "sh -lc 'uv run --no-project --with \"furl-ctx[mcp]\" --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0 python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py\" || true'",
           "timeout": 30,
           "env": {
             "FURL_CCR_BACKEND": "sqlite",

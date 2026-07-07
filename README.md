@@ -5,12 +5,12 @@
   ██╔══╝   ██║   ██║ ██╔══██╗ ██║
    ██║      ╚██████╔╝ ██║  ██║ ███████╗
    ╚═╝       ╚═════╝  ╚═╝  ╚═╝ ╚══════╝
- The context compression layer for AI agents 
-  <img src="typing.svg" width="42" /> 
+ The context compression layer for AI agents
+  <img src="typing.svg" width="42" />
 </pre></div>
 
 
-<p align="center"><strong>60–95% fewer tokens on redundant workloads · library · MCP · local-first · reversible</strong></p>
+<p align="center"><strong>60–95% fewer tokens on redundant workloads · a Claude Code plugin · local-first · reversible</strong></p>
 
 <p align="center">
   <a href="https://github.com/omar-y-abdi/furl/releases/latest"><img src="https://img.shields.io/github/v/release/omar-y-abdi/furl?sort=semver&color=blue" alt="Release"></a>
@@ -18,274 +18,57 @@
 </p>
 
 <p align="center">
-  <a href="#get-started-60-seconds">Install</a> ·
+  <a href="#install">Install</a> ·
   <a href="#proof">Proof</a> ·
-  <a href="https://discord.gg/yRmaUNpsPJ">Discord</a> ·
-  <a href="llms.txt">llms.txt</a>
+  <a href="LIBRARY.md">Library</a> ·
+  <a href="https://discord.gg/yRmaUNpsPJ">Discord</a>
 </p>
-
-<p align="center"><sub>
-  <b>AI agents / LLMs:</b> read <a href="llms.txt"><code>/llms.txt</code></a> here for the doc index.
-</sub></p>
 
 ---
 
-Furl compresses everything your AI agent reads — tool outputs, logs, RAG chunks, files, and conversation history — before it reaches the LLM. Same answers, fraction of the tokens.
+Furl compresses everything your Claude Code agent reads — tool outputs, logs, web fetches, RAG chunks — before it reaches the model. Same answers, a fraction of the tokens. Every dropped byte stays retrievable on demand.
 
 <p align="center">
   <img src="FurlDemo-Fast.gif" alt="Furl in action" width="820">
-  <br/><sub>Live: 10,144 → 1,260 tokens — same FATAL found.</sub>
 </p>
-
-## What it does
-
-- **Library** — `compress(messages)` in Python, inline in any app
-- **MCP server** — `furl_compress`, `furl_retrieve`, `furl_stats` for any MCP client
-- **Reversible (CCR)** — originals are cached for retrieval on demand
-
-## How it works (30 seconds)
-
-```
-  tool output · logs · diffs · JSON · RAG chunks
-                      │
-                      ▼
-               ┌─────────────┐
-               │    Furl     │ 
-               └──────┬──────┘
-                      │
-            ┌─────────┴─────────┐
-            ▼                   ▼
-     compressed context    CCR store (byte-exact originals)
-            │                    ▲
-            ▼                    │
-          LLM  ──► needs detail? ┘
-```
-
-
-- **ContentRouter** — detects content type, selects the right compressor
-- **SmartCrusher** — statistical JSON / array compression
-- **Search / Log / Diff compressors** — search results, build logs, diffs
-- **CacheAligner** — stabilizes prefixes so provider KV caches actually hit
-- **CCR** — stores originals locally; LLM calls `furl_retrieve` if it needs them
-
-## Get started (60 seconds)
-
-```bash
-# 1 — Install (prebuilt wheels on the GitHub Release — no Rust; auto-picks your platform)
-pip install "furl-ctx[all]" --only-binary furl-ctx \
-  --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0
-# [all] = MCP server + full CCR · use [mcp] for just the MCP server
-```
-
-```python
-# 2 — Compress inline in any Python app
-from furl_ctx import compress
-
-result = compress(messages, model="claude-sonnet-4")
-# result.messages  → compressed; CCR keeps originals retrievable
-```
-
-```bash
-# 3 — Or run the MCP server for Claude Code / Cursor / any MCP host
-python3 -m furl_ctx.ccr.mcp_server      # exposes furl_compress / _retrieve / _stats
-```
-
-Granular extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code compression, ~50 MB, opt-in), `[dev]`. Requires **Python 3.10+**.
-
-## Claude Code plugin
-
-Furl ships as a Claude Code plugin (`plugins/furl/`) that bundles the MCP server, an
-automatic compression hook, and a how-it-works skill. Two commands:
-
-```bash
-# 1 — install Furl into the python3 Claude Code uses (prebuilt wheels; no Rust)
-pip install "furl-ctx[mcp]" --only-binary furl-ctx \
-  --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0
-```
-
-```
-# 2 — add + install the plugin (these are /slash commands inside Claude Code)
-/plugin marketplace add /path/to/headroom      # repo root · or: omar-y-abdi/furl once merged
-/plugin install furl@furl
-```
-
-You get the `furl_compress` / `furl_retrieve` / `furl_stats` tools **plus** a
-fail-open `PostToolUse` hook that compresses large external tool outputs (`Bash`,
-`WebFetch`, `WebSearch`, `Task`) before they land in context —
-originals stay retrievable via `<<ccr:HASH>>` markers. Disable the hook anytime with
-`FURL_HOOK_ENABLED=0`. Full setup, tuning, and structure: [`plugins/furl/README.md`](plugins/furl/README.md).
-
-## Proof
-
-**Token reduction on real captured data** — reproducible; inputs committed under `benchmarks/data/`, captured by `benchmarks/run_bench.py` into [BASELINE.md](benchmarks/BASELINE.md). Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable — visible in the output or via CCR):
-
-| Dataset       | Items | Before | After  | Reduction | Regime      | Info retention |
-|---------------|------:|-------:|-------:|----------:|-------------|---------------:|
-| code          |     7 | 41,025 |    471 |       99% | lossy (CCR) |           100% |
-| disk          |     9 |    694 |    347 |       50% | lossless    |           100% |
-| multiturn     |   135 | 14,866 |  2,073 |       86% | lossy (CCR) |           100% |
-| logs          |    90 |  8,595 |    619 |       93% | lossy (CCR) |           100% |
-| search        |    90 |  4,102 |    318 |       92% | lossy (CCR) |           100% |
-| repeated logs |    90 |  3,621 |    120 |       97% | lossy (CCR) |           100% |
-
-<sub>**Regime** — *lossless*: the compressed output is self-contained (zero rows dropped). *lossy (CCR)*: rows are offloaded to the local CCR store and replaced with `<<ccr:HASH>>` markers — smaller output, and **every dropped row is byte-exactly recoverable on demand** (100% info retention, within the configured TTL). `code` (large distinct source files that no compressor can shrink) takes the reversible CCR-offload fallback: an identity preview (paths + first lines) plus a retrieval marker ships in place of the full files. The same offload covers any large, low-redundancy tool output the compressors can't shrink. Note the `code` row measures CCR-offload of file **content** fed as tool output — this is not "your code shrinks 99%": an agent's own `Read`/`Glob` file access is deliberately left untouched by default, so those stay at 0%.</sub>
-
-These are a single deterministic capture at HEAD (`benchmarks/BASELINE.md`). Across the whole corpus the table sums to **94% fewer tokens** (72,903 → 4,016) at 100% information retention; the **60–95%** headline maps to this table's lossy-CCR range. Full methodology and the 6-seed adversarial sweep live in [BENCHMARKS.md](BENCHMARKS.md).
-
-## When to use · When to skip
-
-**Great fit if you…**
-- feed large tool outputs, logs, RAG chunks, or files into an LLM and want fewer tokens
-- want compression you can drop into any Python app, or expose to an MCP host
-- need reversible compression — originals are retrievable via CCR within the configured TTL
-
-**Skip it if you…**
-- only use a single provider's native compaction and don't process large external context
-- can't run the compression locally in your own process
-
-<details>
-<summary><b>Integrations — drop Furl into any stack</b></summary>
-
-| Your setup     | Hook in with                                  |
-|----------------|-----------------------------------------------|
-| Any Python app | `compress(messages, model=…)`                 |
-| MCP clients    | `python3 -m furl_ctx.ccr.mcp_server`          |
-
-</details>
-
-<details>
-<summary><b>What's inside</b></summary>
-
-- **SmartCrusher** — universal JSON: arrays of dicts, nested objects, mixed types.
-- **SearchCompressor / LogCompressor / DiffCompressor** — search results, build logs, and diffs.
-- **CrossMessageDeduper** — deduplicates repeated content across conversation turns.
-- **CacheAligner** — stabilizes prefixes so Anthropic/OpenAI KV caches actually hit.
-- **CCR** — reversible compression; LLM retrieves originals on demand. Large distinct content no compressor can shrink (e.g. source files) takes the reversible CCR offload: an identity preview plus a retrieval marker.
-
-</details>
-
-<details>
-<summary><b>Pipeline internals</b></summary>
-
-`compress()` emits three compression lifecycle stages:
-
-`Input Received` → `Input Routed` → `Input Compressed`
-
-- **Transforms** do the work: CacheAligner, CrossMessageDeduper, ContentRouter, SmartCrusher.
-- **Pipeline extensions** observe or customize these stages via `on_pipeline_event(...)`; `compress()` passes your `hooks` object as the extension.
-- **Compression hooks** sit alongside the lifecycle as an additional extension seam.
-
-</details>
-
-<details>
-<summary><b>Prompt caching (<code>cache_control</code>) — the frozen-prefix contract</b></summary>
-
-Furl never modifies messages up to and including the highest Anthropic
-`cache_control` marker (the **frozen prefix**), so provider prompt caches keep
-hitting. Two rules keep caching and compression compatible:
-
-- **Mark the breakpoint before the live zone.** `cache_control` on the *last*
-  message freezes the whole conversation — every transform skips everything and
-  0 tokens are saved (`error` stays `None`). `compress()` flags this in
-  `result.warnings` and logs at WARNING. Either mark the breakpoint before the
-  turns you want compressed, or compress before marking.
-- **Pass back what Furl shipped.** The provider cached the bytes Furl
-  *returned* last turn, not your originals. On multi-turn conversations, feed
-  the previous `result.messages` back in — or don't move the marker forward
-  past turns that already shipped compressed. Re-sending original history with
-  a forward-moved marker guarantees a prefix-cache miss at the previously
-  compressed message and pins it uncompressed forever (it is frozen). A
-  best-effort detector (CCR registry hit inside the frozen prefix) surfaces
-  this in `result.warnings`.
-
-</details>
 
 ## Install
 
-Prebuilt wheels ship on the GitHub Release — **no Rust toolchain needed**, and pip
-auto-selects your platform's wheel (macOS arm64/x86_64, Linux arm64/x86_64):
+Two commands inside Claude Code:
 
-```bash
-pip install "furl-ctx[all]" --only-binary furl-ctx \
-  --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0
+```
+/plugin marketplace add omar-y-abdi/furl
+/plugin install furl@furl
 ```
 
-Once Furl is on PyPI this shortens to `pip install "furl-ctx[all]"`. Granular extras: `[mcp]` (MCP server), `[code]` (tree-sitter AST-verified code compression, ~50 MB, opt-in), `[dev]`. Requires **Python 3.10+**.
+That's it — this installs the compression hook, the MCP tools, and the skill. No `pip install`, no setup: Furl fetches itself on first use. Requires [`uv`](https://docs.astral.sh/uv/) on your PATH (same as the official [serena](https://github.com/oraios/serena) plugin).
 
-Using `pipx`? Pass the release index through and choose an interpreter:
+**What you get**
 
-```bash
-pipx install --python python3.13 \
-  --pip-args "--only-binary furl-ctx --find-links https://github.com/omar-y-abdi/furl/releases/expanded_assets/v0.27.0" \
-  "furl-ctx[all]"
-```
+- **Auto-compression hook** — shrinks large `Bash` / `WebFetch` / `WebSearch` / `Task` outputs before they enter context. Fail-open: never breaks a tool call.
+- **MCP tools** — `furl_compress`, `furl_retrieve`, `furl_stats`.
+- **Skill** — explains the `<<ccr:HASH>>` retrieval flow and how to tune or disable it.
 
-### Corporate / SSL-inspection environments
+Tuning, disabling (`FURL_HOOK_ENABLED=0`), and the full reference: [`plugins/furl/README.md`](plugins/furl/README.md).
 
-The prebuilt-wheel install above needs no Rust and avoids this entirely. It only
-applies if you force a **source build** (`--no-binary`, `git+…`, or an unsupported
-platform) and `pip` fails with `CERTIFICATE_VERIFY_FAILED`
-(`unable to get local issuer certificate`): your network uses **SSL inspection** — a MITM
-proxy presenting a company-issued CA. The build backend (`maturin`) downloads `rustup` over a
-connection your TLS stack doesn't trust. **Install Rust first** so the build doesn't fetch it:
+## Proof
 
-```bash
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && rustup default stable
-# Windows
-winget install Rustlang.Rustup && rustup default stable
-```
+Token reduction on real captured data — reproducible, inputs committed under `benchmarks/data/`. Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR):
 
-Restart your shell, then re-run the install. Simplest of all: use the prebuilt wheel
-(the `--find-links` command above), which skips the Rust build — and this whole issue — entirely.
+| Dataset       | Items | Before | After  | Reduction | Info retention |
+|---------------|------:|-------:|-------:|----------:|---------------:|
+| code          |     7 | 41,025 |    471 |       99% |           100% |
+| multiturn     |   135 | 14,866 |  2,073 |       86% |           100% |
+| logs          |    90 |  8,595 |    619 |       93% |           100% |
+| search        |    90 |  4,102 |    318 |       92% |           100% |
+| repeated logs |    90 |  3,621 |    120 |       97% |           100% |
+| disk          |     9 |    694 |    347 |       50% |           100% |
 
-One runtime asset is fetched over TLS; if it is blocked, trust your corporate CA via
-`REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` / `CURL_CA_BUNDLE`:
+Across the corpus: **94% fewer tokens** (72,903 → 4,016) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
 
-- **`openaipublic.blob.core.windows.net`** — tiktoken's BPE encoding files, downloaded once on
-  first use and cached locally. Pre-populate the cache and point `TIKTOKEN_CACHE_DIR` at it to
-  run fully offline.
+## Also a Python library
 
-## Configuration (environment variables)
-
-Every live `FURL_*` knob. All are optional — the defaults are the shipped behavior.
-
-| Variable | Default | What it does |
-|----------|---------|--------------|
-| `FURL_WORKSPACE_DIR` | `~/.furl` | Workspace root: home of the durable CCR SQLite store and the shared session-stats file. Also the **security boundary for `furl_read`** — file reads are jailed to it (the jail alone defaults to the server's working directory when unset). |
-| `FURL_CCR_TTL_SECONDS` | `1800` | CCR retention window in seconds — how long "reversible" lasts before an entry expires (an expired/evicted retrieval is a loud miss, never silent). Positive integer; invalid values warn and fall back. |
-| `FURL_CCR_BACKEND` | unset (in-memory; the MCP server defaults to `sqlite`) | CCR store backend: `memory`, `sqlite`, or the name of a third-party `furl_ctx.ccr_backend` entry point. Explicitly selecting a backend that cannot be loaded **raises at startup** — no silent downgrade to memory. |
-| `FURL_CCR_BACKEND_OPTS` | unset (`{}`) | JSON object of keyword arguments passed to a third-party backend factory, e.g. `{"url": "..."}`. |
-| `FURL_CCR_SQLITE_PATH` | `<workspace>/ccr.sqlite3` | File path of the durable SQLite CCR store. |
-| `FURL_CCR_SQLITE_MAX_ROWS` | `10000` | Row cap for the SQLite store (oldest-created evicted first). |
-| `FURL_MCP_READ` | `off` | Enables the `furl_read` MCP tool (`on`/`true`/`1`/`yes`/`enabled`). Reads are jailed to `FURL_WORKSPACE_DIR`. |
-| `FURL_COMPRESS_WORKERS` | `4` | Worker threads for the router's parallel per-message compression. |
-| `FURL_PIPELINE_BREAKER_THRESHOLD` | `3` | Consecutive pipeline failures before the circuit breaker opens and messages pass through **uncompressed** for the cooldown window. `<= 0` disables the breaker. |
-| `FURL_PIPELINE_BREAKER_COOLDOWN_S` | `60` | Seconds an open circuit breaker keeps passing messages through untouched before retrying. |
-| `FURL_COMPACTION_FORMAT` | `csv-schema` | Lossless render format for SmartCrusher compaction: `csv-schema`, `json`, or `markdown-kv`. Unknown values raise. |
-
-## Compared to
-
-Furl runs **locally**, covers **every** content type, and is **reversible**.
-
-|                                                                              | Scope                                          | Deploy                             | Local | Reversible |
-|------------------------------------------------------------------------------|------------------------------------------------|------------------------------------|:-----:|:----------:|
-| **Furl**                                                                 | All context — tools, RAG, logs, files, history | library · MCP                      | Yes   | Yes        |
-| [RTK](https://github.com/rtk-ai/rtk)                                        | CLI command outputs                            | CLI wrapper                        | Yes   | No         |
-| [lean-ctx](https://github.com/yvgude/lean-ctx)                               | CLI commands, MCP tools, editor rules          | CLI wrapper · MCP                  | Yes   | No         |
-| [Compresr](https://compresr.ai), [Token Co.](https://thetokencompany.ai)    | Text sent to their API                         | Hosted API call                    | No    | No         |
-| OpenAI Compaction                                                            | Conversation history                           | Provider-native                    | No    | No         |
-
-> **RTK** ([rtk-ai/rtk](https://github.com/rtk-ai/rtk)) is a complementary CLI-output rewriter — a peer in the table above, **not** bundled with or a dependency of Furl. If you already use it for shell-output rewriting, Furl compresses everything downstream; the two compose cleanly. Credit to the RTK team for a great tool.
-
-## Contributing
-
-```bash
-git clone <your-fork-url> && cd <repo-dir>
-pip install -e ".[dev]" && pytest
-```
-
-A devcontainer ships in `.devcontainer/`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+The same engine drops into any Python app or MCP host: `from furl_ctx import compress`. Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
 
 ## License
 
