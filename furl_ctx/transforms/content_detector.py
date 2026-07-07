@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .csv_ingest import sniff_csv
+from .envelope_ingest import sniff_envelope
 
 
 class ContentType(Enum):
@@ -143,6 +144,11 @@ def detect_content_type(content: str) -> DetectionResult:
     if json_result:
         return json_result
 
+    # 1b. JSON API envelope ({"data":[...], "meta":{}}) — unwrap the records array.
+    envelope_result = _try_detect_envelope(content)
+    if envelope_result:
+        return envelope_result
+
     # 2. Check for diff (very distinctive patterns)
     diff_result = _try_detect_diff(content)
     if diff_result and diff_result.confidence >= 0.7:
@@ -204,6 +210,24 @@ def _try_detect_json(content: str) -> DetectionResult | None:
         pass
 
     return None
+
+
+def _try_detect_envelope(content: str) -> DetectionResult | None:
+    """Detect a JSON API envelope ({"data":[...], "meta":{}}).
+
+    Routes as JSON_ARRAY — same rationale as _try_detect_csv: after unwrapping the
+    payload is a records array, and JSON_ARRAY -> SmartCrusher is exactly where it
+    must land. ``sniff_envelope`` is the SAME predicate dispatch uses, so detection
+    and conversion can never disagree.
+    """
+    view = sniff_envelope(content)
+    if view is None:
+        return None
+    return DetectionResult(
+        ContentType.JSON_ARRAY,
+        0.9,
+        {"envelope": True, "envelope_key": view.key, "item_count": len(view.inner)},
+    )
 
 
 def _try_detect_diff(content: str) -> DetectionResult | None:

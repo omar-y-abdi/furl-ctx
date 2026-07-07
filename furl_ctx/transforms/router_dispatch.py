@@ -43,6 +43,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .csv_ingest import compress_tabular_csv, sniff_csv
+from .envelope_ingest import compress_envelope, sniff_envelope
 from .log_template import encode_verified
 from .router_policy import CompressionStrategy
 
@@ -189,12 +190,36 @@ class StrategyDispatcher:
                     # detector used, so the two can never disagree; a
                     # ``None`` here keeps the historical crush path
                     # byte-identical.
+                    view = (
+                        None if self.config.lossless_only else sniff_envelope(content)
+                    )
                     table = None
                     if not self.config.lossless_only and not content.lstrip().startswith(
                         ("[", "{")
                     ):
                         table = sniff_csv(content)
-                    if table is not None:
+                    if view is not None:
+                        shipped = compress_envelope(
+                            content,
+                            view,
+                            crusher,
+                            context=context,
+                            bias=bias,
+                            token_counter=count,
+                        )
+                        if shipped is not None:
+                            compressed, compressed_tokens = shipped, count(shipped)
+                            decision_reason = "smart_crusher_envelope"
+                        else:
+                            # Fail-open: no savings, or the raw-recovery store
+                            # write vetoed — the raw envelope ships byte-exact.
+                            compressed, compressed_tokens = content, original_tokens
+                            actual_strategy = CompressionStrategy.PASSTHROUGH
+                            compressor_name = "Passthrough"
+                            decision_reason = "envelope_passthrough"
+                            strategy_chain.append(CompressionStrategy.PASSTHROUGH.value)
+                            suppress_no_savings_fallback = True
+                    elif table is not None:
                         shipped = compress_tabular_csv(
                             content,
                             table,
