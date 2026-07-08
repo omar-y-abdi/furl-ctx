@@ -259,3 +259,17 @@ ceiling is byte-identical (verify.run degradations/hash_failures/silent_loss unc
 - **Remaining 24 s residual**: `tokens_before` is one exact tokenization of the 33 MB (~11.7 s,
   memoized). Reducible to ~10 s total by estimating tokens for huge content at the pipeline
   (small change, minor reported-count accuracy trade) — optional last mile.
+
+**Rust crush — scoped for a focused effort (user requested it; needs fresh context — a broken
+`.so` from an interrupted `maturin develop` breaks the whole tool, so don't rebuild-loop at
+deep context).** Entry: `walk.rs:44 crush` → `smart_crush_content_collecting` → per JSON array
+`route.rs:147 crush_array` = walk items → `analyzer.analyze_array` → `planner.create_plan` →
+`execute_plan` → compaction (`compactor.rs` / `formatter.rs`). The **analyzer is O(n)** (per-key
+stats, keys ≈ const) — ruled out. The super-linear term (1 s@4 MB → 26 s@33 MB, ~O(n^1.4)) is
+NOT yet pinpointed; prime suspects: a quadratic op in `planning.rs` (item loops at
+:322/:441/:575/:622/:719) or `compactor.rs` (19 item loops). **Method:** instrument the 4 phases
+in `crush_array` with `Instant` timing, `maturin develop` once, run a <8 MB subset (the
+size-guard offloads >8 MB) at two sizes → the phase whose time scales super-linearly is the
+target. Fix MUST keep the crush output byte-identical (grammar + compression-floor contract) +
+`cargo test --workspace` + `verify.run` unchanged. Note: LOW real-world urgency — the size-guard
+already bounds huge inputs; this only speeds the 4–8 MB path.
