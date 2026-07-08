@@ -192,6 +192,203 @@ impl AnchorWeights {
 // Information density scoring
 // ============================================================================
 
+/// Region-global aggregates for information scoring, computed ONCE over a
+/// candidate region and reused for every item scored against it.
+///
+/// The three [`calculate_information_score`] factors each derive a
+/// region-wide summary from `all_items` (identical for every item in the
+/// region) and then compare a single `item` against it. Scoring K
+/// candidates against the same region recomputed those summaries K times —
+/// each an O(region) pass that re-serialized heavy fields (e.g. a Chrome
+/// trace's `args` dict). `RegionProfile` hoists the shared passes out of
+/// the per-candidate loop: build once (O(region)), score each candidate in
+/// O(item fields). The per-item arithmetic below is byte-for-byte the old
+/// per-call code — same counts, same min/max, same threshold sets — so the
+/// resulting scores are bit-identical and the candidate sort is unchanged.
+struct RegionProfile {
+    /// `all_items.len()` — the divisor for value-rareness and the `< 2`
+    /// guards. Counts ALL items (not just objects), matching the ports.
+    total_items: usize,
+    /// Per-field value→count over every object item (value-uniqueness).
+    field_value_counts: HashMap<String, HashMap<String, usize>>,
+    /// Min/max serialized length over OBJECT items (length-score). `None`
+    /// when no object item exists (the `lengths.is_empty()` guard).
+    length_bounds: Option<(usize, usize)>,
+    /// Object-item count (structural denominator `n`).
+    object_count: usize,
+    /// Fields present in ≥80% of object items (structural `common`).
+    common_fields: HashSet<String>,
+    /// Fields present in <20% of object items (structural `rare`).
+    rare_fields: HashSet<String>,
+}
+
+impl RegionProfile {
+    /// Build the aggregates in a single pass over `all_items`. Mirrors the
+    /// setup halves of `calculate_value_uniqueness`,
+    /// `calculate_length_score`, and `calculate_structural_uniqueness`.
+    fn build(all_items: &[Value]) -> Self {
+        let total_items = all_items.len();
+
+        // Value-uniqueness field counts + structural field presence +
+        // length bounds, all in one walk over the region.
+        let mut field_value_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        let mut structural_field_counts: HashMap<String, usize> = HashMap::new();
+        let mut object_count: usize = 0;
+        let mut min_length: Option<usize> = None;
+        let mut max_length: Option<usize> = None;
+
+        for other in all_items {
+            let Some(obj) = other.as_object() else {
+                continue;
+            };
+            object_count += 1;
+
+            // length-score corpus: serialized length of each object item.
+            let len = serde_json::to_string(other).map(|s| s.len()).unwrap_or(0);
+            min_length = Some(min_length.map_or(len, |m: usize| m.min(len)));
+            max_length = Some(max_length.map_or(len, |m: usize| m.max(len)));
+
+            for (key, value) in obj {
+                // value-uniqueness: per-field value tally.
+                let value_str = stringify_for_uniqueness(value);
+                field_value_counts
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(value_str)
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+                // structural: per-field presence tally.
+                *structural_field_counts.entry(key.clone()).or_insert(0) += 1;
+            }
+        }
+
+        // structural common/rare classification (thresholds on object_count).
+        let n_f = object_count as f64;
+        let common_fields: HashSet<String> = structural_field_counts
+            .iter()
+            .filter(|(_, &c)| c as f64 >= n_f * 0.8)
+            .map(|(k, _)| (*k).clone())
+            .collect();
+        let rare_fields: HashSet<String> = structural_field_counts
+            .iter()
+            .filter(|(_, &c)| (c as f64) < n_f * 0.2)
+            .map(|(k, _)| (*k).clone())
+            .collect();
+
+        let length_bounds = match (min_length, max_length) {
+            (Some(mn), Some(mx)) => Some((mn, mx)),
+            _ => None,
+        };
+
+        RegionProfile {
+            total_items,
+            field_value_counts,
+            length_bounds,
+            object_count,
+            common_fields,
+            rare_fields,
+        }
+    }
+
+    /// Per-item value-rareness. Mirrors the scoring half of
+    /// `calculate_value_uniqueness`.
+    fn value_uniqueness(&self, item: &Value) -> f64 {
+        if self.total_items < 2 {
+            return 0.5;
+        }
+        let item_obj = match item.as_object() {
+            Some(o) => o,
+            None => return 0.5,
+        };
+        let total_items = self.total_items as f64;
+        let mut rareness_scores: Vec<f64> = Vec::new();
+        for (key, value) in item_obj {
+            let Some(counts) = self.field_value_counts.get(key) else {
+                continue;
+            };
+            let value_str = stringify_for_uniqueness(value);
+            let count = counts.get(&value_str).copied().unwrap_or(0);
+            if count > 0 {
+                let frequency = count as f64 / total_items;
+                rareness_scores.push(1.0 - frequency);
+            }
+        }
+        if rareness_scores.is_empty() {
+            return 0.5;
+        }
+        rareness_scores.iter().sum::<f64>() / rareness_scores.len() as f64
+    }
+
+    /// Per-item length score. Mirrors the scoring half of
+    /// `calculate_length_score`.
+    fn length_score(&self, item: &Value) -> f64 {
+        if self.total_items < 2 {
+            return 0.5;
+        }
+        let (min_length, max_length) = match self.length_bounds {
+            Some(b) => b,
+            None => return 0.5,
+        };
+        if max_length == min_length {
+            return 0.5;
+        }
+        let item_length = serde_json::to_string(item)
+            .map(|s| s.len())
+            .unwrap_or_else(|_| format!("{}", item).len());
+        (item_length as f64 - min_length as f64) / (max_length as f64 - min_length as f64)
+    }
+
+    /// Per-item structural uniqueness. Mirrors the scoring half of
+    /// `calculate_structural_uniqueness`.
+    fn structural_uniqueness(&self, item: &Value) -> f64 {
+        if self.object_count < 2 {
+            return 0.5;
+        }
+        let item_fields: HashSet<&str> = item
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+
+        // `has_rare` = |item_fields ∩ rare|; `missing_common` =
+        // |common \ item_fields| — same set operations as the port, just
+        // with the region sets precomputed as owned `String`s.
+        let has_rare = self
+            .rare_fields
+            .iter()
+            .filter(|k| item_fields.contains(k.as_str()))
+            .count();
+        let missing_common = self
+            .common_fields
+            .iter()
+            .filter(|k| !item_fields.contains(k.as_str()))
+            .count();
+
+        let mut uniqueness = 0.0;
+        if !self.rare_fields.is_empty() {
+            uniqueness += 0.5 * (has_rare as f64 / self.rare_fields.len().max(1) as f64);
+        }
+        if !self.common_fields.is_empty() {
+            uniqueness += 0.5 * (missing_common as f64 / self.common_fields.len().max(1) as f64);
+        }
+        uniqueness.min(1.0)
+    }
+
+    /// Combine the three factors — the hard-coded Python weights.
+    fn score(&self, item: &Value) -> f64 {
+        if self.total_items == 0 {
+            return 0.0;
+        }
+        let Some(_) = item.as_object() else {
+            return 0.0;
+        };
+        let uniqueness = self.value_uniqueness(item);
+        let length = self.length_score(item);
+        let structural = self.structural_uniqueness(item);
+        let score = uniqueness * 0.4 + length * 0.3 + structural * 0.3;
+        score.clamp(0.0, 1.0)
+    }
+}
+
 /// Information density score for an item, in `[0.0, 1.0]`.
 ///
 /// Combines three factors with hard-coded Python weights:
@@ -200,7 +397,11 @@ impl AnchorWeights {
 /// - 0.3: structural uniqueness (rare/missing fields).
 ///
 /// Direct port of `calculate_information_score`
-/// (Python `anchor_selector.py:132-175`).
+/// (Python `anchor_selector.py:132-175`). Thin wrapper over
+/// [`RegionProfile`] — builds the region aggregates then scores `item`, so
+/// a single-item caller stays byte-identical while the hot region loop
+/// ([`AnchorSelector::select_by_density`]) reuses one profile across
+/// candidates.
 pub fn calculate_information_score(item: &Value, all_items: &[Value]) -> f64 {
     if all_items.is_empty() {
         return 0.0;
@@ -208,64 +409,7 @@ pub fn calculate_information_score(item: &Value, all_items: &[Value]) -> f64 {
     let Some(_) = item.as_object() else {
         return 0.0;
     };
-
-    let uniqueness = calculate_value_uniqueness(item, all_items);
-    let length = calculate_length_score(item, all_items);
-    let structural = calculate_structural_uniqueness(item, all_items);
-
-    // Python: weighted sum then normalized by total weight (1.0 here).
-    let score = uniqueness * 0.4 + length * 0.3 + structural * 0.3;
-    score.clamp(0.0, 1.0)
-}
-
-fn calculate_value_uniqueness(item: &Value, all_items: &[Value]) -> f64 {
-    if all_items.len() < 2 {
-        return 0.5;
-    }
-
-    // Build per-field value counts using Python-compatible string keys.
-    // Python: json.dumps(value, sort_keys=True) for non-strings; raw
-    // string for strings.
-    let mut field_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    for other in all_items {
-        let Some(obj) = other.as_object() else {
-            continue;
-        };
-        for (key, value) in obj {
-            let value_str = stringify_for_uniqueness(value);
-            field_counts
-                .entry(key.clone())
-                .or_default()
-                .entry(value_str)
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
-        }
-    }
-
-    let item_obj = match item.as_object() {
-        Some(o) => o,
-        None => return 0.5,
-    };
-
-    let total_items = all_items.len() as f64;
-    let mut rareness_scores: Vec<f64> = Vec::new();
-
-    for (key, value) in item_obj {
-        let Some(counts) = field_counts.get(key) else {
-            continue;
-        };
-        let value_str = stringify_for_uniqueness(value);
-        let count = counts.get(&value_str).copied().unwrap_or(0);
-        if count > 0 {
-            let frequency = count as f64 / total_items;
-            rareness_scores.push(1.0 - frequency);
-        }
-    }
-
-    if rareness_scores.is_empty() {
-        return 0.5;
-    }
-    rareness_scores.iter().sum::<f64>() / rareness_scores.len() as f64
+    RegionProfile::build(all_items).score(item)
 }
 
 /// Stringification used for uniqueness counting. Python:
@@ -277,80 +421,6 @@ fn stringify_for_uniqueness(value: &Value) -> String {
         Value::String(s) => s.clone(),
         _ => python_json_dumps_sort_keys(value),
     }
-}
-
-fn calculate_length_score(item: &Value, all_items: &[Value]) -> f64 {
-    if all_items.len() < 2 {
-        return 0.5;
-    }
-
-    let item_length = serde_json::to_string(item)
-        .map(|s| s.len())
-        .unwrap_or_else(|_| format!("{}", item).len());
-
-    let lengths: Vec<usize> = all_items
-        .iter()
-        .filter(|i| i.is_object())
-        .map(|i| serde_json::to_string(i).map(|s| s.len()).unwrap_or(0))
-        .collect();
-
-    if lengths.is_empty() {
-        return 0.5;
-    }
-
-    let max_length = *lengths.iter().max().unwrap_or(&0);
-    let min_length = *lengths.iter().min().unwrap_or(&0);
-
-    if max_length == min_length {
-        return 0.5;
-    }
-
-    (item_length as f64 - min_length as f64) / (max_length as f64 - min_length as f64)
-}
-
-fn calculate_structural_uniqueness(item: &Value, all_items: &[Value]) -> f64 {
-    let valid: Vec<&serde_json::Map<String, Value>> =
-        all_items.iter().filter_map(|v| v.as_object()).collect();
-    let n = valid.len();
-    if n < 2 {
-        return 0.5;
-    }
-
-    let mut field_counts: HashMap<&String, usize> = HashMap::new();
-    for obj in &valid {
-        for key in obj.keys() {
-            *field_counts.entry(key).or_insert(0) += 1;
-        }
-    }
-
-    let n_f = n as f64;
-    let common: HashSet<&String> = field_counts
-        .iter()
-        .filter(|(_, &c)| c as f64 >= n_f * 0.8)
-        .map(|(k, _)| *k)
-        .collect();
-    let rare: HashSet<&String> = field_counts
-        .iter()
-        .filter(|(_, &c)| (c as f64) < n_f * 0.2)
-        .map(|(k, _)| *k)
-        .collect();
-
-    let item_fields: HashSet<&String> = item
-        .as_object()
-        .map(|o| o.keys().collect())
-        .unwrap_or_default();
-
-    let has_rare = item_fields.intersection(&rare).count();
-    let missing_common = common.difference(&item_fields).count();
-
-    let mut uniqueness = 0.0;
-    if !rare.is_empty() {
-        uniqueness += 0.5 * (has_rare as f64 / rare.len().max(1) as f64);
-    }
-    if !common.is_empty() {
-        uniqueness += 0.5 * (missing_common as f64 / common.len().max(1) as f64);
-    }
-    uniqueness.min(1.0)
 }
 
 // ============================================================================
@@ -657,10 +727,18 @@ impl AnchorSelector {
             1.0
         };
 
-        // Borrow the region directly — `calculate_information_score`
-        // only reads, so deep-cloning every `Value` in the region per
-        // call was pure allocation overhead.
+        // Borrow the region directly — scoring only reads, so deep-cloning
+        // every `Value` in the region per call was pure allocation
+        // overhead.
         let region_items: &[Value] = &items[start_idx..end_idx];
+        // The region aggregates (per-field value counts, length bounds,
+        // structural common/rare sets) are identical for every candidate in
+        // this region — build them ONCE instead of recomputing (and
+        // re-serializing the whole region) per candidate. Byte-identical:
+        // `RegionProfile::score` reproduces `calculate_information_score`
+        // exactly (the non-empty-region / object-item guards below still
+        // hold, so the wrapper's early 0.0 returns never applied here).
+        let profile = RegionProfile::build(region_items);
         let mut candidates: Vec<(usize, f64)> = Vec::new();
 
         for i in 0..num_candidates {
@@ -671,7 +749,7 @@ impl AnchorSelector {
             }
             let item = &items[idx];
             let score = if item.is_object() {
-                calculate_information_score(item, region_items)
+                profile.score(item)
             } else {
                 0.5
             };

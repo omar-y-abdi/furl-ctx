@@ -443,16 +443,52 @@ impl SmartAnalyzer {
         let mut signals_absent: Vec<String> = Vec::new();
 
         // 1. ID field detection — keep best (highest confidence) match.
+        //
+        // PERF: `detect_id_field_statistically` hard-gates `unique_ratio
+        // < 0.9` (returns without reading `values`), and beyond that gate
+        // only its String branch (first-20 sample) and Numeric branch
+        // (full list, sequential scan) read `values` at all — Object /
+        // Array / Boolean / Null fields decide on `unique_ratio` alone.
+        // The old unconditional full clone of every field's values
+        // deep-copied heavy `Object` columns (e.g. a Chrome trace's `args`
+        // dict, up to ~1 MB per row) × N rows for a call that never looks
+        // at them. Collect EXACTLY what each branch consumes; the value
+        // list fed to `detect_id_field_statistically` is identical to the
+        // slice the old code passed (same order, same missing→Null fill,
+        // same `filter_map(as_object)` skip of non-dict items), so the
+        // detection result is byte-identical.
         let mut id_field_name: Option<String> = None;
         let mut id_uniqueness: f64 = 0.0;
         let mut id_confidence: f64 = 0.0;
         for (name, stats) in field_stats {
-            let values: Vec<Value> = items
-                .iter()
-                .filter_map(|i| i.as_object())
-                .map(|o| o.get(name).cloned().unwrap_or(Value::Null))
-                .collect();
-            let (is_id, confidence) = detect_id_field_statistically(stats, &values);
+            if stats.unique_ratio < 0.9 {
+                continue;
+            }
+            let collect_values = |limit: Option<usize>| -> Vec<Value> {
+                let iter = items
+                    .iter()
+                    .filter_map(|i| i.as_object())
+                    .map(|o| o.get(name).cloned().unwrap_or(Value::Null));
+                match limit {
+                    Some(n) => iter.take(n).collect(),
+                    None => iter.collect(),
+                }
+            };
+            let (is_id, confidence) = match stats.field_type {
+                // String branch reads `values[..20]` only.
+                FieldType::String => {
+                    let sample = collect_values(Some(20));
+                    detect_id_field_statistically(stats, &sample)
+                }
+                // Numeric branch scans the full list (`detect_sequential_pattern`).
+                FieldType::Numeric => {
+                    let values = collect_values(None);
+                    detect_id_field_statistically(stats, &values)
+                }
+                // Object / Array / Boolean / Null / Unknown: decided by
+                // `unique_ratio` alone — no value read.
+                _ => detect_id_field_statistically(stats, &[]),
+            };
             if is_id && confidence > id_confidence {
                 id_field_name = Some(name.clone());
                 id_uniqueness = stats.unique_ratio;
