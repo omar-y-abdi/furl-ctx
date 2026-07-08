@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from .csv_ingest import compress_tabular_csv, sniff_csv
 from .envelope_ingest import compress_envelope, sniff_envelope
+from .html_ingest import compress_html
 from .log_template import encode_verified
 from .router_policy import CompressionStrategy
 
@@ -336,7 +337,17 @@ class StrategyDispatcher:
             # `enable_search_compressor=False`) — large uncompressible
             # text still gets the router's reversible CCR offload
             # downstream.
-            if self.config.enable_text_crusher and not self.config.lossless_only:
+            # HTML main-content extraction first: WebFetch/HTML ships as extracted
+            # article text + a marker recovering the full raw HTML. Lossy-but-
+            # reversible, so gated off under lossless_only like the prose crusher.
+            html_shipped = (
+                None if self.config.lossless_only else compress_html(content, token_counter=count)
+            )
+            if html_shipped is not None:
+                compressed, compressed_tokens = html_shipped, count(html_shipped)
+                compressor_name = "HtmlExtractor"
+                decision_reason = "text_html_extract"
+            elif self.config.enable_text_crusher and not self.config.lossless_only:
                 text_crusher = get_text_crusher()
                 if text_crusher:
                     compressor_name = type(text_crusher).__name__
