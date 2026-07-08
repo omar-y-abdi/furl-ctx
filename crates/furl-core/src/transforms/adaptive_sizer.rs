@@ -40,7 +40,7 @@
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use rustc_hash::{FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use std::hash::Hasher;
 use std::io::Write;
 
@@ -279,22 +279,89 @@ pub fn count_unique_simhash(items: &[&str], threshold: u32) -> usize {
     }
 
     let fingerprints: Vec<u64> = items.iter().map(|s| simhash(s)).collect();
-    let mut clusters: Vec<u64> = Vec::new();
 
-    for &fp in &fingerprints {
-        let mut matched = false;
-        for &rep in &clusters {
-            if hamming_distance(fp, rep) <= threshold {
-                matched = true;
-                break;
-            }
-        }
+    // Greedy first-match clustering: a fingerprint joins the first existing
+    // cluster within `threshold` Hamming distance, else becomes a new cluster
+    // representative. The result (`clusters.len()`) depends only on *whether*
+    // any existing rep matches — not which one — so any structure that
+    // preserves this existence query yields the identical count.
+    //
+    // Naive: scan every rep per fingerprint → O(n * C) with C ~= n/2 on
+    // diverse data → O(n^2). Instead, index reps by 16-bit blocks: two
+    // fingerprints within Hamming distance `t` must share at least one of
+    // `t + 1` equal blocks (pigeonhole). With `t <= 3` a u64 splits into
+    // BLOCKS = 4 disjoint 16-bit blocks, so a fingerprint's match candidates
+    // are the union of reps in its 4 block buckets — a tiny set on diverse
+    // data. Each candidate is still confirmed with the real Hamming distance,
+    // so there are no false matches and the count is byte-identical.
+    //
+    // For `threshold >= BLOCKS` the pigeonhole bound needs more than BLOCKS
+    // blocks, so fall back to the exact linear scan (only the tests exercise
+    // this; the production call uses threshold = 3).
+    const BLOCKS: u32 = 4;
+    if threshold >= BLOCKS {
+        count_unique_linear(&fingerprints, threshold)
+    } else {
+        count_unique_indexed(&fingerprints, threshold)
+    }
+}
+
+/// Exact greedy clustering by linear scan (fallback for large thresholds).
+fn count_unique_linear(fingerprints: &[u64], threshold: u32) -> usize {
+    let mut clusters: Vec<u64> = Vec::new();
+    for &fp in fingerprints {
+        let matched = clusters
+            .iter()
+            .any(|&rep| hamming_distance(fp, rep) <= threshold);
         if !matched {
             clusters.push(fp);
         }
     }
-
     clusters.len()
+}
+
+/// Exact greedy clustering via 16-bit block index (pigeonhole pruning).
+///
+/// Requires `threshold < 4` so that a u64 split into four 16-bit blocks
+/// guarantees any two fingerprints within `threshold` share an equal block.
+/// Yields the identical cluster count as [`count_unique_linear`]: the block
+/// index only narrows the candidate reps; every candidate is confirmed with
+/// the real Hamming distance, and reps are still admitted in input order.
+fn count_unique_indexed(fingerprints: &[u64], threshold: u32) -> usize {
+    // buckets[b]: value of block `b` -> representative fingerprints whose
+    // block `b` equals that value.
+    let mut buckets: [FxHashMap<u16, Vec<u64>>; 4] = Default::default();
+    let mut cluster_count = 0usize;
+
+    for &fp in fingerprints {
+        let blocks = [
+            fp as u16,
+            (fp >> 16) as u16,
+            (fp >> 32) as u16,
+            (fp >> 48) as u16,
+        ];
+
+        let mut matched = false;
+        'outer: for (b, &block) in blocks.iter().enumerate() {
+            if let Some(reps) = buckets[b].get(&block) {
+                for &rep in reps {
+                    if hamming_distance(fp, rep) <= threshold {
+                        matched = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        if !matched {
+            for (b, &block) in blocks.iter().enumerate() {
+                buckets[b].entry(block).or_default().push(fp);
+            }
+            cluster_count += 1;
+        }
+    }
+
+    cluster_count
 }
 
 /// zlib-based compression-ratio validation of the chosen `k`.
@@ -471,6 +538,49 @@ mod tests {
         // Same fingerprint distance — well under threshold.
         let items = ["abc", "abc"];
         assert_eq!(count_unique_simhash(&items, 0), 1);
+    }
+
+    #[test]
+    fn indexed_matches_linear_on_mixed_fingerprints() {
+        // The block-index fast path (`count_unique_indexed`) must yield the
+        // exact same greedy-cluster count as the reference linear scan
+        // (`count_unique_linear`) for every threshold it serves (0..=3).
+        //
+        // Construct fingerprints exercising the tricky cases:
+        //  - exact duplicates (Hamming 0),
+        //  - near-dupes at Hamming 1/2/3 (straddle the block boundaries so
+        //    the shared-block pigeonhole invariant is genuinely tested),
+        //  - reps sharing a block value but Hamming-far (false candidates
+        //    that must be rejected by the real-distance confirm),
+        //  - a long tail of pseudo-random uniques (the diverse-data regime).
+        let mut fps: Vec<u64> = vec![
+            0x0000_0000_0000_0000,
+            0x0000_0000_0000_0000, // exact dup of previous
+            0x0000_0000_0000_0001, // Hamming 1
+            0x0000_0000_0001_0001, // Hamming 2, crosses a block boundary
+            0x0001_0000_0001_0001, // Hamming 3, spans three blocks
+            0x8000_8000_8000_8000, // shares low block (0x8000) with next; far
+            0x8000_1234_5678_9abc,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFE, // Hamming 1 from all-ones
+        ];
+        // Deterministic pseudo-random tail (xorshift) — the near-all-unique
+        // regime where the two paths must still agree exactly.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..500 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            fps.push(state);
+        }
+
+        for threshold in 0u32..=3 {
+            assert_eq!(
+                count_unique_indexed(&fps, threshold),
+                count_unique_linear(&fps, threshold),
+                "indexed vs linear cluster count diverged at threshold {threshold}"
+            );
+        }
     }
 
     // ---------- compute_unique_bigram_curve ----------
