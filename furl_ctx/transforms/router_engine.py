@@ -106,6 +106,24 @@ _OFFLOAD_PREVIEW_FIELD_CHARS = 120
 _OFFLOAD_PREVIEW_HEAD_LINES = 12
 _OFFLOAD_PREVIEW_TAIL_LINES = 4
 
+# Byte ceiling above which a content block is offloaded immediately instead of
+# run through the exact mixed/crush path — that path is super-linear (a real
+# 33 MB Chrome trace took ~68 s), while CCR offload is O(n) and reversible.
+_HUGE_CONTENT_BYTES_DEFAULT = 8 * 1024 * 1024
+
+
+def _huge_content_bytes() -> int:
+    """The size ceiling in bytes; override with ``FURL_MAX_COMPRESS_BYTES``."""
+    import os
+
+    raw = os.environ.get("FURL_MAX_COMPRESS_BYTES")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _HUGE_CONTENT_BYTES_DEFAULT
+
 
 def _cr() -> ModuleType:
     """The ``content_router`` module, resolved AT CALL TIME.
@@ -391,7 +409,27 @@ class ContentCompressionEngine:
                     selection_reason=("mixed_content" if mixed else "content_detection"),
                 )
 
-            if strategy == CompressionStrategy.MIXED:
+            cfg = self.config
+            if len(content) >= _huge_content_bytes() and (
+                cfg.ccr_offload_fallback
+                and cfg.ccr_enabled
+                and cfg.ccr_inject_marker
+                and not cfg.lossless_only
+            ):
+                # Size ceiling: above the threshold the exact mixed/crush path is
+                # super-linear (a 33 MB trace took ~68 s). Offload straight away —
+                # O(n) and reversible (head/tail preview + full original in CCR) —
+                # instead of paying the crush first and offloading afterwards.
+                passthrough = RouterCompressionResult(
+                    compressed=content,
+                    original=content,
+                    strategy_used=CompressionStrategy.PASSTHROUGH,
+                )
+                offloaded = self._ccr_offload(
+                    content, context, passthrough, token_counter=token_counter, hooks=hooks
+                )
+                result = offloaded if offloaded is not None else passthrough
+            elif strategy == CompressionStrategy.MIXED:
                 result = hooks._compress_mixed(
                     content,
                     context,
