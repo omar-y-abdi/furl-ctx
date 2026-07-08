@@ -207,12 +207,17 @@ worse than useless — an agent would rather burn tokens or `grep`/`bash` the fi
 Perf beats ratio for this use case.
 
 **Epic:**
-1. **Profiled root cause** (4 MB, 21.5 s total, cProfile): `router_engine._compress_mixed`
-   fans the blob into ~9,400 fragments, calling the Rust `SmartCrusher.crush` **9,406×** (9.6 s)
-   and the tiktoken encoder **37,877×** (6.9 s) — ~4 re-tokenizations per fragment.
-   `_extract_json_block` (router_split.py:164) is re-called 9,408× (likely O(n²) rescanning).
-   The blowup is **per-fragment fan-out + redundant re-tokenization**, not the tokenizer itself.
-   → Fix: tokenize once / batch; cap fragment count; stop re-scanning from the top per block.
+1. **Profiled root cause — CORRECTED.** The first profile used *truncated* JSON (`raw[:4MB]`),
+   an artifact: on truncated input the top-level `{` never balances, so the mixed splitter falls
+   through to per-event extraction → ~9,400 tiny sections. On a **VALID complete trace** the
+   splitter yields **1 section** (the whole balanced doc) — the fan-out/size-guard fixes were
+   chasing the artifact and are **dropped**. Real bottleneck (valid JSON, 4 MB, 14.8 s cProfile):
+   **tokenization = 82 %** — `tiktoken.encode` 12.1 s across 243 `count_text` calls (≈ ~17
+   full-content passes at ~0.7 s/pass); the single Rust `crush` is only 1.0 s. The
+   router / dispatch / `min_ratio` gate / fallback chain **re-tokenizes the same multi-MB content
+   ~17×**. → Fix: tokenize once before + once after; reuse/estimate counts for the ratio gate and
+   fallback comparisons instead of re-encoding the full content each time. Contract to preserve:
+   the `min_ratio` gate must still read correct token units (COR-17) — don't weaken it, cache it.
 2. **Latency budget + early-exit**: hard per-call size/time ceiling. Above a byte threshold,
    short-circuit to a bounded cheap path (structural head/tail keep + CCR-offload the bulk)
    instead of the expensive crusher. Never worse-than-linear; target ≥ 20–50 MB/s end-to-end.
