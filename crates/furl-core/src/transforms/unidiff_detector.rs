@@ -24,9 +24,6 @@
 //!   are explicitly **not** diffs — saves the router from compressing
 //!   plain text as if it were a diff.
 //!
-//! - `detect_diff(content)` is the [`ContentType`]-typed wrapper:
-//!   returns `Some(ContentType::GitDiff)` on hit, `None` otherwise.
-//!
 //! # Known gaps (deliberately punted)
 //!
 //! - **Combined-merge diffs** (`@@@ ... @@@`) — `unidiff`'s hunk-header
@@ -37,7 +34,6 @@
 //!   `input.lines()`, which strips `\r` only when paired with `\n`.
 //!   Pathological CRLF-stripped inputs could miss; we accept the gap.
 
-use crate::transforms::detection::ContentType;
 use unidiff::PatchSet;
 
 /// Boolean predicate: does `content` parse as a unified diff with
@@ -81,18 +77,6 @@ pub fn is_diff(content: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// [`ContentType`]-typed wrapper. Returns `Some(ContentType::GitDiff)`
-/// when [`is_diff`] is true, `None` otherwise. The router uses the
-/// `Option` to cleanly fall through to `PlainText` when the parser
-/// says "not a diff".
-pub fn detect_diff(content: &str) -> Option<ContentType> {
-    if is_diff(content) {
-        Some(ContentType::GitDiff)
-    } else {
-        None
-    }
-}
-
 // ─── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -102,7 +86,6 @@ mod tests {
     #[test]
     fn empty_input_is_not_a_diff() {
         assert!(!is_diff(""));
-        assert_eq!(detect_diff(""), None);
     }
 
     #[test]
@@ -136,7 +119,6 @@ mod tests {
                     return \"world\"\n\
                     -    # gone\n";
         assert!(is_diff(diff));
-        assert_eq!(detect_diff(diff), Some(ContentType::GitDiff));
     }
 
     #[test]
@@ -235,7 +217,6 @@ mod tests {
                      +++ git describe --tags\n\
                      + echo done\n";
         assert!(!is_diff(trace));
-        assert_eq!(detect_diff(trace), None);
     }
 
     #[test]
@@ -252,7 +233,6 @@ mod tests {
                      -old\n\
                      +new\n";
         assert!(!is_diff(mixed));
-        assert_eq!(detect_diff(mixed), None);
     }
 
     #[test]
@@ -265,12 +245,5 @@ mod tests {
     fn yaml_is_not_a_diff() {
         let yaml = "name: my-app\nversion: 1.0\ndependencies:\n  - foo\n";
         assert!(!is_diff(yaml));
-    }
-
-    #[test]
-    fn detect_diff_returns_none_on_negative() {
-        assert_eq!(detect_diff("not a diff"), None);
-        assert_eq!(detect_diff("{}"), None);
-        assert_eq!(detect_diff(""), None);
     }
 }

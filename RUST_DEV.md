@@ -105,9 +105,12 @@ trait + tier system in `crates/furl-core/src/signals/`. See
 - **Per-granularity traits.** `LineImportanceDetector` ships today; future
   `ContentTypeDetector` and `ItemImportanceDetector<I>` will follow as their
   consumers get touched.
-- **`Tiered<T>` combinator.** Composition, not inheritance. Future ML
-  detectors slot in as new tiers without changes to `KeywordDetector` or
-  any caller.
+- **`Tiered<T>` combinator — DELETED (SIMP-5b).** A chaining combinator for
+  composing detector tiers originally lived here; it had zero production
+  constructions and was removed (`crates/furl-core/src/signals/mod.rs`'s own
+  doc comment records the deletion). Composition, when a future tier lands,
+  happens at the call site instead of through a shared combinator — see
+  `signals/mod.rs` for the current (post-deletion) architecture note.
 - **One concrete impl.** `KeywordDetector` (aho-corasick) is the only tier
   registered today. **No NoOp/stub impls** — per project no-silent-fallbacks
   rule, future tiers land with their real implementations.
