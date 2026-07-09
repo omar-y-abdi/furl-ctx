@@ -16,12 +16,22 @@
 > processes resolve main-agent hashes through the shared workspace file.
 > It does NOT widen the eviction window — see option 1 below.
 >
-> **Open epic (owner-deferred): the retention half.** True cross-call retention
-> so *evicted* data is actually still there, not merely missed loudly. The
-> store is still single-tier: capacity/TTL eviction deletes the row from
-> whichever backend holds it (no spill tier, no session-scoped lifetime yet).
-> This file exists so we can return to that — the free lunch has always been
-> the goal.
+> **Update (Q10 spill tier, 2026-07-06 + 2026-07-08): SHIPPED, opt-in.** The
+> retention half described as open below is now built. `FURL_CCR_SPILL=1`
+> (`compression_store.py:1729` `CCR_SPILL_ENV`, `:1733`
+> `_create_spill_backend_from_env`, wired into `get_compression_store` at
+> `:1794`) demotes a capacity-evicted entry to a durable `SqliteBackend`
+> instead of deleting it: `_evict_if_needed` calls `_spill_evicted` (`:1341`,
+> best-effort/fail-open) BEFORE the primary `delete` (`:1436-1442`), and
+> `retrieve()` falls through to `_recover_from_spill` (`:614`, `:1357`) on a
+> primary miss — a spill hit returns byte-identical to the pre-eviction value,
+> no promotion, no bookkeeping mutation. Lifecycle is bounded by the spill
+> `SqliteBackend`'s own row-cap/TTL (`FURL_CCR_SQLITE_MAX_ROWS`), answering the
+> "when is the durable store cleared?" question below. Locked by
+> `tests/test_ccr_spill_tier.py`. **Off by default** — this is genuinely
+> opt-in (default single-tier, matching the guarantee documented at the top of
+> this file), not a silent behavior change. See the fully-updated §"The free
+> lunch" below for the option-by-option disposition.
 
 ## What Cluster G actually is
 
@@ -113,7 +123,7 @@ A genuinely TTL-*expired* entry keeps its exact wording (`status="expired"` →
 Locked by `tests/test_ccr_eviction_loud_miss.py` (loudness for bulk + granular,
 cause-honesty, and that real expiry keeps its precise cause).
 
-## The free lunch — true retention (OPEN, return here)
+## The free lunch — true retention (#1 SHIPPED opt-in; #2-#5 still open)
 
 Loud-on-miss is *correct* but it is not *free*: the model still loses access to
 the evicted data and must recompute the source (if it even can). The standing
@@ -121,21 +131,28 @@ goal is **retention**: keep the data actually retrievable for as long as the
 sentinel can plausibly be referenced, ideally at ~zero added cost. Options, with
 trade-offs, ranked by how close they are to a free lunch:
 
-1. **Durable backend (BUILT — Engine P1-7; the spill half remains open).**
-   `SqliteBackend` (`furl_ctx/cache/backends/sqlite.py`) now ships alongside
+1. **Durable backend + spill tier (BUILT — Engine P1-7 durable backend,
+   2026-07-03; Q10 spill tier, 2026-07-06 PR #30, extended 2026-07-08 B2).**
+   `SqliteBackend` (`furl_ctx/cache/backends/sqlite.py`) ships alongside
    `InMemoryBackend`: WAL journal mode, 0600 file under the workspace dir
    (`FURL_CCR_SQLITE_PATH` override), startup + opportunistic expired-row
    purge, 10 000-row oldest-first cap (`FURL_CCR_SQLITE_MAX_ROWS`),
    corruption→fail-open-to-memory with one loud ERROR, lock-contention→bounded
    retry then per-op fail-open. It is the MCP server's DEFAULT backend and
-   selectable anywhere via `FURL_CCR_BACKEND=sqlite`. What it delivers today:
+   selectable anywhere via `FURL_CCR_BACKEND=sqlite`. On its own it delivers
    restart survival and cross-process retrieval for entries still inside the
-   window. What it does NOT deliver: the store is still single-tier — a durable
-   backend alone changes WHERE entries live, not the eviction window, so
-   capacity/TTL eviction still deletes the row outright (durability !=
-   retention). The remaining build is the SPILL TIER: divert evicted entries
-   to the durable store instead of deleting them, + a lifecycle story (when is
-   the durable store cleared?).
+   window, but durability alone doesn't widen the window — that gap is now
+   closed by the **spill tier**: `FURL_CCR_SPILL=1` makes a fast in-memory
+   primary demote (not delete) capacity/TTL-evicted entries into a durable
+   `SqliteBackend` spill (`compression_store.py:1341` `_spill_evicted`, called
+   from `_evict_if_needed` immediately before the primary `delete`;
+   `:1357` `_recover_from_spill`, checked on a primary `retrieve()` miss). The
+   spill's own row-cap/TTL bounds its lifecycle (no unbounded growth). A
+   redundant-combo guard skips the spill when the primary is already
+   `SqliteBackend` (`_create_spill_backend_from_env`, `:1733`). **Off by
+   default** — single-tier remains the out-of-the-box behavior; opting in via
+   `FURL_CCR_SPILL=1` is what buys demote-not-delete. Locked by
+   `tests/test_ccr_spill_tier.py`.
 
 2. **Session-scoped / conversation-lifetime retention.** Tie entry lifetime to
    the conversation that emitted the sentinel rather than a global FIFO+TTL. A
@@ -157,14 +174,17 @@ trade-offs, ranked by how close they are to a free lunch:
 5. **Raise the cap.** Trivial, buys headroom, but only *delays* eviction and
    grows RAM linearly — not a real solution, only a knob.
 
-**Recommended next step when we return:** the durable backend (#1) is now
-built (Engine P1-7); use it as the eviction spill target, keyed by session
-(#2) for cleanup — that combination gives bounded RAM *and* genuinely-retained
-data (the free lunch). The remaining machinery is the spill path itself: the
-store is still single-tier, so eviction deletes rather than demotes. The owner
-has **deliberately deferred** the retention epic; the delivered behavior is
-the window + loud-miss guarantee documented at the top, now durable within the
-window for the MCP deployment.
+**Status:** option #1 (durable backend as the eviction spill target) is
+**shipped and opt-in** (`FURL_CCR_SPILL=1`) — the "bounded RAM *and*
+genuinely-retained data" free lunch is available today for anyone who turns it
+on; it just isn't the default. Session-scoped keying (#2) for spill cleanup,
+reference-counted retention (#3), a thinner spill-to-disk LRU (#4), and simply
+raising the cap (#5) remain **owner-deferred** — the spill's own row-cap/TTL is
+the current lifecycle answer, not a session-scoped one. Default (spill
+disabled) behavior is unchanged from the window + loud-miss guarantee
+documented at the top of this file; opting into the spill additionally makes
+that window durable across capacity/TTL eviction, not just across MCP
+restarts.
 
 ## Cross-references
 - `docs/audits/EVAL-break.md` — Cluster G original finding (row 6) + this reframe.
@@ -177,4 +197,9 @@ window for the MCP deployment.
   library default) and the durable `SqliteBackend`
   (`furl_ctx/cache/backends/sqlite.py`, the MCP server default — Engine P1-7;
   locked by `tests/test_sqlite_backend.py` + `tests/test_mcp_sqlite_default.py`).
+- `furl_ctx/cache/compression_store.py` — the Q10 spill tier:
+  `CCR_SPILL_ENV`/`_create_spill_backend_from_env` (`:1729-1757`),
+  `_spill_evicted`/`_recover_from_spill` (`:1341`, `:1357`), wired into
+  `_evict_if_needed` (`:1436-1442`) and `retrieve()` (`:614`). Locked by
+  `tests/test_ccr_spill_tier.py`.
 - `tests/test_ccr_eviction_loud_miss.py` — the locking regression tests.

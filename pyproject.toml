@@ -90,7 +90,6 @@ dev = [
     "ruff>=0.15.19",
     "mypy>=1.14.1",
     "pre-commit>=3.0.0",
-    "numpy>=1.24.0",
 ]
 # All optional dependencies (everything the compression library can use)
 all = [

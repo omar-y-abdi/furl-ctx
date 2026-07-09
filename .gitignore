@@ -188,6 +188,7 @@ temp/
 .benchmarks/
 benchmark_results.json
 benchmark_results/
+verify/raw_results.json
 
 # DeepEval cache
 .deepeval/
@@ -264,6 +265,7 @@ uv.lock
 /docs/
 /PLAN.md
 /FABLE-RECON-PLAN.md
+/VALIDATION-REPORT.md
 /NAME-IDEAS.md
 /ENGINE-COMPARISON.md
 /finished-fable-work.md
