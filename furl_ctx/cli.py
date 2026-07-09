@@ -2,6 +2,10 @@
 
     furl compress [FILE]   # FILE (or - / omitted for stdin) -> compressed stdout
     furl retrieve HASH     # print the original content for a CCR marker hash
+    furl retrieve HASH --pattern REGEX [--context-lines N] [--line-range START:END]
+    furl retrieve HASH --fields f1 f2  # project named keys out of a JSON array
+    furl retrieve HASH --select-field NAME --select-equals VALUE [--limit N]
+    furl retrieve HASH --select-field NAME --select-min 0 --select-max 99 [--limit N]
     furl eval CORPUS --recall  # corpus compression ratio + needle-recall gate
     furl doctor            # check the install: native core, tokenizer, CCR store
 
@@ -16,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 
 
 def _read_input(path: str) -> str:
@@ -51,17 +56,82 @@ def _cmd_compress(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_line_range(value: str) -> list[int | None]:
+    """Parse ``"START:END"`` into ``[start|None, end|None]``.
+
+    Both sides are 1-based and optional (``":50"`` → ``[None, 50]``,
+    ``"5:"`` → ``[5, None]``).  Raises ``argparse.ArgumentTypeError`` on
+    non-integer tokens so argparse can surface a clean usage error.
+    """
+    parts = value.split(":", 1)
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(
+            f"--line-range must be 'START:END' (e.g. '10:20', ':50', '5:'), got: {value!r}"
+        )
+    result: list[int | None] = []
+    for token in parts:
+        if token == "":
+            result.append(None)
+        else:
+            try:
+                result.append(int(token))
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"--line-range bounds must be integers, got: {token!r}"
+                ) from exc
+    return result
+
+
+def _parse_select_equals(value: str) -> Any:
+    """Parse ``--select-equals`` with ``json.loads`` → fall back to raw string.
+
+    ``"123"`` → ``123`` (int), ``"true"`` → ``True`` (bool),
+    ``"null"`` → ``None``, ``"DroppedFrame"`` → ``"DroppedFrame"`` (str).
+    """
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+
+
 def _cmd_retrieve(args: argparse.Namespace) -> int:
     from furl_ctx import retrieve
 
-    original = retrieve(args.hash)
-    if original is None:
+    # Build kwargs only from flags the user actually passed (SUPPRESS default).
+    # This keeps the no-flag path a plain full retrieve with no extra arguments.
+    kwargs: dict[str, Any] = {}
+    if hasattr(args, "pattern"):
+        kwargs["pattern"] = args.pattern
+    if hasattr(args, "context_lines"):
+        kwargs["context_lines"] = args.context_lines
+    if hasattr(args, "line_range"):
+        kwargs["line_range"] = args.line_range
+    if hasattr(args, "fields"):
+        kwargs["fields"] = args.fields
+    if hasattr(args, "select_field"):
+        kwargs["select_field"] = args.select_field
+    if hasattr(args, "select_equals"):
+        kwargs["select_equals"] = args.select_equals
+    if hasattr(args, "select_min"):
+        kwargs["select_min"] = args.select_min
+    if hasattr(args, "select_max"):
+        kwargs["select_max"] = args.select_max
+    if hasattr(args, "limit"):
+        kwargs["limit"] = args.limit
+
+    try:
+        result = retrieve(args.hash, **kwargs)
+    except ValueError as exc:
+        sys.stderr.write(f"furl: {exc}\n")
+        return 2
+
+    if result is None:
         sys.stderr.write(
             f"furl: hash {args.hash} not found in the CCR store window "
             "(never stored, evicted, or expired)\n"
         )
         return 1
-    sys.stdout.write(original)
+    sys.stdout.write(result)
     return 0
 
 
@@ -208,6 +278,79 @@ def main(argv: list[str] | None = None) -> int:
 
     p_retrieve = sub.add_parser("retrieve", help="print the original content for a CCR hash")
     p_retrieve.add_argument("hash")
+    # Slice flags — all optional; omitting them all gives a plain full retrieve.
+    # SUPPRESS keeps unset flags off args.* so _cmd_retrieve can distinguish
+    # "not passed" from an explicit value (critical for --select-equals).
+    p_retrieve.add_argument(
+        "--pattern",
+        default=argparse.SUPPRESS,
+        metavar="REGEX",
+        help="regex to filter lines (shows matching lines with context)",
+    )
+    p_retrieve.add_argument(
+        "--context-lines",
+        dest="context_lines",
+        type=int,
+        default=argparse.SUPPRESS,
+        metavar="N",
+        help="lines of context around each --pattern match (default 0)",
+    )
+    p_retrieve.add_argument(
+        "--line-range",
+        dest="line_range",
+        type=_parse_line_range,
+        default=argparse.SUPPRESS,
+        metavar="START:END",
+        help="1-based line window, either side blank for open (e.g. '10:20', ':50', '5:')",
+    )
+    p_retrieve.add_argument(
+        "--fields",
+        nargs="+",
+        default=argparse.SUPPRESS,
+        metavar="FIELD",
+        help="project named keys out of a JSON array of objects",
+    )
+    p_retrieve.add_argument(
+        "--select-field",
+        dest="select_field",
+        default=argparse.SUPPRESS,
+        metavar="FIELD",
+        help="field name for row-select (use with --select-equals or --select-min/--select-max)",
+    )
+    p_retrieve.add_argument(
+        "--select-equals",
+        dest="select_equals",
+        type=_parse_select_equals,
+        default=argparse.SUPPRESS,
+        metavar="VALUE",
+        help=(
+            "keep rows where --select-field equals VALUE; "
+            "parsed as JSON (so 123→int, true→bool, null→None) then falls back to raw string"
+        ),
+    )
+    p_retrieve.add_argument(
+        "--select-min",
+        dest="select_min",
+        type=float,
+        default=argparse.SUPPRESS,
+        metavar="NUM",
+        help="keep rows where --select-field >= NUM (numeric range, inclusive)",
+    )
+    p_retrieve.add_argument(
+        "--select-max",
+        dest="select_max",
+        type=float,
+        default=argparse.SUPPRESS,
+        metavar="NUM",
+        help="keep rows where --select-field <= NUM (numeric range, inclusive)",
+    )
+    p_retrieve.add_argument(
+        "--limit",
+        type=int,
+        default=argparse.SUPPRESS,
+        metavar="N",
+        help="maximum number of rows to return from a row-select",
+    )
     p_retrieve.set_defaults(func=_cmd_retrieve)
 
     p_eval = sub.add_parser("eval", help="compression ratio + needle recall over a corpus")
