@@ -188,6 +188,7 @@ temp/
 .benchmarks/
 benchmark_results.json
 benchmark_results/
+verify/raw_results.json
 
 # DeepEval cache
 .deepeval/
