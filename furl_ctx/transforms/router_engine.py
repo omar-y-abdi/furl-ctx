@@ -639,6 +639,11 @@ class ContentCompressionEngine:
                 original_item_count=n_items,
                 query_context=context or None,
                 compression_strategy=CompressionStrategy.CCR_OFFLOAD.value,
+                # A durable write that fell open to volatile storage raises
+                # DurableWriteError → caught below, keeping the original (audit
+                # #3). The round-trip verify alone cannot catch this: a volatile
+                # write still resolves in-process.
+                require_durable=True,
             )
             # Round-trip verification is an ENGINE-INTERNAL read — it must not
             # feed the retrieval-feedback loop as if the model asked for this

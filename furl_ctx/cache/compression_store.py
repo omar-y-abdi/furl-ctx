@@ -62,6 +62,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class DurableWriteError(RuntimeError):
+    """Raised by ``CompressionStore.store(..., require_durable=True)`` when the
+    entry did NOT reach the durable backend — the write fell open to a volatile
+    in-process fallback (the configured durable backend is degraded, or the
+    write lost the lock-contention retry). The marker-decision caller catches it
+    and vetoes to passthrough (serves the original uncompressed), so a
+    ``<<ccr:HASH>>`` marker never ships for content whose only surviving copy is
+    volatile and dies with the process (audit #3).
+
+    Not raised for a non-durable backend (the default in-memory store): there
+    the operator explicitly chose volatile storage, so there is no durability to
+    lose and ``require_durable`` is a no-op.
+    """
+
+
 # Session-scale default (Engine P0-3): agentic sessions routinely outlive
 # 5 minutes, and an entry that expires mid-session silently converts
 # "lossless + retrieval" into lossy. 1800 s (30 min) matches the Rust
@@ -444,6 +460,7 @@ class CompressionStore:
         compression_strategy: str | None = None,
         ttl: int | None = None,
         explicit_hash: str | None = None,
+        require_durable: bool = False,
     ) -> str:
         """Store compressed content and return hash for retrieval.
 
@@ -467,6 +484,13 @@ class CompressionStore:
                 string, raises ``ValueError``. The marker hash and the
                 store key MUST match — otherwise a ``furl_retrieve`` of the
                 marker hash misses even though the data is present.
+            require_durable: When True and the configured backend is durable
+                (exposes ``set_durable``), raise ``DurableWriteError`` if the
+                write only reached the volatile fallback (backend degraded or
+                lock-contention retry lost). Marker-decision callers pass True so
+                a lost durable write vetoes the ``<<ccr:HASH>>`` marker instead
+                of shipping one whose original dies with the process (audit #3).
+                No-op for the in-memory backend (nothing durable to lose).
 
         Returns:
             Hash key for retrieving this content. On a true hash collision
@@ -595,11 +619,41 @@ class CompressionStore:
                 # Mark old heap entry as stale since we're replacing
                 self._stale_heap_entries += 1
 
-            self._backend.set(hash_key, entry)
+            durable = self._persist_and_report_durability(hash_key, entry)
             # Add to eviction heap for O(log n) eviction
             heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
 
+        # Durability veto (audit #3), raised OUTSIDE the lock. When the caller
+        # required durability but the write only reached the volatile fallback,
+        # refuse to certify the store: the marker-decision caller catches this
+        # and reverts to the ORIGINAL uncompressed content (no dangling marker).
+        # The entry stays in the volatile tier so same-process retrieval still
+        # works; it simply must not back a shipped marker.
+        if require_durable and not durable:
+            raise DurableWriteError(
+                f"CCR durable write for hash {hash_key} fell open to volatile "
+                f"in-process storage (backend degraded or lock-contention retry "
+                f"lost); refusing to certify durability so the caller vetoes the "
+                f"marker rather than shipping one whose original dies with the "
+                f"process"
+            )
         return hash_key
+
+    def _persist_and_report_durability(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Write ``entry`` and report whether it reached a DURABLE backend.
+
+        A backend that distinguishes durable from volatile writes exposes
+        ``set_durable`` (the ``SqliteBackend`` does); its bool is returned
+        verbatim. A backend without it (the in-memory default) is treated as
+        durability-satisfied — the operator chose volatile storage, so
+        ``require_durable`` has nothing to veto. Must be called with the store
+        lock held.
+        """
+        set_durable = getattr(self._backend, "set_durable", None)
+        if set_durable is not None:
+            return bool(set_durable(hash_key, entry))
+        self._backend.set(hash_key, entry)
+        return True
 
     def retrieve(
         self,

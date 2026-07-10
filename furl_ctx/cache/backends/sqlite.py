@@ -277,20 +277,36 @@ class SqliteBackend:
 
     def set(self, hash_key: str, entry: CompressionEntry) -> None:
         """Store an entry, overwriting any existing entry with the same key."""
-        if not self._degraded:
-            try:
-                self._run("set", lambda conn: self._sqlite_set(conn, hash_key, entry))
-            except _SqliteOpFailed:
-                # Per-op fail-open: retain the entry in-process so the marker
-                # that references it never dangles for THIS process. Other
-                # processes miss it loudly — the pre-durability status quo.
-                self._memory.set(hash_key, entry)
-            else:
-                # Drop any stale fallback shadow from an earlier contended
-                # write of the same key: SQLite now holds the newest entry.
-                self._memory.delete(hash_key)
-            return
-        self._memory.set(hash_key, entry)
+        self.set_durable(hash_key, entry)
+
+    def set_durable(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Store an entry and report whether the write reached the DURABLE file.
+
+        Returns ``True`` iff the row landed in SQLite; ``False`` if it fell open
+        to the volatile in-process fallback — the backend is permanently
+        degraded, or this write lost the bounded lock-contention retry
+        (``busy_timeout`` × retries of sustained writer contention). A caller
+        that must not ship a ``<<ccr:HASH>>`` marker until the original is
+        durable (else a lost write leaves the marker pointing at a volatile-only
+        copy — audit #3) vetoes to passthrough on ``False``. ``set`` is exactly
+        this, discarding the result (the Protocol method stays ``-> None``).
+        """
+        if self._degraded:
+            self._memory.set(hash_key, entry)
+            return False
+        try:
+            self._run("set", lambda conn: self._sqlite_set(conn, hash_key, entry))
+        except _SqliteOpFailed:
+            # Per-op fail-open: retain the entry in-process so same-process
+            # retrieval still round-trips, but report the durability MISS so the
+            # marker-decision caller can veto. Other processes miss it loudly —
+            # the pre-durability status quo.
+            self._memory.set(hash_key, entry)
+            return False
+        # Durable write landed: drop any stale fallback shadow from an earlier
+        # contended write of the same key.
+        self._memory.delete(hash_key)
+        return True
 
     def delete(self, hash_key: str) -> bool:
         """Delete an entry by hash key from both tiers."""

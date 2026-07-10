@@ -901,6 +901,12 @@ class SmartCrusher(Transform):
                 query_context=query_context if query_context else None,
                 compression_strategy=strategy,
                 explicit_hash=ccr_hash,
+                # A durable write that fell open to the volatile fallback raises
+                # DurableWriteError (audit #3); the `except Exception` below
+                # turns it into CcrMirrorError so compress() reverts to the
+                # ORIGINAL rows rather than shipping a marker whose only copy
+                # dies with the process.
+                require_durable=True,
             )
         except ValueError:
             # explicit_hash validation failed — the marker had a

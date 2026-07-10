@@ -629,6 +629,10 @@ class CrossMessageDeduper(Transform):
                 query_context=query_context or None,
                 compression_strategy="cross_message_dedup",
                 explicit_hash=ccr_hash,
+                # A durable write that fell open to volatile storage raises
+                # DurableWriteError → vetoed below (audit #3): no replacement
+                # ships unless the original is durably recoverable.
+                require_durable=True,
             )
             return True
         except Exception as exc:  # noqa: BLE001 - any store failure must veto
