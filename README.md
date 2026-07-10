@@ -21,7 +21,7 @@
   <a href="#install">Install</a> ·
   <a href="#proof">Proof</a> ·
   <a href="LIBRARY.md">Library</a> ·
-  <a href="https://discord.gg/yRmaUNpsPJ">Discord</a>
+  <a href="#community">Community</a>
 </p>
 
 ---
@@ -67,11 +67,17 @@ Token reduction on real captured data — reproducible, inputs committed under `
 
 Across the corpus: **95% fewer tokens** (72,903 → 3,880) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
 
+**Honest read:** the numbers above are best-case, low-entropy *ceilings* measured on the dev fixtures — two independent, out-of-sample audits show they degrade by 6–43pp on fresh high-entropy / near-unique / realistic data (exactly where real logs and listings live). On genuinely high-entropy content, honest lossless savings sit in the **0–54% band**, not 60–95% (code 0%, search 40%, repeated_logs 54%); read every figure here as a ceiling, not a typical, and see the tier-aware breakdown in [BENCHMARKS.md](BENCHMARKS.md).
+
 The `code` row's 99% is CCR-offload of a large non-file-read tool output (e.g. `Bash` dumping source text); an agent's own `Read`/`Grep`/`Glob` file access bypasses the compression hook by design and passes through unchanged, at 0%.
 
 ## Also a Python library
 
 The same engine drops into any Python app or MCP host: `from furl_ctx import compress`. Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
+
+## Community
+
+Questions or bug reports → [open a GitHub issue](https://github.com/omar-y-abdi/furl/issues) (the surest way to reach us). For chat, there's a [Discord](https://discord.gg/yRmaUNpsPJ).
 
 ## License
 
