@@ -462,14 +462,36 @@ class ReadLifecycleManager:
         if self.store is None:
             return False, content, None
 
-        # Store original in CCR and obtain the backed hash.
-        ccr_hash = self.store.store(
-            original=content,
-            compressed="",
-            tool_name="Read",
-            tool_call_id=classification.tool_call_id,
-            compression_strategy=f"read_lifecycle:{classification.state.value}",
-        )
+        # Store original in CCR and obtain the backed hash. require_durable:
+        # when the store's backend is durable (e.g. sqlite), a write that only
+        # reached its volatile in-process fallback (backend degraded, or the
+        # write lost the lock-contention retry) raises DurableWriteError —
+        # decline the substitution exactly like the store-is-None guard above
+        # and serve the content verbatim. A replacement marker must never ship
+        # when the original's only backing dies with this process: a second
+        # process's retrieve would miss and the replaced bytes would be
+        # unrecoverable (audit #3 / review F1 — the same veto every other
+        # marker seam applies). Lazy import: content producers must not pull
+        # the cache package at module import time.
+        from ..cache.compression_store import DurableWriteError
+
+        try:
+            ccr_hash = self.store.store(
+                original=content,
+                compressed="",
+                tool_name="Read",
+                tool_call_id=classification.tool_call_id,
+                compression_strategy=f"read_lifecycle:{classification.state.value}",
+                require_durable=True,
+            )
+        except DurableWriteError as exc:
+            logger.warning(
+                "read_lifecycle: durable CCR write failed for %s (%s); serving "
+                "content verbatim (no replacement without durable recoverability)",
+                classification.file_path,
+                exc,
+            )
+            return False, content, None
 
         file_display = classification.file_path or "unknown"
 

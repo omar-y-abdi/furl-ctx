@@ -122,6 +122,23 @@ class InMemoryBackend:
         """
         return list(self._store.items())
 
+    def purge_expired(self, now: float) -> int:
+        """Delete entries whose per-row TTL elapsed by ``now``; return the count.
+
+        The store's expiry GC (audit #2): lets ``CompressionStore`` reap expired
+        entries without materializing them back out through ``items()``. ``now``
+        is the store's clock, so expiry matches the store's own TTL checks.
+        """
+        expired = [key for key, entry in self._store.items() if entry.is_expired(now)]
+        for key in expired:
+            del self._store[key]
+        return len(expired)
+
+    def created_at_index(self) -> list[tuple[float, str]]:
+        """``(created_at, hash_key)`` pairs — the projection the store rebuilds
+        its eviction heap from, without carrying the full entries (audit #2)."""
+        return [(entry.created_at, key) for key, entry in self._store.items()]
+
     def get_stats(self) -> dict[str, Any]:
         """Get backend statistics.
 

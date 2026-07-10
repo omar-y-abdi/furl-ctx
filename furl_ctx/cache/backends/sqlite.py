@@ -105,6 +105,17 @@ _CREATE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS ccr_entries_created_at_idx ON ccr_entries (created_at)"
 )
 
+# Expression index on the expiry cutoff so ``_PURGE_EXPIRED_SQL`` (WHERE
+# ``created_at + ttl < ?``) is an indexed range scan, not a full-table scan
+# (audit #6). The bare ``created_at`` index above cannot serve a predicate on
+# the SUM, so every purge — startup and every Nth put — full-scanned the shared
+# file. Append-only (IF NOT EXISTS): safe to add to an existing database; SQLite
+# materialises the expression into the index and the planner matches the
+# identical ``created_at + ttl`` expression in the DELETE.
+_CREATE_EXPIRES_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS ccr_entries_expires_at_idx ON ccr_entries (created_at + ttl)"
+)
+
 _COLUMNS = (
     "hash_key, entry_hash, original_content, compressed_content, original_tokens, "
     "compressed_tokens, original_item_count, compressed_item_count, tool_name, "
@@ -235,6 +246,11 @@ class SqliteBackend:
         self._state_lock = threading.Lock()
         self._all_connections: list[sqlite3.Connection] = []
         self._put_count = 0
+        # Maintained row count for the cap check, replacing a per-put COUNT(*)
+        # full-scan (audit #6). Seeded from the file in _initialize (after the
+        # startup purge) and resynced on the purge cadence; 0 until then so a
+        # degrade-during-init leaves it consistent.
+        self._row_count = 0
         self._degraded = False
         self._degradation_logged = False
         # Fallback tier: sole storage once degraded; per-op refuge for writes
@@ -277,20 +293,36 @@ class SqliteBackend:
 
     def set(self, hash_key: str, entry: CompressionEntry) -> None:
         """Store an entry, overwriting any existing entry with the same key."""
-        if not self._degraded:
-            try:
-                self._run("set", lambda conn: self._sqlite_set(conn, hash_key, entry))
-            except _SqliteOpFailed:
-                # Per-op fail-open: retain the entry in-process so the marker
-                # that references it never dangles for THIS process. Other
-                # processes miss it loudly — the pre-durability status quo.
-                self._memory.set(hash_key, entry)
-            else:
-                # Drop any stale fallback shadow from an earlier contended
-                # write of the same key: SQLite now holds the newest entry.
-                self._memory.delete(hash_key)
-            return
-        self._memory.set(hash_key, entry)
+        self.set_durable(hash_key, entry)
+
+    def set_durable(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Store an entry and report whether the write reached the DURABLE file.
+
+        Returns ``True`` iff the row landed in SQLite; ``False`` if it fell open
+        to the volatile in-process fallback — the backend is permanently
+        degraded, or this write lost the bounded lock-contention retry
+        (``busy_timeout`` × retries of sustained writer contention). A caller
+        that must not ship a ``<<ccr:HASH>>`` marker until the original is
+        durable (else a lost write leaves the marker pointing at a volatile-only
+        copy — audit #3) vetoes to passthrough on ``False``. ``set`` is exactly
+        this, discarding the result (the Protocol method stays ``-> None``).
+        """
+        if self._degraded:
+            self._memory.set(hash_key, entry)
+            return False
+        try:
+            self._run("set", lambda conn: self._sqlite_set(conn, hash_key, entry))
+        except _SqliteOpFailed:
+            # Per-op fail-open: retain the entry in-process so same-process
+            # retrieval still round-trips, but report the durability MISS so the
+            # marker-decision caller can veto. Other processes miss it loudly —
+            # the pre-durability status quo.
+            self._memory.set(hash_key, entry)
+            return False
+        # Durable write landed: drop any stale fallback shadow from an earlier
+        # contended write of the same key.
+        self._memory.delete(hash_key)
+        return True
 
     def delete(self, hash_key: str) -> bool:
         """Delete an entry by hash key from both tiers."""
@@ -382,6 +414,48 @@ class SqliteBackend:
         result.extend((key, entry) for key, entry in self._memory.items() if key not in seen)
         return result
 
+    def purge_expired(self, now: float) -> int:
+        """Delete rows whose per-row TTL elapsed by ``now`` and return the count
+        purged across both tiers (audit #2).
+
+        This is the store's expiry GC — an indexed range delete
+        (``created_at + ttl < now``) instead of materializing every row into
+        Python to find the expired keys. ``now`` is the STORE's clock (injectable
+        for tests), passed through so expiry stays consistent with the store's
+        TTL checks. Fail-open: the file tier contributes 0 on degrade/lock-loss.
+        """
+        file_purged = 0
+        if not self._degraded:
+            try:
+                file_purged = self._run(
+                    "purge_expired", lambda conn: self._sqlite_purge_expired(conn, now)
+                )
+            except _SqliteOpFailed:
+                file_purged = 0
+        return file_purged + self._memory.purge_expired(now)
+
+    def created_at_index(self) -> list[tuple[float, str]]:
+        """``(created_at, hash_key)`` for every entry, WITHOUT decoding content
+        BLOBs — the projection ``CompressionStore`` rebuilds its eviction heap
+        from (audit #2). Merges the volatile fallback like ``items()`` does."""
+        if self._degraded:
+            return [(entry.created_at, key) for key, entry in self._memory.items()]
+        try:
+            rows = self._run(
+                "created_at_index",
+                lambda conn: conn.execute(
+                    "SELECT created_at, hash_key FROM ccr_entries"
+                ).fetchall(),
+            )
+        except _SqliteOpFailed:
+            return [(entry.created_at, key) for key, entry in self._memory.items()]
+        result = [(float(created_at), _decode_text(hash_key)) for created_at, hash_key in rows]
+        seen = {key for _created_at, key in result}
+        result.extend(
+            (entry.created_at, key) for key, entry in self._memory.items() if key not in seen
+        )
+        return result
+
     def get_stats(self) -> dict[str, Any]:
         """Backend statistics — counts and sizes only, never content."""
         bytes_used = 0
@@ -470,16 +544,30 @@ class SqliteBackend:
         return conn
 
     def _initialize(self, conn: sqlite3.Connection) -> None:
-        """Create the schema and purge rows that expired while we were down."""
+        """Create the schema, purge rows that expired while we were down, and
+        seed the maintained row counter from the file."""
         with conn:
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
+            conn.execute(_CREATE_EXPIRES_INDEX_SQL)
             purged = conn.execute(_PURGE_EXPIRED_SQL, (time.time(),)).rowcount
+            row_count = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
+        with self._state_lock:
+            self._row_count = row_count
         if purged > 0:
             logger.info("event=ccr_sqlite_startup_purge purged_rows=%d", purged)
 
     def _sqlite_set(self, conn: sqlite3.Connection, hash_key: str, entry: CompressionEntry) -> None:
         with conn:
+            # Insert-vs-replace via a PK point-lookup (O(log n)) so the
+            # maintained counter stays exact within this process — far cheaper
+            # than the per-put COUNT(*) full-scan it replaces (audit #6).
+            existed = (
+                conn.execute(
+                    "SELECT 1 FROM ccr_entries WHERE hash_key = ?", (_encode_text(hash_key),)
+                ).fetchone()
+                is not None
+            )
             conn.execute(_UPSERT_SQL, _entry_to_row(hash_key, entry))
             # Count the put only once the write is in flight inside the
             # transaction, so lock-contention retries of the same logical put
@@ -488,21 +576,50 @@ class SqliteBackend:
                 self._put_count += 1
                 purge_now = self._put_count % self._purge_every_n_puts == 0
             if purge_now:
+                # Indexed opportunistic purge, then resync the counter from the
+                # shared file: corrects any drift from another process's writes
+                # this counter never saw, at 1/purge_every_n_puts the cost of the
+                # old per-put COUNT(*).
                 conn.execute(_PURGE_EXPIRED_SQL, (time.time(),))
-            row_count = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
-            if row_count > self._max_rows:
-                conn.execute(_EVICT_OLDEST_SQL, (row_count - self._max_rows,))
+                resynced = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
+                with self._state_lock:
+                    self._row_count = resynced
+            elif not existed:
+                with self._state_lock:
+                    self._row_count += 1
+            with self._state_lock:
+                over = self._row_count - self._max_rows
+            if over > 0:
+                evicted = conn.execute(_EVICT_OLDEST_SQL, (over,)).rowcount
+                with self._state_lock:
+                    self._row_count -= evicted
 
     def _sqlite_delete(self, conn: sqlite3.Connection, hash_key: str) -> bool:
         with conn:
             cursor = conn.execute(
                 "DELETE FROM ccr_entries WHERE hash_key = ?", (_encode_text(hash_key),)
             )
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+        if deleted:
+            with self._state_lock:
+                self._row_count -= 1
+        return deleted
+
+    def _sqlite_purge_expired(self, conn: sqlite3.Connection, now: float) -> int:
+        """Indexed delete of rows whose per-row TTL elapsed by ``now`` (uses the
+        ``created_at + ttl`` expression index). Maintains the row counter."""
+        with conn:
+            purged = conn.execute(_PURGE_EXPIRED_SQL, (now,)).rowcount
+        if purged:
+            with self._state_lock:
+                self._row_count -= purged
+        return int(purged)
 
     def _sqlite_clear(self, conn: sqlite3.Connection) -> None:
         with conn:
             conn.execute("DELETE FROM ccr_entries")
+        with self._state_lock:
+            self._row_count = 0
 
     def _sqlite_has(self, hash_key: str) -> bool:
         try:

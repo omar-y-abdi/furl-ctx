@@ -62,6 +62,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class DurableWriteError(RuntimeError):
+    """Raised by ``CompressionStore.store(..., require_durable=True)`` when the
+    entry did NOT reach the durable backend — the write fell open to a volatile
+    in-process fallback (the configured durable backend is degraded, or the
+    write lost the lock-contention retry). The marker-decision caller catches it
+    and vetoes to passthrough (serves the original uncompressed), so a
+    ``<<ccr:HASH>>`` marker never ships for content whose only surviving copy is
+    volatile and dies with the process (audit #3).
+
+    Not raised for a non-durable backend (the default in-memory store): there
+    the operator explicitly chose volatile storage, so there is no durability to
+    lose and ``require_durable`` is a no-op.
+    """
+
+
 # Session-scale default (Engine P0-3): agentic sessions routinely outlive
 # 5 minutes, and an entry that expires mid-session silently converts
 # "lossless + retrieval" into lossy. 1800 s (30 min) matches the Rust
@@ -88,6 +104,17 @@ _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
 # design: the snippet is a disambiguation preview so the caller can pick a hash
 # to retrieve in full, not a content channel. Redacted before truncation.
 _CROSS_STORE_PREVIEW_CHARS = 200
+# ReDoS guard (PERF/SEC). The credential regexes below — chiefly
+# ``_SECRET_KEY_VALUE_RE`` — are O(N^2) on a long unbroken base64url/hex/minified
+# run: a ``-`` sits INSIDE the ``[A-Z0-9_-]`` secret-key class yet is a word
+# boundary, so ``\b([A-Z0-9_-]*KEYWORD...)`` opens O(N) anchor positions each
+# scanning O(N). Empirically a 64 KB dashed run took ~82 s. Every preview/log
+# surface keeps only a bounded head, so callers redact the kept window PLUS this
+# margin (never the whole multi-MB original) — bounding the regex input to a
+# constant. The margin lets a secret straddling the budget edge be seen whole
+# and masked before truncation; real secrets (keys/tokens/URL passwords) fit
+# inside it.
+_REDACT_WINDOW_MARGIN_CHARS = 256
 # Match ``<sensitive-key><sep><value>`` in both plain (``api_key=...``) and JSON
 # quoted-key (``"api_key": "..."``) form. Group 2 allows an OPTIONAL closing quote
 # before the separator: in JSON the key's own closing ``"`` sits between the key
@@ -222,9 +249,16 @@ def _redact_retrieval_log_payload(payload: str) -> str:
 
 
 def _payload_for_retrieval_log(payload: str) -> dict[str, Any]:
-    redacted = _redact_retrieval_log_payload(payload)
-    preview = redacted[:_RETRIEVAL_LOG_PREVIEW_CHARS]
-    truncated = len(redacted) > len(preview)
+    # SLICE-before-REDACT (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``).
+    # Redacting the FULL payload first is O(N^2) on unbroken base64url/hex runs
+    # and this fires on EVERY retrieve (full-body log redact). The preview keeps
+    # only ``_RETRIEVAL_LOG_PREVIEW_CHARS`` regardless, so redact just the bounded
+    # window that feeds it. ``payload_chars`` still reports the FULL length, and
+    # ``payload_truncated`` still reflects whether content was cut.
+    window = payload[: _RETRIEVAL_LOG_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS]
+    redacted_window = _redact_retrieval_log_payload(window)
+    preview = redacted_window[:_RETRIEVAL_LOG_PREVIEW_CHARS]
+    truncated = len(payload) > len(window) or len(redacted_window) > _RETRIEVAL_LOG_PREVIEW_CHARS
     return {
         "payload_chars": len(payload),
         "payload_preview_chars": len(preview),
@@ -426,6 +460,7 @@ class CompressionStore:
         compression_strategy: str | None = None,
         ttl: int | None = None,
         explicit_hash: str | None = None,
+        require_durable: bool = False,
     ) -> str:
         """Store compressed content and return hash for retrieval.
 
@@ -449,13 +484,22 @@ class CompressionStore:
                 string, raises ``ValueError``. The marker hash and the
                 store key MUST match — otherwise a ``furl_retrieve`` of the
                 marker hash misses even though the data is present.
+            require_durable: When True and the configured backend is durable
+                (exposes ``set_durable``), raise ``DurableWriteError`` if the
+                write only reached the volatile fallback (backend degraded or
+                lock-contention retry lost). Marker-decision callers pass True so
+                a lost durable write vetoes the ``<<ccr:HASH>>`` marker instead
+                of shipping one whose original dies with the process (audit #3).
+                No-op for the in-memory backend (nothing durable to lose).
 
         Returns:
             Hash key for retrieving this content. On a true hash collision
-            (same key, different live content) the store KEEPS the first
-            binding and refuses the overwrite — the returned key then
-            resolves to the earlier content and the refusal is logged at
-            ERROR.
+            (same key, different live content) the store DROPS the ambiguous
+            binding — the stored entry is deleted, the new one refused, and the
+            collision logged at ERROR — so a later ``retrieve`` of the key is a
+            LOUD, cause-honest miss (recompute) rather than a silent resolution
+            to the other producer's foreign content. The key is still returned
+            (signature unchanged); its marker simply no longer resolves.
         """
         # Reject a non-positive TTL loudly. ttl=0 (or negative) produces an
         # entry that is_expired() immediately (time.time()-created_at > 0), so it
@@ -537,26 +581,35 @@ class CompressionStore:
 
             # Hash collision handling. If the key already exists with
             # DIFFERENT content it is a true hash collision (astronomically
-            # rare at 96-/48-bit keys) — KEEP-FIRST: refuse the overwrite.
-            # Rebinding would silently corrupt the already-emitted marker that
-            # points at the existing entry; refusing means the NEW caller's
-            # marker dangles instead, and dangles LOUDLY (error log here,
-            # cause-honest miss on retrieval of the changed content) rather
-            # than resolving old markers to foreign content. An expired
-            # same-key entry never reaches this branch: _evict_if_needed()
-            # above already reaped it, so a dead binding cannot wedge its key.
+            # rare at 96-/48-bit keys). Both producers' ``<<ccr:HASH>>`` markers
+            # now point at the SAME key, and retrieval — a bare
+            # ``backend.get(hash_key)`` with no per-marker content identity —
+            # cannot tell them apart. Serving the stored entry would hand the
+            # SECOND producer the FIRST producer's bytes: foreign content, i.e.
+            # silent corruption, the exact outcome this store exists to prevent.
+            # We cannot safely serve EITHER binding, so we DROP the binding
+            # entirely: delete the stored entry and refuse the new one. Every
+            # marker on this key then resolves to a LOUD, cause-honest miss
+            # (recompute) instead of foreign content. An expired same-key entry
+            # never reaches this branch: _evict_if_needed() above already reaped
+            # it, so a dead binding cannot wedge its key.
             existing = self._backend.get(hash_key)
             if existing is not None:
                 if existing.original_content != original:
                     logger.error(
                         "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
-                        "new_len=%d) — keeping first binding, refusing overwrite; "
-                        "the new content is NOT stored and its marker will miss",
+                        "new_len=%d) — dropping the ambiguous binding; NEITHER content "
+                        "is served (both markers now loud-miss) rather than resolving "
+                        "to foreign content",
                         hash_key,
                         tool_name,
                         len(existing.original_content),
                         len(original),
                     )
+                    # Drop the stored entry so retrieve() loud-misses instead of
+                    # serving foreign bytes; its heap tuple is now stale.
+                    self._backend.delete(hash_key)
+                    self._stale_heap_entries += 1
                     return hash_key
                 # Same content being stored again - this is fine, just update
                 logger.debug(
@@ -566,11 +619,41 @@ class CompressionStore:
                 # Mark old heap entry as stale since we're replacing
                 self._stale_heap_entries += 1
 
-            self._backend.set(hash_key, entry)
+            durable = self._persist_and_report_durability(hash_key, entry)
             # Add to eviction heap for O(log n) eviction
             heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
 
+        # Durability veto (audit #3), raised OUTSIDE the lock. When the caller
+        # required durability but the write only reached the volatile fallback,
+        # refuse to certify the store: the marker-decision caller catches this
+        # and reverts to the ORIGINAL uncompressed content (no dangling marker).
+        # The entry stays in the volatile tier so same-process retrieval still
+        # works; it simply must not back a shipped marker.
+        if require_durable and not durable:
+            raise DurableWriteError(
+                f"CCR durable write for hash {hash_key} fell open to volatile "
+                f"in-process storage (backend degraded or lock-contention retry "
+                f"lost); refusing to certify durability so the caller vetoes the "
+                f"marker rather than shipping one whose original dies with the "
+                f"process"
+            )
         return hash_key
+
+    def _persist_and_report_durability(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Write ``entry`` and report whether it reached a DURABLE backend.
+
+        A backend that distinguishes durable from volatile writes exposes
+        ``set_durable`` (the ``SqliteBackend`` does); its bool is returned
+        verbatim. A backend without it (the in-memory default) is treated as
+        durability-satisfied — the operator chose volatile storage, so
+        ``require_durable`` has nothing to veto. Must be called with the store
+        lock held.
+        """
+        set_durable = getattr(self._backend, "set_durable", None)
+        if set_durable is not None:
+            return bool(set_durable(hash_key, entry))
+        self._backend.set(hash_key, entry)
+        return True
 
     def retrieve(
         self,
@@ -860,14 +943,18 @@ class CompressionStore:
     def _cross_store_preview(original_content: str) -> str:
         """Redacted, truncated preview of an original for a cross-store hit.
 
-        Redact FIRST, then truncate: truncating first could sever a credential
-        mid-token and leave a recognizable head un-redacted. The redaction
-        rules are shared with the retrieval-log preview so both surfaces mask
-        exactly the same secret shapes.
+        Slice-before-redact (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``):
+        redact only the bounded window the 200-char preview can show, never the
+        whole multi-MB original. The margin still lets a secret straddling the
+        preview edge be seen whole and masked before truncation, so a truncated
+        head cannot leave a recognizable credential prefix in the clear. The
+        redaction rules are shared with the retrieval-log preview so both
+        surfaces mask exactly the same secret shapes.
         """
-        redacted = _redact_retrieval_log_payload(original_content)
+        window = original_content[: _CROSS_STORE_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS]
+        redacted = _redact_retrieval_log_payload(window)
         preview = redacted[:_CROSS_STORE_PREVIEW_CHARS]
-        if len(redacted) > len(preview):
+        if len(original_content) > len(window) or len(redacted) > _CROSS_STORE_PREVIEW_CHARS:
             preview = preview + "…"
         return preview
 
@@ -1427,15 +1514,18 @@ class CompressionStore:
     def _clean_expired(self) -> None:
         """Remove expired entries. Must be called with lock held.
 
-        CRITICAL FIX: Track stale heap entries when deleting to prevent memory leak.
+        Delegates to the backend's expiry GC (audit #2) instead of
+        materializing every row into Python just to find the expired keys —
+        this runs on the store() write hot path (via ``_evict_if_needed``), so
+        for the durable backend it is now an indexed range delete, not a full
+        scan + decode of the whole shared file. Each purged entry leaves a stale
+        ``(created_at, hash_key)`` tuple in the eviction heap; the counter bump
+        keeps the heap-staleness accounting exactly as the old per-key delete
+        loop did (the tuples are found stale on pop, or reaped by the
+        ratio-guard rebuild).
         """
-        now = self._now()
-        expired_keys = [key for key, entry in self._backend.items() if entry.is_expired(now)]
-        for key in expired_keys:
-            self._backend.delete(key)
-            # CRITICAL FIX: Increment stale counter - the heap still has an entry
-            # for this key that will be stale when we try to evict
-            self._stale_heap_entries += 1
+        purged = self._backend.purge_expired(self._now())
+        self._stale_heap_entries += purged
 
     def _rebuild_heap(self) -> None:
         """Rebuild heap from current store entries. Must be called with lock held.
@@ -1443,10 +1533,10 @@ class CompressionStore:
         CRITICAL FIX: This removes stale heap entries that accumulate when entries
         are deleted or replaced. Without this, the heap grows unboundedly.
         """
-        # Build new heap from current store entries only
-        self._eviction_heap = [
-            (entry.created_at, hash_key) for hash_key, entry in self._backend.items()
-        ]
+        # Build new heap from current store entries only. Uses the backend's
+        # projected (created_at, hash_key) read (audit #2) so a rebuild on the
+        # store() hot path does not decode every content BLOB out of the file.
+        self._eviction_heap = list(self._backend.created_at_index())
         heapq.heapify(self._eviction_heap)
         # Reset stale counter - heap is now clean
         self._stale_heap_entries = 0

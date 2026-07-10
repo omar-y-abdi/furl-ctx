@@ -132,6 +132,10 @@ class CcrMirror:
             # Backing verification is an ENGINE-INTERNAL read — it must not
             # feed the retrieval-feedback loop as if the model asked for this
             # content back (Engine P2-13).
+            # NOTE (review O2): this retrieve also resolves a VOLATILE in-process
+            # copy, so it verifies in-process resolvability, not durability —
+            # acceptable only while the Tier-2 result cache is itself in-process
+            # (they co-terminate); revisit if that cache ever becomes durable.
             if store.retrieve(h, record_feedback_signal=False) is None:
                 logger.debug(
                     "_ensure_ccr_backed: hash %s unbackable after re-mirror "

@@ -19,6 +19,7 @@ from typing import Any
 from furl_ctx.cache.compression_store import CompressionStore
 from furl_ctx.config import ReadLifecycleConfig
 from furl_ctx.transforms.read_lifecycle import ReadLifecycleManager
+from tests._fixtures import make_fail_open_sqlite_backend
 
 # Detect the phantom pattern: "Retrieve original: hash=<something>"
 _PHANTOM_HASH_RE = re.compile(r"Retrieve original:\s*hash=")
@@ -390,6 +391,84 @@ class TestStoreConfiguredBackedMarkerUnchanged:
             raise AssertionError(
                 f"With store=None, result.ccr_hashes must be empty but got: {result.ccr_hashes}"
             )
+
+
+class TestDurableWriteVetoServesVerbatim:
+    """Review F1 (audit #3, the fifth marker seam): when the store's DURABLE
+    backend falls open to volatile in-process memory (degraded, or the write
+    lost the sqlite lock race), the substitution must be DECLINED exactly like
+    the store=None guard — content ships verbatim, no marker, no hash.
+
+    Before the fix the ``[Read content stale/superseded ... Retrieve original:
+    hash=H]`` marker replaced the content while the original's only copy died
+    with the process — a second process's ``furl_retrieve`` missed, and the
+    replaced bytes were unrecoverable (the exact silent loss audit #3 forbids;
+    every other marker seam already vetoes via ``require_durable=True``).
+    """
+
+    def _make_manager(self, tmp_path) -> ReadLifecycleManager:
+        store = CompressionStore(backend=make_fail_open_sqlite_backend(tmp_path / "veto.sqlite3"))
+        config = ReadLifecycleConfig(enabled=True, min_size_bytes=200)
+        return ReadLifecycleManager(config=config, compression_store=store)
+
+    def test_stale_read_served_verbatim_no_marker(self, tmp_path) -> None:
+        original_content = "durable_veto_stale_" * 35  # ~665 bytes
+        messages = _build_messages_with_stale_read(read_content=original_content)
+        manager = self._make_manager(tmp_path)
+
+        result = manager.apply(messages)
+        all_text = _get_all_text_from_messages(result.messages)
+
+        assert result.reads_stale == 1, (
+            "precondition: the fixture's read must be CLASSIFIED stale — "
+            "otherwise this proves nothing about the veto path"
+        )
+        assert original_content in all_text, (
+            "a failed durable write must decline the substitution and serve verbatim"
+        )
+        assert not _PHANTOM_HASH_RE.search(all_text), (
+            "no 'Retrieve original: hash=' marker may ship when the original's "
+            "only backing is volatile process-local memory (review F1)"
+        )
+        assert not result.ccr_hashes
+
+    def test_superseded_read_served_verbatim_no_marker(self, tmp_path) -> None:
+        original_content = "durable_veto_superseded_" * 28  # ~670 bytes
+        messages = _build_messages_with_superseded_read(read_content=original_content)
+        store = CompressionStore(backend=make_fail_open_sqlite_backend(tmp_path / "veto2.sqlite3"))
+        config = ReadLifecycleConfig(enabled=True, min_size_bytes=200, compress_superseded=True)
+        manager = ReadLifecycleManager(config=config, compression_store=store)
+
+        result = manager.apply(messages)
+        all_text = _get_all_text_from_messages(result.messages)
+
+        assert result.reads_superseded == 1, (
+            "precondition: the fixture's read must be CLASSIFIED superseded"
+        )
+        assert original_content in all_text
+        assert not _PHANTOM_HASH_RE.search(all_text)
+        assert not result.ccr_hashes
+
+    def test_healthy_durable_store_still_replaces(self, tmp_path) -> None:
+        # Control: with a HEALTHY sqlite-backed store the SAME fixture still
+        # substitutes and the marker's hash resolves to the original — proving
+        # the veto tests assert a change on failure, not that replacement is
+        # globally off for durable backends.
+        from furl_ctx.cache.backends.sqlite import SqliteBackend
+
+        store = CompressionStore(backend=SqliteBackend(db_path=tmp_path / "ok.sqlite3"))
+        config = ReadLifecycleConfig(enabled=True, min_size_bytes=200)
+        manager = ReadLifecycleManager(config=config, compression_store=store)
+
+        original_content = "durable_ok_stale_" * 40  # ~680 bytes
+        messages = _build_messages_with_stale_read(read_content=original_content)
+        result = manager.apply(messages)
+        all_text = _get_all_text_from_messages(result.messages)
+
+        hash_match = re.search(r"Retrieve original:\s*hash=([a-f0-9]+)", all_text)
+        assert hash_match, "healthy durable store must still substitute"
+        entry = store.retrieve(hash_match.group(1))
+        assert entry is not None and entry.original_content == original_content
 
 
 class TestMinSizeBytesBoundary:
