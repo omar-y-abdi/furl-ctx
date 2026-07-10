@@ -298,6 +298,22 @@ def sql_dump(n: int = 200, *, secret: str | None = None) -> str:
     return head + "\n".join(inserts) + "\nCOMMIT;\n"
 
 
+def toml_document(n: int = 120, *, secret: str | None = None) -> str:
+    lines = ["# migration config", 'title = "furl matrix"', ""]
+    for i in range(n):
+        api = secret if (secret is not None and i == 40) else f"token-{i}"
+        lines += [
+            f"[service.svc_{i}]",
+            f'image = "registry.example.com/app:{i}.0.{i % 9}"',
+            f'api_key = "{api}"',
+            f"replicas = {i % 5 + 1}",
+            f"port = {8000 + i}",
+            f'tags = ["env-{i}", "tier-{i % 3}"]',
+            "",
+        ]
+    return "\n".join(lines) + "\n"
+
+
 def typescript_source(n: int = 60, *, secret: str | None = None) -> str:
     parts = ["import { Foo } from './foo';\n"]
     for i in range(n):
