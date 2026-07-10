@@ -36,6 +36,11 @@ from furl_ctx.cache.compression_store import (
 from furl_ctx.ccr import marker_grammar
 from furl_ctx.tokenizer import Tokenizer
 from furl_ctx.tokenizers import get_tokenizer
+from furl_ctx.transforms.code_aware_compressor import (
+    CodeAwareCompressor,
+    CodeCompressionResult,
+    CodeLanguage,
+)
 from furl_ctx.transforms.content_detector import ContentType, DetectionResult
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 from furl_ctx.transforms.router_policy import (
@@ -421,3 +426,47 @@ class TestProtectionPrecedence:
         entry = working_store.retrieve(marker_hash)
         assert entry is not None
         assert entry.original_content == code
+
+
+# ─── 7. compress() total-function edges + result property ────────────────────
+#
+# These pin public-API edges that hold regardless of the [code] extra: content
+# with no detectable language passes through, and lines_saved is a pure floor.
+
+
+class TestCompressPassthroughAndResult:
+    """``compress`` is total (unknown-language content passes through unchanged) and
+    ``CodeCompressionResult.lines_saved`` is a floored line delta."""
+
+    def test_unknown_language_content_passes_through_byte_exact(self) -> None:
+        """Sizable content with no language signal detects UNKNOWN and passes through."""
+        content = "the quick brown fox jumps over the lazy dog " * 12  # >400 chars, not code
+        result = CodeAwareCompressor().compress(content)
+        assert result.compressed == content
+        assert result.compression_ratio == 1.0
+        assert result.language is CodeLanguage.UNKNOWN
+        assert result.cache_key is None
+
+    @pytest.mark.parametrize("tiny", ["", "x = 1\n", "🎉"])
+    def test_tiny_content_passes_through_byte_exact(self, tiny: str) -> None:
+        """Below ``min_chars`` the marker would eat the savings, so content is returned as-is."""
+        result = CodeAwareCompressor().compress(tiny)
+        assert result.compressed == tiny
+        assert result.compression_ratio == 1.0
+
+    @pytest.mark.parametrize(
+        ("original_lines", "compressed_lines", "expected_saved"),
+        [(10, 3, 7), (10, 10, 0), (3, 10, 0), (1, 0, 1)],
+    )
+    def test_lines_saved_is_a_non_negative_line_delta(
+        self, original_lines: int, compressed_lines: int, expected_saved: int
+    ) -> None:
+        """``lines_saved`` = max(0, original - compressed): never negative when a render grew."""
+        result = CodeCompressionResult(
+            compressed="x",
+            original="y",
+            original_line_count=original_lines,
+            compressed_line_count=compressed_lines,
+            compression_ratio=0.5,
+        )
+        assert result.lines_saved == expected_saved
