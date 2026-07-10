@@ -573,8 +573,11 @@ _LIST_PREVIEW_CHARS = 120  # leading chars of a furl_list entry preview
 # ReDoS guard: the credential regexes are O(N^2) on long base64url/hex runs, so
 # these previews redact only the kept window PLUS this margin (never the whole
 # multi-MB original). The margin lets a secret straddling the preview cap be
-# masked whole before truncation. (Mirrors compression_store's window guard;
-# kept local to preserve mcp_server's lazy compression_store import boundary.)
+# masked whole before truncation — GUARANTEED only for secrets <= this margin;
+# a longer one (a ~1700-char PEM private key, a long JWT) whose anchor falls
+# outside the widened window can still leak an unanchored tail fragment.
+# (Mirrors compression_store's window guard; kept local to preserve
+# mcp_server's lazy compression_store import boundary.)
 _PREVIEW_REDACT_MARGIN = 256
 
 
@@ -634,7 +637,10 @@ def _match_preview(original: str, needle_lower: str) -> str:
     must never see the whole multi-MB original. The match is located in the RAW
     text (a linear ``find``); the redactor then sees a MARGIN-widened window
     around it — the margin means a secret straddling either display edge is
-    seen WHOLE and masked before any cut can leave a recognizable fragment
+    seen WHOLE and masked before any cut can leave a recognizable fragment,
+    for secrets up to ``_PREVIEW_REDACT_MARGIN`` chars; a longer secret (PEM
+    private key, long JWT) whose anchor sits outside the widened window can
+    still leak an unanchored tail — the accepted, bounded residual
     (review F4: a bare radius window truncated a prefix-anchored key into an
     unmatchable — and therefore leaked — head or un-anchored tail). The needle
     is re-found inside the REDACTED text and the display window is cut around
