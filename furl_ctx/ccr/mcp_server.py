@@ -796,6 +796,13 @@ class FurlMCPServer:
         have masked. Pure read — no retrieval is booked (the caller retrieves
         by hash next), so no ``record_retrieval`` here.
         """
+        # PERF-16: search_all is synchronous BM25 scoring over SQLite-backed
+        # rows; run it in a worker thread so the event loop is never blocked
+        # (the documented sqlite-backend invariant — backends/sqlite.py).
+        return await asyncio.to_thread(self._search_all_content_sync, query)
+
+    def _search_all_content_sync(self, query: str) -> dict[str, Any]:
+        """Blocking body of :meth:`_search_all_content` (runs off the loop)."""
         store = self._get_local_store()
         matches = store.search_all(query)
         return {
@@ -843,6 +850,19 @@ class FurlMCPServer:
         are mutually exclusive with ``query`` at the handler boundary, so a
         non-empty ``filters`` is only ever passed on the no-query path.
         """
+        # PERF-16: every store op below (search / exists / retrieve /
+        # get_entry_status) and the retrieval-stat file append are synchronous
+        # SQLite/file I/O; run the whole body in a worker thread so the event
+        # loop stays free (the documented sqlite-backend invariant).
+        return await asyncio.to_thread(self._retrieve_content_sync, hash_key, query, filters)
+
+    def _retrieve_content_sync(
+        self,
+        hash_key: str,
+        query: str | None,
+        filters: RetrieveFilters | None = None,
+    ) -> dict[str, Any]:
+        """Blocking body of :meth:`_retrieve_content` (runs off the loop)."""
         store = self._get_local_store()
         if query:
             results = store.search(hash_key, query)
@@ -1332,6 +1352,13 @@ class FurlMCPServer:
 
     async def _handle_stats(self) -> list[TextContent]:
         """Handle furl_stats tool call."""
+        # PERF-16: store.get_stats() and _read_shared_events() (an flock'd file
+        # read) are synchronous I/O — build the aggregate off the event loop.
+        stats = await asyncio.to_thread(self._compute_stats)
+        return [TextContent(type="text", text=json.dumps(stats, indent=2))]
+
+    def _compute_stats(self) -> dict[str, Any]:
+        """Blocking stats aggregation (store + shared-file reads), off the loop."""
         stats = self._stats.to_dict()
 
         # Add local store stats if available
@@ -1368,12 +1395,10 @@ class FurlMCPServer:
                 "estimated_cost_saved_usd": round(all_saved * _cost_rate_per_mtok() / 1_000_000, 4),
             }
 
-        return [TextContent(type="text", text=json.dumps(stats, indent=2))]
+        return stats
 
     async def _handle_read(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_read tool call — file read with session caching."""
-        import hashlib
-
         file_path = arguments.get("file_path", "")
         fresh = arguments.get("fresh", False)
 
@@ -1384,6 +1409,15 @@ class FurlMCPServer:
         # jail below must only ever see real path strings (API-15).
         if not isinstance(file_path, str):
             return _err(f"file_path parameter must be a string, got {type(file_path).__name__}")
+
+        # PERF-16: the jail walk (resolve/openat), fstat, body read, fcntl-locked
+        # stats append and store.store are all synchronous file I/O — run the
+        # whole read off the event loop (the documented sqlite-backend invariant).
+        return await asyncio.to_thread(self._read_file_sync, file_path, fresh)
+
+    def _read_file_sync(self, file_path: str, fresh: bool) -> list[TextContent]:
+        """Blocking body of :meth:`_handle_read` (runs off the loop)."""
+        import hashlib
 
         path = Path(file_path).expanduser().resolve()
 
