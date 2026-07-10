@@ -570,6 +570,12 @@ _SEARCH_LIST_LIMIT_CAP = 100
 _MATCH_PREVIEW_RADIUS = 60  # chars of context each side of a furl_search match
 _MATCH_PREVIEW_MAX = 240  # hard char cap on a single furl_search preview
 _LIST_PREVIEW_CHARS = 120  # leading chars of a furl_list entry preview
+# ReDoS guard: the credential regexes are O(N^2) on long base64url/hex runs, so
+# these previews redact only the kept window PLUS this margin (never the whole
+# multi-MB original). The margin lets a secret straddling the preview cap be
+# masked whole before truncation. (Mirrors compression_store's window guard;
+# kept local to preserve mcp_server's lazy compression_store import boundary.)
+_PREVIEW_REDACT_MARGIN = 256
 
 
 def _parse_bounded_limit(raw: Any, default: int, cap: int) -> tuple[int | None, str | None]:
@@ -623,28 +629,48 @@ def _match_preview(original: str, needle_lower: str) -> str:
     """A short REDACTED window of ``original`` around its first case-insensitive
     match of ``needle_lower``.
 
-    Redacts the full original FIRST, then windows on the redacted text: a
-    credential is masked before it can appear in the snippet, and a window edge
-    can never sever a secret's head into the clear. If the match fell inside a
-    redacted secret it is absent from the redacted text — fall back to a redacted
-    head. Bounded to ``_MATCH_PREVIEW_MAX`` chars."""
-    redacted = _redact_preview_text(original)
-    ridx = redacted.lower().find(needle_lower)
-    if ridx < 0:
-        return _bounded(redacted, _MATCH_PREVIEW_MAX)
-    start = max(0, ridx - _MATCH_PREVIEW_RADIUS)
-    end = min(len(redacted), ridx + len(needle_lower) + _MATCH_PREVIEW_RADIUS)
+    Slice-before-redact (ReDoS guard, see ``_PREVIEW_REDACT_MARGIN``): the
+    credential regexes are O(N^2) on long base64url/hex runs, so the redactor
+    must never see the whole multi-MB original. The match is located in the RAW
+    text (a linear ``find``), a bounded window is cut around it, and ONLY that
+    window is redacted. If the match fell inside a secret it is absent from the
+    redacted window — fall back to a redacted head, preserving the original
+    "a match inside a credential does not reveal its location" property.
+    Bounded to ``_MATCH_PREVIEW_MAX`` chars."""
+    raw_idx = original.lower().find(needle_lower)
+    if raw_idx < 0:
+        # Defensive: callers only pass a needle already found in the original,
+        # but stay total — redact a bounded head.
+        return _bounded(
+            _redact_preview_text(original[: _MATCH_PREVIEW_MAX + _PREVIEW_REDACT_MARGIN]),
+            _MATCH_PREVIEW_MAX,
+        )
+    start = max(0, raw_idx - _MATCH_PREVIEW_RADIUS)
+    end = min(len(original), raw_idx + len(needle_lower) + _MATCH_PREVIEW_RADIUS)
+    redacted = _redact_preview_text(original[start:end])
+    if needle_lower not in redacted.lower():
+        # The match sat inside a credential now masked to [REDACTED]; windowing
+        # around it would reveal its location — fall back to a redacted head.
+        return _bounded(
+            _redact_preview_text(original[: _MATCH_PREVIEW_MAX + _PREVIEW_REDACT_MARGIN]),
+            _MATCH_PREVIEW_MAX,
+        )
     prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(redacted) else ""
-    return _bounded(f"{prefix}{redacted[start:end]}{suffix}", _MATCH_PREVIEW_MAX)
+    suffix = "…" if end < len(original) else ""
+    return _bounded(f"{prefix}{redacted}{suffix}", _MATCH_PREVIEW_MAX)
 
 
 def _list_preview(original: str) -> str:
     """A redacted leading-``_LIST_PREVIEW_CHARS`` preview of a stored original.
 
-    Redact FIRST, then take the head (matching the cross-store preview) so a
-    truncated head cannot leave a credential's recognizable prefix in the clear."""
-    return _bounded(_redact_preview_text(original), _LIST_PREVIEW_CHARS)
+    Slice-before-redact (ReDoS guard, see ``_PREVIEW_REDACT_MARGIN``): redact
+    only the bounded head the preview can show (+ margin so a secret straddling
+    the cap is masked whole before truncation), never the full multi-MB
+    original — the credential regexes are O(N^2) on long base64url/hex runs."""
+    return _bounded(
+        _redact_preview_text(original[: _LIST_PREVIEW_CHARS + _PREVIEW_REDACT_MARGIN]),
+        _LIST_PREVIEW_CHARS,
+    )
 
 
 class FurlMCPServer:

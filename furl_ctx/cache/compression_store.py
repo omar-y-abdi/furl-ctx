@@ -88,6 +88,17 @@ _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
 # design: the snippet is a disambiguation preview so the caller can pick a hash
 # to retrieve in full, not a content channel. Redacted before truncation.
 _CROSS_STORE_PREVIEW_CHARS = 200
+# ReDoS guard (PERF/SEC). The credential regexes below — chiefly
+# ``_SECRET_KEY_VALUE_RE`` — are O(N^2) on a long unbroken base64url/hex/minified
+# run: a ``-`` sits INSIDE the ``[A-Z0-9_-]`` secret-key class yet is a word
+# boundary, so ``\b([A-Z0-9_-]*KEYWORD...)`` opens O(N) anchor positions each
+# scanning O(N). Empirically a 64 KB dashed run took ~82 s. Every preview/log
+# surface keeps only a bounded head, so callers redact the kept window PLUS this
+# margin (never the whole multi-MB original) — bounding the regex input to a
+# constant. The margin lets a secret straddling the budget edge be seen whole
+# and masked before truncation; real secrets (keys/tokens/URL passwords) fit
+# inside it.
+_REDACT_WINDOW_MARGIN_CHARS = 256
 # Match ``<sensitive-key><sep><value>`` in both plain (``api_key=...``) and JSON
 # quoted-key (``"api_key": "..."``) form. Group 2 allows an OPTIONAL closing quote
 # before the separator: in JSON the key's own closing ``"`` sits between the key
@@ -222,9 +233,16 @@ def _redact_retrieval_log_payload(payload: str) -> str:
 
 
 def _payload_for_retrieval_log(payload: str) -> dict[str, Any]:
-    redacted = _redact_retrieval_log_payload(payload)
-    preview = redacted[:_RETRIEVAL_LOG_PREVIEW_CHARS]
-    truncated = len(redacted) > len(preview)
+    # SLICE-before-REDACT (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``).
+    # Redacting the FULL payload first is O(N^2) on unbroken base64url/hex runs
+    # and this fires on EVERY retrieve (full-body log redact). The preview keeps
+    # only ``_RETRIEVAL_LOG_PREVIEW_CHARS`` regardless, so redact just the bounded
+    # window that feeds it. ``payload_chars`` still reports the FULL length, and
+    # ``payload_truncated`` still reflects whether content was cut.
+    window = payload[: _RETRIEVAL_LOG_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS]
+    redacted_window = _redact_retrieval_log_payload(window)
+    preview = redacted_window[:_RETRIEVAL_LOG_PREVIEW_CHARS]
+    truncated = len(payload) > len(window) or len(redacted_window) > _RETRIEVAL_LOG_PREVIEW_CHARS
     return {
         "payload_chars": len(payload),
         "payload_preview_chars": len(preview),
@@ -860,14 +878,18 @@ class CompressionStore:
     def _cross_store_preview(original_content: str) -> str:
         """Redacted, truncated preview of an original for a cross-store hit.
 
-        Redact FIRST, then truncate: truncating first could sever a credential
-        mid-token and leave a recognizable head un-redacted. The redaction
-        rules are shared with the retrieval-log preview so both surfaces mask
-        exactly the same secret shapes.
+        Slice-before-redact (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``):
+        redact only the bounded window the 200-char preview can show, never the
+        whole multi-MB original. The margin still lets a secret straddling the
+        preview edge be seen whole and masked before truncation, so a truncated
+        head cannot leave a recognizable credential prefix in the clear. The
+        redaction rules are shared with the retrieval-log preview so both
+        surfaces mask exactly the same secret shapes.
         """
-        redacted = _redact_retrieval_log_payload(original_content)
+        window = original_content[: _CROSS_STORE_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS]
+        redacted = _redact_retrieval_log_payload(window)
         preview = redacted[:_CROSS_STORE_PREVIEW_CHARS]
-        if len(redacted) > len(preview):
+        if len(original_content) > len(window) or len(redacted) > _CROSS_STORE_PREVIEW_CHARS:
             preview = preview + "…"
         return preview
 
