@@ -1,4 +1,4 @@
-"""MATRIX · structured-text families with ZERO prior coverage: YAML · XML · SQL.
+"""MATRIX · structured-text families with ZERO prior coverage: YAML · XML · SQL · TOML.
 
 Contract under test (``_matrix.assert_text_lossless_byte_exact``): each is routed
 to a byte-exact recovery path — passthrough OR whole-content offload whose
@@ -57,3 +57,26 @@ def test_sql_dump_preserves_statement_terminators(salt) -> None:
     recovered = m.retrieve(result.ccr_hashes[0])
     assert recovered == doc
     assert recovered.count(";") == doc.count(";")  # every ';' terminator survives
+
+
+def test_toml_document_is_byte_exact_recoverable(salt) -> None:
+    m.assert_text_lossless_byte_exact(m.toml_document(), salt=salt)
+
+
+def test_toml_actually_offloads_and_round_trips_whole(salt) -> None:
+    doc = m.salted(m.toml_document(), salt)
+    result = m.run(doc)
+    assert result.ccr_hashes, "toml at this size is expected to offload"
+    assert m.retrieve(result.ccr_hashes[0]) == doc
+
+
+def test_toml_whole_offload_preserves_table_headers_and_arrays(salt) -> None:
+    doc = m.salted(m.toml_document(), salt)
+    result = m.run(doc)
+    assert result.ccr_hashes, "toml at this size is expected to offload"
+    recovered = m.retrieve(result.ccr_hashes[0])
+    assert recovered == doc
+    # Spot-pin the structural edges a re-serializer would drop: every table
+    # header and the inline arrays survive verbatim.
+    assert recovered.count("[service.svc_") == 120
+    assert 'tags = ["env-0", "tier-0"]' in recovered
