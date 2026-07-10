@@ -1400,6 +1400,28 @@ class CompressionStore:
             self._eviction_heap.clear()  # Clear heap too
             self._stale_heap_entries = 0  # CRITICAL FIX: Reset stale counter
 
+    def close(self) -> None:
+        """Release backend resources (sqlite connections / file descriptors).
+
+        Distinct from ``clear`` (which empties entries but keeps the backend
+        open): a dropped store — e.g. a per-namespace store retired by
+        ``reset_compression_store`` — must close its sqlite handles or they leak
+        as ``ResourceWarning``-flagged unclosed connections (P5). Idempotent and
+        fail-open: a backend without ``close`` (the in-memory default) is
+        skipped, and a close error is logged, never raised, so teardown always
+        proceeds. The spill tier is closed too, so no durable handle survives.
+        """
+        for backend in (self._backend, self._spill):
+            if backend is None:
+                continue
+            close = getattr(backend, "close", None)
+            if close is None:
+                continue
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 — teardown must not raise
+                logger.warning("CCR backend close failed (non-fatal): %s", exc)
+
     def _spill_evicted(self, hash_key: str, entry: CompressionEntry) -> None:
         """Demote a capacity-evicted (still-live) entry to the spill tier.
 
@@ -1910,11 +1932,13 @@ def reset_compression_store() -> None:
     with _store_lock:
         if _compression_store is not None:
             _compression_store.clear()
+            _compression_store.close()  # release sqlite fds before dropping (P5 leak)
         _compression_store = None
 
     with _namespace_lock:
         for store in _namespace_stores.values():
             store.clear()
+            store.close()  # each per-namespace backend holds its own fds — close them
         _namespace_stores.clear()
 
 
