@@ -196,9 +196,12 @@ def get_encoding_for_model(model: str) -> str:
 # the decline LOUD and DETERMINISTIC everywhere: the ValueError rides compress()'s
 # fail-open boundary into result.error, byte-exact original preserved. The limit
 # sits far above any legitimate same-class token/word/run (real ones are a handful
-# of characters) yet below where backtracking bites, and — being >= the memoization
-# floor ``_COUNT_CACHE_MIN_LEN`` — guarantees the un-memoized fast path (shorter
-# text) can never smuggle a longer run past this gate.
+# of characters) and caps the measured divergence regime: a sub-limit run costs
+# ~7.5 s worst-case at ~130k and grows super-linearly beyond (~18.7 s @ 200k,
+# ~46.5 s @ 300k; the hard stack raise only lands near ~2 M). Being >= the
+# memoization floor ``_COUNT_CACHE_MIN_LEN`` (65_536) also guarantees the
+# un-memoized fast path (shorter text) can never smuggle a longer run past this
+# gate.
 _MAX_SAFE_SAME_CLASS_RUN = 131_072
 
 
@@ -208,9 +211,12 @@ def _has_backtracking_prone_run(text: str, limit: int) -> bool:
     punctuation/symbols.
 
     Digit runs are EXEMPT (o200k caps them at ``\\p{N}{1,3}``, so they never
-    backtrack) and any class transition breaks the run — which is why base64's
-    mixed alphanumerics stay safe. Pure ``O(n)`` scan with an early exit at the
-    first offending run, so genuinely pathological input costs only ``O(limit)``.
+    backtrack) and any class transition breaks the run — so high-entropy base64
+    and other mixed content passes (its runs stay short), while a DEGENERATE
+    single-class run is refused loud regardless of provenance: low-entropy
+    base64 (e.g. the all-'A' encoding of zero-filled data) at >= *limit* IS
+    flagged. Pure ``O(n)`` scan with an early exit at the first offending run,
+    so genuinely pathological input costs only ``O(limit)``.
     """
     if len(text) < limit:
         return False
