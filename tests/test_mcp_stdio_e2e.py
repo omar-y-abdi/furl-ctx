@@ -39,6 +39,11 @@ async def _client(tmp_path, args=None):
         "FURL_WORKSPACE_DIR": str(tmp_path),
         "FURL_CCR_SQLITE_PATH": str(tmp_path / "ccr.sqlite3"),
         "FURL_MCP_LEGEND": "off",
+        # Opt out of per-project isolation (audit #4): this suite pins an
+        # explicit FURL_CCR_SQLITE_PATH and asserts on that single global file,
+        # so it must exercise the un-namespaced global store, not the per-project
+        # one main() would otherwise derive from cwd.
+        "FURL_CCR_PROJECT_DIR": "",
     }
     env.pop("FURL_CCR_BACKEND", None)  # exercise the real durable SQLite default
     params = StdioServerParameters(command=sys.executable, args=args or _MODULE_ARGS, env=env)
