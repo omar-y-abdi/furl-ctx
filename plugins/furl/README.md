@@ -20,8 +20,9 @@ Inside Claude Code:
 That is the whole install. It registers this repo as a marketplace named `furl`
 and installs the plugin — MCP server, compression hook, and skill. **No `pip
 install`, no venv:** Furl fetches itself on first use via
-[`uv`](https://docs.astral.sh/uv/) from the prebuilt wheels on the GitHub Release
-(the right wheel for your platform, no Rust toolchain). The one requirement is
+[`uv`](https://docs.astral.sh/uv/) from prebuilt wheels on PyPI (Linux
+x86_64/aarch64, macOS arm64/Intel — no Windows wheels yet, so Windows needs a
+Rust toolchain to build from source). The one requirement is
 `uv` on your PATH — the same bootstrap the official
 [serena](https://github.com/oraios/serena) plugin uses.
 

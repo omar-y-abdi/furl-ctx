@@ -5,6 +5,7 @@
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
+  "release-as": "1.0.0",
   "draft": false,
   "prerelease": false,
   "separate-pull-requests": false,

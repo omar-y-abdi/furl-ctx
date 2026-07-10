@@ -4,10 +4,10 @@
 
 | Version           | Supported          |
 | ----------------- | ------------------ |
-| latest 0.x release | :white_check_mark: |
+| latest release    | :white_check_mark: |
 | older releases    | :x:                |
 
-Only the latest published 0.x release receives security fixes — upgrade to
+Only the latest published release receives security fixes — upgrade to
 the newest version before reporting.
 
 ## Reporting a Vulnerability
