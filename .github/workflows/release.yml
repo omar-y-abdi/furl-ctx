@@ -409,6 +409,91 @@ jobs:
           import furl_ctx
           from furl_ctx._core import hello as _rust_hello
           print(f"smoke-import OK: python={sys.version_info[:3]} hello={_rust_hello()}")
+
+          # CAVEAT-02 hardening: `import furl_ctx` alone (the check above) does not
+          # prove the wheel shipped a working CLI. The 0.27.0 wheel imported cleanly
+          # and STILL had no console script and no furl_ctx.cli module (RECORD had
+          # no furl_ctx/cli.py, dist-info had no entry_points.txt). Everything below
+          # proves the full CLI + library surface a `pip install furl-ctx` user gets
+          # is actually present and runnable, in this same clean venv with ONLY the
+          # wheel installed.
+
+          # (1) Public library exports (furl_ctx/__init__.py) a pip-only user relies on.
+          from furl_ctx import compress, retrieve, purge, resolve_markers  # noqa: F401
+          print("smoke-exports OK: compress, retrieve, purge, resolve_markers all importable")
+
+          # (2) Wheel metadata: the `furl` console script must be a registered entry
+          # point of the `furl-ctx` distribution (pyproject.toml declares
+          # `furl = "furl_ctx.cli:main"` under [project.scripts]). Belt-and-braces
+          # with the executable check below: this proves the *metadata* is correct
+          # even if PATH/shim resolution were ever flaky.
+          from importlib import metadata
+
+          dist = metadata.distribution("furl-ctx")
+          console_scripts = {
+              ep.name: ep.value for ep in dist.entry_points if ep.group == "console_scripts"
+          }
+          if console_scripts.get("furl") != "furl_ctx.cli:main":
+              sys.exit(
+                  "smoke-FAIL: furl-ctx wheel has no console_scripts entry point "
+                  f"'furl = furl_ctx.cli:main' (found: {console_scripts})"
+              )
+          print(f"smoke-entrypoint OK: console_scripts={console_scripts}")
+
+          # (3) The `furl` executable itself. pip installs console scripts into the
+          # same bin/ directory as the interpreter that ran pip, so this is the
+          # venv-relative path regardless of OS or venv location (no PATH needed).
+          import pathlib
+          import subprocess
+
+          furl_bin = str(pathlib.Path(sys.executable).parent / "furl")
+
+          help_proc = subprocess.run([furl_bin, "--help"], capture_output=True, text=True, timeout=30)
+          if help_proc.returncode != 0:
+              sys.exit(
+                  f"smoke-FAIL: '{furl_bin} --help' exited {help_proc.returncode}\n"
+                  f"stdout={help_proc.stdout}\nstderr={help_proc.stderr}"
+              )
+          print("smoke-cli-help OK: furl --help exited 0")
+
+          # (4) Minimal end-to-end: pipe a small JSON blob through `furl compress` and
+          # assert exit 0 + non-empty output. --model is deliberately an unrecognized
+          # name: MODEL_PATTERNS (furl_ctx/tokenizers/registry.py) only routes
+          # gpt-*/o1/o3/text-embedding*/text-davinci/code-*/davinci/curie/babbage/ada/
+          # claude-*/gemini/palm/command to a real tokenizer backend (tiktoken, which
+          # downloads its BPE vocab file from openaipublic.blob.core.windows.net on a
+          # cold cache -- empirically confirmed: a cold-cache fetch of the DEFAULT
+          # model's encoding either fails or stalls well past furl's own 10s internal
+          # timeout before falling back). Any other model name resolves to the local
+          # EstimatingTokenCounter (regex/length heuristics, zero I/O), keeping this
+          # gate offline and fast on every runner regardless of network conditions.
+          import json
+
+          sample_input = json.dumps({"role": "tool", "content": "furl release smoke-test payload"})
+          compress_proc = subprocess.run(
+              [furl_bin, "compress", "--model", "furl-ci-smoke-estimator", "--json"],
+              input=sample_input,
+              capture_output=True,
+              text=True,
+              timeout=30,
+          )
+          if compress_proc.returncode != 0:
+              sys.exit(
+                  f"smoke-FAIL: '{furl_bin} compress' exited {compress_proc.returncode}\n"
+                  f"stdout={compress_proc.stdout}\nstderr={compress_proc.stderr}"
+              )
+          if not compress_proc.stdout.strip():
+              sys.exit("smoke-FAIL: 'furl compress' produced empty stdout")
+          compress_payload = json.loads(compress_proc.stdout)
+          if not compress_payload.get("compressed"):
+              sys.exit(f"smoke-FAIL: 'furl compress' JSON missing non-empty 'compressed': {compress_payload}")
+          if compress_payload.get("error") is not None:
+              sys.exit(f"smoke-FAIL: 'furl compress' reported a fail-open error: {compress_payload.get('error')}")
+          print(
+              "smoke-cli-compress OK: "
+              f"tokens_before={compress_payload.get('tokens_before')} "
+              f"tokens_after={compress_payload.get('tokens_after')}"
+          )
           PY
 
       - name: Smoke-import wheel inside container (Linux)
