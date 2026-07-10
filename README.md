@@ -47,7 +47,7 @@ That's it — this installs the compression hook, the MCP tools, and the skill. 
 
 - **Auto-compression hook** — shrinks large `Bash` / `WebFetch` / `WebSearch` / `Task` outputs before they enter context. Fail-open: never breaks a tool call.
 - **Signal-aware offload + sliceable retrieval** — a payload too big to compress inline (e.g. a 33 MB trace) comes back as a structured summary (schema, per-field value histograms, example rows) instead of a truncated head/tail, and the agent pulls a narrow slice on demand — `retrieve(hash, select_field="name", select_equals="DroppedFrame")` or a numeric range — without materializing the whole thing.
-- **MCP tools** — `furl_compress`, `furl_retrieve`, `furl_stats`.
+- **MCP tools** — `furl_compress`, `furl_retrieve`, `furl_stats`. A fourth tool, `furl_read`, exists but is off by default — enable with `FURL_MCP_READ=1`.
 - **Skill** — explains the `<<ccr:HASH>>` retrieval flow and how to tune or disable it.
 
 Tuning, disabling (`FURL_HOOK_ENABLED=0`), and the full reference: [`plugins/furl/README.md`](plugins/furl/README.md).
