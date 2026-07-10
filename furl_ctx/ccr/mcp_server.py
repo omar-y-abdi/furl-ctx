@@ -1857,16 +1857,20 @@ class FurlMCPServer:
         ``store.search_all`` performs — and drops expired-but-unreaped rows
         against the wall clock. ``keys()`` is deliberately NOT used: it is not
         part of the ``CompressionStoreBackend`` protocol (ARCH-10), whereas
-        ``items()`` is, so this stays backend-agnostic. The snapshot read needs
-        no store lock — each backend's ``items()`` returns an atomic snapshot and
-        is independently thread-safe for direct reads (backends/sqlite.py)."""
+        ``items()`` is, so this stays backend-agnostic.
+
+        The snapshot is taken UNDER the store's own lock, exactly as
+        ``search_all`` does: without it, a concurrent ``store()``/``delete()``
+        from another worker thread (tool calls now run off the loop) can mutate
+        the backend mid-read — for the in-memory backend an unlocked
+        ``list(dict.items())`` racing a write raises "dictionary changed size
+        during iteration". The expiry filter and sort run on the local snapshot,
+        outside the lock, so the lock is held only for the materialization."""
         store = self._get_local_store()
         now = time.time()
-        live = [
-            (hash_key, entry)
-            for hash_key, entry in store._backend.items()
-            if not entry.is_expired(now)
-        ]
+        with store._lock:
+            snapshot = list(store._backend.items())
+        live = [(hash_key, entry) for hash_key, entry in snapshot if not entry.is_expired(now)]
         live.sort(key=lambda pair: (pair[1].created_at, pair[0]), reverse=True)
         return live
 
