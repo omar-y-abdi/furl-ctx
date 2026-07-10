@@ -8,6 +8,8 @@ Tools:
     furl_retrieve   — Retrieve original uncompressed content by hash
     furl_stats      — Session compression statistics
     furl_purge      — Erase stored originals (one hash, or all)
+    furl_search     — Find stored originals by content substring
+    furl_list       — List stored entries (newest first)
 
 Usage:
     # As a standalone server (stdio transport, spawned by AI coding tools)
@@ -76,6 +78,8 @@ COMPRESS_TOOL_NAME = "furl_compress"
 STATS_TOOL_NAME = "furl_stats"
 READ_TOOL_NAME = "furl_read"
 PURGE_TOOL_NAME = "furl_purge"
+SEARCH_TOOL_NAME = "furl_search"
+LIST_TOOL_NAME = "furl_list"
 
 # Model this server compresses with — and therefore counts tokens with:
 # _handle_read's original_tokens must come from the same tokenizer
@@ -553,6 +557,94 @@ class SessionStats:
             "estimated_cost_saved_usd": cost_saved,
             "recent_events": self.events[-10:],
         }
+
+
+# ─── furl_search / furl_list: shared paging + preview helpers ───────────────
+#
+# Both discovery tools bound their output (invariant D): a positive-int limit
+# capped at ``_SEARCH_LIST_LIMIT_CAP``, previews trimmed to a fixed char budget,
+# and previews redacted with the SAME rules the cross-store search uses so a
+# match sitting next to a credential never surfaces it.
+_SEARCH_LIST_LIMIT_DEFAULT = 20
+_SEARCH_LIST_LIMIT_CAP = 100
+_MATCH_PREVIEW_RADIUS = 60  # chars of context each side of a furl_search match
+_MATCH_PREVIEW_MAX = 240  # hard char cap on a single furl_search preview
+_LIST_PREVIEW_CHARS = 120  # leading chars of a furl_list entry preview
+
+
+def _parse_bounded_limit(raw: Any, default: int, cap: int) -> tuple[int | None, str | None]:
+    """A search/list ``limit``: a positive int, silently capped at ``cap``.
+
+    Returns ``(value, None)`` or ``(None, error)``. ``bool`` is excluded (True is
+    not the int 1 here); a non-positive limit is a caller bug (a zero-row result
+    is meaningless), rejected rather than clamped. A value past the cap is clamped
+    DOWN to the cap (the documented ceiling) and the effective limit is echoed in
+    the response, so the truncation is never silent."""
+    if raw is None:
+        return default, None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None, f"limit must be an integer, got {type(raw).__name__}"
+    if raw < 1:
+        return None, f"limit must be >= 1, got {raw}"
+    return min(raw, cap), None
+
+
+def _parse_offset(raw: Any) -> tuple[int | None, str | None]:
+    """A furl_list ``offset``: a non-negative int (``None``→0). ``bool`` excluded."""
+    if raw is None:
+        return 0, None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None, f"offset must be an integer, got {type(raw).__name__}"
+    if raw < 0:
+        return None, f"offset must be >= 0, got {raw}"
+    return raw, None
+
+
+def _redact_preview_text(text: str) -> str:
+    """Redact a preview snippet with the store's credential rules.
+
+    Reuses ``_redact_retrieval_log_payload`` — the same primitive the cross-store
+    search preview uses — so furl_search / furl_list never surface a secret a
+    per-hash retrieval's log path would have masked. Imported lazily to keep the
+    compression_store module off the mcp_server import path until first use."""
+    from furl_ctx.cache.compression_store import _redact_retrieval_log_payload
+
+    return _redact_retrieval_log_payload(text)
+
+
+def _bounded(text: str, limit: int) -> str:
+    """Trim ``text`` to ``limit`` chars, marking truncation with an ellipsis."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _match_preview(original: str, needle_lower: str) -> str:
+    """A short REDACTED window of ``original`` around its first case-insensitive
+    match of ``needle_lower``.
+
+    Redacts the full original FIRST, then windows on the redacted text: a
+    credential is masked before it can appear in the snippet, and a window edge
+    can never sever a secret's head into the clear. If the match fell inside a
+    redacted secret it is absent from the redacted text — fall back to a redacted
+    head. Bounded to ``_MATCH_PREVIEW_MAX`` chars."""
+    redacted = _redact_preview_text(original)
+    ridx = redacted.lower().find(needle_lower)
+    if ridx < 0:
+        return _bounded(redacted, _MATCH_PREVIEW_MAX)
+    start = max(0, ridx - _MATCH_PREVIEW_RADIUS)
+    end = min(len(redacted), ridx + len(needle_lower) + _MATCH_PREVIEW_RADIUS)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(redacted) else ""
+    return _bounded(f"{prefix}{redacted[start:end]}{suffix}", _MATCH_PREVIEW_MAX)
+
+
+def _list_preview(original: str) -> str:
+    """A redacted leading-``_LIST_PREVIEW_CHARS`` preview of a stored original.
+
+    Redact FIRST, then take the head (matching the cross-store preview) so a
+    truncated head cannot leave a credential's recognizable prefix in the clear."""
+    return _bounded(_redact_preview_text(original), _LIST_PREVIEW_CHARS)
 
 
 class FurlMCPServer:
@@ -1203,6 +1295,71 @@ class FurlMCPServer:
                         },
                     },
                 ),
+                Tool(
+                    name=SEARCH_TOOL_NAME,
+                    description=(
+                        "Find stored originals by a case-insensitive SUBSTRING of their "
+                        "content — for when you lost a <<ccr:HASH>> marker but remember some "
+                        "of the text. Returns per hit: hash, a short preview around the "
+                        "match, created-at, and size (characters), newest first. Substring "
+                        "only (NOT a regex). Then call furl_retrieve with a returned hash "
+                        "for the full original."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": (
+                                    "Non-empty substring to look for (case-insensitive). "
+                                    "Matched literally — not a regex."
+                                ),
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": _SEARCH_LIST_LIMIT_CAP,
+                                "description": (
+                                    f"Max hits to return (default {_SEARCH_LIST_LIMIT_DEFAULT}, "
+                                    f"capped at {_SEARCH_LIST_LIMIT_CAP})."
+                                ),
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                ),
+                Tool(
+                    name=LIST_TOOL_NAME,
+                    description=(
+                        "List stored CCR entries, newest first — a directory of what "
+                        "furl_compress / furl_read have stashed this session. Returns per "
+                        "entry: hash, created-at, size (characters), content-kind (the "
+                        "originating tool, when known), and a short preview. Page with "
+                        "limit/offset. Use furl_retrieve with a hash for the full original, "
+                        "or furl_search to find by content."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": _SEARCH_LIST_LIMIT_CAP,
+                                "description": (
+                                    f"Max entries to return (default {_SEARCH_LIST_LIMIT_DEFAULT}, "
+                                    f"capped at {_SEARCH_LIST_LIMIT_CAP})."
+                                ),
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": (
+                                    "Number of newest entries to skip, for paging (default 0)."
+                                ),
+                            },
+                        },
+                    },
+                ),
             ]
 
             # Conditionally add furl_read (behind feature flag)
@@ -1263,6 +1420,10 @@ class FurlMCPServer:
                     result = await self._handle_stats()
                 elif name == PURGE_TOOL_NAME:
                     result = await self._handle_purge(arguments)
+                elif name == SEARCH_TOOL_NAME:
+                    result = await self._handle_search(arguments)
+                elif name == LIST_TOOL_NAME:
+                    result = await self._handle_list(arguments)
                 elif name == READ_TOOL_NAME and _READ_ENABLED:
                     result = await self._handle_read(arguments)
                 else:
@@ -1581,6 +1742,127 @@ class FurlMCPServer:
         count = int(store.get_stats().get("entry_count", 0))
         store.clear()
         return count
+
+    async def _handle_search(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """Handle furl_search — case-insensitive SUBSTRING search over originals.
+
+        For when a ``<<ccr:HASH>>`` marker was lost: find stored originals by a
+        substring of their content and get the hash back. Substring only (no
+        regex — no injection/ReDoS surface). Output is bounded: at most ``limit``
+        (<= 100) hits, each with a short redacted preview around the match.
+        """
+        query = arguments.get("query")
+        if query is None:
+            return _err("query parameter is required")
+        if not isinstance(query, str):
+            return _err(f"query parameter must be a string, got {type(query).__name__}")
+        if not query.strip():
+            return _err("query parameter must be a non-empty string")
+
+        limit, err = _parse_bounded_limit(
+            arguments.get("limit"), _SEARCH_LIST_LIMIT_DEFAULT, _SEARCH_LIST_LIMIT_CAP
+        )
+        if err is not None:
+            return _err(err)
+        assert limit is not None  # err is None ⇒ limit resolved
+
+        result = await asyncio.to_thread(self._search_substring, query, limit)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    def _search_substring(self, query: str, limit: int) -> dict[str, Any]:
+        """Blocking substring scan over live originals (runs off the loop)."""
+        needle = query.lower()
+        matches: list[dict[str, Any]] = []
+        for hash_key, entry in self._live_entries():
+            original = entry.original_content
+            if needle not in original.lower():
+                continue
+            matches.append(
+                {
+                    "hash": hash_key,
+                    "preview": _match_preview(original, needle),
+                    "created_at": entry.created_at,
+                    "size": len(original),
+                }
+            )
+            if len(matches) >= limit:
+                break
+        return {
+            "query": query,
+            "count": len(matches),
+            "limit": limit,
+            "matches": matches,
+            "note": (
+                "Substring matches over stored originals (newest first). Call "
+                "furl_retrieve with a hash for the full original content."
+                if matches
+                else "No stored original contains that substring (case-insensitive)."
+            ),
+        }
+
+    async def _handle_list(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """Handle furl_list — newest-first directory of stored CCR entries."""
+        limit, err = _parse_bounded_limit(
+            arguments.get("limit"), _SEARCH_LIST_LIMIT_DEFAULT, _SEARCH_LIST_LIMIT_CAP
+        )
+        if err is not None:
+            return _err(err)
+        offset, off_err = _parse_offset(arguments.get("offset"))
+        if off_err is not None:
+            return _err(off_err)
+        assert limit is not None and offset is not None
+
+        result = await asyncio.to_thread(self._list_entries, limit, offset)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    def _list_entries(self, limit: int, offset: int) -> dict[str, Any]:
+        """Blocking newest-first entry listing (runs off the loop)."""
+        live = self._live_entries()
+        total = len(live)
+        page = live[offset : offset + limit]
+        entries = [
+            {
+                "hash": hash_key,
+                "created_at": entry.created_at,
+                "size": len(entry.original_content),
+                "content_kind": entry.tool_name,
+                "preview": _list_preview(entry.original_content),
+            }
+            for hash_key, entry in page
+        ]
+        return {
+            "count": len(entries),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "entries": entries,
+            "note": (
+                "Stored CCR entries, newest first. Retrieve one in full with "
+                "furl_retrieve, or find by content with furl_search."
+                if entries
+                else "No stored entries in the current session window."
+            ),
+        }
+
+    def _live_entries(self) -> list[tuple[str, Any]]:
+        """Live ``(hash, entry)`` pairs, newest ``created_at`` first.
+
+        Consumes the backend Protocol's ``items()`` — the same live-entry read
+        ``store.search_all`` performs — and drops expired-but-unreaped rows
+        against the wall clock. ``keys()`` is deliberately NOT used: it is not
+        part of the ``CompressionStoreBackend`` protocol (ARCH-10), whereas
+        ``items()`` is, so this stays backend-agnostic. The snapshot read needs
+        no store lock — each backend's ``items()`` returns an atomic snapshot and
+        is independently thread-safe for direct reads (backends/sqlite.py)."""
+        store = self._get_local_store()
+        now = time.time()
+        live = [
+            (hash_key, entry)
+            for hash_key, entry in store._backend.items()
+            if not entry.is_expired(now)
+        ]
+        live.sort(key=lambda pair: (pair[1].created_at, pair[0]), reverse=True)
+        return live
 
     async def _handle_read(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_read tool call — file read with session caching."""
