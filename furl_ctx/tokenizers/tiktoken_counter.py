@@ -184,6 +184,54 @@ def get_encoding_for_model(model: str) -> str:
     return DEFAULT_ENCODING
 
 
+# Refuse to tokenize input carrying an unbroken same-class run at least this long.
+# tiktoken's split regex has UNBOUNDED quantifiers for letters (``\p{L}+``),
+# whitespace (``\s+``) and punctuation/symbols (``[^\s\p{L}\p{N}]+``); a very long
+# run of any ONE of those classes drives fancy-regex into catastrophic
+# backtracking. That failure is PLATFORM-DIVERGENT: small-stack platforms (macOS)
+# raise "Max stack size exceeded for backtracking", while larger-stack ones
+# (CI Linux) merely burn super-linear time and then hand the content back
+# un-tokenized — so the same 2 MB single-line input fails LOUD on one platform and
+# declines SILENTLY on the other. Rejecting the run here (before the encode) makes
+# the decline LOUD and DETERMINISTIC everywhere: the ValueError rides compress()'s
+# fail-open boundary into result.error, byte-exact original preserved. The limit
+# sits far above any legitimate same-class token/word/run (real ones are a handful
+# of characters) yet below where backtracking bites, and — being >= the memoization
+# floor ``_COUNT_CACHE_MIN_LEN`` — guarantees the un-memoized fast path (shorter
+# text) can never smuggle a longer run past this gate.
+_MAX_SAFE_SAME_CLASS_RUN = 131_072
+
+
+def _has_backtracking_prone_run(text: str, limit: int) -> bool:
+    """True iff *text* holds a run of at least *limit* consecutive characters in
+    one backtracking-prone tokenizer class — letters, whitespace, or
+    punctuation/symbols.
+
+    Digit runs are EXEMPT (o200k caps them at ``\\p{N}{1,3}``, so they never
+    backtrack) and any class transition breaks the run — which is why base64's
+    mixed alphanumerics stay safe. Pure ``O(n)`` scan with an early exit at the
+    first offending run, so genuinely pathological input costs only ``O(limit)``.
+    """
+    if len(text) < limit:
+        return False
+    run = 0
+    current = ""
+    for ch in text:
+        if ch.isdigit():
+            current = "d"
+            run = 0
+            continue
+        cls = "a" if ch.isalpha() else ("s" if ch.isspace() else "o")
+        if cls == current:
+            run += 1
+            if run >= limit:
+                return True
+        else:
+            current = cls
+            run = 1
+    return False
+
+
 class TiktokenCounter(BaseTokenizer):
     """Token counter using tiktoken (OpenAI's tokenizer).
 
@@ -293,6 +341,18 @@ class TiktokenCounter(BaseTokenizer):
         cached = self._count_cache.get(text)
         if cached is not None:
             return cached
+        # Refuse backtracking-prone input BEFORE the (super-linear / stack-blowing)
+        # encode, so the decline is loud and identical on every platform rather
+        # than a raise-here / silent-passthrough-there split (see
+        # _MAX_SAFE_SAME_CLASS_RUN). The raise rides compress()'s fail-open path
+        # into result.error with the original content returned byte-exact.
+        if _has_backtracking_prone_run(text, _MAX_SAFE_SAME_CLASS_RUN):
+            raise ValueError(
+                "tokenizer input has an unbroken same-class run of at least "
+                f"{_MAX_SAFE_SAME_CLASS_RUN} characters, which triggers catastrophic "
+                "regex backtracking in the tokenizer (a platform-dependent stack "
+                "overflow); declining compression and returning the original unchanged."
+            )
         n = len(self._encode_tolerant(text))
         self._count_cache[text] = n
         self._count_cache_bytes += len(text)

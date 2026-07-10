@@ -29,6 +29,7 @@ bound (constructor never loaded, registry never saw the failure).
 
 from __future__ import annotations
 
+import base64
 import threading
 import time
 
@@ -37,6 +38,10 @@ import pytest
 import furl_ctx.tokenizers.tiktoken_counter as tiktoken_counter_module
 from furl_ctx.tokenizers import EstimatingTokenCounter, TiktokenCounter, get_tokenizer
 from furl_ctx.tokenizers.registry import TokenizerRegistry
+from furl_ctx.tokenizers.tiktoken_counter import (
+    _MAX_SAFE_SAME_CLASS_RUN,
+    _has_backtracking_prone_run,
+)
 
 
 class TestSpecialTokenLiterals:
@@ -168,3 +173,63 @@ class TestBoundedEncodingLoad:
         counter = TiktokenCounter("gpt-4o")
         assert counter.encoding_name == "o200k_base"
         assert counter.count_text("hello world") > 0
+
+
+class TestBacktrackingRunGuard:
+    """MATRIX-03: an unbroken long same-class run must be REFUSED before the
+    encode. tiktoken's split regex backtracks catastrophically on such runs — a
+    hard raise on small-stack platforms (macOS) but a silent super-linear
+    passthrough on larger-stack ones (CI Linux), where the router handed the 2 MB
+    input back with ``error=None``. Rejecting the run here makes the decline
+    loud and DETERMINISTIC on every platform (the ValueError rides compress()'s
+    fail-open into ``result.error``)."""
+
+    L = _MAX_SAFE_SAME_CLASS_RUN
+
+    def test_predicate_flags_long_letter_run(self) -> None:
+        assert _has_backtracking_prone_run("x" * (self.L + 1), self.L)
+        # A run of DISTINCT letters is the same \p{L}+ pre-token — also flagged.
+        distinct = "".join("abcdefghijklmnop"[i % 16] for i in range(self.L + 1))
+        assert _has_backtracking_prone_run(distinct, self.L)
+
+    def test_predicate_flags_long_whitespace_and_punct_runs(self) -> None:
+        assert _has_backtracking_prone_run(" " * (self.L + 1), self.L)
+        assert _has_backtracking_prone_run("." * (self.L + 1), self.L)
+
+    def test_predicate_exempts_digit_runs(self) -> None:
+        # o200k caps digit tokens at \p{N}{1,3}; long digit runs never backtrack.
+        assert not _has_backtracking_prone_run("0" * (self.L * 2), self.L)
+
+    def test_predicate_safe_for_mixed_class_and_split_runs(self) -> None:
+        # base64 is mixed alnum: frequent class transitions keep every run short.
+        b64 = base64.b64encode(bytes((i * 13) % 256 for i in range(self.L))).decode()
+        assert len(b64) >= self.L
+        assert not _has_backtracking_prone_run(b64, self.L)
+        # A single digit between two sub-limit letter runs keeps each under limit.
+        split = "a" * (self.L - 1) + "5" + "a" * (self.L - 1)
+        assert not _has_backtracking_prone_run(split, self.L)
+
+    def test_predicate_ignores_text_shorter_than_limit(self) -> None:
+        assert not _has_backtracking_prone_run("x" * (self.L - 1), self.L)
+        assert not _has_backtracking_prone_run("", self.L)
+
+    def test_count_text_refuses_pathological_run_loudly(self) -> None:
+        counter = TiktokenCounter("gpt-4o")
+        with pytest.raises(ValueError, match="backtracking"):
+            counter.count_text("x" * (2 * 1024 * 1024))
+
+    def test_count_messages_surfaces_the_refusal(self) -> None:
+        """The compress-path entry point (count_messages → count_text) surfaces
+        the refusal, so compress() fail-open can turn it into result.error."""
+        counter = TiktokenCounter("gpt-4o")
+        messages = [{"role": "tool", "content": "x" * (2 * 1024 * 1024)}]
+        with pytest.raises(ValueError, match="backtracking"):
+            counter.count_messages(messages)
+
+    def test_count_text_still_counts_large_safe_content(self) -> None:
+        """Content LARGER than the run limit but mixed-class (no backtracking
+        risk) must still tokenize normally — the guard is surgical."""
+        counter = TiktokenCounter("gpt-4o")
+        b64 = base64.b64encode(bytes((i * 13) % 256 for i in range(110_000))).decode()
+        assert len(b64) > self.L
+        assert counter.count_text(b64) > 0

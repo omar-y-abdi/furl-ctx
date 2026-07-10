@@ -106,17 +106,18 @@ def test_tiny_and_empty_inputs_are_byte_exact(content) -> None:
 # ─── fail-open: byte-exact + LOUD error (no salt: fail-open stores nothing) ───
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="MATRIX-03: the 2MB single-line decline is platform-divergent — locally "
-    "(macOS) it fails open LOUD (fancy-regex 'Max stack size exceeded for "
-    "backtracking' surfaced in result.error); on CI Linux the same input declines "
-    "SILENTLY (byte-exact return, no offload, error=None), violating the "
-    "loud-decline contract this test pins. Non-strict so loud platforms XPASS. "
-    "Fix: make every decline surface result.error, then drop this marker.",
-)
 def test_huge_single_line_fails_open_byte_exact() -> None:
-    # A 2 MB single line trips tiktoken's regex (catastrophic backtracking).
+    # A 2 MB single line trips tiktoken's catastrophic regex backtracking. That
+    # failure used to be PLATFORM-DIVERGENT — a hard raise on macOS (small stack)
+    # vs a silent super-linear passthrough on CI Linux (bigger stack), where the
+    # router handed the input back with error=None (MATRIX-03 silent decline).
+    # The tokenizer now rejects any long same-class run BEFORE the encode
+    # (TiktokenCounter._MAX_SAFE_SAME_CLASS_RUN), so the decline is LOUD and
+    # DETERMINISTIC on every platform: the ValueError rides compress()'s fail-open
+    # into result.error. error_contains="backtracking" is a substring the guard's
+    # message guarantees on BOTH platforms (the guard names that same failure
+    # mode and fires before the encode), so this assertion holds cross-platform —
+    # no per-route substring split is needed.
     m.assert_text_failopen_byte_exact(
         m.huge_single_line(megabytes=2), error_contains="backtracking"
     )
