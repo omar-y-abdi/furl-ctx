@@ -9,6 +9,7 @@
     furl purge HASH        # delete the stored original for a CCR hash from the store
     furl eval CORPUS --recall  # corpus compression ratio + needle-recall gate
     furl doctor            # check the install: native core, tokenizer, CCR store
+    furl mcp               # run the stdio MCP server (for Claude Code, Cursor, etc.)
 
 Shell-native access to the same engine the library and MCP server use — for
 pipelines (``psql … | furl compress``), CI log reduction, and offline evaluation
@@ -278,6 +279,22 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     return 0 if all(passed for _, passed, _ in checks) else 1
 
 
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    """Launch the stdio MCP server (equivalent of ``python -m furl_ctx.ccr.mcp_server``)."""
+    import asyncio
+
+    from furl_ctx.ccr.mcp_server import main as mcp_main
+
+    try:
+        asyncio.run(mcp_main(["--debug"] if args.debug else []))
+    except ImportError as exc:
+        # The MCP SDK ships in the optional ``mcp`` extra; surface the missing
+        # dependency as a clean furl-style error instead of a traceback.
+        sys.stderr.write(f"furl: {exc}\n")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="furl", description="Furl context-compression CLI.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -381,6 +398,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_doctor = sub.add_parser("doctor", help="check the install (core, tokenizer, store)")
     p_doctor.set_defaults(func=_cmd_doctor)
+
+    p_mcp = sub.add_parser("mcp", help="run the stdio MCP server for AI coding tools")
+    p_mcp.add_argument("--debug", action="store_true", help="enable debug logging")
+    p_mcp.set_defaults(func=_cmd_mcp)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

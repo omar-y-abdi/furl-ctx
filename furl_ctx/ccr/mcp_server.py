@@ -2078,8 +2078,13 @@ class FurlMCPServer:
             )
 
 
-async def main() -> None:
-    """Run the Furl MCP server."""
+async def main(argv: list[str] | None = None) -> None:
+    """Run the Furl MCP server.
+
+    ``argv`` defaults to ``sys.argv[1:]`` (the ``python -m furl_ctx.ccr.mcp_server``
+    entry point); the ``furl mcp`` CLI launcher passes an explicit list so both
+    the module entry point and the console script share one launch path.
+    """
     parser = argparse.ArgumentParser(description="Furl MCP Server — Context engineering toolkit")
     parser.add_argument(
         "--debug",
@@ -2087,7 +2092,7 @@ async def main() -> None:
         help="Enable debug logging",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
