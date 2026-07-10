@@ -265,7 +265,7 @@ def yaml_document(n: int = 120, *, secret: str | None = None) -> str:
             f"    image: registry.example.com/app:{i}.0.{i % 9}",
             f"    api_key: {api}",
             f"    replicas: {i % 5 + 1}",
-            f"    env:",
+            "    env:",
             f"      - NAME=service-{i}",
             f"      - TIMEOUT={i * 100}",
             f"    healthcheck: curl -f http://localhost:{8000 + i}/health || exit 1",

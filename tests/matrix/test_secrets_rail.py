@@ -23,8 +23,6 @@ are assembled from parts (scanner-hygiene).
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from furl_ctx import CompressConfig, compress
