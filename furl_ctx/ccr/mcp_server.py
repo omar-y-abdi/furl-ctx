@@ -1520,6 +1520,23 @@ class FurlMCPServer:
             # stored entries. No hash AND no query stays the original loud
             # parameter error (a bare retrieve needs a target).
             if query:
+                # Schema honesty (symmetry with the with-hash path): filters
+                # project a SINGLE stored entry, so they require a hash. The
+                # with-hash path rejects query+filters loudly; silently ignoring
+                # the same keys here let {query, select_field} run a plain
+                # cross-store search as if the filter had been applied. Parse
+                # with the same smart constructor so a malformed filter gets its
+                # own structured error and a valid one gets the missing-hash one.
+                filters = RetrieveFilters.parse(arguments)
+                if isinstance(filters, FilterError):
+                    return _err(filters.reason)
+                if not filters.is_empty:
+                    return _err(
+                        "filters (pattern/fields/line_range/select_*) require a "
+                        "hash: they project a single stored entry. Pass the "
+                        "entry's hash to filter it, or drop the filters to "
+                        "search across all entries."
+                    )
                 logger.info("event=mcp_search_all_started")
                 logger.debug("event=mcp_search_all_started_detail query_len=%d", len(query))
                 result = await self._search_all_content(query)

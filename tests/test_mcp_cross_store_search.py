@@ -111,6 +111,29 @@ async def test_no_hash_no_query_still_errors(server) -> None:
     assert env == {"error": "hash parameter is required"}
 
 
+async def test_no_hash_query_rejects_filter_keys_and_query_only_still_works(server) -> None:
+    # Schema-honesty symmetry with the with-hash path: filters project a single
+    # entry and require a hash. Before this pin, {query, select_field} with no
+    # hash SILENTLY ignored the filter and ran a plain cross-store search.
+    _seed(server, "a" * 12, "alpha needleword beta gamma")
+
+    # Direction 1: query + a select filter (no hash) errors cleanly.
+    env = _envelope(await server._handle_retrieve({"query": "needleword", "select_field": "kind"}))
+    assert "error" in env
+    assert "require a hash" in env["error"]
+
+    # A line filter (the other filter family) is rejected the same way.
+    env2 = _envelope(await server._handle_retrieve({"query": "needleword", "pattern": "beta"}))
+    assert "error" in env2
+    assert "require a hash" in env2["error"]
+
+    # Direction 2: query-only still runs the cross-store search, untouched.
+    ok = _envelope(await server._handle_retrieve({"query": "needleword"}))
+    assert ok["source"] == "cross_store"
+    assert ok["count"] == 1
+    assert ok["matches"][0]["hash"] == "a" * 12
+
+
 async def test_cross_store_search_returned_hash_round_trips(server) -> None:
     # The whole point of returning a hash: the caller retrieves it in full next.
     _seed(server, "a" * 12, "findme needleword payload body")
