@@ -758,9 +758,25 @@ class FurlMCPServer:
         database file. ``FURL_CCR_BACKEND=memory`` opts back out (any other
         explicit value defers to the library's env-selected loader).
         """
-        if self._local_store is None:
-            from furl_ctx.cache.compression_store import get_compression_store
+        from furl_ctx.cache.compression_store import (
+            get_compression_store,
+            resolve_ccr_namespace_store,
+        )
 
+        # Per-project isolation (audit #4): when a namespace is active — the
+        # plugin exports FURL_CCR_PROJECT_DIR from the project root, or a user
+        # set FURL_CCR_NAMESPACE — search / list / retrieve / evict MUST target
+        # the SAME isolated store the compress path writes to. Without this the
+        # read tools would serve the process-global singleton while the hook
+        # wrote to the per-project store, so every retrieve would loud-miss.
+        # resolve_* returns None when no namespace is active, leaving the
+        # singleton path (its MCP_SESSION_TTL + durable backend) exactly as
+        # before — so in-process tests that set no namespace are unaffected.
+        namespace_store = resolve_ccr_namespace_store()
+        if namespace_store is not None:
+            return namespace_store
+
+        if self._local_store is None:
             self._local_store = get_compression_store(
                 default_ttl=MCP_SESSION_TTL,
                 backend=_default_store_backend(),
@@ -2213,6 +2229,18 @@ async def main(argv: list[str] | None = None) -> None:
         logging.basicConfig(level=logging.DEBUG)
     else:
         logging.basicConfig(level=logging.WARNING)
+
+    # Per-project CCR isolation (audit #4): scope this server's durable store to
+    # the project it serves, so one machine-global ~/.furl DB cannot surface
+    # project A's originals in project B or evict across projects. CLAUDE_PROJECT_DIR
+    # (Claude Code's project root — stable across the main agent, its sub-agents,
+    # and the compress hook) is preferred; cwd is the fallback. ``setdefault``
+    # leaves a user free to force a shared store (FURL_CCR_NAMESPACE) or the
+    # legacy global one (FURL_CCR_PROJECT_DIR="") without being overridden here.
+    os.environ.setdefault(
+        "FURL_CCR_PROJECT_DIR",
+        os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd(),
+    )
 
     server = FurlMCPServer()
 

@@ -198,6 +198,22 @@ def main() -> None:
     if not isinstance(payload, dict):
         _passthrough()
 
+    # --- per-project CCR isolation (audit #4) ---
+    # Scope the durable store to THIS project so the shared ~/.furl DB cannot
+    # commingle originals across projects or evict cross-project. Prefer
+    # CLAUDE_PROJECT_DIR (Claude Code's project root) so this hook and the
+    # long-lived furl MCP server converge on ONE per-project store; the stdin
+    # ``cwd`` then os.getcwd() are fallbacks. ``setdefault`` keeps a user's
+    # shared-store override (FURL_CCR_NAMESPACE) or legacy-global opt-out
+    # (FURL_CCR_PROJECT_DIR="") intact.
+    _cwd = payload.get("cwd")
+    os.environ.setdefault(
+        "FURL_CCR_PROJECT_DIR",
+        os.environ.get("CLAUDE_PROJECT_DIR")
+        or (_cwd if isinstance(_cwd, str) and _cwd.strip() else "")
+        or os.getcwd(),
+    )
+
     # --- kill switch ---
     if not _flag_enabled(os.environ.get(_ENABLED_ENV)):
         _passthrough()

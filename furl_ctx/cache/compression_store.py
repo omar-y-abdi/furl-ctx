@@ -1614,11 +1614,40 @@ def clear_request_compression_store() -> None:
 
 FURL_CCR_NAMESPACE_ENV = "FURL_CCR_NAMESPACE"
 
+# Per-project isolation (audit #4). When set — the plugin deployment exports it
+# from the project root — an otherwise un-namespaced call is scoped to a
+# per-project store instead of the process-global singleton, closing the
+# cross-project commingling + eviction hole with zero user config. Absent
+# (library / unit tests) the global singleton serves, byte-for-byte unchanged.
+FURL_CCR_PROJECT_DIR_ENV = "FURL_CCR_PROJECT_DIR"
+
 # Registry of namespace-key -> store, so identical (namespace, session, agent)
 # tuples converge on the SAME store across calls (cross-turn retrieval works)
 # and in-memory tenants do not lose their entries between compress() calls.
 _namespace_stores: dict[str, CompressionStore] = {}
 _namespace_lock = threading.Lock()
+
+
+def _project_scope_key() -> str | None:
+    """Per-project namespace key from ``FURL_CCR_PROJECT_DIR`` (audit #4).
+
+    Returns ``None`` when the variable is unset/blank, so the caller keeps
+    today's global-singleton behavior (library, unit tests). When set, the raw
+    project root is canonicalized (``expanduser().resolve()``) so the hook and
+    MCP processes — which may observe the same project via different spellings
+    or a symlink — converge on ONE key, and thus ONE sqlite file. The ``\\x01``
+    prefix marks this as a project-scope key so it can never alias an explicit
+    ``(namespace, session, agent)`` tuple; the value is opaque and only ever
+    hashed into the sqlite filename, never interpolated into a path.
+    """
+    raw = (os.environ.get(FURL_CCR_PROJECT_DIR_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        resolved = str(Path(raw).expanduser().resolve())
+    except OSError:
+        resolved = raw
+    return "\x01".join(("furl-project", resolved))
 
 
 def _namespace_key(session_id: str | None, agent_id: str | None) -> str | None:
@@ -1627,15 +1656,18 @@ def _namespace_key(session_id: str | None, agent_id: str | None) -> str | None:
     The three segments together define the tenant boundary: an identical tuple
     maps to the same store (so a later turn recovers what an earlier turn
     stored), any difference maps to a different store. Blank/None segments
-    contribute an empty field. When NONE of the three is set the caller wants
-    today's global behavior, so this returns ``None`` — the resolver then
-    touches nothing and the global singleton serves.
+    contribute an empty field. When none of the three is set the call carries no
+    explicit tenant identity, so it falls back to the per-project scope
+    (``FURL_CCR_PROJECT_DIR``); with neither present this returns ``None`` and
+    the global singleton serves — today's behavior, byte-for-byte.
     """
     env_ns = (os.environ.get(FURL_CCR_NAMESPACE_ENV) or "").strip()
     session = (session_id or "").strip()
     agent = (agent_id or "").strip()
     if not env_ns and not session and not agent:
-        return None
+        # No explicit tenant identity: prefer per-project isolation when the
+        # deployment provides a project root, else None (global singleton).
+        return _project_scope_key()
     # NUL-joined so distinct segmentations cannot alias (``a`` + ``bc`` vs
     # ``ab`` + ``c``); the raw values are opaque and never touch a filesystem
     # path directly — the sqlite filename is derived by hashing this key.
