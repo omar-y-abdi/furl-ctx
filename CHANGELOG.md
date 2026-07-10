@@ -309,3 +309,5 @@ The following capabilities were excised before this release and do not ship:
 
 Furl is now a focused context-compression engine and MCP server for Claude Code
 tool-output compression, with no network-facing proxy surface.
+
+<!-- ci-probe: docs-only short-circuit verification for PR #60 (temporary, will be removed) -->
