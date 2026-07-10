@@ -484,13 +484,24 @@ class SqliteBackend:
         }
 
     def close(self) -> None:
-        """Close every connection this backend opened (all threads)."""
+        """Close the connections this backend opened, best-effort.
+
+        Connections are thread-local (one per thread, deliberately WITHOUT
+        ``check_same_thread=False`` so each stays pinned to its creating thread
+        for safety). ``close()`` therefore only truly closes connections created
+        on the CALLING thread; one opened on an ``asyncio.to_thread`` worker (the
+        MCP server's store ops) raises ``sqlite3.ProgrammingError`` here (the
+        same-thread rule) and is swallowed below — that fd is reclaimed by the OS
+        at process exit, not by this call. This only matters under the test-only
+        ``reset_compression_store`` (the long-lived server runs to kill);
+        same-thread callers such as ``ccr_export`` / ``ccr_import`` close cleanly.
+        """
         with self._state_lock:
             connections, self._all_connections = self._all_connections, []
         for conn in connections:
             try:
                 conn.close()
-            except sqlite3.Error:  # pragma: no cover - close is best-effort
+            except sqlite3.Error:  # pragma: no cover - cross-thread close; OS reclaims fd at exit
                 pass
 
     # ------------------------------------------------------------------ #

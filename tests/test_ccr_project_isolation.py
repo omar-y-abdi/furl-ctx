@@ -15,6 +15,8 @@ explicit-namespace env so a stray value cannot leak between cases.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from furl_ctx.cache.backends.sqlite import SqliteBackend
@@ -201,26 +203,48 @@ def test_D_pre_upgrade_global_store_readable_after_upgrade(
 # --------------------------------------------------------------------------- #
 
 
-def test_E_reset_closes_namespace_backend(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_E_reset_invokes_close_emptying_the_namespace_connection_registry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """reset must call close() on every store it drops, not merely clear().
+
+    ``_all_connections`` is emptied ONLY by close()'s swap — clear() leaves it
+    populated — so ``== []`` distinguishes the two and guards the fix against a
+    revert to clear()-only. This test is single-threaded, so the tracked
+    connection was created on THIS thread and close() genuinely releases its fd
+    (using it afterward raises). Connections created on asyncio.to_thread workers
+    (the MCP server) cannot be closed cross-thread and are OS-reclaimed at process
+    exit — see SqliteBackend.close; this test does not (and cannot) assert that.
+    """
     store = _project_store(monkeypatch, tmp_path / "proj")
     store.store("opens a connection", "<<ccr:e>>")
     backend = store._backend
     assert isinstance(backend, SqliteBackend)
-    assert backend._all_connections, "expected an open sqlite connection after a write"
+    conns = list(backend._all_connections)
+    assert conns, "expected an open sqlite connection after a write"
 
     reset_compression_store()
-    assert backend._all_connections == [], "reset must close + drop the backend's connections (P5)"
+
+    assert backend._all_connections == [], (
+        "reset left the registry populated (clear()-only regression)"
+    )
+    with pytest.raises(sqlite3.ProgrammingError):
+        conns[0].execute("SELECT 1")  # same-thread conn truly closed, not just dropped
 
 
-def test_E_reset_closes_global_backend() -> None:
+def test_E_reset_invokes_close_on_the_global_backend() -> None:
     store = get_compression_store()
     store.store("global write", "<<ccr:g>>")
     backend = store._backend
     assert isinstance(backend, SqliteBackend)
-    assert backend._all_connections
+    conns = list(backend._all_connections)
+    assert conns
 
     reset_compression_store()
+
     assert backend._all_connections == []
+    with pytest.raises(sqlite3.ProgrammingError):
+        conns[0].execute("SELECT 1")
 
 
 def test_E_close_is_idempotent_and_fail_open_on_memory_backend() -> None:
