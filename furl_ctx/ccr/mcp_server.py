@@ -682,10 +682,10 @@ class FurlMCPServer:
         # off — the SDK then omits the field from the initialize response.
         # ``version=`` is load-bearing: the SDK's create_initialization_options
         # falls back to ``importlib.metadata.version("mcp")`` when the Server has
-        # no version, so serverInfo would otherwise advertise the MCP SDK's
-        # version (e.g. 1.28.1) as if it were Furl's. Report the furl-ctx
-        # distribution version instead (``get_version`` is total — "unknown" when
-        # the package is not installed, never raises).
+        # no version, so serverInfo would otherwise advertise the MCP SDK's own
+        # version as if it were Furl's. Report the furl-ctx distribution version
+        # instead (``get_version`` is total — "unknown" when the package is not
+        # installed, never raises).
         self.server: Server = Server(
             "furl",
             version=get_version(),

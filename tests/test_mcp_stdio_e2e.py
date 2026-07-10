@@ -24,6 +24,8 @@ pytest.importorskip("mcp")
 from mcp import ClientSession, StdioServerParameters  # noqa: E402
 from mcp.client.stdio import stdio_client  # noqa: E402
 
+from furl_ctx._version import get_version  # noqa: E402
+
 _TIMEOUT = 30  # seconds — generous but bounded, so a wedged child can't hang CI.
 _MODULE_ARGS = ["-m", "furl_ctx.ccr.mcp_server"]
 _CLI_LAUNCHER_ARGS = ["-m", "furl_ctx.cli", "mcp"]  # the `furl mcp` path
@@ -59,8 +61,12 @@ def _text(result) -> dict:
 async def test_stdio_initialize_reports_furl_version(tmp_path) -> None:
     async with _client(tmp_path) as (_session, init):
         assert init.serverInfo.name == "furl"
-        # The furl-ctx distribution version — never the MCP SDK's (1.28.1).
-        assert init.serverInfo.version not in ("", "1.28.1")
+        # Equality against the real source of truth: the server subprocess runs
+        # in this same environment, so it must report exactly the furl-ctx
+        # distribution version get_version() resolves here — never the MCP
+        # SDK's own version (the regression this guards: a Server constructed
+        # without version= falls back to the SDK's package version).
+        assert init.serverInfo.version == get_version()
 
 
 async def test_stdio_tools_list_advertises_full_suite_and_schemas(tmp_path) -> None:
