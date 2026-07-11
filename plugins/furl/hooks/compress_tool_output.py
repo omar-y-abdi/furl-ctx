@@ -63,6 +63,22 @@ def _flag_enabled(raw: str | None) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
 
 
+def _noop_verbose_enabled() -> bool:
+    """Whether to log a one-line reason when the hook no-ops.
+
+    Opt-in (explicit truthy FURL_HOOK_VERBOSE), NOT default-on: a no-op fires on
+    nearly every tool call (most outputs are small / non-text), so defaulting this on
+    would flood stderr. This is deliberately stricter than the rare success-path
+    annotation, which keeps its shipped default-on ``_flag_enabled`` gate."""
+    return os.environ.get(_VERBOSE_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "enabled",
+    }
+
+
 def _min_chars() -> int:
     """Minimum tool-output length (chars) before compression is attempted."""
     raw = os.environ.get(_MIN_CHARS_ENV, "").strip()
@@ -78,19 +94,56 @@ def _min_chars() -> int:
 def _extract_text(tool_response: Any) -> str | None:
     """Pull compressible plain text out of a ``tool_response``.
 
-    Handles the three shapes Claude Code emits:
-      * ``str``                       -> Bash / plain tool output.
-      * ``[{"type":"text","text":.}]``-> MCP-style content blocks.
-      * ``{"content": <str|blocks>}`` -> wrapped tool result.
+    Handles the shapes Claude Code actually emits for the matched tools, verified
+    against live PostToolUse payloads (Claude Code 2.1.x):
 
-    Returns ``None`` for anything else (images, mixed non-text blocks, empty) so
-    the caller passes the original through untouched.
+      * ``str``                        -> plain tool output.
+      * ``[{"type":"text","text":.}]`` -> MCP-style content blocks.
+      * ``{"content": <str|blocks>}``  -> wrapped result; also the Task/``Agent``
+                                          sub-agent answer (content blocks).
+      * ``{"stdout","stderr",..}``     -> Bash. Uses ``stdout``; appends ``stderr``
+                                          only when non-empty, under a clear
+                                          ``[stderr]`` separator, so error text stays
+                                          compressible AND retrievable.
+      * ``{"result": <str>, ..}``      -> WebFetch (its answer lives in ``result``).
+      * ``{"text": <str>, ..}``        -> generic single-text-field results.
+
+    Returns ``None`` for anything else — images, mixed non-text blocks, empty
+    output, and structured payloads with no free-text field (e.g. WebSearch's
+    ``{"query","results":[{title,url}..]}`` link list, deliberately left to pass
+    through rather than forced through a prose compressor). Totality is preserved:
+    unknown shape -> ``None`` -> caller passes the original through untouched.
     """
     if isinstance(tool_response, str):
         return tool_response or None
 
     if isinstance(tool_response, dict):
-        return _extract_text(tool_response.get("content"))
+        # Wrapped result / MCP-style blocks / Task(Agent) sub-agent answer. Kept
+        # first so the legacy ``{"content": ...}`` contract is byte-identical; only
+        # fall through when ``content`` is absent or carries no text, so a Bash-style
+        # sibling key (``stdout``) on the same dict is still reachable.
+        content = tool_response.get("content")
+        if content is not None:
+            text = _extract_text(content)
+            if text is not None:
+                return text
+
+        # Bash: {"stdout","stderr","interrupted","isImage","noOutputExpected"}.
+        stdout = tool_response.get("stdout")
+        if isinstance(stdout, str):
+            stderr = tool_response.get("stderr")
+            if isinstance(stderr, str) and stderr.strip():
+                combined = f"{stdout}\n\n[stderr]\n{stderr}" if stdout else stderr
+                return combined or None
+            return stdout or None
+
+        # WebFetch ("result") and other single-text-field results ("text").
+        for key in ("result", "text"):
+            value = tool_response.get(key)
+            if isinstance(value, str):
+                return value or None
+
+        return None
 
     if isinstance(tool_response, list):
         parts: list[str] = []
@@ -141,45 +194,62 @@ def _mode_kwargs() -> dict[str, object]:
     return {}
 
 
-def _compress_text(text: str) -> str | None:
+def _compress_text(text: str) -> tuple[str | None, str | None]:
     """Compress one tool-output blob via Furl's public pipeline.
 
-    Returns the compressed text only when compression genuinely helped
-    (no fail-open error AND the result is shorter). Returns ``None`` otherwise,
-    signalling "leave the original alone". Never raises.
+    Returns ``(compressed, None)`` only when compression genuinely helped
+    (no fail-open error AND the result is shorter). Returns ``(None, reason)``
+    otherwise, signalling "leave the original alone" — where ``reason`` is a
+    distinct diagnostic label for the FURL_HOOK_VERBOSE no-op line, so an
+    import failure is never mislabeled as "no savings":
+
+      * ``import-failed``  -> furl_ctx is not importable in the hook's env.
+      * ``compress-error`` -> compress() raised (caught here; fail-open).
+      * ``engine-error``   -> compress() reported an internal fail-open error.
+      * ``empty-result``   -> engine returned no messages / non-text content.
+      * ``no-savings``     -> compression succeeded but did not shrink the text.
+
+    Never raises.
     """
     try:
         from furl_ctx import compress
     except Exception:
-        return None
+        return None, "import-failed"
 
     model = os.environ.get(_MODEL_ENV, "").strip() or _DEFAULT_MODEL
     try:
         result = compress([{"role": "tool", "content": text}], model=model, **_mode_kwargs())
     except Exception:
-        return None
+        return None, "compress-error"
 
     # compress() is fail-open: on internal failure it returns the ORIGINAL
     # messages with ``error`` set. Treat that as "do nothing".
     if getattr(result, "error", None):
-        return None
+        return None, "engine-error"
 
     messages = getattr(result, "messages", None)
     if not messages:
-        return None
+        return None, "empty-result"
 
     compressed = messages[0].get("content")
     if not isinstance(compressed, str):
-        return None
+        return None, "empty-result"
 
     # Only replace when we actually saved characters.
     if len(compressed) >= len(text):
-        return None
-    return compressed
+        return None, "no-savings"
+    return compressed, None
 
 
-def _passthrough() -> NoReturn:
-    """Emit nothing and succeed: the original tool output is kept verbatim."""
+def _passthrough(reason: str | None = None) -> NoReturn:
+    """Emit nothing and succeed: the original tool output is kept verbatim.
+
+    When FURL_HOOK_VERBOSE is on and *reason* is given, write ONE diagnostic line to
+    stderr naming why nothing was compressed (shape-unmatched / below-min-chars /
+    excluded-tool / disabled / ...). stderr is surfaced to the user only; it never
+    reaches the model and never blocks the tool call — exit stays 0 (fail-open)."""
+    if reason and _noop_verbose_enabled():
+        sys.stderr.write(f"furl: no-op ({reason})\n")
     sys.exit(0)
 
 
@@ -188,15 +258,15 @@ def main() -> None:
     try:
         raw = sys.stdin.read()
     except Exception:
-        _passthrough()
+        _passthrough("stdin-read-failed")
     if not raw.strip():
-        _passthrough()
+        _passthrough("empty-stdin")
     try:
         payload = json.loads(raw)
     except Exception:
-        _passthrough()
+        _passthrough("bad-json")
     if not isinstance(payload, dict):
-        _passthrough()
+        _passthrough("non-dict-payload")
 
     # --- per-project CCR isolation (audit #4) ---
     # Scope the durable store to THIS project so the shared ~/.furl DB cannot
@@ -216,30 +286,30 @@ def main() -> None:
 
     # --- kill switch ---
     if not _flag_enabled(os.environ.get(_ENABLED_ENV)):
-        _passthrough()
+        _passthrough("disabled")
 
     # --- loop guard + operator exclusions (FURL_HOOK_EXCLUDE_TOOLS) ---
     tool_name = payload.get("tool_name")
     if isinstance(tool_name, str) and _excluded(tool_name):
-        _passthrough()
+        _passthrough("excluded-tool")
 
-    # --- extract text; bail on non-text / empty payloads ---
+    # --- extract text; bail on non-text / empty / unrecognized payloads ---
     text = _extract_text(payload.get("tool_response"))
     if text is None:
-        _passthrough()
+        _passthrough("shape-unmatched")
 
     # --- loop guard: already carries CCR markers -> already compressed ---
     if _CCR_MARKER in text:
-        _passthrough()
+        _passthrough("already-compressed")
 
     # --- size gate ---
     if len(text) < _min_chars():
-        _passthrough()
+        _passthrough("below-min-chars")
 
-    # --- compress (returns None unless it genuinely helped) ---
-    compressed = _compress_text(text)
+    # --- compress (returns None + a distinct reason unless it genuinely helped) ---
+    compressed, compress_fail_reason = _compress_text(text)
     if compressed is None:
-        _passthrough()
+        _passthrough(compress_fail_reason or "no-savings")
 
     # --- optional one-line stderr annotation (FURL_HOOK_VERBOSE) ---
     if _flag_enabled(os.environ.get(_VERBOSE_ENV)):
@@ -260,7 +330,7 @@ def main() -> None:
         sys.stdout.write(json.dumps(output))
     except Exception:
         # If we somehow cannot serialize, fall back to passthrough.
-        _passthrough()
+        _passthrough("serialize-failed")
     sys.exit(0)
 
 
