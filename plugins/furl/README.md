@@ -8,6 +8,22 @@ Bundles Furl's context compression into Claude Code as a single plugin:
 - **Skill** (`furl`) → explains how it works, the `<<ccr:HASH>>` retrieval flow, and
   how to tune or disable it.
 
+## Scope (global install, per-project opt-out)
+
+Installing the plugin enables Furl **globally** — the compression hook and MCP tools
+apply to every project you open in Claude Code. To opt a **single project** out of the
+hook, set `FURL_HOOK_ENABLED=0` in that project's `.claude/settings.json` `env` block:
+
+```json
+{ "env": { "FURL_HOOK_ENABLED": "0" } }
+```
+
+Claude Code applies `settings.json` `env` to the session and to the subprocesses it
+spawns — this PostToolUse hook included — and project settings override user settings
+([settings docs](https://code.claude.com/docs/en/settings)), so this scopes the opt-out
+to that one project while the MCP tools stay available. Equivalent broader alternatives:
+`export FURL_HOOK_ENABLED=0` in the shell you launch `claude` from, or disable the plugin.
+
 ## Install (2 commands)
 
 Inside Claude Code:
@@ -93,6 +109,17 @@ output), so a compression problem can never break your tool call.
 | `FURL_STATUS_LINE` | on | `0` silences the one-line SessionStart status signal. Export it in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 
 The full `FURL_*` reference is in [`LIBRARY.md`](../../LIBRARY.md) → "Configuration".
+
+**Per-call overhead (measured).** On a warm `uv` cache the hook adds a median of
+**~0.18 s per matched tool call** (N=10: 0.173–0.183 s on a macOS/Apple-silicon dev
+machine), measured by feeding the shipped pinned command a below-threshold no-op payload
+so the figure is pure invocation cost — `uv` resolve + Python startup + hook import, not
+compression. It runs only on `Bash`/`WebFetch`/`WebSearch`/`Task` outputs and is
+fail-open. A fresh `uv` cache dir still resolved in ~0.25–0.30 s here (`uv` reused
+already-present wheels rather than re-downloading), so the only genuinely cold cost is
+the one-time wheel fetch from PyPI on first-ever use (network-bound, paid once, then
+cached). These numbers are machine- and cache-dependent — treat ~0.2 s as an
+order-of-magnitude guide, not a guarantee.
 
 ### Skill (`skills/furl/SKILL.md`)
 

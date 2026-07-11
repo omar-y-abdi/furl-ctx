@@ -1378,9 +1378,15 @@ class FurlMCPServer:
                 Tool(
                     name=STATS_TOOL_NAME,
                     description=(
-                        "Show compression statistics for this session: "
-                        "total compressions, tokens saved, estimated cost savings, "
-                        "and recent compression events."
+                        "Show compression statistics. Two clearly-labeled scopes: "
+                        "(1) this-server-process counters — compressions, tokens saved, "
+                        "estimated cost savings, and recent events done by THIS process; "
+                        "and (2) a live 'store' section derived from the shared CCR store "
+                        "for this namespace — live_entries, original vs compressed bytes and "
+                        "tokens, estimated tokens saved, and oldest/newest entry age. The "
+                        "store section reflects entries written by ALL processes (including "
+                        "the PostToolUse hook and sub-agents), so it stays truthful even when "
+                        "this server process compressed nothing."
                     ),
                     inputSchema={
                         "type": "object",
@@ -1751,17 +1757,21 @@ class FurlMCPServer:
     def _compute_stats(self) -> dict[str, Any]:
         """Blocking stats aggregation (store + shared-file reads), off the loop."""
         stats = self._stats.to_dict()
+        # Label the flat counters above as THIS-server-process scope so they are
+        # never read as a session-wide total (Finding B): they count only what
+        # this MCP server process itself compressed/retrieved. The live,
+        # cross-process picture is the ``store`` block below.
+        stats["process_scope"] = (
+            "counters above (compressions, retrievals, total_*_tokens, "
+            "savings_percent, estimated_cost_saved_usd) reflect ONLY what THIS "
+            "MCP server process did this session — not the PostToolUse hook or "
+            "sub-agents. See 'store' for the shared, cross-process picture."
+        )
 
-        # Add local store stats. Route through _get_local_store() (the accessor
-        # every other handler uses) so per-project isolation — the deployed
-        # default — reports the ACTIVE namespace store. Reading self._local_store
-        # directly saw None whenever a namespace store served (that path returns
-        # without populating the singleton slot), silently dropping the block.
-        store_stats = self._get_local_store().get_stats()
-        stats["store"] = {
-            "entries": store_stats.get("entry_count", 0),
-            "max_entries": store_stats.get("max_entries", 0),
-        }
+        # Store-derived, cross-process section. Route through _get_local_store()
+        # (the accessor every other handler uses) so per-project isolation — the
+        # deployed default — reports the ACTIVE namespace store.
+        stats["store"] = self._store_derived_stats()
 
         # Aggregate cross-process stats (main session + sub-agents)
         my_pid = os.getpid()
@@ -1790,6 +1800,55 @@ class FurlMCPServer:
             }
 
         return stats
+
+    def _store_derived_stats(self) -> dict[str, Any]:
+        """Live, store-derived stats for the SHARED CCR store (this namespace).
+
+        Finding B: the process counters in ``SessionStats`` are structurally
+        blind to the PostToolUse hook (a separate subprocess) and to sub-agents,
+        so ``furl_stats`` used to report 0 while the shared sqlite store held real
+        entries from the hook or prior turns — false reassurance. This block is
+        computed LIVE from the shared store every call, so it reflects those
+        entries even when THIS server process compressed nothing.
+
+        Derived from ``_live_entries`` — the same expiry-filtered, lock-guarded
+        snapshot ``furl_list`` / ``furl_search`` read — so the numbers agree with
+        what those tools would show at this instant. ``max_entries`` comes from
+        ``get_stats`` (which also prunes expired rows as a side benefit).
+        """
+        store = self._get_local_store()
+        max_entries = store.get_stats().get("max_entries", 0)
+        live = self._live_entries()
+        now = time.time()
+
+        total_original_bytes = sum(len(entry.original_content) for _, entry in live)
+        total_compressed_bytes = sum(len(entry.compressed_content) for _, entry in live)
+        total_original_tokens = sum(entry.original_tokens for _, entry in live)
+        total_compressed_tokens = sum(entry.compressed_tokens for _, entry in live)
+        tokens_saved = max(0, total_original_tokens - total_compressed_tokens)
+
+        block: dict[str, Any] = {
+            "scope": (
+                "shared CCR store for this namespace — reflects entries written by "
+                "ALL processes (this server, the PostToolUse hook, sub-agents), even "
+                "when this server compressed nothing this session"
+            ),
+            # ``entries`` kept as the live count (byte-consistent with the block's
+            # single snapshot); ``live_entries`` is the explicit, self-describing name.
+            "entries": len(live),
+            "live_entries": len(live),
+            "max_entries": max_entries,
+            "total_original_bytes": total_original_bytes,
+            "total_compressed_bytes": total_compressed_bytes,
+            "total_original_tokens": total_original_tokens,
+            "total_compressed_tokens": total_compressed_tokens,
+            "estimated_tokens_saved": tokens_saved,
+        }
+        if live:
+            ages = [now - entry.created_at for _, entry in live]
+            block["oldest_entry_age_seconds"] = round(max(ages))
+            block["newest_entry_age_seconds"] = round(min(ages))
+        return block
 
     async def _handle_purge(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_purge — erase one entry (by hash) or the whole store.

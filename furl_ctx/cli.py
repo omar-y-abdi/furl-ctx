@@ -96,6 +96,41 @@ def _parse_select_equals(value: str) -> Any:
         return value
 
 
+def _ccr_store_search_target() -> tuple[str, bool]:
+    """Describe WHERE ``furl retrieve`` just looked, and whether that store is
+    volatile (process-local memory).
+
+    Introspects the SAME store the library ``retrieve`` consults —
+    ``get_compression_store()`` (the process singleton / request-scoped store),
+    already initialized by the retrieve attempt that just missed. Returns
+    ``(descriptor, is_process_local_memory)``:
+
+    * durable sqlite backend → ``("backend=sqlite store=<db path>", False)``
+    * in-memory backend      → ``("in-memory (process-local)", True)``
+    * any other backend      → ``("backend=<ClassName>", False)``
+
+    Total: never raises. A store/introspection failure degrades to a generic
+    ``("the CCR store window", False)`` so the loud miss message is always
+    emitted (an honest miss must never itself fail).
+    """
+    try:
+        from furl_ctx.cache.compression_store import get_compression_store
+
+        backend = get_compression_store()._backend
+        # SqliteBackend exposes its resolved database path as ``_db_path``; the
+        # in-memory backend has none. Report the concrete file so a user knows
+        # exactly which store was searched (and can inspect/point another
+        # process at it).
+        db_path = getattr(backend, "_db_path", None)
+        if db_path is not None:
+            return (f"backend=sqlite store={db_path}", False)
+        if type(backend).__name__ == "InMemoryBackend":
+            return ("in-memory (process-local)", True)
+        return (f"backend={type(backend).__name__}", False)
+    except Exception:
+        return ("the CCR store window", False)
+
+
 def _cmd_retrieve(args: argparse.Namespace) -> int:
     from furl_ctx import retrieve
 
@@ -128,10 +163,23 @@ def _cmd_retrieve(args: argparse.Namespace) -> int:
         return 2
 
     if result is None:
+        # Honest miss: name the store that was actually searched (backend +
+        # resolved path for sqlite; "in-memory (process-local)" otherwise) so a
+        # user is never left guessing WHERE the hash was looked for. When the
+        # store is the volatile in-memory backend, say plainly that its entries
+        # do not survive across processes — the exact reason a compress in one
+        # `furl` invocation cannot be retrieved by a later one — and point at the
+        # durable opt-out.
+        target, volatile = _ccr_store_search_target()
         sys.stderr.write(
-            f"furl: hash {args.hash} not found in the CCR store window "
-            "(never stored, evicted, or expired)\n"
+            f"furl: hash {args.hash} not found in {target} (never stored, evicted, or expired)\n"
         )
+        if volatile:
+            sys.stderr.write(
+                "furl: in-memory CCR entries do not survive across processes, so a hash "
+                "stored by one `furl` command cannot be retrieved by a later one. Set "
+                "FURL_CCR_BACKEND=sqlite for a durable store that persists across processes.\n"
+            )
         return 1
     sys.stdout.write(result)
     return 0
@@ -303,10 +351,33 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # CLI-vs-library backend split. The `furl` CLI is a command-line tool: its
+    # `compress` and `retrieve` run in SEPARATE processes, so its CCR store must
+    # be durable — the library's in-memory default dies with the process, which
+    # would make every cross-process `retrieve` a false miss (the exact "nothing
+    # is truly lost" contradiction this closes). Default the CLI's store to the
+    # durable sqlite backend BEFORE any engine/store init below.
+    #
+    # This opts in ONLY the CLI entrypoint — the LIBRARY default stays in-memory
+    # on purpose (a library must not write to disk unbidden; callers opt in via
+    # FURL_CCR_BACKEND, and the Claude Code plugin already pins sqlite). setdefault
+    # means an explicit user FURL_CCR_BACKEND (memory, sqlite, a plugin name, ...)
+    # is always respected.
+    os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
+
     parser = argparse.ArgumentParser(prog="furl", description="Furl context-compression CLI.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_compress = sub.add_parser("compress", help="compress FILE or stdin to stdout")
+    p_compress = sub.add_parser(
+        "compress",
+        help="compress FILE or stdin to stdout",
+        epilog=(
+            "Offloaded originals are stored in the CLI's CCR store — durable sqlite by "
+            "default (FURL_CCR_BACKEND=sqlite), at ~/.furl/ccr.sqlite3 (FURL_WORKSPACE_DIR / "
+            "FURL_CCR_SQLITE_PATH override) — and stay retrievable by hash via `furl retrieve` "
+            "for FURL_CCR_TTL_SECONDS (default 1800s / 30 min)."
+        ),
+    )
     p_compress.add_argument("file", nargs="?", default="-", help="input file, or - for stdin")
     p_compress.add_argument("--model", default="claude-sonnet-4-5-20250929")
     p_compress.add_argument(
@@ -314,7 +385,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_compress.set_defaults(func=_cmd_compress)
 
-    p_retrieve = sub.add_parser("retrieve", help="print the original content for a CCR hash")
+    p_retrieve = sub.add_parser(
+        "retrieve",
+        help="print the original content for a CCR hash",
+        epilog=(
+            "Looks the hash up in the CLI's CCR store — durable sqlite by default "
+            "(FURL_CCR_BACKEND=sqlite), at ~/.furl/ccr.sqlite3 (FURL_WORKSPACE_DIR / "
+            "FURL_CCR_SQLITE_PATH override). Entries persist for FURL_CCR_TTL_SECONDS "
+            "(default 1800s / 30 min); a miss names the store that was searched."
+        ),
+    )
     p_retrieve.add_argument("hash")
     # Slice flags — all optional; omitting them all gives a plain full retrieve.
     # SUPPRESS keeps unset flags off args.* so _cmd_retrieve can distinguish
