@@ -5,6 +5,15 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3](https://github.com/omar-y-abdi/furl/compare/v1.0.2...v1.0.3) (2026-07-11)
+
+
+### Bug Fixes
+
+* **cli:** durable CLI store by default + store-derived furl_stats ([508ba7b](https://github.com/omar-y-abdi/furl/commit/508ba7ba08e1cef863585cf51f2768c05a68e417))
+* **lib:** retrieve/purge/resolve_markers resolve the same namespace store as compress ([6f7719d](https://github.com/omar-y-abdi/furl/commit/6f7719dd6d648b182fb459ba55b260f358cd7e09))
+* **plugin:** pin furl-ctx version in commands + SessionStart status signal ([5e83ed9](https://github.com/omar-y-abdi/furl/commit/5e83ed98af0b63b9a170d95aa686e180a3669098))
+
 ## [1.0.2](https://github.com/omar-y-abdi/furl/compare/v1.0.1...v1.0.2) (2026-07-11)
 
 
