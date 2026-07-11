@@ -157,3 +157,21 @@ def test_retrieve_miss_in_memory_is_honest_about_volatility(_hermetic_cli_env) -
     assert "in-memory (process-local)" in stderr
     assert "do not survive across processes" in stderr
     assert "FURL_CCR_BACKEND=sqlite" in stderr
+
+
+def test_retrieve_miss_names_the_namespace_store(_hermetic_cli_env, tmp_path) -> None:
+    """F2: with FURL_CCR_PROJECT_DIR active, a miss names the per-namespace sqlite
+    store that was actually searched (ccr-ns-<hash>.sqlite3), NOT the global
+    ccr.sqlite3 — the miss message must describe the same store the namespace-aware
+    retrieve consulted."""
+    _hermetic_cli_env.setenv("FURL_CCR_BACKEND", "sqlite")
+    _hermetic_cli_env.setenv("FURL_CCR_PROJECT_DIR", str(tmp_path / "proj"))
+    rc, stderr = _retrieve_miss_stderr(["retrieve", "0" * 24])
+    assert rc == 1
+    assert "not found" in stderr
+    assert "backend=sqlite" in stderr
+    assert "ccr-ns-" in stderr, "miss must name the per-namespace store file"
+    # The global file is exactly 'ccr.sqlite3'; the ns file ('ccr-ns-<hash>.sqlite3')
+    # does not contain that substring, so its absence proves the global store is
+    # NOT the one being named.
+    assert "ccr.sqlite3" not in stderr

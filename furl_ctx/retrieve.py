@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .cache.compression_store import CompressionStore, get_compression_store
+from .cache.compression_store import CompressionStore, _active_ccr_store
 from .ccr.marker_grammar import hash_of_match, marker_patterns
 from .ccr.retrieve_filters import FilterError, RetrieveFilters, apply_filters
 
@@ -41,6 +41,8 @@ def retrieve(
     select_min: float | None = None,
     select_max: float | None = None,
     limit: int | None = None,
+    session_id: str | None = None,
+    agent_id: str | None = None,
 ) -> str | None:
     """Return the original content stored under *hash*, or ``None`` on a miss.
 
@@ -48,6 +50,15 @@ def retrieve(
     original (or ``None`` if the hash is not in the store's window: never stored,
     evicted under capacity, or TTL-expired — a loud, explicit miss, not a silent
     loss). *query* is optional retrieval-event context on that path.
+
+    Store resolution is SYMMETRIC with ``compress()`` (F1): when a namespace is
+    active — ``FURL_CCR_PROJECT_DIR`` / ``FURL_CCR_NAMESPACE``, or the same
+    ``session_id``/``agent_id`` that was passed to ``compress()`` — this reads
+    the SAME isolated per-namespace store that compress call wrote to (the old
+    behavior read the global store there: a guaranteed miss). With no namespace
+    active the default path is unchanged — the request-scoped store if
+    middleware set one, else the global singleton. Same resolution seam as
+    ``ccr_export``/``ccr_import`` (``_active_ccr_store``).
 
     The filter arguments narrow what comes back, mirroring the MCP
     ``furl_retrieve`` tool and reusing the same validated
@@ -95,7 +106,7 @@ def retrieve(
             "to project the full original"
         )
 
-    entry = get_compression_store().retrieve(hash, query=query)
+    entry = _active_ccr_store(session_id, agent_id).retrieve(hash, query=query)
     if entry is None:
         return None
     if filters.is_empty:
@@ -107,7 +118,7 @@ def retrieve(
     return outcome.content
 
 
-def purge(hash: str) -> bool:
+def purge(hash: str, *, session_id: str | None = None, agent_id: str | None = None) -> bool:
     """Delete the stored entry for *hash* from the active CCR store.
 
     The purge surface (B3 SECURITY): permanently removes a single offloaded
@@ -115,28 +126,43 @@ def purge(hash: str) -> bool:
     companion to the fail-closed redactor for content that was already stored
     before a redaction policy existed, or that must be erased on request.
 
-    Acts on the SAME store the retrieve path reads: ``get_compression_store()``,
-    which honors the active namespace (the request-scoped ``FURL_CCR_NAMESPACE``
-    / ``session_id`` / ``agent_id`` isolation), so a purge only ever touches the
-    caller's own tenant store — an entry another tenant stored is neither
-    visible nor deletable here.
+    Acts on the SAME store the retrieve path reads — ``_active_ccr_store``, the
+    resolution seam ``compress()``/``ccr_export`` share: the isolated namespace
+    store when one is active (``FURL_CCR_PROJECT_DIR`` / ``FURL_CCR_NAMESPACE``,
+    or the ``session_id``/``agent_id`` passed at ``compress()`` time), else the
+    request-scoped/global store. (The old wording claimed
+    ``get_compression_store()`` honored the env namespace — it did not, F1: a
+    purge under a namespace silently no-opped against the global store.) A purge
+    only ever touches the caller's own tenant store — an entry another tenant
+    stored is neither visible nor deletable here.
 
     Returns:
         ``True`` if an entry was removed, ``False`` if the hash was absent
         (never stored, already purged, or already evicted/expired out of the
         store window). Total: never raises for a missing hash.
     """
-    return get_compression_store().delete(hash)
+    return _active_ccr_store(session_id, agent_id).delete(hash)
 
 
 def resolve_markers(
-    messages: list[dict[str, Any]], *, store: CompressionStore | None = None
+    messages: list[dict[str, Any]],
+    *,
+    store: CompressionStore | None = None,
+    session_id: str | None = None,
+    agent_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return a copy of *messages* with every resolvable CCR marker expanded to
     its original content. Unresolvable markers (window miss) are left in place;
     non-string message content is passed through untouched.
+
+    With no explicit ``store``, resolution is symmetric with ``compress()``
+    (F1): the active namespace store (``FURL_CCR_PROJECT_DIR`` /
+    ``FURL_CCR_NAMESPACE``, or the same ``session_id``/``agent_id`` passed to
+    ``compress()``) when one is active, else the request-scoped/global store —
+    so markers a namespaced compress just emitted actually expand instead of
+    silently window-missing against the global store.
     """
-    active = store or get_compression_store()
+    active = store or _active_ccr_store(session_id, agent_id)
 
     def _expand(text: str) -> str:
         for pattern in marker_patterns():

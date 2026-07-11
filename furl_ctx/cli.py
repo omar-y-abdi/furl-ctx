@@ -101,8 +101,13 @@ def _ccr_store_search_target() -> tuple[str, bool]:
     volatile (process-local memory).
 
     Introspects the SAME store the library ``retrieve`` consults —
-    ``get_compression_store()`` (the process singleton / request-scoped store),
-    already initialized by the retrieve attempt that just missed. Returns
+    ``_active_ccr_store(None, None)``, the resolution seam ``compress()``/
+    ``retrieve()`` share (F2): the isolated per-namespace store when one is
+    active (``FURL_CCR_PROJECT_DIR`` / ``FURL_CCR_NAMESPACE``), else the
+    request-scoped/global singleton — already initialized by the retrieve
+    attempt that just missed. Under a namespace the miss therefore names the
+    ``ccr-ns-<hash>.sqlite3`` file that was actually searched, never the
+    global ``ccr.sqlite3`` it did not touch. Returns
     ``(descriptor, is_process_local_memory)``:
 
     * durable sqlite backend → ``("backend=sqlite store=<db path>", False)``
@@ -114,9 +119,9 @@ def _ccr_store_search_target() -> tuple[str, bool]:
     emitted (an honest miss must never itself fail).
     """
     try:
-        from furl_ctx.cache.compression_store import get_compression_store
+        from furl_ctx.cache.compression_store import _active_ccr_store
 
-        backend = get_compression_store()._backend
+        backend = _active_ccr_store(None, None)._backend
         # SqliteBackend exposes its resolved database path as ``_db_path``; the
         # in-memory backend has none. Report the concrete file so a user knows
         # exactly which store was searched (and can inspect/point another
