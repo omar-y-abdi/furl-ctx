@@ -5,6 +5,15 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1](https://github.com/omar-y-abdi/furl/compare/v1.0.0...v1.0.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* **ci:** required checks always conclude — unblock config/release-only PRs ([9a164e1](https://github.com/omar-y-abdi/furl/commit/9a164e1c16e8b936114ee545324e2c807f499b08))
+* first-contact polish — honest README numbers, clone guard, community link, drop release-as ([be3b239](https://github.com/omar-y-abdi/furl/commit/be3b239c1f5228df7ae48c79855ec1c668fc68d4))
+* **plugin:** hooks.json schema — wrap events under hooks record so plugin hooks load ([ceb8f91](https://github.com/omar-y-abdi/furl/commit/ceb8f9179a6eb8864672a34ff9c253c44b08d849))
+
 ## [1.0.0](https://github.com/omar-y-abdi/furl/compare/v0.27.0...v1.0.0) (2026-07-10)
 
 
