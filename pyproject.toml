@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "furl-ctx"
-version = "1.0.1"
+version = "1.0.2"
 description = "The context compression layer for AI agents - typically 0-54% fewer tokens on real high-entropy content, up to 95% on repetitive logs/fixtures (best-case ceiling), reversible via CCR"
 readme = "README.md"
 license = "Apache-2.0"

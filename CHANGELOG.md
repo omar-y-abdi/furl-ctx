@@ -5,6 +5,15 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2](https://github.com/omar-y-abdi/furl/compare/v1.0.1...v1.0.2) (2026-07-11)
+
+
+### Bug Fixes
+
+* **core:** search preview lines byte-exact — verbatim line tokens and separators ([c1fe4bb](https://github.com/omar-y-abdi/furl/commit/c1fe4bb7e65a1cd22fd4292dc9e880df19a973bd))
+* honest headline everywhere, TTL visibility, furl_read + secrets docs, agent-first MCP legend ([19a53bb](https://github.com/omar-y-abdi/furl/commit/19a53bb542aa40e062b64b66f5f970a6e5d383f7))
+* **plugin:** hook extracts real Bash/WebFetch/Agent payload shapes — was silent no-op live ([829f4a4](https://github.com/omar-y-abdi/furl/commit/829f4a4d46ca4c0d434d894f37d8392c9b70bd12))
+
 ## [1.0.1](https://github.com/omar-y-abdi/furl/compare/v1.0.0...v1.0.1) (2026-07-11)
 
 
