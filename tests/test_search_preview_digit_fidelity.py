@@ -34,11 +34,20 @@ def _compress_text(content: str) -> str:
 
 
 def _assert_preview_lines_byte_exact(content: str, compressed: str) -> None:
-    """Every rendered match line (not a ``[...]`` summary / retrieval marker)
-    must appear verbatim in the input."""
+    """Every retained line must appear verbatim in the input.
+
+    Only the two STRUCTURAL lines the formatter emits are exempt, matched
+    precisely: the ``[... and N more matches in FILE]`` omission summary and
+    the ``[N matches compressed to M. Retrieve more: hash=...]`` CCR marker.
+    A data line that merely starts with ``[`` (a bracketed timestamp
+    ``[2026-...]``) is still asserted — the old any-``[``-prefix skip
+    silently exempted exactly those lines.
+    """
     for line in compressed.splitlines():
         stripped = line.lstrip()
-        if stripped.startswith("[") or "Retrieve more:" in line:
+        is_omission_summary = stripped.startswith("[... and ") and " more matches in " in stripped
+        is_ccr_marker = ". Retrieve more: hash=" in line
+        if is_omission_summary or is_ccr_marker:
             continue
         assert line in content, f"preview line not byte-exact in input:\n{line!r}"
 
@@ -68,4 +77,19 @@ def test_zero_padded_ids_and_amounts_survive_in_preview() -> None:
 
     # A padded id from the first (always-kept) line rides through verbatim.
     assert "svc:0000:charge acct=00000" in out, out
+    _assert_preview_lines_byte_exact(content, out)
+
+
+def test_bracketed_timestamp_lines_are_asserted_and_byte_exact() -> None:
+    # Lines starting with "[" used to be skipped wholesale by the helper's
+    # any-"["-prefix sentinel, so a corrupted bracketed timestamp passed
+    # silently. The helper now matches the structural sentinels precisely,
+    # and these lines are pinned end-to-end.
+    content = "\n".join(
+        f"[2026-07-11T13:{i % 10:02d}:00] payment id={i:04d} status=ok" for i in range(60)
+    )
+    out = _compress_text(content)
+
+    assert "13:0:00" not in out, out
+    assert "[2026-07-11T13:00:00] payment id=0000 status=ok" in out, out
     _assert_preview_lines_byte_exact(content, out)
