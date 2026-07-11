@@ -17,8 +17,11 @@ it never blocks, mutates inputs, or raises to the host.
 Retrievability: compression offloads dropped content to the shared CCR store and
 leaves ``<<ccr:HASH>>`` markers. For the ``furl`` MCP server's ``furl_retrieve`` to
 resolve those markers, this hook and the server must share one durable store —
-both pin ``FURL_CCR_BACKEND=sqlite`` (see hooks.json / .mcp.json), which resolves
-to ``~/.furl/ccr.sqlite3`` in every process of the session.
+both pin ``FURL_CCR_BACKEND=sqlite`` (see hooks.json / .mcp.json) and both derive
+the same per-project namespace (``FURL_CCR_PROJECT_DIR``, from CLAUDE_PROJECT_DIR /
+stdin ``cwd``), which resolves to a per-project ``~/.furl/ccr-ns-<hash>.sqlite3``
+in every process of the session. The legacy global ``~/.furl/ccr.sqlite3`` serves
+only when namespacing is explicitly disabled (``FURL_CCR_PROJECT_DIR=""``).
 """
 
 from __future__ import annotations

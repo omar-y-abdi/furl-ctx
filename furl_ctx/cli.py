@@ -14,6 +14,12 @@
 Shell-native access to the same engine the library and MCP server use — for
 pipelines (``psql … | furl compress``), CI log reduction, and offline evaluation
 with no LLM harness.
+
+The CLI's CCR store is the GLOBAL durable one (``~/.furl/ccr.sqlite3``) with a
+24 h retention default (``FURL_CCR_TTL_SECONDS=86400``, matching the Claude Code
+plugin; the bare library default is 1800 s). The plugin's hook/MCP surfaces write
+to PER-PROJECT stores instead — set ``FURL_CCR_PROJECT_DIR=<project root>`` to
+point the CLI at a project's store.
 """
 
 from __future__ import annotations
@@ -370,6 +376,22 @@ def main(argv: list[str] | None = None) -> int:
     # is always respected.
     os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
 
+    # TTL parity with the Claude Code plugin (round-6 evaluator finding): the
+    # library's 30-minute default made CLI-stored originals die mid-session
+    # while the plugin's hook and MCP tools (FURL_CCR_TTL_SECONDS=86400, set
+    # by hooks/compress_tool_output.py and .mcp.json) kept theirs for 24 h.
+    # Mirror the hook's setdefault so a `furl compress` hash lives as long as
+    # a hook-compressed one; an explicit user FURL_CCR_TTL_SECONDS still wins.
+    #
+    # Store SCOPE stays global (~/.furl/ccr.sqlite3) on purpose. The plugin's
+    # per-project stores are keyed by FURL_CCR_PROJECT_DIR, which the hook and
+    # MCP server derive in-process from CLAUDE_PROJECT_DIR — an env var Claude
+    # Code does not export to Bash-run commands — and inferring a project root
+    # from cwd here would silo data under whatever subdirectory the user ran
+    # from. Users target a project store explicitly:
+    # FURL_CCR_PROJECT_DIR=<project root> furl retrieve <hash>.
+    os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")
+
     parser = argparse.ArgumentParser(prog="furl", description="Furl context-compression CLI.")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -378,9 +400,12 @@ def main(argv: list[str] | None = None) -> int:
         help="compress FILE or stdin to stdout",
         epilog=(
             "Offloaded originals are stored in the CLI's CCR store — durable sqlite by "
-            "default (FURL_CCR_BACKEND=sqlite), at ~/.furl/ccr.sqlite3 (FURL_WORKSPACE_DIR / "
-            "FURL_CCR_SQLITE_PATH override) — and stay retrievable by hash via `furl retrieve` "
-            "for FURL_CCR_TTL_SECONDS (default 1800s / 30 min)."
+            "default (FURL_CCR_BACKEND=sqlite), at the GLOBAL ~/.furl/ccr.sqlite3 "
+            "(FURL_WORKSPACE_DIR / FURL_CCR_SQLITE_PATH override) — and stay retrievable by "
+            "hash via `furl retrieve` for FURL_CCR_TTL_SECONDS (CLI default 86400s / 24 h, "
+            "matching the Claude Code plugin; the bare library default is 1800s). The plugin "
+            "writes to PER-PROJECT stores instead; set FURL_CCR_PROJECT_DIR=<project root> "
+            "to target a project's store here."
         ),
     )
     p_compress.add_argument("file", nargs="?", default="-", help="input file, or - for stdin")
@@ -395,9 +420,11 @@ def main(argv: list[str] | None = None) -> int:
         help="print the original content for a CCR hash",
         epilog=(
             "Looks the hash up in the CLI's CCR store — durable sqlite by default "
-            "(FURL_CCR_BACKEND=sqlite), at ~/.furl/ccr.sqlite3 (FURL_WORKSPACE_DIR / "
-            "FURL_CCR_SQLITE_PATH override). Entries persist for FURL_CCR_TTL_SECONDS "
-            "(default 1800s / 30 min); a miss names the store that was searched."
+            "(FURL_CCR_BACKEND=sqlite), at the GLOBAL ~/.furl/ccr.sqlite3 "
+            "(FURL_WORKSPACE_DIR / FURL_CCR_SQLITE_PATH override). Entries persist for "
+            "FURL_CCR_TTL_SECONDS (CLI default 86400s / 24 h); a miss names the store that "
+            "was searched. Hashes minted inside Claude Code live in that project's "
+            "PER-PROJECT store — set FURL_CCR_PROJECT_DIR=<project root> to look there."
         ),
     )
     p_retrieve.add_argument("hash")

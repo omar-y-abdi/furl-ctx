@@ -308,10 +308,50 @@ def _legend_enabled() -> bool:
     )
 
 
-# Session-scoped TTL: content persists for the session (1 hour), outlasting
-# the library's own 30-minute default. The MCP server process lives as long
-# as the coding session.
+# Session-scoped TTL fallback: content persists for the session (1 hour),
+# outlasting the library's own 30-minute default. The MCP server process
+# lives as long as the coding session. Fallback ONLY — an operator-set
+# FURL_CCR_TTL_SECONDS overrides it (see _mcp_session_ttl below): the plugin
+# ships FURL_CCR_TTL_SECONDS=86400 via .mcp.json, and before the env was
+# honored here, MCP-tool-stored entries silently expired at 1 h while
+# hook-compressed entries in the very same per-project store lived 24 h.
 MCP_SESSION_TTL = 3600
+
+
+def _mcp_session_ttl() -> int:
+    """Effective TTL (seconds) for entries this server stores — env-aware.
+
+    ``FURL_CCR_TTL_SECONDS`` — the same knob the library store and the
+    plugin's .mcp.json use — wins when set to a valid positive integer, so
+    the plugin's 24 h retention governs MCP-tool writes exactly as it
+    governs the hook's. Unset/blank keeps the bare-server default
+    ``MCP_SESSION_TTL`` byte-identical to before env support existed.
+    Invalid values (non-integer, <= 0) log one WARNING and fall back to
+    ``MCP_SESSION_TTL`` — a bad env var must never crash or silently
+    reconfigure the server. Re-read from the environment per call (the
+    SEC-7 no-import-freeze discipline, same as ``_legend_enabled``).
+    """
+    raw_value = os.environ.get("FURL_CCR_TTL_SECONDS")
+    if raw_value is None or not raw_value.strip():
+        return MCP_SESSION_TTL
+    try:
+        ttl_seconds = int(raw_value)
+    except ValueError:
+        logger.warning(
+            "FURL_CCR_TTL_SECONDS must be a positive integer number of seconds, "
+            "got %r; using %s",
+            raw_value,
+            MCP_SESSION_TTL,
+        )
+        return MCP_SESSION_TTL
+    if ttl_seconds <= 0:
+        logger.warning(
+            "FURL_CCR_TTL_SECONDS must be greater than 0, got %s; using %s",
+            ttl_seconds,
+            MCP_SESSION_TTL,
+        )
+        return MCP_SESSION_TTL
+    return ttl_seconds
 
 
 def _default_store_backend_factory() -> Any:
@@ -764,16 +804,19 @@ class FurlMCPServer:
 
         Returns the same instance the compress path uses so retrieval can
         see content compressed in-process. The singleton's config is fixed on
-        FIRST init, so this passes ``default_ttl=MCP_SESSION_TTL``: the
-        pipeline run inside ``_compress_content`` persists dropped rows under
-        the marker hash embedded in the compressed text WITHOUT an explicit
-        ttl, and under the store's stock default (1800 s since Engine P0-3;
-        300 s when this fix landed) those rows expired mid-session while the
-        wrapper hash (stored with ``ttl=MCP_SESSION_TTL``) advertised session
-        persistence. Sharing the session TTL as the store default keeps both
-        retrieval surfaces alive for the same window — and at 3600 s the MCP
-        store stays at least as durable as the library default. The compress
-        path still passes its own per-entry ``ttl`` at store time.
+        FIRST init, so this passes ``default_ttl=_mcp_session_ttl()`` — the
+        env-aware session TTL (FURL_CCR_TTL_SECONDS when set and valid, else
+        ``MCP_SESSION_TTL``): the pipeline run inside ``_compress_content``
+        persists dropped rows under the marker hash embedded in the
+        compressed text WITHOUT an explicit ttl, and under the store's stock
+        default (1800 s since Engine P0-3; 300 s when this fix landed) those
+        rows expired mid-session while the wrapper hash (stored with the
+        session TTL) advertised session persistence. Sharing the session TTL
+        as the store default keeps both retrieval surfaces alive for the same
+        window — and at the 3600 s fallback the MCP store stays at least as
+        durable as the library default. The compress path still passes its
+        own per-entry ``ttl`` at store time — the same ``_mcp_session_ttl()``
+        value, so wrapper hash and dropped rows stay in lockstep.
 
         Backend (Engine P1-7): the MCP deployment defaults to the durable
         SQLite backend so originals survive a server restart and sub-agent
@@ -793,7 +836,7 @@ class FurlMCPServer:
         # read tools would serve the process-global singleton while the hook
         # wrote to the per-project store, so every retrieve would loud-miss.
         # resolve_* returns None when no namespace is active, leaving the
-        # singleton path (its MCP_SESSION_TTL + durable backend) exactly as
+        # singleton path (its session TTL + durable backend) exactly as
         # before — so in-process tests that set no namespace are unaffected.
         namespace_store = resolve_ccr_namespace_store()
         if namespace_store is not None:
@@ -801,7 +844,7 @@ class FurlMCPServer:
 
         if self._local_store is None:
             self._local_store = get_compression_store(
-                default_ttl=MCP_SESSION_TTL,
+                default_ttl=_mcp_session_ttl(),
                 backend=_default_store_backend(),
             )
         return self._local_store
@@ -829,9 +872,14 @@ class FurlMCPServer:
         # the pipeline: compress() persists marker-hash dropped rows through
         # its own no-arg get_compression_store() call, and the singleton's
         # default TTL is fixed on first init. Initializing here first
-        # guarantees those embedded-marker entries carry MCP_SESSION_TTL
-        # rather than the 1800 s pipeline default, which would silently
-        # expire granular retrieval 30 minutes into a session-long window.
+        # guarantees those embedded-marker entries carry the session TTL
+        # (env-aware ``_mcp_session_ttl``) rather than the 1800 s pipeline
+        # default, which would silently expire granular retrieval 30 minutes
+        # into a session-long window. Under an active NAMESPACE store the
+        # default is env-derived at construction instead (see
+        # compression_store._build_namespace_store) — with
+        # FURL_CCR_TTL_SECONDS set, the plugin's shipped configuration, both
+        # surfaces carry the same env TTL there too.
         store = self._get_local_store()
 
         # Section filtering (non-empty patterns) → run-by-run path. Delegated
@@ -887,7 +935,7 @@ class FurlMCPServer:
                 original_tokens=input_tokens,
                 compressed_tokens=output_tokens,
                 compression_strategy="mcp_compress",
-                ttl=MCP_SESSION_TTL,
+                ttl=_mcp_session_ttl(),
                 require_durable=True,
             )
         except DurableWriteError as exc:
@@ -923,6 +971,17 @@ class FurlMCPServer:
                 ),
             }
 
+        note = (
+            f"Original stored with hash={hash_key}. "
+            f"Use mcp__furl__{CCR_TOOL_NAME} to get full content later."
+        )
+        if savings_pct == 0:
+            # A bare "0%" reads as a malfunction. Name the engine's own
+            # reason(s): the raw transforms_applied strings (e.g. a router
+            # noop tag), rendered generically — their taxonomy belongs to
+            # the router, not to this handler.
+            note += f" No token savings on this content — engine transforms: {strategy}."
+
         return {
             "compressed": compressed_content,
             "hash": hash_key,
@@ -931,7 +990,7 @@ class FurlMCPServer:
             "tokens_saved": tokens_saved,
             "savings_percent": savings_pct,
             "transforms": result.transforms_applied,
-            "note": f"Original stored with hash={hash_key}. Use mcp__furl__{CCR_TOOL_NAME} to get full content later.",
+            "note": note,
         }
 
     def _compress_filtered(
@@ -983,6 +1042,18 @@ class FurlMCPServer:
         tokens_saved = max(0, total_input - total_output)
         savings_pct = round(tokens_saved / total_input * 100, 1) if total_input > 0 else 0
 
+        note = (
+            f"Pattern-filtered compression: {len(hashes)} eligible run(s) compressed, "
+            f"protected lines passed through verbatim. Retrieve any run via "
+            f"mcp__furl__{CCR_TOOL_NAME} with its hash."
+        )
+        if savings_pct == 0:
+            # Same zero-savings honesty as the single-unit path: name the
+            # engine's raw per-run transform strings rather than shipping an
+            # unexplained 0%.
+            strategy = ", ".join(transforms) if transforms else "passthrough"
+            note += f" No token savings on this content — engine transforms: {strategy}."
+
         return {
             "compressed": rendered,
             "mode": mode.value,
@@ -994,11 +1065,7 @@ class FurlMCPServer:
             "tokens_saved": tokens_saved,
             "savings_percent": savings_pct,
             "transforms": transforms,
-            "note": (
-                f"Pattern-filtered compression: {len(hashes)} eligible run(s) compressed, "
-                f"protected lines passed through verbatim. Retrieve any run via "
-                f"mcp__furl__{CCR_TOOL_NAME} with its hash."
-            ),
+            "note": note,
         }
 
     async def _search_all_content(self, query: str) -> dict[str, Any]:
@@ -1461,8 +1528,9 @@ class FurlMCPServer:
                     description=(
                         "List stored CCR entries, newest first — a directory of what "
                         "furl_compress / furl_read have stashed this session. Returns per "
-                        "entry: hash, created-at, expires_in (humanized time left before the "
-                        'retention TTL evicts it, e.g. "23h"), size (characters), '
+                        "entry: hash, created-at, age (humanized time since storage), ttl "
+                        "(the entry's retention window), expires_in (humanized time left "
+                        'before the TTL evicts it, e.g. "23h"), size (characters), '
                         "content-kind (the originating tool, when known), and a short "
                         "preview. Page with limit/offset. Use furl_retrieve with a hash for "
                         "the full original, or furl_search to find by content."
@@ -2027,6 +2095,12 @@ class FurlMCPServer:
             {
                 "hash": hash_key,
                 "created_at": entry.created_at,
+                # age + ttl alongside expires_in: "58m left" alone is
+                # ambiguous — a fresh 1 h entry and a 23 h-old 24 h entry
+                # read identically. (_humanize_ttl_remaining is a plain
+                # whole-seconds humanizer, reused for all three.)
+                "age": _humanize_ttl_remaining(now - entry.created_at),
+                "ttl": _humanize_ttl_remaining(entry.ttl),
                 "expires_in": _humanize_ttl_remaining(entry.ttl - (now - entry.created_at)),
                 "size": len(entry.original_content),
                 "content_kind": entry.tool_name,
@@ -2265,7 +2339,7 @@ class FurlMCPServer:
                 original_tokens=token_estimate,
                 compressed_tokens=5,
                 tool_name="furl_read",
-                ttl=MCP_SESSION_TTL,
+                ttl=_mcp_session_ttl(),
                 require_durable=True,
             )
         except DurableWriteError as exc:
