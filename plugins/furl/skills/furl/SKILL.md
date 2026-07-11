@@ -1,7 +1,7 @@
 ---
 name: furl
 description: How the Furl context-compression plugin works — the furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list MCP tools, the PostToolUse hook that shrinks large tool outputs, the <<ccr:HASH>> retrieval flow, and the FURL_* environment knobs to tune or disable it. Use when the user asks what Furl is doing, why a tool output looks compressed or contains <<ccr:...>> markers, how to retrieve original content, how to tune compression thresholds, or how to turn the hook off.
-version: 1.0.2
+version: 1.0.3
 ---
 
 # Furl — context compression for Claude Code
@@ -27,9 +27,9 @@ every dropped byte **retrievable on demand**. It ships two things to this sessio
 - `furl_stats` — session compression statistics (compressions, tokens saved, cost).
 - `furl_purge` — permanently erase stored originals: one hash, or all of them. No undo.
 - `furl_search` — find stored originals by a case-insensitive content substring; returns a hash + preview per hit.
-- `furl_list` — list stored entries, newest first, for paging through what's been compressed this session.
+- `furl_list` — list stored entries, newest first, for paging through what's been compressed this session. Each entry carries an `expires_in` — humanized time left before its retention TTL evicts it (e.g. `23h`).
 
-A seventh tool, `furl_read`, exists but is off by default — enable with `FURL_MCP_READ=1`.
+A seventh tool, `furl_read`, exists but is off by default — enable with `FURL_MCP_READ=1` (see [The `furl_read` tool](#the-furl_read-tool-opt-in) below).
 
 ## When the hook fires
 
@@ -53,9 +53,13 @@ Instead of shrinking large low-redundancy content, Furl offloads it to a local
 store and leaves a marker like `<<ccr:a1b2c3>>` in its place.
 
 When you need the full content behind a marker, **call `furl_retrieve` with that
-hash** — it returns the byte-exact original (within the retention window). The hook
-and the `furl` MCP server share one durable SQLite store (`~/.furl/ccr.sqlite3`),
-so markers the hook creates are retrievable through `furl_retrieve`.
+hash** — it returns the byte-exact original, as long as the entry is still within
+its retention window. **The plugin keeps offloaded originals for 24 hours by
+default (`FURL_CCR_TTL_SECONDS=86400`); lower it to expire them sooner or raise it
+for a longer window.** After that the entry expires and a retrieve is a loud miss,
+never a silent wrong answer. The hook and the `furl` MCP server share one durable
+SQLite store (`~/.furl/ccr.sqlite3`), so markers the hook creates are retrievable
+through `furl_retrieve`.
 
 When a marker offloaded a large JSON array (an `_ccr_summary` preview shows its
 schema, per-field value histograms, and numeric ranges), you usually want a
@@ -66,6 +70,30 @@ those rows, or `select_field=<a numeric field>, select_min=…, select_max=…` 
 range window (add `fields=[…]` to project columns, `limit` to cap). The slice is
 tiny compared to the full original, so locality and anomaly questions are
 answerable without pulling megabytes back into context.
+
+## The `furl_read` tool (opt-in)
+
+`furl_read` is a seventh MCP tool, **off by default**. It reads a file with
+session caching: the first read returns the full content and caches it, and later
+reads of the *same unchanged file* return a lightweight `<<ccr:HASH>>` marker
+(~20 tokens instead of the whole file) — pull the full body back with
+`furl_retrieve` on the hash if you need it. Pass `fresh: true` to bypass the cache
+(after a context compaction, inside a sub-agent, or whenever you need
+guaranteed-current bytes).
+
+**Why it's off by default:** it is a filesystem-reading tool. Reads are jailed to
+`FURL_WORKSPACE_DIR` (and, when that is unset, to the MCP server's working
+directory), and a caching layer over file reads can serve stale bytes if a file
+changes out of band. Rather than silently shadow the built-in `Read` tool, Furl
+ships it opt-in so enabling the extra read surface is a deliberate choice.
+
+**How to enable:** set `FURL_MCP_READ=1` (`on`/`true`/`yes`/`enabled`) in the
+plugin's `.mcp.json` env or your shell, then restart the session. Once enabled,
+call it like the built-in Read:
+
+```
+furl_read(file_path="/abs/path/to/big_file.py")
+```
 
 ## Tuning (environment variables)
 
@@ -80,7 +108,7 @@ Set these in the plugin's `hooks/hooks.json` / `.mcp.json` env, or your shell:
 | `FURL_HOOK_MODE` | `normal` | `aggressive` also compresses code in the blob and squeezes smaller outputs; `normal` keeps the default behavior. |
 | `FURL_HOOK_VERBOSE` | off | `1`/`true` prints a one-line savings summary per compression to stderr (`furl: Bash 12.4 KB -> 0.3 KB  -97%`). |
 | `FURL_CCR_BACKEND` | `sqlite` (set by the plugin) | CCR store backend. Must match between the hook and the `furl` server for retrieval to work. |
-| `FURL_CCR_TTL_SECONDS` | `86400` (set by the plugin) | How long offloaded originals stay retrievable. |
+| `FURL_CCR_TTL_SECONDS` | `86400` = 24h (set by the plugin) | How long offloaded originals stay retrievable before they expire. Lower to reclaim disk sooner; raise for a longer retrieval window. |
 | `FURL_CCR_PROJECT_DIR` | auto, per project (set by the plugin) | Scopes the CCR store to the current project so one machine-global `~/.furl` store never surfaces or evicts another project's entries. Derived automatically from the project root; set to `""` to share one store across all projects — this is also how you read a pre-1.0 global store after upgrading. |
 
 The full `FURL_*` reference (workspace dir, store paths, row caps, circuit breaker)

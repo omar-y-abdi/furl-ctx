@@ -255,31 +255,37 @@ _READ_ENABLED = os.environ.get("FURL_MCP_READ", "off").lower().strip() in (
 # SDK's server-level ``instructions=`` parameter (surfaced to the host in
 # the initialize response) instead of per-table in-band bytes: zero
 # wire-byte change to any table render — the grammar characterization
-# suites stay untouched — at an amortized conversation-scope cost of ~190
+# suites stay untouched — at an amortized conversation-scope cost of ~250
 # o200k tokens. This is owner-approved alternative (b) of
 # QUESTIONS-FOR-USER.md item 15; the original once-per-conversation carrier
 # (``CCRToolInjector.inject_system_instructions``) was excised in SIMP-4,
 # leaving server-level instructions as the out-of-band channel.
+#
+# Agent-first ordering (a fresh agent must decode this cold): a 3-part
+# plain-English summary (what the table format IS, what a ``<<ccr:HASH>>``
+# marker means, the retrieve-before-reasoning rule) → ONE worked micro-example
+# (input line → compact row → read-back) → THEN the compact grammar reference.
 #
 # Every decode claim below is grammar-verified against the reference
 # decoder ``furl_ctx/transforms/csv_schema_decoder.py`` (the documented
 # consumer contract for the Rust ``formatter.rs`` output); the executable
 # pins live in ``tests/test_mcp_server_instructions.py``. The highest
 # comprehension risk is ``%k``: a cell ``53`` under ``time_ms:float%3``
-# decodes to 0.053, NOT 53.
+# decodes to 0.053, NOT 53 — the worked example leads with exactly that.
 CSV_DECODE_LEGEND = (
-    "Compacted tables: `[N]{col:type,...}` = N rows; body lines = CSV rows "
-    "of the remaining columns. "
-    "type=V: constant V. "
-    "int=B+S: row i = B+S*i (i from 0). "
-    "float%k: cell/10^k (53 at %3 = 0.053, not 53). "
-    "string~: full ISO timestamp first, then ±seconds[/tz] deltas. "
-    "string^ + __affix:col=P,S: value = P+cell+S. "
-    "string@ + __head:col=<d>h0,h1: cell 1<d>tail = h1+tail. "
-    "__dict:col=v0,v1: cells index the list. "
-    "= alone repeats the cell above. "
-    "__null__ null, __missing__ absent key, ? nullable. "
-    "<<ccr:HASH>> markers: dropped rows; retrieve via furl_retrieve."
+    # 1) Plain-English summary: what the format is, what a marker means, and
+    #    the retrieve-before-reasoning rule.
+    "Furl packs long tool outputs into small tables — read one before you reason. "
+    "Header `[N]{col:type,...}` = N rows; later lines give each row's non-constant columns as CSV. "
+    "`<<ccr:HASH>>` = rows offloaded, not lost; furl_retrieve it first — never guess dropped data. "
+    # 2) One worked micro-example: input line → compact row → read it back.
+    "Example: `[1]{lvl:string=INFO,ms:float%3}` + line `53` = {lvl:INFO, ms:0.053} — "
+    "constant col re-attaches, float%3 = ×10^-3 (53 -> 0.053, not 53). "
+    # 3) Compact grammar reference.
+    "GRAMMAR: type=V constant V; int=B+S row i=B+S*i (0-based); float%k cell/10^k; "
+    "string~ ISO ts then ±sec[/tz] deltas; string^ +__affix:col=P,S value=P+cell+S; "
+    "string@ +__head:col=<d>h0,h1 cell 1<d>tail=h1+tail; __dict:col=v0,v1 cell indexes it; "
+    "= repeats cell above; __null__ null, __missing__ absent key, ? nullable."
 )
 
 
@@ -626,6 +632,23 @@ def _bounded(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+def _humanize_ttl_remaining(seconds: float) -> str:
+    """Humanize seconds-until-expiry as a short ``23h`` / ``45m`` / ``30s`` string.
+
+    Rounds to whole seconds first (killing sub-second aging jitter, so a
+    freshly stored 24h entry reads ``24h`` and not ``23h``), then floors to the
+    largest whole unit — an "at least this long left" read. Non-positive input
+    clamps to ``0s``: an entry at or past expiry is dropped from furl_list by
+    ``_live_entries`` before this runs, so the clamp is only a defensive floor
+    against clock skew."""
+    s = max(0, round(seconds))
+    if s >= 3600:
+        return f"{s // 3600}h"
+    if s >= 60:
+        return f"{s // 60}m"
+    return f"{s}s"
 
 
 def _match_preview(original: str, needle_lower: str) -> str:
@@ -1432,10 +1455,11 @@ class FurlMCPServer:
                     description=(
                         "List stored CCR entries, newest first — a directory of what "
                         "furl_compress / furl_read have stashed this session. Returns per "
-                        "entry: hash, created-at, size (characters), content-kind (the "
-                        "originating tool, when known), and a short preview. Page with "
-                        "limit/offset. Use furl_retrieve with a hash for the full original, "
-                        "or furl_search to find by content."
+                        "entry: hash, created-at, expires_in (humanized time left before the "
+                        'retention TTL evicts it, e.g. "23h"), size (characters), '
+                        "content-kind (the originating tool, when known), and a short "
+                        "preview. Page with limit/offset. Use furl_retrieve with a hash for "
+                        "the full original, or furl_search to find by content."
                     ),
                     inputSchema={
                         "type": "object",
@@ -1937,12 +1961,14 @@ class FurlMCPServer:
     def _list_entries(self, limit: int, offset: int) -> dict[str, Any]:
         """Blocking newest-first entry listing (runs off the loop)."""
         live = self._live_entries()
+        now = time.time()
         total = len(live)
         page = live[offset : offset + limit]
         entries = [
             {
                 "hash": hash_key,
                 "created_at": entry.created_at,
+                "expires_in": _humanize_ttl_remaining(entry.ttl - (now - entry.created_at)),
                 "size": len(entry.original_content),
                 "content_kind": entry.tool_name,
                 "preview": _list_preview(entry.original_content),

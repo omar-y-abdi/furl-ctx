@@ -10,7 +10,7 @@
 </pre></div>
 
 
-<p align="center"><strong>60–95% fewer tokens on redundant workloads · a Claude Code plugin · local-first · reversible</strong></p>
+<p align="center"><strong>Typically 0–54% fewer tokens on real high-entropy content · up to 95% on repetitive logs/fixtures (<a href="#proof">honest read</a>) · a Claude Code plugin · local-first · reversible</strong></p>
 
 <p align="center">
   <a href="https://github.com/omar-y-abdi/furl/releases/latest"><img src="https://img.shields.io/github/v/release/omar-y-abdi/furl?sort=semver&color=blue" alt="Release"></a>
@@ -27,6 +27,8 @@
 ---
 
 Furl compresses everything your Claude Code agent reads — tool outputs, logs, web fetches, RAG chunks — before it reaches the model. Same answers, a fraction of the tokens. Every dropped byte stays retrievable on demand.
+
+The name is nautical: to *furl* is to roll up a sail — Furl rolls long context up out of the model's way and keeps it on a line, ready to *unfurl* (retrieve) the instant you need it.
 
 <p align="center">
   <img src="FurlDemo-Fast.gif" alt="Furl in action" width="820">
@@ -54,7 +56,9 @@ Tuning, disabling (`FURL_HOOK_ENABLED=0`), and the full reference: [`plugins/fur
 
 ## Proof
 
-Token reduction on real captured data — reproducible, inputs committed under `benchmarks/data/`. Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR):
+Token reduction on real captured data — reproducible, inputs committed under `benchmarks/data/`. Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR). Read every figure below as a **best-case ceiling**, not a typical — the honest read follows.
+
+*Best-case ceilings — low-entropy dev fixtures (the compressor's happy path):*
 
 | Dataset       | Items | Before | After  | Reduction | Info retention |
 |---------------|------:|-------:|-------:|----------:|---------------:|

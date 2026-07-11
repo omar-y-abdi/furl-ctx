@@ -1,7 +1,8 @@
 """
 Furl - The context compression layer for AI agents.
 
-60-95% fewer tokens on redundant workloads, reversible via CCR.
+Typically 0-54% fewer tokens on real high-entropy content; up to 95% on
+repetitive logs/fixtures (best-case ceiling). Reversible via CCR.
 
 Furl provides:
 - Smart compression of tool outputs (keeps errors, anomalies, relevant items)

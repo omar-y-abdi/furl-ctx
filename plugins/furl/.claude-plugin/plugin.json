@@ -1,6 +1,6 @@
 {
   "name": "furl",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Furl context compression for Claude Code: bundles the Furl MCP server (furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list) and a fail-open PostToolUse hook that shrinks large tool outputs before they land in context. Originals stay byte-exactly retrievable via <<ccr:HASH>> markers.",
   "author": {
     "name": "Omar Y. Abdi",

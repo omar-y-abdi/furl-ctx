@@ -96,8 +96,10 @@ back to its original inline (bulk recovery), leaving unresolvable markers in pla
 ## Redact & purge — security
 
 Offloaded content is stored **byte-exact** for later `retrieve()`, so by default a
-secret inside a tool output is stored and stays recoverable. Two opt-in surfaces
-control that:
+secret inside a tool output is stored and stays recoverable — unencrypted, in a
+local per-project SQLite file under `~/.furl` (`0600` perms). See
+[SECURITY.md](SECURITY.md) → "Stored originals: at-rest posture" for the full
+threat model. Two opt-in surfaces control that:
 
 **Redactor (fail-closed).** Pass a pure `redactor: str -> str` on `CompressConfig`
 to scrub content **before** it is compressed or stored. Redaction runs **outside**
@@ -131,6 +133,29 @@ from furl_ctx import purge
 
 purge(hash)  # True if an entry was deleted, False if already gone
 ```
+
+## `furl_read` — opt-in cached file reads (MCP)
+
+The MCP server exposes a seventh tool, `furl_read`, **off by default**. It reads a
+file with session caching: the first read returns full content and caches it;
+later reads of the *same unchanged file* return a lightweight `<<ccr:HASH>>` marker
+(~20 tokens instead of the whole file), and `furl_retrieve` on that hash returns
+the full body. A `fresh: true` argument forces a cache-bypassing read (use after a
+context compaction, in a sub-agent, or when you need guaranteed-current bytes).
+
+It ships **off** because it is a filesystem-reading surface: reads are jailed to
+`FURL_WORKSPACE_DIR` (or the server's working directory when that is unset), and a
+cache over file reads can serve stale bytes when a file changes out of band. Rather
+than silently shadow the host's built-in read tool, Furl makes enabling the extra
+read surface a deliberate choice. Turn it on with `FURL_MCP_READ=1`
+(`on`/`true`/`yes`/`enabled`):
+
+```bash
+FURL_MCP_READ=1 python3 -m furl_ctx.ccr.mcp_server
+```
+
+Once enabled, call `furl_read(file_path="/abs/path/to/file.py")` in place of the
+host's built-in read for repeat-read token savings.
 
 ## How it works
 
@@ -211,7 +236,7 @@ Every live `FURL_*` knob. All are optional — the defaults are the shipped beha
 | Variable | Default | What it does |
 |----------|---------|--------------|
 | `FURL_WORKSPACE_DIR` | `~/.furl` | Workspace root: home of the durable CCR SQLite store and the shared session-stats file. Also the **security boundary for `furl_read`** — file reads are jailed to it (the jail alone defaults to the server's working directory when unset). |
-| `FURL_CCR_TTL_SECONDS` | `1800` | CCR retention window in seconds — how long "reversible" lasts before an entry expires (an expired/evicted retrieval is a loud miss, never silent). Positive integer; invalid values warn and fall back. |
+| `FURL_CCR_TTL_SECONDS` | `1800` (30 min) | CCR retention window in seconds — how long "reversible" lasts before an entry expires (an expired/evicted retrieval is a loud miss, never silent). Positive integer; invalid values warn and fall back. The Claude Code plugin overrides this to `86400` (24h) via its MCP env. |
 | `FURL_CCR_BACKEND` | unset (in-memory; the MCP server defaults to `sqlite`) | CCR store backend: `memory`, `sqlite`, or the name of a third-party `furl_ctx.ccr_backend` entry point. Explicitly selecting a backend that cannot be loaded **raises at startup** — no silent downgrade to memory. |
 | `FURL_CCR_BACKEND_OPTS` | unset (`{}`) | JSON object of keyword arguments passed to a third-party backend factory, e.g. `{"url": "..."}`. |
 | `FURL_CCR_SQLITE_PATH` | `<workspace>/ccr.sqlite3` | File path of the durable SQLite CCR store. |

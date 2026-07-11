@@ -1,6 +1,6 @@
 # Furl
 
-> Context compression layer for AI agents. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, 60–95% fewer tokens on redundant workloads. Python library and MCP server. Apache 2.0, local-first.
+> Context compression layer for AI agents. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, typically 0–54% fewer tokens on real high-entropy content — up to 95% on repetitive logs/fixtures (best-case ceiling). Python library and MCP server. Apache 2.0, local-first.
 
 Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compress`, `furl_retrieve`, `furl_stats` tools). Both use the same compression pipeline: per-content-type compressors (JSON, search results, logs, diffs) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original on demand, within the configured retention window (default TTL 1800 s; entries are also capacity-evicted oldest-first, and an expired/evicted retrieval is a loud miss, never silent).
 

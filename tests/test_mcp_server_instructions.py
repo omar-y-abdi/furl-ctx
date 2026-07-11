@@ -109,6 +109,32 @@ def test_legend_names_every_shipped_encoding() -> None:
         assert needle in CSV_DECODE_LEGEND, f"legend lost its {needle!r} claim"
 
 
+def test_legend_is_agent_first_structured() -> None:
+    # The restructure (agent-first): a plain-English summary and ONE worked
+    # example come BEFORE the compact grammar reference, so a fresh agent can
+    # decode a table without reverse-engineering the grammar first.
+    legend = CSV_DECODE_LEGEND
+    assert "GRAMMAR:" in legend, "grammar reference section is missing"
+    grammar_at = legend.index("GRAMMAR:")
+    # Plain-English summary + worked example precede the grammar block.
+    assert legend.index("read one before you reason") < grammar_at
+    assert legend.index("Example:") < grammar_at
+    # Marker meaning + retrieve-before-reasoning rule are stated up front.
+    assert legend.index("furl_retrieve") < grammar_at
+    assert "offloaded, not lost" in legend
+    # The critical %k read-back is in the worked example, before the grammar.
+    assert legend.index("0.053, not 53") < grammar_at
+
+
+def test_legend_stays_within_token_budget() -> None:
+    # Server-level instructions cost tokens on every conversation. The
+    # agent-first rewrite must stay within ~+30% of the original ~190
+    # o200k-token legend (a guard against future bloat).
+    tiktoken = pytest.importorskip("tiktoken")
+    enc = tiktoken.get_encoding("o200k_base")
+    assert len(enc.encode(CSV_DECODE_LEGEND)) <= 255
+
+
 # ─── Grammar pins: every legend claim decoded by the reference decoder ──────
 #
 # The legend is prose; these decode fixtures make each claim executable.

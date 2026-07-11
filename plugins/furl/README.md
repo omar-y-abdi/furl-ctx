@@ -57,6 +57,8 @@ Code launches with a minimal environment (a login shell that lacks `uv` is the o
 failure mode — install [`uv`](https://docs.astral.sh/uv/) and it resolves). `exec`
 hands stdio and signals straight to the server. `FURL_CCR_BACKEND=sqlite` makes the
 CCR store durable at `~/.furl/ccr.sqlite3`, so originals survive across processes.
+`FURL_CCR_TTL_SECONDS=86400` keeps each offloaded original retrievable for 24 hours
+(the plugin default); raise or lower it to widen or shrink the retention window.
 
 ### Compression hook (`hooks/hooks.json` + `hooks/compress_tool_output.py`)
 

@@ -19,7 +19,7 @@ pytest.importorskip("mcp")
 import mcp.types as mt  # noqa: E402
 
 from furl_ctx.cache.compression_store import reset_compression_store  # noqa: E402
-from furl_ctx.ccr.mcp_server import FurlMCPServer  # noqa: E402
+from furl_ctx.ccr.mcp_server import FurlMCPServer, _humanize_ttl_remaining  # noqa: E402
 
 # Hook-safe split literal (no verbatim secret in source).
 _API_KEY = "sk" + "-" + "abcdefghijklmnopqrstuvwx"
@@ -216,3 +216,46 @@ async def test_list_bad_offset_errors(server) -> None:
 async def test_list_bad_limit_errors(server) -> None:
     env = _envelope(await server._handle_list({"limit": 0}))
     assert env["error"] == "limit must be >= 1, got 0"
+
+
+# ─── furl_list: expires_in (TTL visibility) ────────────────────────────────
+
+
+async def test_list_entry_carries_humanized_expires_in(server) -> None:
+    # Pin created_at (aged 30 min) and ttl (24h) directly on the live entry so
+    # the remaining ~23.5h floors to a stable "23h" independent of test timing.
+    now = time.time()
+    _seed(server, "a" * 24, "body", created_at=now - 1800)
+    server._get_local_store()._backend.get("a" * 24).ttl = 86400
+    env = _envelope(await server._handle_list({}))
+    entry = env["entries"][0]
+    assert entry["expires_in"] == "23h"
+
+
+async def test_list_expires_in_reflects_short_ttl(server) -> None:
+    # A short custom TTL surfaces in minutes, not hours.
+    now = time.time()
+    _seed(server, "b" * 24, "body", created_at=now)
+    server._get_local_store()._backend.get("b" * 24).ttl = 1530  # 25.5 min
+    env = _envelope(await server._handle_list({}))
+    assert env["entries"][0]["expires_in"] == "25m"
+
+
+@pytest.mark.parametrize(
+    "seconds, expected",
+    [
+        (86400, "24h"),  # the plugin's 24h default, fresh
+        (82800, "23h"),
+        (84600, "23h"),  # 23.5h floors to 23h ("at least")
+        (3600, "1h"),
+        (3599, "59m"),
+        (90, "1m"),
+        (60, "1m"),  # exact minute boundary
+        (59, "59s"),
+        (30, "30s"),
+        (0, "0s"),
+        (-5, "0s"),  # defensive clamp — never negative
+    ],
+)
+def test_humanize_ttl_remaining(seconds: float, expected: str) -> None:
+    assert _humanize_ttl_remaining(seconds) == expected

@@ -64,4 +64,42 @@ Furl includes several security features:
 - **Input validation**: All inputs are validated before processing
 - **Safe defaults**: Security-conscious defaults out of the box
 
+## Stored originals: at-rest posture
+
+Furl's reversibility works by keeping the **original** content: when the
+compression hook or `furl_compress` offloads a payload, the byte-exact original is
+written to a local SQLite store — `~/.furl/ccr.sqlite3`, or a per-project
+`ccr-ns-<hash>.sqlite3` file in the same directory. Be explicit about what that
+means:
+
+- **It is not encrypted.** The store is a plain SQLite database on your local
+  disk. The database file is created `0600` (owner read/write only), its parent
+  directory `0700`, and the WAL/SHM sidecars inherit the database file's
+  permissions — but that is filesystem access control, **not** encryption at rest.
+  Anyone who can read your user account's files can read the stored originals.
+- **Whatever is in a tool output lands there byte-exact.** If a `Bash` command
+  prints an API key, or a log line carries a bearer token, that value is stored
+  verbatim and stays retrievable for the retention window (`FURL_CCR_TTL_SECONDS`
+  — 30 min for the library, 24h under the Claude Code plugin). The credential
+  redaction described above scrubs *retrieval-event log lines* only, **not** the
+  stored original.
+
+Mitigations that exist **today** (there is no encryption-at-rest feature — do not
+assume one):
+
+- **Opt-in redactor.** Pass a `redactor: str -> str` on `CompressConfig` to scrub
+  content **before** it is compressed or stored, so a later `retrieve()` returns
+  the already-redacted original. It is fail-closed: a raising redactor aborts
+  `compress()` rather than storing unredacted bytes. See
+  [LIBRARY.md → "Redact & purge — security"](LIBRARY.md#redact--purge--security).
+- **`furl_purge` / `purge(hash)`.** Permanently delete a stored original (one hash,
+  or all) — the companion for content captured before a redaction policy existed.
+- **TTL expiry.** Entries expire after `FURL_CCR_TTL_SECONDS` and become an
+  unrecoverable (loud) miss; shorten it to hold sensitive originals for less time.
+- **Per-project isolation.** By default the store is scoped per project, so one
+  project's entries never surface in another's `furl_search` / `furl_list` /
+  `furl_retrieve`. Setting `FURL_CCR_PROJECT_DIR=""` disables that scoping and
+  shares one global store across all projects — convenient, but it widens who can
+  retrieve a given original, so leave it scoped when handling sensitive content.
+
 Thank you for helping keep Furl and its users safe!
