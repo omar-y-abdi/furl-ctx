@@ -63,7 +63,7 @@ through `uv`, which fetches Furl on first use — no prior install:
 ```json
 { "mcpServers": { "furl": {
   "command": "sh",
-  "args": ["-lc", "exec uv run --no-project --with 'furl-ctx[mcp]==1.0.2' python -m furl_ctx.ccr.mcp_server"],
+  "args": ["-lc", "exec uv run --no-project --with 'furl-ctx[mcp]==1.0.3' python -m furl_ctx.ccr.mcp_server"],
   "env": { "FURL_CCR_BACKEND": "sqlite", "FURL_CCR_TTL_SECONDS": "86400" }
 }}}
 ```
@@ -75,7 +75,7 @@ hands stdio and signals straight to the server. `FURL_CCR_BACKEND=sqlite` makes 
 CCR store durable at `~/.furl/ccr.sqlite3`, so originals survive across processes.
 `FURL_CCR_TTL_SECONDS=86400` keeps each offloaded original retrievable for 24 hours
 (the plugin default); raise or lower it to widen or shrink the retention window. The
-`furl-ctx[mcp]==1.0.2` pin is deterministic — every launch resolves the same wheel instead
+`furl-ctx[mcp]==1.0.3` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 
 ### Compression hook (`hooks/hooks.json` + `hooks/compress_tool_output.py`)
