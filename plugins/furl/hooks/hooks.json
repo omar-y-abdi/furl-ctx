@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -lc 'uv run --no-project --with \"furl-ctx[mcp]==1.1.0\" python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py\" || true'",
+            "command": "sh -lc 'uv run --no-project --with \"furl-ctx[mcp]==1.2.0\" python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py\" || true'",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -lc 'case \"$(printf %s \"$FURL_PRETOOL_PIPE\" | tr \"[:upper:]\" \"[:lower:]\" | tr -d \"[:space:]\")\" in 1|true|yes|on|enabled) uv run --no-project --with \"furl-ctx[mcp]==1.1.0\" python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pretool_pipe.py\" ;; esac; true'",
+            "command": "sh -lc 'case \"$(printf %s \"$FURL_PRETOOL_PIPE\" | tr \"[:upper:]\" \"[:lower:]\" | tr -d \"[:space:]\")\" in 1|true|yes|on|enabled) uv run --no-project --with \"furl-ctx[mcp]==1.2.0\" python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pretool_pipe.py\" ;; esac; true'",
             "timeout": 30
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c '[ \"$FURL_STATUS_LINE\" = \"0\" ] || printf \"%s\" \"{\\\"systemMessage\\\": \\\"furl 1.1.0 · engine furl-ctx 1.1.0 — PostToolUse compression armed; store: per-project (~/.furl); verify: furl_stats\\\"}\"; true'",
+            "command": "sh -c '[ \"$FURL_STATUS_LINE\" = \"0\" ] || printf \"%s\" \"{\\\"systemMessage\\\": \\\"furl 1.2.0 · engine furl-ctx 1.2.0 — PostToolUse compression armed; store: per-project (~/.furl); verify: furl_stats\\\"}\"; true'",
             "timeout": 5
           }
         ]

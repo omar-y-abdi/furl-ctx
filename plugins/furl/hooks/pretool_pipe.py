@@ -40,7 +40,7 @@ from pathlib import Path
 
 # The engine pin MUST match hooks.json's command pins (a test asserts this) so
 # the compressor resolves the SAME furl-ctx the rest of the plugin uses.
-_FURL_CTX_PIN = "furl-ctx[mcp]==1.1.0"
+_FURL_CTX_PIN = "furl-ctx[mcp]==1.2.0"
 
 # Transparency marker: prepended to the rewritten command (visible in the
 # transcript) AND used as the loop guard so an already-wrapped command is never
