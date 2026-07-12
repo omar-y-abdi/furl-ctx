@@ -93,12 +93,15 @@ until they agree:
 - **Library version** (`pyproject.toml` `project.version`): release-please bumps it on the
   release PR. release-please has **no updater that can rewrite a version embedded inside a
   shell command**, so hand-sync the `furl-ctx[mcp]==X.Y.Z` pins in
-  `plugins/furl/hooks/hooks.json` and `plugins/furl/.mcp.json` to the new version on that
-  same PR before merging.
+  `plugins/furl/hooks/hooks.json` and `plugins/furl/.mcp.json`, the same pin in the prose
+  examples of `plugins/furl/skills/furl/SKILL.md` and `plugins/furl/README.md`, and the
+  engine half of the baked SessionStart status line in `plugins/furl/hooks/hooks.json`, to
+  the new version on that same PR before merging.
 - **Plugin version** (`plugins/furl/.claude-plugin/plugin.json` `version`): bump it together
   with both `version` fields in `.claude-plugin/marketplace.json`, the `version:` in
-  `plugins/furl/skills/furl/SKILL.md` frontmatter, and the baked `furl <version> active`
-  string in the SessionStart hook of `plugins/furl/hooks/hooks.json`.
+  `plugins/furl/skills/furl/SKILL.md` frontmatter, and the plugin half of the baked
+  `furl <version> · engine furl-ctx <version>` string in the SessionStart hook of
+  `plugins/furl/hooks/hooks.json`.
 
 ## Development setup
 
@@ -109,6 +112,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
+
+`pytest` failing with a "build the extension first" message? `make test-python` builds the Rust extension then runs the suite in one step.
 
 ### Dev Containers
 

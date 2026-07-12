@@ -91,6 +91,84 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PY_VERSION }}
+      # Runs unconditionally (not gated behind needs.changes.outputs.code): llms.txt
+      # is agent-orientation content, not `.md`, so a PR that edits only llms.txt
+      # never trips the `code` path filter above — gating this step the same way
+      # would let a broken doc anchor land silently. Pure stdlib, no repo import,
+      # sub-second. Fails when llms.txt carries NO anchored doc links at all, so a
+      # bad edit that strips or malforms the last reference cannot pass vacuously.
+      # Keep in sync with tests/test_llms_txt_anchors.py, which runs the same check
+      # locally as part of the full gated suite — divergence between the two
+      # implementations is itself a bug.
+      - name: llms.txt anchor guard
+        shell: python
+        run: |
+          import re
+          import sys
+          from pathlib import Path
+
+          llms_txt = Path("llms.txt").read_text(encoding="utf-8")
+          # The files llms.txt links into by #anchor. Extend this tuple (and the
+          # mirrored tests/test_llms_txt_anchors.py) if llms.txt ever gains anchored
+          # links into another document — anchor_ref_re is derived from it, so refs
+          # to a new doc cannot be silently skipped by a forgotten regex edit.
+          doc_names = ("README.md", "LIBRARY.md")
+
+          heading_re = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+          slug_strip_re = re.compile(r"[^\w\- ]")
+          anchor_ref_re = re.compile(
+              "(" + "|".join(re.escape(name) for name in doc_names) + ")#([A-Za-z0-9_-]+)"
+          )
+
+
+          def github_slug(heading_text):
+              """Reproduce GitHub's heading-to-anchor slug algorithm."""
+              slug = heading_text.strip().lower()
+              slug = slug_strip_re.sub("", slug)
+              return slug.replace(" ", "-")
+
+
+          def anchor_slugs(markdown):
+              """Every anchor GitHub would generate for a document's headings."""
+              slugs = set()
+              seen = {}
+              in_fence = False
+              for line in markdown.splitlines():
+                  stripped = line.strip()
+                  if stripped.startswith("```") or stripped.startswith("~~~"):
+                      in_fence = not in_fence
+                      continue
+                  if in_fence:
+                      continue
+                  heading = heading_re.match(line)
+                  if heading is None:
+                      continue
+                  base = github_slug(heading.group(1))
+                  count = seen.get(base, 0)
+                  seen[base] = count + 1
+                  slugs.add(base if count == 0 else f"{base}-{count}")
+              return slugs
+
+
+          slugs_by_doc = {
+              name: anchor_slugs(Path(name).read_text(encoding="utf-8")) for name in doc_names
+          }
+          refs = anchor_ref_re.findall(llms_txt)
+          if not refs:
+              print("llms.txt contains no README.md#.../LIBRARY.md#... anchor references at")
+              print("all — this guard would pass vacuously. If removing the last anchored doc")
+              print("link is deliberate, update this step and tests/test_llms_txt_anchors.py")
+              print("together.")
+              sys.exit(1)
+          missing = sorted({f"{doc}#{anchor}" for doc, anchor in refs if anchor not in slugs_by_doc[doc]})
+          if missing:
+              print("llms.txt references anchors that do not exist in their target file:")
+              for ref in missing:
+                  print(f"  - {ref}")
+              for doc in doc_names:
+                  print(f"Valid {doc} anchors: {sorted(slugs_by_doc[doc])}")
+              sys.exit(1)
+          print(f"OK: {len(refs)} anchor reference(s) in llms.txt all resolve.")
       - name: Cache pip
         uses: actions/cache@v6
         with:
