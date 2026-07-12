@@ -19,7 +19,7 @@ We take security vulnerabilities seriously. If you discover a security issue, pl
 **Please DO NOT open a public GitHub issue for security vulnerabilities.**
 
 Instead, report privately via **GitHub Security Advisories**: open
-[github.com/omar-y-abdi/furl/security/advisories](https://github.com/omar-y-abdi/furl/security/advisories)
+[github.com/omar-y-abdi/furl-ctx/security/advisories](https://github.com/omar-y-abdi/furl-ctx/security/advisories)
 and click **"Report a vulnerability"**.
 
 Include the following information:

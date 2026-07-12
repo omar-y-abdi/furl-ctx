@@ -1,6 +1,8 @@
 # Furl — Claude Code plugin
 
-Bundles Furl's context compression into Claude Code as a single plugin:
+Context compression for AI agents, bundled into Claude Code as a single plugin — it
+cuts token costs by shrinking large tool outputs before they reach the model's
+context window:
 
 - **MCP server** (`furl`) → the `furl_compress`, `furl_retrieve`, `furl_stats`, `furl_purge`, `furl_search`, `furl_list` tools. A seventh tool, `furl_read`, is off by default (enable with `FURL_MCP_READ=1`).
 - **PostToolUse hook** → automatically compresses large tool outputs before they
@@ -108,7 +110,7 @@ to that one project while the MCP tools stay available. Equivalent broader alter
 Inside Claude Code:
 
 ```
-/plugin marketplace add omar-y-abdi/furl
+/plugin marketplace add omar-y-abdi/furl-ctx
 /plugin install furl@furl
 ```
 

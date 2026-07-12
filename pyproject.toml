@@ -28,6 +28,14 @@ keywords = [
     "caching",
     "ai",
     "machine-learning",
+    "context-compression",
+    "claude-code",
+    "claude-code-plugin",
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "token-optimization",
+    "context-window",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -58,9 +66,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/omar-y-abdi/furl"
-Repository = "https://github.com/omar-y-abdi/furl"
-Issues = "https://github.com/omar-y-abdi/furl/issues"
+Homepage = "https://github.com/omar-y-abdi/furl-ctx"
+Repository = "https://github.com/omar-y-abdi/furl-ctx"
+Issues = "https://github.com/omar-y-abdi/furl-ctx/issues"
 
 [project.scripts]
 furl = "furl_ctx.cli:main"

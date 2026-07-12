@@ -10,10 +10,10 @@
 </pre></div>
 
 
-<p align="center"><strong>Typically 0–54% fewer tokens on real high-entropy content · up to 95% on repetitive logs/fixtures (<a href="#proof">honest read</a>) · a Claude Code plugin · local-first · reversible</strong></p>
+<p align="center"><strong>Typically 0–54% token savings on real high-entropy content · up to 95% on repetitive logs/fixtures (<a href="#proof">honest read</a>) · a Claude Code plugin + MCP server · local-first · reversible</strong></p>
 
 <p align="center">
-  <a href="https://github.com/omar-y-abdi/furl/releases/latest"><img src="https://img.shields.io/github/v/release/omar-y-abdi/furl?sort=semver&color=blue" alt="Release"></a>
+  <a href="https://github.com/omar-y-abdi/furl-ctx/releases/latest"><img src="https://img.shields.io/github/v/release/omar-y-abdi/furl-ctx?sort=semver&color=blue" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
 </p>
 
@@ -26,7 +26,7 @@
 
 ---
 
-Furl compresses everything your Claude Code agent reads — tool outputs, logs, web fetches, RAG chunks — before it reaches the model. Same answers, a fraction of the tokens. Every dropped byte stays retrievable on demand.
+Furl is context compression for AI agents: it shrinks everything your Claude Code agent reads — tool outputs, logs, web fetches, RAG chunks — before it hits the model's context window. Same answers, a fraction of the token costs. Every dropped byte stays retrievable on demand.
 
 The name is nautical: to *furl* is to roll up a sail — Furl rolls long context up out of the model's way and keeps it on a line, ready to *unfurl* (retrieve) the instant you need it.
 
@@ -41,7 +41,7 @@ Furl was extracted from the author's *Headroom* context-engineering experimentat
 Two commands inside Claude Code:
 
 ```
-/plugin marketplace add omar-y-abdi/furl
+/plugin marketplace add omar-y-abdi/furl-ctx
 /plugin install furl@furl
 ```
 
@@ -96,7 +96,7 @@ Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_
 
 ## Community
 
-Questions or bug reports → [open a GitHub issue](https://github.com/omar-y-abdi/furl/issues) (the surest way to reach the maintainer). For chat, there's a [Discord](https://discord.gg/yRmaUNpsPJ).
+Questions or bug reports → [open a GitHub issue](https://github.com/omar-y-abdi/furl-ctx/issues) (the surest way to reach the maintainer). For chat, there's a [Discord](https://discord.gg/yRmaUNpsPJ).
 
 **Maintainer note:** Furl is solo-maintained today — one person handles issues, PRs, and security reports, so response times vary with availability. [CONTRIBUTING.md](CONTRIBUTING.md) covers how PRs get reviewed and [SECURITY.md](SECURITY.md) covers the vulnerability-disclosure process; both hold regardless of team size.
 

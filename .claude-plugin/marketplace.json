@@ -3,7 +3,7 @@
   "name": "furl",
   "owner": {
     "name": "Omar Y. Abdi",
-    "url": "https://github.com/omar-y-abdi/furl"
+    "url": "https://github.com/omar-y-abdi/furl-ctx"
   },
   "metadata": {
     "description": "Furl context compression for Claude Code — MCP server + fail-open compression hook + how-it-works skill.",
@@ -17,10 +17,10 @@
       "version": "1.2.0",
       "author": {
         "name": "Omar Y. Abdi",
-        "url": "https://github.com/omar-y-abdi/furl"
+        "url": "https://github.com/omar-y-abdi/furl-ctx"
       },
-      "homepage": "https://github.com/omar-y-abdi/furl",
-      "repository": "https://github.com/omar-y-abdi/furl",
+      "homepage": "https://github.com/omar-y-abdi/furl-ctx",
+      "repository": "https://github.com/omar-y-abdi/furl-ctx",
       "license": "Apache-2.0",
       "keywords": [
         "claude-code",
