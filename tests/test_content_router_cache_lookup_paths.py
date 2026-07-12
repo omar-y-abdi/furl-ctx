@@ -123,7 +123,7 @@ class TestStringPathCacheLookup:
 
         # Served byte-for-byte unchanged — no compression transform emitted.
         assert result.messages[0]["content"] == content
-        assert result.transforms_applied == ["router:noop"]
+        assert result.transforms_applied == ["router:noop:no_savings"]
 
         after = dict(router._cache.stats)
         # The Tier-1 skip set was consulted and hit exactly once...
@@ -162,7 +162,7 @@ class TestStringPathCacheLookup:
         # Original served, stale payload withheld, no compression transform.
         assert result.messages[0]["content"] == content
         assert stale_payload not in result.messages[0]["content"]
-        assert result.transforms_applied == ["router:noop"]
+        assert result.transforms_applied == ["router:noop:no_savings"]
 
         # The entry was relocated: result cache → skip set.
         assert router._cache.size == 0
@@ -202,7 +202,7 @@ class TestContentBlockPathCacheLookup:
 
         # Block content unchanged, no compression transform emitted.
         assert self._served_block_text(result) == text
-        assert result.transforms_applied == ["router:noop"]
+        assert result.transforms_applied == ["router:noop:no_savings"]
 
         after = dict(router._cache.stats)
         # Tier-1 consulted and hit once; Tier-2 lookup never reached.
@@ -226,7 +226,7 @@ class TestContentBlockPathCacheLookup:
         # Original served, stale payload withheld, no compression transform.
         assert self._served_block_text(result) == text
         assert stale_payload not in self._served_block_text(result)
-        assert result.transforms_applied == ["router:noop"]
+        assert result.transforms_applied == ["router:noop:no_savings"]
 
         # Entry relocated: result cache → skip set; the get() was a hit.
         assert router._cache.size == 0

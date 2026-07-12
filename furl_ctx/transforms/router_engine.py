@@ -81,7 +81,7 @@ from .router_message_policy import (
     Small,
     classify_message,
 )
-from .router_policy import CompressionStrategy
+from .router_policy import CompressionStrategy, noop_transform
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -1650,7 +1650,7 @@ def run_router_passes(
         messages=transformed_messages,
         tokens_before=tokens_before,
         tokens_after=tokens_after,
-        transforms_applied=all_transforms if all_transforms else ["router:noop"],
+        transforms_applied=all_transforms if all_transforms else [noop_transform(route_counts)],
         markers_inserted=lifecycle_ccr_hashes,
         warnings=warnings,
         timing=compressor_timing,
