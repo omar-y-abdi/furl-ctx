@@ -5,6 +5,14 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4](https://github.com/omar-y-abdi/furl/compare/v1.0.3...v1.0.4) (2026-07-12)
+
+
+### Bug Fixes
+
+* env-TTL wins for MCP writes, CLI store/TTL symmetry, list age visibility ([#71](https://github.com/omar-y-abdi/furl/issues/71)) ([3b832ef](https://github.com/omar-y-abdi/furl/commit/3b832ef24103f1a80c9e1e562527a3c26e427f3a))
+* reasoned router no-ops + structured-content classification ([#72](https://github.com/omar-y-abdi/furl/issues/72)) ([af4cf2c](https://github.com/omar-y-abdi/furl/commit/af4cf2ce8cc25498f83964647a02734db1e2c004))
+
 ## [1.0.3](https://github.com/omar-y-abdi/furl/compare/v1.0.2...v1.0.3) (2026-07-11)
 
 
