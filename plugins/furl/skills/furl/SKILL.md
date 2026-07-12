@@ -1,7 +1,7 @@
 ---
 name: furl
 description: How the Furl context-compression plugin works — the furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list MCP tools, the PostToolUse hook that shrinks large tool outputs, the <<ccr:HASH>> retrieval flow, and the FURL_* environment knobs to tune or disable it. Use when the user asks what Furl is doing, why a tool output looks compressed or contains <<ccr:...>> markers, how to retrieve original content, how to tune compression thresholds, or how to turn the hook off.
-version: 1.0.8
+version: 1.1.0
 ---
 
 # Furl — context compression for Claude Code
@@ -132,7 +132,7 @@ is in [`LIBRARY.md`](../../../../LIBRARY.md) → "Configuration".
 ## Prerequisite
 
 Both the hook and the MCP server launch through [`uv`](https://docs.astral.sh/uv/)
-(`uv run --with "furl-ctx[mcp]==1.0.5" …`), which fetches Furl from PyPI on first use — no
+(`uv run --with "furl-ctx[mcp]==1.1.0" …`), which fetches Furl from PyPI on first use — no
 `pip install`, no Rust toolchain. The version is pinned so every launch resolves the same
 wheel deterministically instead of whatever `uv`'s cache last held; upgrades arrive through
 plugin updates, which bump the pin. The

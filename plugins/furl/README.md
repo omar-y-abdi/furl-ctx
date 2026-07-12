@@ -63,7 +63,7 @@ through `uv`, which fetches Furl on first use — no prior install:
 ```json
 { "mcpServers": { "furl": {
   "command": "sh",
-  "args": ["-lc", "exec uv run --no-project --with 'furl-ctx[mcp]==1.0.5' python -m furl_ctx.ccr.mcp_server"],
+  "args": ["-lc", "exec uv run --no-project --with 'furl-ctx[mcp]==1.1.0' python -m furl_ctx.ccr.mcp_server"],
   "env": { "FURL_CCR_BACKEND": "sqlite", "FURL_CCR_TTL_SECONDS": "86400" }
 }}}
 ```
@@ -77,7 +77,7 @@ so originals survive across processes. `FURL_CCR_TTL_SECONDS=86400` keeps each
 offloaded original retrievable for 24 hours (the plugin default) — governing the
 hook's offloads and the MCP tools' stores alike; raise or lower it to widen or
 shrink the retention window. The
-`furl-ctx[mcp]==1.0.5` pin is deterministic — every launch resolves the same wheel instead
+`furl-ctx[mcp]==1.1.0` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 
 **Plugin version vs. engine version.** This plugin (`plugin.json`) and the pinned engine
