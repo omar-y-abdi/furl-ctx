@@ -7,14 +7,14 @@
   },
   "metadata": {
     "description": "Furl context compression for Claude Code — MCP server + fail-open compression hook + how-it-works skill.",
-    "version": "1.0.7"
+    "version": "1.0.8"
   },
   "plugins": [
     {
       "name": "furl",
       "source": "./plugins/furl",
       "description": "Furl context compression: the Furl MCP server (furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list) plus a fail-open PostToolUse hook that shrinks large tool outputs before they enter context. Originals stay byte-exactly retrievable via <<ccr:HASH>> markers.",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "author": {
         "name": "Omar Y. Abdi",
         "url": "https://github.com/omar-y-abdi/furl"
