@@ -309,6 +309,14 @@ Every live `FURL_*` knob. All are optional — the defaults are the shipped beha
 The Claude Code plugin's own hook/MCP knobs (`FURL_HOOK_*`) are documented in
 [`plugins/furl/README.md`](plugins/furl/README.md).
 
+A direct `furl_compress` call (the MCP tool or the `compress()` API) never runs
+through that hook, so `FURL_HOOK_MIN_CHARS` does not gate it; a small or
+already-dense input is instead governed by the router's own
+`min_tokens_to_compress` floor (250 tokens by default) and by the router's
+refusal to ship a compression that would not actually shrink the input — either
+gate reports back a `router:noop:below_min_tokens` or `router:noop:no_savings`
+reason rather than a silent pass-through.
+
 ## Compared to
 
 Furl runs **locally**, covers **every** content type, and is **reversible**.

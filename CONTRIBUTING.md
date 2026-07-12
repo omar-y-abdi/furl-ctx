@@ -1,6 +1,6 @@
 # Contributing to Furl
 
-Thanks for contributing! Please skim this before opening a PR : the policies exist because we've been burned skipping them, not because we love paperwork.
+Thanks for contributing! Please skim this before opening a PR : the policies exist because I've been burned skipping them, not because I love paperwork.
 
 By participating, you agree to our [Code of Conduct](CODE_OF_CONDUCT.md).
 
@@ -11,7 +11,7 @@ By participating, you agree to our [Code of Conduct](CODE_OF_CONDUCT.md).
 | 🐛 Bug or small fix | **Open a PR** (with repro + test) |
 | ✨ New feature / architectural change | **Open an issue or ask in Discord first.** |
 | 🧹 Refactor-only | **Don't.** Only if a maintainer asked, as part of a concrete fix. |
-| 🧪 Test/CI-only PR chasing a known `main` failure | **Don't.** We're tracking it. |
+| 🧪 Test/CI-only PR chasing a known `main` failure | **Don't.** I'm tracking it. |
 | 📦 New dep or version bump | **PR with written justification.** |
 | ❓ Question | **Discord `#help`.** |
 
@@ -33,7 +33,7 @@ If you genuinely can't write a test, say so explicitly and explain how you verif
 
 ## "Real behavior proof" — required on every external PR
 
-We can't merge what we can't verify. Include a **`Real behavior proof`** section in the PR body covering:
+I can't merge what I can't verify. Include a **`Real behavior proof`** section in the PR body covering:
 
 - **Setup you tested on** (OS, Python, config, provider/model)
 - **Exact command or steps you ran after the patch**

@@ -56,9 +56,11 @@ That's it — this installs the compression hook, the MCP tools, and the skill. 
 
 Tuning, disabling (`FURL_HOOK_ENABLED=0`), and the full reference: [`plugins/furl/README.md`](plugins/furl/README.md). Retrieval TTL differs by surface: the library defaults to 30 minutes; this Claude Code plugin ships a 24 h window (`FURL_CCR_TTL_SECONDS=86400`) governing both the hook's offloads and the MCP tools' stores; the `furl` CLI defaults to the same 24 h. (A bare MCP server without a valid `FURL_CCR_TTL_SECONDS` keeps a 1 h session TTL for its tool-stored entries, while dropped-row originals embedded in compressed output follow the library's 30-minute default — the full 24 h window needs the env set, as the plugin ships it.)
 
+**A note on version numbers:** the Claude Code plugin versions independently from the `furl-ctx` engine it pins — a plugin release doesn't always mean an engine release, and vice versa. `/plugin` shows the plugin version; GitHub Releases and `CHANGELOG.md` track the engine version; the SessionStart banner shows both together (`furl <plugin> · engine furl-ctx <engine>`), which is the quickest way to see both numbers at once.
+
 ## Proof
 
-Token reduction on real captured data — reproducible, inputs committed under `benchmarks/data/`. Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR). Read every figure below as a **best-case ceiling**, not a typical — the honest read follows.
+Token reduction on real captured data — a dated snapshot (inputs committed under `benchmarks/data/` for auditability; a re-run measures the current engine, so absolute counts can drift from this table — the honest-read band below is the authoritative check). Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR). Read every figure below as a **best-case ceiling**, not a typical — the honest read follows.
 
 *Best-case ceilings — low-entropy dev fixtures (the compressor's happy path):*
 
@@ -83,7 +85,9 @@ The same engine drops into any Python app or MCP host: `from furl_ctx import com
 
 ## Community
 
-Questions or bug reports → [open a GitHub issue](https://github.com/omar-y-abdi/furl/issues) (the surest way to reach us). For chat, there's a [Discord](https://discord.gg/yRmaUNpsPJ).
+Questions or bug reports → [open a GitHub issue](https://github.com/omar-y-abdi/furl/issues) (the surest way to reach the maintainer). For chat, there's a [Discord](https://discord.gg/yRmaUNpsPJ).
+
+**Maintainer note:** Furl is solo-maintained today — one person handles issues, PRs, and security reports, so response times vary with availability. [CONTRIBUTING.md](CONTRIBUTING.md) covers how PRs get reviewed and [SECURITY.md](SECURITY.md) covers the vulnerability-disclosure process; both hold regardless of team size.
 
 ## License
 
