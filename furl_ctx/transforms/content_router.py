@@ -56,6 +56,7 @@ Pipeline Usage:
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import time
@@ -688,11 +689,20 @@ class ContentRouter(Transform):
         else:
             # Parallel compression via thread pool. Each compress() call
             # is independent; per-task inputs are passed by argument.
+            # Submissions run under contextvars.copy_context() so the
+            # request-scoped ContextVars compress() binds — the originating
+            # tool name (content_kind) AND the per-tenant CCR store — reach
+            # the worker threads; a bare submit dropped both (multi-message
+            # calls stored content_kind=None and wrote the GLOBAL store even
+            # under an active namespace, while the inline path above kept
+            # them). Each submission copies its own Context: a single Context
+            # object cannot be entered by two threads concurrently.
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for _, task_content, task_ctx, task_bias, _, task_detection in pending_tasks:
                     futures.append(
                         executor.submit(
+                            contextvars.copy_context().run,
                             self._timed_compress,
                             task_content,
                             task_ctx,

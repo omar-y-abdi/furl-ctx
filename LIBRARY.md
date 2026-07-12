@@ -107,20 +107,31 @@ environment variable to a list of regexes (one per line) — or `@/path/to/file`
 read them from a file — in the Claude Code plugin's `hooks/hooks.json` / `.mcp.json`
 env or your shell. Every match is replaced with a `[REDACTED:<n>]` marker (`n` = the
 pattern's 1-based line) **before** compression and storage, applied identically by
-the PostToolUse hook, the MCP server, and `compress()`. This is the redaction
-channel the env-only plugin can reach — it cannot pass a Python callable. A later
-`retrieve()` returns the already-redacted original (the secret is gone by design).
-An invalid regex is warned about once (stderr) and skipped; the remaining patterns
-still apply. Unset → a no-op, byte-identical. Commas are **not** separators (regexes
-use them in `{n,m}` quantifiers) — separate patterns with newlines.
+the PostToolUse hook, every MCP store path (`furl_compress` including its
+pattern-filtered per-run stores, `furl_read`, and the pipeline's internal offload),
+and `compress()`. This is the redaction channel the env-only plugin can reach — it
+cannot pass a Python callable. A later `retrieve()` returns the already-redacted
+original (the secret is gone by design). An invalid regex is warned about once
+(stderr) and skipped; the remaining patterns still apply. Unset → a no-op,
+byte-identical. Commas are **not** separators (regexes use them in `{n,m}`
+quantifiers) — separate patterns with newlines. Patterns compile with
+`re.MULTILINE`: `^`/`$` anchor at line boundaries, so `^password=\S+` matches a
+`password=` line anywhere in the output. Patterns apply in list order, each over
+the previous pattern's output — overlapping patterns can therefore nest markers
+(e.g. `[REDACTED:[REDACTED:2]]`); no secret bytes survive either way, and
+retrieval stays byte-exact against the stored (redacted) original.
 
 ```
 FURL_REDACT_PATTERNS='(?i)\b(api[_-]?key|token|secret|password)\s*[=:]\s*\S+
-(?i)\bbearer\s+[A-Za-z0-9._-]{12,}'
+(?i)\bbearer\s+[A-Za-z0-9._-]{12,}
+^password=\S+'
 ```
 
 `FURL_REDACT_PATTERNS` and the callback below **compose**: the env patterns run
-first, then the callback — both apply.
+first, then the callback — both apply. Caveat (hook only): a catastrophically-
+backtracking pattern that hangs past the hook's 30 s timeout gets the hook killed,
+and fail-open then ships that call's output raw and unredacted — prefer bounded,
+anchored patterns (see SECURITY.md for the full failure mode).
 
 **Redactor (fail-closed).** Pass a pure `redactor: str -> str` on `CompressConfig`
 to scrub content **before** it is compressed or stored. Redaction runs **outside**
@@ -320,7 +331,7 @@ Every live `FURL_*` knob. All are optional — the defaults are the shipped beha
 | `FURL_CCR_SQLITE_MAX_ROWS` | `10000` | Row cap for the SQLite store (oldest-created evicted first). |
 | `FURL_CCR_PROJECT_DIR` | auto, per project (the plugin hook + MCP server set it from `CLAUDE_PROJECT_DIR`, else cwd) | Scopes the durable CCR store to a single project: an un-namespaced call resolves a per-project store (`ccr-ns-<hash>.sqlite3`) instead of the shared global `ccr.sqlite3`, so `furl_search` / `furl_list` / `furl_retrieve` and eviction never cross project boundaries. Set to `""` to disable scoping and use the global store — the way to share one store across projects, and to read a **pre-1.0 (global) store** after upgrade. An explicit `FURL_CCR_NAMESPACE` overrides this with a named shared store. Note: the per-namespace store follows the library backend default — with `FURL_CCR_BACKEND` unset it is **in-memory** (process-local, gone at exit); set `FURL_CCR_BACKEND=sqlite` for a durable per-namespace file (the Claude Code plugin already pins it). |
 | `FURL_CCR_SPILL` | `off` | Q10 retention. When truthy (`1`/`true`/`yes`/`on`), an **in-memory** primary demotes evicted entries to a durable SQLite **spill** tier instead of deleting them, so a `retrieve()` past the in-memory cap still recovers (byte-identical, read-only — no promotion back). Ignored when the primary is already `sqlite` (`FURL_CCR_BACKEND=sqlite`, the MCP server's default): a durable primary has nothing to spill to. |
-| `FURL_REDACT_PATTERNS` | unset (off) | Preventive secret redaction reachable from the env-only plugin. A newline-separated list of `re` regexes (or `@/path/to/file`); every match is replaced with `[REDACTED:<n>]` **before** compression and storage, from the hook, the MCP server, and `compress()`. Invalid regex → warned once + skipped (rest still apply). Composes with `CompressConfig.redactor` (env patterns first). Commas are not separators — use newlines. Unset → byte-identical no-op. See "Redact & purge — security". |
+| `FURL_REDACT_PATTERNS` | unset (off) | Preventive secret redaction reachable from the env-only plugin. A newline-separated list of `re` regexes (or `@/path/to/file`); every match is replaced with `[REDACTED:<n>]` **before** compression and storage, from the hook, every MCP store path (`furl_compress` incl. filtered runs, `furl_read`, pipeline offload), and `compress()`. Compiled with `re.MULTILINE` (`^`/`$` anchor per line). Invalid regex → warned once + skipped (rest still apply). Composes with `CompressConfig.redactor` (env patterns first). Commas are not separators — use newlines. Unset → byte-identical no-op. See "Redact & purge — security". |
 | `FURL_MCP_READ` | `off` | Enables the `furl_read` MCP tool (`on`/`true`/`1`/`yes`/`enabled`). Reads are jailed to `FURL_WORKSPACE_DIR`. |
 | `FURL_COMPRESS_WORKERS` | `4` | Worker threads for the router's parallel per-message compression. |
 | `FURL_PIPELINE_BREAKER_THRESHOLD` | `3` | Consecutive pipeline failures before the circuit breaker opens and messages pass through **uncompressed** for the cooldown window. `<= 0` disables the breaker. |

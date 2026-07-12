@@ -69,6 +69,39 @@ def test_compress_labels_entries_with_tool_name() -> None:
     assert all(entry.tool_name == "Bash" for _hash, entry in entries)
 
 
+def test_multi_message_parallel_compress_preserves_content_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Review F3: the router compresses multiple cache-miss messages in a
+    # ThreadPoolExecutor (FURL_COMPRESS_WORKERS, default 4). A plain
+    # executor.submit does NOT carry ContextVars into the worker thread, so the
+    # request-scoped tool name bound by compress() was lost — every entry from
+    # a multi-message call stored content_kind=None while single-message (the
+    # plugin path, compressed inline on the calling thread) worked. Submissions
+    # now run under contextvars.copy_context(), so the binding propagates.
+    from furl_ctx import compress
+    from furl_ctx.cache.compression_store import get_compression_store
+
+    monkeypatch.setenv("FURL_COMPRESS_WORKERS", "4")
+    log_a = _big_log()
+    log_b = "\n".join(
+        f"{i:04d} req={i * 11 % 89} route=/api/v{i % 7} elapsed={i * 5 % 173}ms code=200 body"
+        for i in range(220)
+    )
+    compress(
+        [
+            {"role": "tool", "content": log_a},
+            {"role": "tool", "content": log_b},
+        ],
+        tool_name="Bash",
+    )
+    store = get_compression_store()
+    entries = list(store._backend.items())
+    assert len(entries) >= 2, f"expected both messages stored, got {len(entries)}"
+    kinds = sorted({entry.tool_name for _hash, entry in entries}, key=str)
+    assert kinds == ["Bash"], f"content_kind lost across worker threads: {kinds}"
+
+
 def test_compress_without_tool_name_stays_null() -> None:
     from furl_ctx import compress
     from furl_ctx.cache.compression_store import get_compression_store

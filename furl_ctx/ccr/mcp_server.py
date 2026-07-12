@@ -2261,6 +2261,8 @@ class FurlMCPServer:
         """Blocking body of :meth:`_handle_read` (runs off the loop)."""
         import hashlib
 
+        from furl_ctx.redaction import build_env_redactor
+
         path = Path(file_path).expanduser().resolve()
 
         # Path jail: confine reads to the workspace root (resolve() above already
@@ -2369,6 +2371,18 @@ class FurlMCPServer:
         # is for tool output display, not SSE/wire path, so a replacement
         # char on invalid bytes is acceptable).
         content = _safe_decode_for_logging(raw)
+
+        # Env-expressible redaction (FURL_REDACT_PATTERNS), applied AFTER decode
+        # and BEFORE the hash / cache / store / served output — furl_read stored
+        # and served the raw file verbatim, bypassing the redaction the other
+        # store paths got (review F1). Redacting before the content_hash keeps
+        # the file cache coherent: same file + same patterns hash identically
+        # (cache hit), while a pattern change hashes differently and forces a
+        # fresh (re-redacted) read. The served numbered output is scrubbed too,
+        # consistent with the hook. Unset patterns => None => byte-identical.
+        _read_redactor = build_env_redactor()
+        if _read_redactor is not None:
+            content = _read_redactor(content)
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:24]
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)

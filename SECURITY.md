@@ -94,18 +94,35 @@ assume one):
   environment variable, set in the Claude Code plugin's `hooks/hooks.json` /
   `.mcp.json` env or your shell. Every match is replaced with a `[REDACTED:<n>]`
   marker **before** the content is compressed or written to the store, from BOTH
-  the PostToolUse hook and the MCP server. This is the redactor the env-only plugin
-  can actually reach — the plugin is configured exclusively through environment
-  variables, so it cannot pass a Python callable. A later `retrieve()` returns the
-  already-redacted original: the pre-redaction secret is gone from the store **by
-  design**. An invalid regex is warned about once (on stderr) and skipped; the
-  remaining patterns still apply. Unset (the default) is a no-op — byte-identical
-  behavior. Example (scrub `key=value` secrets and bearer tokens):
+  the PostToolUse hook and every MCP store path — `furl_compress` (including its
+  pattern-filtered per-run stores), `furl_read`, and the compression pipeline's
+  internal offload. This is the redactor the env-only plugin can actually reach —
+  the plugin is configured exclusively through environment variables, so it cannot
+  pass a Python callable. A later `retrieve()` returns the already-redacted
+  original: the pre-redaction secret is gone from the store **by design**. An
+  invalid regex is warned about once (on stderr) and skipped; the remaining
+  patterns still apply. Unset (the default) is a no-op — byte-identical behavior.
+  Patterns compile with `re.MULTILINE`, so `^`/`$` anchor at line boundaries —
+  `^password=\S+` matches a `password=` line anywhere in a tool output, which is
+  what anchoring means in line-oriented output. Patterns apply in list order; with
+  overlapping patterns a later one can match text an earlier replacement produced,
+  nesting markers (e.g. `[REDACTED:[REDACTED:2]]`) — no secret bytes survive
+  either way. Example (scrub `key=value` secrets, bearer tokens, and whole
+  `password=` lines):
 
   ```
   FURL_REDACT_PATTERNS='(?i)\b(api[_-]?key|token|secret|password)\s*[=:]\s*\S+
-  (?i)\bbearer\s+[A-Za-z0-9._-]{12,}'
+  (?i)\bbearer\s+[A-Za-z0-9._-]{12,}
+  ^password=\S+'
   ```
+
+  Two honest limits. (1) Redaction is preventive only for content stored AFTER the
+  patterns are set — use `furl_purge` for anything captured before. (2) A
+  catastrophically-backtracking pattern (stdlib `re` has no match timeout) can hang
+  past the hook's 30 s timeout, in which case the host kills the hook and its
+  fail-open contract passes that call's output through **raw and unredacted** —
+  redaction degrades to passthrough, it never blocks the tool call. Prefer bounded,
+  anchored patterns.
 
 - **Library redactor callback (`CompressConfig.redactor`).** In-process library
   callers can additionally pass a `redactor: str -> str` on `CompressConfig`. It

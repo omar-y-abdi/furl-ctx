@@ -316,3 +316,103 @@ def test_hook_default_off_is_byte_identical_passthrough(tmp_path: Path) -> None:
     proc, _db = _run_hook(tmp_path, small, patterns=None, min_chars="100000")
     assert proc.returncode == 0
     assert proc.stdout == ""  # passthrough emits nothing
+
+
+# ─── MULTILINE anchor semantics (review F4) ──────────────────────────────────
+
+
+def test_multiline_caret_anchor_matches_mid_string_lines() -> None:
+    # Tool output is line-oriented: an operator writing ^ means "line start".
+    # Patterns compile with re.MULTILINE, so ^password=... hits a mid-output
+    # line — string-anchored-only was the silent-miss surprise (review F4).
+    redactor = build_env_redactor({"FURL_REDACT_PATTERNS": r"^password=\S+"})
+    assert redactor is not None
+    out = redactor("header line\npassword=hunter2\ntrailer line")
+    assert "hunter2" not in out
+    assert out == "header line\n[REDACTED:1]\ntrailer line"
+
+
+def test_multiline_dollar_anchor_matches_per_line() -> None:
+    redactor = build_env_redactor({"FURL_REDACT_PATTERNS": r"token=\S+$"})
+    assert redactor is not None
+    out = redactor("token=abc123\nnext line stays")
+    assert "abc123" not in out
+    assert out == "[REDACTED:1]\nnext line stays"
+
+
+# ─── MCP furl_read path (review F1) ──────────────────────────────────────────
+
+
+def test_furl_read_redacts_served_output_stored_entry_and_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # furl_read stores RAW file content; with FURL_REDACT_PATTERNS set the
+    # secret must be absent from the served (numbered) output, the CCR entry,
+    # AND every store-dir file's raw bytes (review F1).
+    pytest.importorskip("mcp")
+    from furl_ctx.cache.compression_store import reset_compression_store
+    from furl_ctx.ccr.mcp_server import FurlMCPServer
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    secret_file = workspace / "notes.txt"
+    secret_file.write_text(f"prelude\n{SECRET}\npostlude\n", encoding="utf-8")
+
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    monkeypatch.setenv("FURL_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("FURL_CCR_BACKEND", "sqlite")
+    monkeypatch.setenv("FURL_CCR_SQLITE_PATH", str(store_dir / "ccr.sqlite3"))
+    monkeypatch.delenv("FURL_CCR_PROJECT_DIR", raising=False)
+    monkeypatch.delenv("FURL_CCR_NAMESPACE", raising=False)
+    monkeypatch.setenv("FURL_MCP_READ", "1")
+    monkeypatch.setenv("FURL_REDACT_PATTERNS", PATTERN)
+    reset_compression_store()
+
+    server = FurlMCPServer()
+    served = server._read_file_sync(str(secret_file), fresh=True)
+    served_text = "".join(block.text for block in served)
+    assert SECRET not in served_text, "secret leaked into the served furl_read output"
+    assert "[REDACTED:1]" in served_text
+
+    store = server._get_local_store()
+    entries = list(store._backend.items())
+    assert entries, "furl_read should have stored a CCR entry"
+    for _hash, entry in entries:
+        assert SECRET not in entry.original_content, "secret persisted in the CCR entry"
+        assert "[REDACTED:1]" in entry.original_content
+
+    reset_compression_store()  # close sqlite handles before raw-byte inspection
+    for path in store_dir.iterdir():
+        assert SECRET.encode() not in path.read_bytes(), f"secret leaked into {path.name}"
+
+
+# ─── MCP filtered-compress path (review F2 pin) ──────────────────────────────
+
+
+def test_mcp_compress_filtered_runs_are_redacted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # _compress_filtered receives content AFTER _compress_content's redaction
+    # point and re-enters _compress_content per eligible run — so the filtered
+    # store path is covered by the same redaction. Pin it (review F2).
+    pytest.importorskip("mcp")
+    from furl_ctx.ccr.compress_modes import SectionPatterns
+    from furl_ctx.ccr.mcp_server import FurlMCPServer
+
+    _fresh_sqlite_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("FURL_REDACT_PATTERNS", PATTERN)
+
+    server = FurlMCPServer()
+    out = server._compress_content(
+        _big_secret_log(),
+        patterns=SectionPatterns(include=("line",), exclude=()),
+    )
+    assert out.get("filtered") is True, f"expected the filtered path, got {out.keys()}"
+    assert SECRET not in json.dumps(out)
+
+    store = server._get_local_store()
+    entries = list(store._backend.items())
+    assert entries, "filtered compress should have stored per-run entries"
+    for _hash, entry in entries:
+        assert SECRET not in entry.original_content

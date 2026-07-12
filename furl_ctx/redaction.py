@@ -20,6 +20,17 @@ Format (``FURL_REDACT_PATTERNS``):
     beginning with ``#`` are ignored.
   * File: a value of the form ``@/abs/path/to/patterns`` reads the regexes from
     that file (same one-per-line, ``#``-comment rules).
+  * Patterns compile with ``re.MULTILINE``: ``^``/``$`` anchor at LINE
+    boundaries, not only the ends of the whole blob. Tool output is
+    line-oriented, and an operator writing ``^password=`` means "a line
+    starting with password=" — string-only anchoring silently missed every
+    mid-output line (review F4).
+  * Patterns apply in list order, each ``re.sub`` running over the previous
+    pattern's output — so with overlapping patterns a later one can match text
+    an earlier replacement produced, nesting markers (e.g.
+    ``[REDACTED:[REDACTED:2]]``). No secret bytes survive either way, and
+    retrieval stays byte-exact against the stored (redacted) original; order
+    the list from most- to least-specific to keep markers clean.
 
 Marker: ``[REDACTED:<1-based-index>]`` — obvious, and a FIXED length independent
 of the secret, so the redacted span never leaks the secret's length.
@@ -34,7 +45,12 @@ Default: ``FURL_REDACT_PATTERNS`` unset/empty (or every pattern invalid) yields
 
 ReDoS note: patterns are the operator's own; stdlib ``re`` has no match timeout,
 so a pathological pattern (nested unbounded quantifiers over adversarial input)
-can backtrack expensively. Prefer anchored, bounded patterns.
+can backtrack expensively. Prefer anchored, bounded patterns. Know the failure
+mode: in the PostToolUse hook a redactor that hangs past the hook's timeout
+(30 s in the shipped hooks.json) gets the hook process KILLED, and the host's
+fail-open contract then passes the ORIGINAL, UNREDACTED output through for that
+call — a catastrophic pattern degrades redaction to raw passthrough; it never
+blocks the tool call.
 """
 
 from __future__ import annotations
@@ -107,6 +123,10 @@ def _pattern_lines(raw: str) -> list[str]:
 def _compile(patterns: list[str]) -> list[tuple[str, re.Pattern[str]]]:
     """Compile each pattern; skip + warn-once on any that is invalid.
 
+    Compiled with ``re.MULTILINE`` (review F4): tool output is line-oriented,
+    so ``^``/``$`` anchor per line — an operator's ``^password=\\S+`` must hit
+    a mid-output line, not just the very start of the blob.
+
     Returns ``(marker, compiled)`` pairs. The marker's index is the pattern's
     1-based position in the ORIGINAL list, so a skipped invalid pattern does not
     renumber the survivors — an operator's ``[REDACTED:3]`` always means "the
@@ -115,7 +135,7 @@ def _compile(patterns: list[str]) -> list[tuple[str, re.Pattern[str]]]:
     compiled: list[tuple[str, re.Pattern[str]]] = []
     for i, pattern in enumerate(patterns, start=1):
         try:
-            compiled.append((redaction_marker(i), re.compile(pattern)))
+            compiled.append((redaction_marker(i), re.compile(pattern, re.MULTILINE)))
         except re.error as exc:
             _warn_once(
                 f"{FURL_REDACT_PATTERNS_ENV}: skipping invalid regex #{i} {pattern!r} ({exc})"
