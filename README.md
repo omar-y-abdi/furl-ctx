@@ -50,17 +50,18 @@ That's it — this installs the compression hook, the MCP tools, and the skill. 
 **What you get**
 
 - **Auto-compression hook** — shrinks large `Bash` / `WebFetch` / `WebSearch` / `Task` (sub-agent) outputs before they enter context. Fail-open: never breaks a tool call. **It does *not* touch your `Read` / `Grep` / `Glob` file reads — by design**, so a later `Edit` still sees exact file bytes; those reads (often a coding agent's largest context cost) pass through uncompressed ([why](#proof)). One honest limit: when an output is so large that Claude Code itself persists it to a file and hands the model only a file reference, there is no inline output for the hook to compress.
+- **Known issue:** Claude Code ≥2.1.163 currently ignores hooks' replacement output ([anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951)), so the automatic PostToolUse compression above stores and accounts savings, but the model may still receive the original text until that bug is fixed. Manual tools (`furl_compress` / `furl_retrieve` / `furl_search`) are unaffected. See [LIBRARY.md](LIBRARY.md) for current harness status and the `FURL_PRETOOL_PIPE` opt-in.
 - **Signal-aware offload + sliceable retrieval** — a payload too big to compress inline (e.g. a 33 MB trace) comes back as a structured summary (schema, per-field value histograms, example rows) instead of a truncated head/tail, and the agent pulls a narrow slice on demand — `retrieve(hash, select_field="name", select_equals="DroppedFrame")` or a numeric range — without materializing the whole thing.
 - **MCP tools** — `furl_compress`, `furl_retrieve`, `furl_stats`, `furl_purge` (erase stored originals), `furl_search` (find by content substring), `furl_list` (list stored entries). A seventh tool, `furl_read`, exists but is off by default — enable with `FURL_MCP_READ=1` (see [LIBRARY.md](LIBRARY.md)).
 - **Skill** — explains the `<<ccr:HASH>>` retrieval flow and how to tune or disable it.
 
-Tuning, disabling (`FURL_HOOK_ENABLED=0`), and the full reference: [`plugins/furl/README.md`](plugins/furl/README.md). Retrieval TTL differs by surface: the library defaults to 30 minutes; this Claude Code plugin ships a 24 h window (`FURL_CCR_TTL_SECONDS=86400`) governing both the hook's offloads and the MCP tools' stores; the `furl` CLI defaults to the same 24 h. (A bare MCP server without a valid `FURL_CCR_TTL_SECONDS` keeps a 1 h session TTL for its tool-stored entries, while dropped-row originals embedded in compressed output follow the library's 30-minute default — the full 24 h window needs the env set, as the plugin ships it.)
+Tuning, disabling (`FURL_HOOK_ENABLED=0`), and the full reference: [`plugins/furl/README.md`](plugins/furl/README.md). Retrieval TTL differs by surface: the library defaults to 30 minutes; this Claude Code plugin ships a 24 h window (`FURL_CCR_TTL_SECONDS=86400`) governing both the hook's offloads and the MCP tools' stores; the `furl` CLI (no bare binary on PATH by default — run it via `uv run --no-project --with 'furl-ctx[mcp]' furl ...`, or `pip install furl-ctx` for a persistent one) defaults to the same 24 h. (A bare MCP server without a valid `FURL_CCR_TTL_SECONDS` keeps a 1 h session TTL for its tool-stored entries, while dropped-row originals embedded in compressed output follow the library's 30-minute default — the full 24 h window needs the env set, as the plugin ships it.)
 
 **A note on version numbers:** the Claude Code plugin versions independently from the `furl-ctx` engine it pins — a plugin release doesn't always mean an engine release, and vice versa. `/plugin` shows the plugin version; GitHub Releases and `CHANGELOG.md` track the engine version; the SessionStart banner shows both together (`furl <plugin> · engine furl-ctx <engine>`), which is the quickest way to see both numbers at once.
 
 ## Proof
 
-Token reduction on real captured data — a dated snapshot (inputs committed under `benchmarks/data/` for auditability; a re-run measures the current engine, so absolute counts can drift from this table — the honest-read band below is the authoritative check). Every number uses the engine's own tokenizer; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR). Read every figure below as a **best-case ceiling**, not a typical — the honest read follows.
+Token reduction on real captured data — a dated snapshot (inputs committed under `benchmarks/data/` for auditability; a re-run measures the current engine, so absolute counts can drift from this table — the honest-read band below is the authoritative check). Every number uses the engine's own tokenizer and measures `compress()` directly — independent of the PostToolUse hook-delivery issue noted above; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR). Read every figure below as a **best-case ceiling**, not a typical — the honest read follows.
 
 *Best-case ceilings — low-entropy dev fixtures (the compressor's happy path):*
 
@@ -81,7 +82,17 @@ The `code` row's 99% is CCR-offload of a large non-file-read tool output (e.g. `
 
 ## Also a Python library
 
-The same engine drops into any Python app or MCP host: `from furl_ctx import compress`. Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
+The same engine drops into any Python app or MCP host:
+
+```python
+from furl_ctx import compress
+
+messages = [{"role": "tool", "content": "..."}]
+result = compress(messages, model="claude-sonnet-4")
+# result.messages → compressed when content is large enough; CCR keeps originals retrievable
+```
+
+Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
 
 ## Community
 
