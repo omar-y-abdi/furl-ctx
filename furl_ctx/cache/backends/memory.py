@@ -40,6 +40,12 @@ class InMemoryBackend:
     def __init__(self) -> None:
         """Initialize the in-memory backend."""
         self._store: dict[str, CompressionEntry] = {}
+        # Named observability counters (hook invocations/compressions, etc.).
+        # PROCESS-LOCAL here — the in-memory backend is volatile and not shared
+        # across processes, so these count only THIS process's activity. The
+        # durable SqliteBackend persists the same names to the shared file, which
+        # is what lets furl_stats see the hook's cross-process increments.
+        self._counters: dict[str, int] = {}
 
     def get(self, hash_key: str) -> CompressionEntry | None:
         """Retrieve an entry by hash key.
@@ -93,6 +99,24 @@ class InMemoryBackend:
     def clear(self) -> None:
         """Remove all entries from storage."""
         self._store.clear()
+        # A full reset clears observability counters too, so test isolation
+        # (reset_compression_store) and furl_purge(all) start from a clean slate.
+        self._counters.clear()
+
+    def increment_counter(self, name: str, amount: int = 1) -> int:
+        """Add ``amount`` to the named counter and return its new value.
+
+        Not part of the ``CompressionStoreBackend`` protocol (ARCH-10) — a
+        convenience extra for observability, mirroring ``exists``/``keys``. The
+        in-memory tally is process-local; the durable SqliteBackend persists the
+        same names to the shared file for the cross-process furl_stats picture.
+        """
+        self._counters[name] = self._counters.get(name, 0) + amount
+        return self._counters[name]
+
+    def get_counters(self) -> dict[str, int]:
+        """Snapshot of all named counters (a copy — callers cannot mutate state)."""
+        return dict(self._counters)
 
     def count(self) -> int:
         """Get the number of entries in storage.

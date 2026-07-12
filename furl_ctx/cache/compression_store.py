@@ -1459,6 +1459,60 @@ class CompressionStore:
                 "backend": backend_stats,
             }
 
+    def increment_counter(self, name: str, amount: int = 1) -> int | None:
+        """Add ``amount`` to a named cross-process observability counter.
+
+        Advisory and FAIL-OPEN: a backend without counter support, or any counter
+        error, is a silent no-op returning ``None`` — a broken counter must never
+        break storage or a tool call. Returns the new value ONLY when it was
+        durably persisted (cross-process visible via the SqliteBackend); ``None``
+        otherwise (unsupported backend, or a volatile fallback write). The hook's
+        once-per-namespace first-run note reads a ``1`` here (see
+        ``counters_durable``); furl_stats reads the totals via ``get_counters``.
+        """
+        inc = getattr(self._backend, "increment_counter", None)
+        if inc is None:
+            return None
+        try:
+            with self._lock:
+                result = inc(name, amount)
+        except Exception as exc:  # noqa: BLE001 — counters are advisory, never fatal
+            logger.debug("CCR counter increment dropped (non-fatal): %s=%s", name, exc)
+            return None
+        return result if result is None or isinstance(result, int) else None
+
+    def get_counters(self) -> dict[str, int]:
+        """Snapshot of all named counters (cumulative, cross-process for sqlite).
+
+        FAIL-OPEN: an unsupported backend or a read error returns ``{}`` — the
+        observability read must never raise into furl_stats.
+        """
+        getter = getattr(self._backend, "get_counters", None)
+        if getter is None:
+            return {}
+        try:
+            with self._lock:
+                counters = getter()
+        except Exception as exc:  # noqa: BLE001 — advisory read, never fatal
+            logger.debug("CCR counter read dropped (non-fatal): %s", exc)
+            return {}
+        return dict(counters) if isinstance(counters, dict) else {}
+
+    @property
+    def counters_durable(self) -> bool:
+        """True iff this store's backend persists counters DURABLY (cross-process).
+
+        A durable counter backend exposes BOTH ``increment_counter`` and
+        ``set_durable`` — the SqliteBackend does; the in-memory default does not
+        (its counters are process-local). The hook uses this to gate its
+        once-per-namespace first-run note so a per-process ``1`` from the volatile
+        backend (library / unit tests) never fires it.
+        """
+        return (
+            getattr(self._backend, "increment_counter", None) is not None
+            and getattr(self._backend, "set_durable", None) is not None
+        )
+
     def delete(self, hash_key: str) -> bool:
         """Delete the entry for *hash_key* from the store. Returns whether one went.
 

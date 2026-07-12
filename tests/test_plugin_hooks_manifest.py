@@ -50,7 +50,7 @@ _LIB_VERSION = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"][
 # The events Furl ships. The loader rejects unknown event keys ("Invalid key in
 # record"), so pinning this set also guards against typo'd event names.
 _EVENT = "PostToolUse"
-_EVENTS = {"PostToolUse", "SessionStart"}
+_EVENTS = {"PostToolUse", "PreToolUse", "SessionStart"}
 
 # The exact PostToolUse command the plugin ships — byte-identical to the pre-pin
 # command except for the deterministic ``==<version>`` pin that stops ``uv`` from
@@ -59,6 +59,17 @@ _EXPECTED_COMMAND = (
     "sh -lc 'uv run --no-project --with "
     f'"furl-ctx[mcp]=={_LIB_VERSION}" '
     'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py" || true\''
+)
+
+# The opt-in PreToolUse pipe hook (default OFF). The command is SHELL-GATED on
+# FURL_PRETOOL_PIPE so the default-off path never spends a ``uv`` resolve — only a
+# truthy flag launches the rewrite script. Bash-only. Any edit here must be
+# deliberate.
+_EXPECTED_PRETOOL_COMMAND = (
+    'sh -lc \'case "$FURL_PRETOOL_PIPE" in 1|true|yes|on|enabled) '
+    "uv run --no-project --with "
+    f'"furl-ctx[mcp]=={_LIB_VERSION}" '
+    'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/pretool_pipe.py" ;; esac; true\''
 )
 
 # Fields the schema does not honor where the old manifest wrongly placed them:
@@ -141,6 +152,55 @@ def test_env_defaults_owned_by_hook_script_setdefault() -> None:
     src = _HOOK_SCRIPT.read_text(encoding="utf-8")
     assert 'os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")' in src
     assert 'os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")' in src
+
+
+# --- PreToolUse opt-in pipe hook (default OFF) ------------------------------------
+
+
+def test_pretool_group_shape() -> None:
+    groups = _load()["hooks"]["PreToolUse"]
+    assert len(groups) == 1
+    group = groups[0]
+    assert set(group.keys()) <= {"matcher", "hooks"}
+    assert not (_FORBIDDEN_MATCHER_KEYS & set(group.keys()))
+    # Bash-only: the pipe rewrites a command's stdout, so only Bash is in scope.
+    assert group["matcher"] == "Bash"
+    assert isinstance(group["hooks"], list) and group["hooks"]
+    for hook in group["hooks"]:
+        assert hook["type"] == "command"
+        assert isinstance(hook["command"], str) and hook["command"]
+        assert not (_FORBIDDEN_HOOK_KEYS & set(hook.keys()))
+
+
+def test_pretool_command_is_env_gated_and_pinned() -> None:
+    hook = _load()["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["timeout"] == 30
+    command = hook["command"]
+    assert command == _EXPECTED_PRETOOL_COMMAND
+    # Shell-gated on the opt-in flag so the default-off path costs no `uv` resolve.
+    assert 'case "$FURL_PRETOOL_PIPE"' in command
+    # Invokes the bundled rewrite script via the plugin-root placeholder.
+    assert "${CLAUDE_PLUGIN_ROOT}/hooks/pretool_pipe.py" in command
+    # No inline env pins on the hooks.json command itself (the rewrite bakes the
+    # CCR env at runtime; the manifest command must not clobber user env).
+    assert "FURL_CCR" not in command
+
+
+def test_pretool_default_off_is_cheap_no_uv_no_output() -> None:
+    # With the flag unset, the shell gate skips the body entirely: no output, exit
+    # 0, and crucially NO `uv` process is spawned (the default-off zero-cost path).
+    command = _load()["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    proc = _run(command)  # FURL_PRETOOL_PIPE not set
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+
+
+def test_pretool_falsey_flag_stays_off() -> None:
+    command = _load()["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    for value in ("0", "false", "off", ""):
+        proc = _run(command, {"FURL_PRETOOL_PIPE": value})
+        assert proc.returncode == 0
+        assert proc.stdout == "", f"flag {value!r} must NOT enable the pipe"
 
 
 # --- SessionStart status signal ---------------------------------------------------

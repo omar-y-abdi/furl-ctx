@@ -8,6 +8,57 @@ Bundles Furl's context compression into Claude Code as a single plugin:
 - **Skill** (`furl`) → explains how it works, the `<<ccr:HASH>>` retrieval flow, and
   how to tune or disable it.
 
+## Current harness status (Claude Code ≥ 2.1.163)
+
+**Heads-up:** Claude Code ≥ 2.1.163 currently **ignores a PostToolUse hook's
+replacement output** — `hookSpecificOutput.updatedToolOutput` is silently dropped, so
+the model still sees the **original** tool output
+([anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951);
+[our 2.1.207 repro](https://github.com/anthropics/claude-code/issues/68951#issuecomment-4951540435)).
+The compression hook still **runs** and still **stores** originals — you just don't get
+the token savings from the default path until upstream fixes the drop.
+
+**What still works today:** the MCP tools (`furl_compress`, `furl_retrieve`,
+`furl_search`, `furl_list`, `furl_stats`, `furl_purge`) — manual compression and
+retrieval are unaffected; durable storage + `<<ccr:HASH>>` retrieval; the SessionStart
+status line; the observability counters below; and the opt-in `FURL_PRETOOL_PIPE` path.
+
+The hook **keeps emitting** `updatedToolOutput`, so the default path revives
+automatically — with no plugin release — the moment upstream fixes #68951.
+
+### Observability counters
+
+Every PostToolUse hook run tallies into the shared per-project CCR store (cross-process,
+cumulative), surfaced by `furl_stats` under `store.hook_activity`:
+
+- `hook_invocations_seen` — how many times the hook ran.
+- `hook_compressions_applied` — how many replacements it produced (and *would* have
+  delivered if not dropped).
+
+**How to read them:** if `hook_invocations_seen` is rising but your context still shows
+raw tool output, the harness is dropping the replacements — see
+[#68951](https://github.com/anthropics/claude-code/issues/68951). The first hook run per
+project also prints a one-line stderr heads-up. (These activate once the runtime
+`furl-ctx` engine ships the store counter API; the hook is armed for them now.)
+
+### `FURL_PRETOOL_PIPE` — real savings on today's harness (opt-in, default OFF)
+
+Set `FURL_PRETOOL_PIPE=1` to enable a **PreToolUse** hook that rewrites a `Bash`
+command so its stdout is piped through the Furl compressor **before** it becomes the
+tool result — so the model-visible output **is** the compressed form (the original is
+stored under a `<<ccr:HASH>>` marker, retrievable via `furl_retrieve`, exactly like the
+PostToolUse path). It does **not** rely on `updatedToolOutput`, so it works now.
+
+Trade-offs:
+
+- **Bash-only** — it rewrites a command's stdout; other tools are untouched.
+- **The command mutation is visible in the transcript** — the rewrite carries a
+  `# furl-pipe (FURL_PRETOOL_PIPE=1)` comment so it is never a silent substitution.
+- **Exit code preserved exactly**, **stderr passes through untouched**, small outputs
+  pass through raw, and it is **fail-open** — a compressor that cannot even start falls
+  back to the raw captured output; never a broken command.
+- Default **OFF** is a byte-identical no-op (the default-off path spends no `uv` resolve).
+
 ## Scope (global install, per-project opt-out)
 
 Installing the plugin enables Furl **globally** — the compression hook and MCP tools
@@ -119,6 +170,7 @@ output that actually enters context.
 | `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tools never to compress — exact or `mcp__db__*` globs. |
 | `FURL_HOOK_MODE` | `normal` | `aggressive` compresses more (code + smaller outputs). |
 | `FURL_HOOK_VERBOSE` | off | `1` prints a one-line per-compression savings summary to stderr. |
+| `FURL_PRETOOL_PIPE` | off | `1`/`true`/`on` enables the opt-in PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status"). Default off is a byte-identical no-op. |
 | `FURL_STATUS_LINE` | on | `0` silences the one-line SessionStart status signal. Export it in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 
 The full `FURL_*` reference is in [`LIBRARY.md`](../../LIBRARY.md) → "Configuration".
@@ -149,8 +201,11 @@ plugins/furl/
 │   └── plugin.json          # plugin manifest (name, version, skills)
 ├── .mcp.json                # registers the `furl` MCP server
 ├── hooks/
-│   ├── hooks.json           # PostToolUse registration (auto-loaded)
-│   └── compress_tool_output.py   # the fail-open compression hook
+│   ├── hooks.json           # PostToolUse + PreToolUse + SessionStart registration
+│   ├── compress_tool_output.py   # the fail-open PostToolUse compression hook
+│   ├── pretool_pipe.py      # opt-in PreToolUse pipe rewrite (FURL_PRETOOL_PIPE)
+│   ├── pipe_compress.py     # the stdout compressor the pipe rewrite runs
+│   └── _furl_ccr_counters.py     # shared cross-process observability counters
 ├── skills/
 │   └── furl/
 │       └── SKILL.md         # how-it-works skill

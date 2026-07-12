@@ -116,6 +116,19 @@ _CREATE_EXPIRES_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS ccr_entries_expires_at_idx ON ccr_entries (created_at + ttl)"
 )
 
+# Named observability counters (hook_invocations_seen, hook_compressions_applied,
+# pipe_*, hook_noop:<reason>, ...). A tiny separate table in the SAME per-project
+# file as ``ccr_entries`` so the short-lived hook subprocess and the long-lived
+# MCP server (furl_stats) share ONE cumulative, cross-process tally. Append-only
+# (IF NOT EXISTS): safe to add to an existing database. Counters are monotonic —
+# they survive entry eviction/expiry (unlike ``ccr_entries``), so "invocations
+# rising while your context still shows raw output" stays a durable signal that
+# the harness is dropping replacement output (anthropics/claude-code#68951).
+_CREATE_COUNTERS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS ccr_counters "
+    "(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)"
+)
+
 _COLUMNS = (
     "hash_key, entry_hash, original_content, compressed_content, original_tokens, "
     "compressed_tokens, original_item_count, compressed_item_count, tool_name, "
@@ -483,6 +496,49 @@ class SqliteBackend:
             "fallback_entry_count": self._memory.count(),
         }
 
+    def increment_counter(self, name: str, amount: int = 1) -> int | None:
+        """Atomically add ``amount`` to the named counter in the shared file and
+        return its new DURABLE value, or ``None`` when the write did not reach
+        the file (backend degraded, or this op lost the lock-contention retry).
+
+        Not a Protocol method — an observability extra (like ``exists``/``keys``).
+        The upsert + read-back run in ONE transaction under SQLite's writer lock,
+        so concurrent processes serialise and each sees its own post-increment
+        value (a ``None`` return means "counted, but only in the volatile fallback
+        this process — not durable/cross-process"). Fail-open: never raises out.
+        """
+        if self._degraded:
+            self._memory.increment_counter(name, amount)
+            return None
+        try:
+            return self._run(
+                "increment_counter",
+                lambda conn: self._sqlite_increment_counter(conn, name, amount),
+            )
+        except _SqliteOpFailed:
+            # Per-op fail-open: keep the tally moving in the volatile fallback,
+            # but report the non-durable miss so a first-run gate cannot treat a
+            # lock-lost write as the durable "first invocation".
+            self._memory.increment_counter(name, amount)
+            return None
+
+    def get_counters(self) -> dict[str, int]:
+        """All named counters, merging the durable file with the volatile
+        fallback (degraded / lock-lost increments) so nothing counted is hidden."""
+        counters: dict[str, int] = {}
+        if not self._degraded:
+            try:
+                rows = self._run(
+                    "get_counters",
+                    lambda conn: conn.execute("SELECT name, value FROM ccr_counters").fetchall(),
+                )
+                counters = {str(name): int(value) for name, value in rows}
+            except _SqliteOpFailed:
+                counters = {}
+        for name, value in self._memory.get_counters().items():
+            counters[name] = counters.get(name, 0) + value
+        return counters
+
     def close(self) -> None:
         """Close the connections this backend opened, best-effort.
 
@@ -561,6 +617,7 @@ class SqliteBackend:
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_EXPIRES_INDEX_SQL)
+            conn.execute(_CREATE_COUNTERS_TABLE_SQL)
             purged = conn.execute(_PURGE_EXPIRED_SQL, (time.time(),)).rowcount
             row_count = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
         with self._state_lock:
@@ -626,9 +683,24 @@ class SqliteBackend:
                 self._row_count -= purged
         return int(purged)
 
+    def _sqlite_increment_counter(self, conn: sqlite3.Connection, name: str, amount: int) -> int:
+        """Upsert-add ``amount`` to ``name`` and read back the new value in ONE
+        transaction. INSERT-OR-IGNORE + UPDATE (not ON CONFLICT) for portability
+        across older SQLite; both statements share the transaction's writer lock,
+        so the read-back is this writer's own post-increment value even under
+        cross-process contention."""
+        with conn:
+            conn.execute("INSERT OR IGNORE INTO ccr_counters (name, value) VALUES (?, 0)", (name,))
+            conn.execute("UPDATE ccr_counters SET value = value + ? WHERE name = ?", (amount, name))
+            row = conn.execute("SELECT value FROM ccr_counters WHERE name = ?", (name,)).fetchone()
+        return int(row[0])
+
     def _sqlite_clear(self, conn: sqlite3.Connection) -> None:
         with conn:
             conn.execute("DELETE FROM ccr_entries")
+            # A full clear resets counters too (matches the in-memory backend and
+            # keeps test isolation / furl_purge(all) a clean slate).
+            conn.execute("DELETE FROM ccr_counters")
         with self._state_lock:
             self._row_count = 0
 

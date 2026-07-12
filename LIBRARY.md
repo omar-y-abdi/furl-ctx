@@ -293,6 +293,40 @@ The only entries that live solely in one process are those a veto already flagge
 as non-durable (volatile fallback) — and the caller was told exactly that at veto
 time and still holds those originals.
 
+## Claude Code harness status (≥ 2.1.163) — the PostToolUse drop and the pipe opt-in
+
+The Claude Code plugin's PostToolUse compression hook replaces a large tool output by
+emitting `hookSpecificOutput.updatedToolOutput`. On Claude Code **≥ 2.1.163 that
+replacement is silently dropped** — the hook runs, stores the original, and exits 0
+cleanly, but the model still receives the **original** output
+([anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951);
+[our 2.1.207 repro](https://github.com/anthropics/claude-code/issues/68951#issuecomment-4951540435)).
+Everything else is unaffected: the MCP tools (`furl_compress`/`furl_retrieve`/…), durable
+`<<ccr:HASH>>` storage and retrieval, and the SessionStart status line all work. The hook
+keeps emitting the replacement, so the default path revives automatically — with no
+release — once upstream fixes the drop.
+
+**Observability counters.** Every hook run tallies into the shared per-project CCR store
+(cross-process, cumulative — they survive entry eviction), surfaced by `furl_stats` under
+`store.hook_activity` as `hook_invocations_seen` and `hook_compressions_applied` (plus
+bucketed `hook_noop_reasons`). **If `hook_invocations_seen` is rising but your context
+still shows raw tool output, the harness is dropping the replacements — see
+[#68951](https://github.com/anthropics/claude-code/issues/68951).** The counters are
+stored via `CompressionStore.increment_counter` / `get_counters` and read back cross-process
+through the durable SQLite backend.
+
+**`FURL_PRETOOL_PIPE` — real savings on today's harness (opt-in, default OFF).** When set
+truthy, a **PreToolUse** hook rewrites a `Bash` command so its stdout is piped through the
+Furl compressor **before** it becomes the tool result — so the model-visible output *is*
+the compressed form, with the original stored under a `<<ccr:HASH>>` marker in the same
+per-project store (same TTL and redaction as the PostToolUse path). It does not use
+`updatedToolOutput`, so it is unaffected by #68951. Trade-offs: **Bash-only**; the command
+mutation is **visible in the transcript** (a `# furl-pipe (FURL_PRETOOL_PIPE=1)` comment,
+never a silent substitution); the original command's **exit code is preserved exactly**,
+its **stderr passes through untouched**, small outputs pass through raw, and it is
+**fail-open** (a compressor that cannot start falls back to the raw captured output — never
+a broken command). Default off is a byte-identical no-op.
+
 ## CLI
 
 `pip install furl-ctx` also installs a `furl` command — shell-native access to the

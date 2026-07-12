@@ -1918,6 +1918,13 @@ class FurlMCPServer:
     def _compute_stats(self) -> dict[str, Any]:
         """Blocking stats aggregation (store + shared-file reads), off the loop."""
         stats = self._stats.to_dict()
+        # One up-front contrast so the two scopes below are never conflated: the
+        # flat top-level counters are THIS process only; the ``store`` block
+        # (entries + hook_activity counters) is the shared cross-process picture.
+        stats["scopes"] = (
+            "top-level counters = THIS server process this session; "
+            "'store' = shared across all sessions/processes on this project."
+        )
         # Label the flat counters above as THIS-server-process scope so they are
         # never read as a session-wide total (Finding B): they count only what
         # this MCP server process itself compressed/retrieved. The live,
@@ -2004,11 +2011,61 @@ class FurlMCPServer:
             "total_original_tokens": total_original_tokens,
             "total_compressed_tokens": total_compressed_tokens,
             "estimated_tokens_saved": tokens_saved,
+            # Cross-process hook/pipe activity counters (persisted in this store).
+            "hook_activity": self._hook_activity_block(store),
         }
         if live:
             ages = [now - entry.created_at for _, entry in live]
             block["oldest_entry_age_seconds"] = round(max(ages))
             block["newest_entry_age_seconds"] = round(min(ages))
+        return block
+
+    @staticmethod
+    def _hook_activity_block(store: Any) -> dict[str, Any]:
+        """Cross-process hook/pipe counters from the shared store (observability).
+
+        Cumulative and monotonic — they survive entry eviction/expiry (unlike the
+        live-entry stats above), so ``hook_invocations_seen`` rising while your
+        context still shows RAW tool output is the durable signal that Claude Code
+        is dropping the PostToolUse hook's replacement output
+        (anthropics/claude-code#68951). ``hook_compressions_applied`` counts
+        replacements Furl produced (and would have delivered if not dropped); a
+        gap between the two is bucketed no-op reasons. The opt-in FURL_PRETOOL_PIPE
+        path is unaffected by #68951 — its ``pipe_*`` counters appear only once it
+        has run. Empty until the runtime furl-ctx ships the store counter API;
+        FAIL-OPEN (never raises into furl_stats).
+        """
+        try:
+            counters = store.get_counters()
+        except Exception:
+            counters = {}
+        if not isinstance(counters, dict):
+            counters = {}
+
+        def _bucketed(prefix: str) -> dict[str, int]:
+            return {
+                name[len(prefix) :]: value
+                for name, value in counters.items()
+                if name.startswith(prefix)
+            }
+
+        block: dict[str, Any] = {
+            "note": (
+                "cumulative across all processes on this project, monotonic. "
+                "invocations rising while output still looks raw → the harness "
+                "is dropping replacements (anthropics/claude-code#68951)."
+            ),
+            "hook_invocations_seen": counters.get("hook_invocations_seen", 0),
+            "hook_compressions_applied": counters.get("hook_compressions_applied", 0),
+            "hook_noop_reasons": _bucketed("hook_noop:"),
+        }
+        pipe_seen = counters.get("pipe_invocations_seen", 0)
+        pipe_applied = counters.get("pipe_compressions_applied", 0)
+        pipe_noop = _bucketed("pipe_noop:")
+        if pipe_seen or pipe_applied or pipe_noop:
+            block["pipe_invocations_seen"] = pipe_seen
+            block["pipe_compressions_applied"] = pipe_applied
+            block["pipe_noop_reasons"] = pipe_noop
         return block
 
     async def _handle_purge(self, arguments: dict[str, Any]) -> list[TextContent]:

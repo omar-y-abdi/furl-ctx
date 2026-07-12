@@ -58,6 +58,46 @@ os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")
 # (as a glob, always excluded); operators add more via FURL_HOOK_EXCLUDE_TOOLS.
 _SELF_TOOL_SUBSTR = "furl_"
 
+# --- observability counters (shared with the PreToolUse pipe + furl_stats) ------
+# Resolved ONCE per run in main() and stashed here so the terminal _passthrough /
+# _emit tally exactly one outcome (invariant: invocations == compressions + noop
+# buckets). Imported lazily and FAIL-OPEN — a counter problem never changes the
+# hook's stdout/exit or breaks the tool call. Inert until the runtime furl-ctx
+# ships the store-level counter API (older pinned engines just no-op here). See
+# _furl_ccr_counters and furl_stats' "store" block.
+_run_counter_ctx: tuple[Any, Any] | None = None
+
+
+def _counters_module() -> Any:
+    """Lazily import the sibling counter helper. Returns None when unavailable so
+    counting degrades to a no-op instead of ever raising into the hook."""
+    try:
+        import _furl_ccr_counters
+
+        return _furl_ccr_counters
+    except Exception:
+        return None
+
+
+def _record_noop(reason: str | None) -> None:
+    """Tally a no-op outcome bucket for this run (fail-open, no-op if unset)."""
+    ctx = _run_counter_ctx
+    if ctx is None or not reason:
+        return
+    cmod, cstore = ctx
+    if cmod is not None and cstore is not None:
+        cmod.bump(cstore, cmod.HOOK_NOOP_PREFIX + reason)
+
+
+def _record_compression() -> None:
+    """Tally a genuine compression outcome for this run (fail-open)."""
+    ctx = _run_counter_ctx
+    if ctx is None:
+        return
+    cmod, cstore = ctx
+    if cmod is not None and cstore is not None:
+        cmod.bump(cstore, cmod.HOOK_COMPRESSIONS)
+
 
 def _flag_enabled(raw: str | None) -> bool:
     """Interpret an on/off env flag. Unset or empty -> enabled (default on)."""
@@ -258,6 +298,7 @@ def _passthrough(reason: str | None = None) -> NoReturn:
     reaches the model and never blocks the tool call — exit stays 0 (fail-open)."""
     if reason and _noop_verbose_enabled():
         sys.stderr.write(f"furl: no-op ({reason})\n")
+    _record_noop(reason)
     sys.exit(0)
 
 
@@ -291,12 +332,21 @@ def _apply_env_redaction(text: str) -> str:
         return text
 
 
-def _emit(output_text: str) -> NoReturn:
+def _emit(output_text: str, *, compressed: bool) -> NoReturn:
     """Replace the model-visible tool output with *output_text* and exit 0.
 
     The single writer of the PostToolUse ``updatedToolOutput`` contract, used by
-    the compression path AND the redaction-only paths (a scrubbed-but-not-shrunk
-    output). Serialization failure falls back to passthrough (fail-open)."""
+    the compression path (``compressed=True``) AND the redaction-only paths
+    (``compressed=False`` — a scrubbed-but-not-shrunk output). Serialization
+    failure falls back to passthrough (fail-open). ``compressed`` selects the
+    observability outcome bucket so counters stay honest: a redaction-only emit
+    is NOT a compression.
+
+    NOTE (anthropics/claude-code#68951): Claude Code >=2.1.163 currently DROPS
+    this ``updatedToolOutput`` — the model still sees the original. The emission
+    is kept so the feature revives automatically when upstream fixes the drop;
+    until then real savings need the opt-in PreToolUse pipe (FURL_PRETOOL_PIPE),
+    and the counters here surface whether the drop is happening."""
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
@@ -307,6 +357,10 @@ def _emit(output_text: str) -> NoReturn:
         sys.stdout.write(json.dumps(output))
     except Exception:
         _passthrough("serialize-failed")
+    if compressed:
+        _record_compression()
+    else:
+        _record_noop("redaction-only")
     sys.exit(0)
 
 
@@ -341,6 +395,20 @@ def main() -> None:
         or os.getcwd(),
     )
 
+    # --- observability: record THIS invocation (every run past payload parse) ---
+    # Resolved once here (after the project dir is scoped, so it hits the SAME
+    # per-project store the MCP server reads) and stashed for the terminal
+    # _passthrough / _emit, which tally the run's single outcome. On the FIRST
+    # durably-recorded invocation, a one-line #68951 heads-up is written to stderr
+    # (once per store, not per call — the in-memory backend never triggers it, so
+    # a no-op stays byte-silent). All fail-open: counting never breaks the hook.
+    global _run_counter_ctx
+    _cmod = _counters_module()
+    _cstore = _cmod.resolve_store() if _cmod is not None else None
+    _run_counter_ctx = (_cmod, _cstore)
+    if _cmod is not None and _cstore is not None:
+        _cmod.emit_first_run_note_if_first(_cstore, _cmod.bump(_cstore, _cmod.HOOK_INVOCATIONS))
+
     # --- kill switch ---
     if not _flag_enabled(os.environ.get(_ENABLED_ENV)):
         _passthrough("disabled")
@@ -370,7 +438,7 @@ def main() -> None:
         # Below the compression threshold. If redaction changed the bytes, still
         # emit the scrubbed form so the secret never reaches the model.
         if redacted != text:
-            _emit(redacted)
+            _emit(redacted, compressed=False)
         _passthrough("below-min-chars")
 
     # --- compress (returns None + a distinct reason unless it genuinely helped) ---
@@ -383,7 +451,7 @@ def main() -> None:
         # Compression did not help. Emit the redacted text if it changed;
         # otherwise leave the original untouched (byte-identical passthrough).
         if redacted != text:
-            _emit(redacted)
+            _emit(redacted, compressed=False)
         _passthrough(compress_fail_reason or "no-savings")
 
     # --- optional one-line stderr annotation (FURL_HOOK_VERBOSE) ---
@@ -395,7 +463,7 @@ def main() -> None:
         )
 
     # --- replace the tool output the model sees ---
-    _emit(compressed)
+    _emit(compressed, compressed=True)
 
 
 if __name__ == "__main__":

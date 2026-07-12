@@ -41,6 +41,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PYPROJECT = _ROOT / "pyproject.toml"
 _PLUGIN_DIR = _ROOT / "plugins" / "furl"
 _HOOKS_JSON = _PLUGIN_DIR / "hooks" / "hooks.json"
+_PRETOOL_SCRIPT = _PLUGIN_DIR / "hooks" / "pretool_pipe.py"
 _MCP_JSON = _PLUGIN_DIR / ".mcp.json"
 _PLUGIN_JSON = _PLUGIN_DIR / ".claude-plugin" / "plugin.json"
 _SKILL_MD = _PLUGIN_DIR / "skills" / "furl" / "SKILL.md"
@@ -74,6 +75,11 @@ def _hook_command() -> str:
     return str(hooks["PostToolUse"][0]["hooks"][0]["command"])
 
 
+def _pretool_command() -> str:
+    hooks = json.loads(_read(_HOOKS_JSON))["hooks"]
+    return str(hooks["PreToolUse"][0]["hooks"][0]["command"])
+
+
 def _mcp_command() -> str:
     return " ".join(json.loads(_read(_MCP_JSON))["mcpServers"]["furl"]["args"])
 
@@ -104,6 +110,23 @@ def test_hook_pin_matches_pyproject_version() -> None:
 
 def test_mcp_pin_matches_pyproject_version() -> None:
     assert _extract(_PIN_RE, _mcp_command(), "furl-ctx[mcp] pin") == _pyproject_version()
+
+
+def test_pretool_pin_matches_pyproject_version() -> None:
+    # The opt-in PreToolUse pipe hook resolves the same pinned engine.
+    assert _extract(_PIN_RE, _pretool_command(), "furl-ctx[mcp] pin") == _pyproject_version()
+
+
+def test_pretool_pipe_script_pin_matches_pyproject_version() -> None:
+    # pretool_pipe.py BAKES the pin into the rewritten command (the compressor the
+    # rewrite pipes through), so it MUST equal pyproject too — a separate pin from
+    # the hooks.json command above and, like the prose pins, invisible to
+    # release-please's updaters. See _FURL_CTX_PIN in pretool_pipe.py.
+    pins = _pins_in(_read(_PRETOOL_SCRIPT))
+    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_PRETOOL_SCRIPT}"
+    assert all(pin == _pyproject_version() for pin in pins), (
+        f"{_PRETOOL_SCRIPT} pin(s) {pins} != pyproject version {_pyproject_version()!r}"
+    )
 
 
 def test_skill_prose_pin_matches_pyproject_version() -> None:

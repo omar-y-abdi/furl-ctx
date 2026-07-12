@@ -12,6 +12,28 @@ every dropped byte **retrievable on demand**. It ships two things to this sessio
 1. An **MCP server** (`furl`) exposing six tools.
 2. A **PostToolUse hook** that compresses big tool outputs automatically.
 
+## Current harness status (Claude Code ≥ 2.1.163)
+
+Claude Code ≥ 2.1.163 currently **ignores a PostToolUse hook's replacement output**
+(`updatedToolOutput` is silently dropped — the model still sees the *original*;
+[anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951),
+[our 2.1.207 repro](https://github.com/anthropics/claude-code/issues/68951#issuecomment-4951540435)).
+The hook still runs and still stores originals; what's lost is the automatic token
+saving. Unaffected: the MCP tools (manual `furl_compress`/`furl_retrieve`/…), durable
+`<<ccr:HASH>>` storage + retrieval, and the SessionStart status line. The hook keeps
+emitting the replacement, so the default path revives itself when upstream fixes the drop.
+
+**Counters:** `furl_stats` shows `store.hook_activity.hook_invocations_seen` and
+`hook_compressions_applied` (cross-process, cumulative). **If invocations are rising but
+your context still shows raw tool output, the harness is dropping the replacements — see
+[#68951](https://github.com/anthropics/claude-code/issues/68951).**
+
+**Real savings now (opt-in):** set `FURL_PRETOOL_PIPE=1` for a **PreToolUse** pipe that
+compresses a `Bash` command's stdout at the source (so the tool result *is* the
+compressed form, original retrievable via `furl_retrieve`) — it doesn't use
+`updatedToolOutput`, so it works today. Bash-only; the rewrite is transcript-visible
+(a `# furl-pipe` comment); exit code preserved, stderr untouched, fail-open. Default off.
+
 ## The MCP tools
 
 - `furl_compress` — compress a string on demand. Returns compressed text plus a
@@ -116,6 +138,7 @@ Set these in the plugin's `hooks/hooks.json` / `.mcp.json` env, or your shell:
 | `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tool names never to compress — exact (`Bash`) or fnmatch globs (`mcp__db__*`). Furl's own tools are always excluded. |
 | `FURL_HOOK_MODE` | `normal` | `aggressive` also compresses code in the blob and squeezes smaller outputs; `normal` keeps the default behavior. |
 | `FURL_HOOK_VERBOSE` | off | `1`/`true` prints a one-line savings summary per compression to stderr (`furl: Bash 12.4 KB -> 0.3 KB  -97%`). |
+| `FURL_PRETOOL_PIPE` | off | `1`/`true`/`on` enables the opt-in PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status"). Default off is a byte-identical no-op. |
 | `FURL_STATUS_LINE` | on | Set `0` to silence the one-line `furl … · engine furl-ctx …` SessionStart status signal. Must be exported in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 | `FURL_CCR_BACKEND` | `sqlite` (set by the plugin) | CCR store backend. Must match between the hook and the `furl` server for retrieval to work. |
 | `FURL_CCR_TTL_SECONDS` | `86400` = 24h (set by the plugin) | How long offloaded originals stay retrievable before they expire. Lower to reclaim disk sooner; raise for a longer retrieval window. |
