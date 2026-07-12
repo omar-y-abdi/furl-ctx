@@ -6,11 +6,12 @@ CARGO ?= cargo
 MATURIN ?= maturin
 PYTHON ?= python3
 
-.PHONY: help test bench build-wheel fmt fmt-check lint clippy clean ci-precheck ci-precheck-rust ci-precheck-python ci-precheck-commitlint install-git-hooks verify-rust-core
+.PHONY: help test test-python bench build-wheel fmt fmt-check lint clippy clean ci-precheck ci-precheck-rust ci-precheck-python ci-precheck-commitlint install-git-hooks verify-rust-core
 
 help:
 	@echo "Furl Rust targets:"
 	@echo "  make test               - cargo test --workspace"
+	@echo "  make test-python        - build extension (release) + pytest tests/ -q (one-command path)"
 	@echo "  make bench              - cargo bench --workspace"
 	@echo "  make build-wheel        - release wheel (root manifest: Python pkg + _core.so)"
 	@echo "  make verify-rust-core   - build + install + import-verify furl_ctx._core"
@@ -28,6 +29,19 @@ help:
 
 test:
 	$(CARGO) test --workspace
+
+# One-command path from a fresh clone to a passing Python suite: builds the native
+# extension (most tests hard-import furl_ctx._core, so a bare `pytest` fails fast
+# with a "build the extension first" message — see conftest.py) then runs pytest.
+# Distinct from `make test` (Rust-only, see RUST_DEV.md) so that target's existing
+# meaning doesn't change underneath anyone.
+test-python:
+	@if [ -z "$$VIRTUAL_ENV" ]; then \
+		echo "error: activate a venv first (e.g. source .venv/bin/activate)"; \
+		exit 1; \
+	fi
+	$(MATURIN) develop --release
+	$(PYTHON) -m pytest tests/ -q
 
 bench:
 	$(CARGO) bench --workspace

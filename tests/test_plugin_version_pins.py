@@ -12,12 +12,18 @@ bumps".
 LIBRARY version (``pyproject.toml`` ``project.version``): the ``furl-ctx[mcp]==X.Y.Z``
 pins in the PostToolUse hook command (``hooks/hooks.json``) and the MCP server command
 (``.mcp.json``) MUST equal it, so ``uv run`` fetches a deterministic wheel instead of
-whatever stale resolution its cache happens to hold.
+whatever stale resolution its cache happens to hold. The same pin also appears as
+worked-example PROSE in ``skills/furl/SKILL.md`` and ``plugins/furl/README.md`` — not
+inside machine-read config, so nothing else catches it going stale — and MUST equal it
+too (three stale examples slipped past release once already; see CONTRIBUTING.md
+"Releasing / version bumps"). The SessionStart status line names the engine alongside
+the plugin (``furl X.Y.Z · engine furl-ctx A.B.C``), so its engine half MUST equal it
+as well.
 
 PLUGIN version (``plugin.json`` ``version``): the marketplace metadata + entry
-versions, the skill frontmatter, and the baked SessionStart status-line version MUST
-all equal it, because the plugin cache is version-keyed and the status line advertises
-the running plugin build.
+versions, the skill frontmatter, and the plugin half of the baked SessionStart
+status-line version MUST all equal it, because the plugin cache is version-keyed and
+the status line advertises the running plugin build.
 
 Pure stdlib (json, re, tomllib) — no furl_ctx import — so the guard runs even without
 the built extension.
@@ -38,11 +44,16 @@ _HOOKS_JSON = _PLUGIN_DIR / "hooks" / "hooks.json"
 _MCP_JSON = _PLUGIN_DIR / ".mcp.json"
 _PLUGIN_JSON = _PLUGIN_DIR / ".claude-plugin" / "plugin.json"
 _SKILL_MD = _PLUGIN_DIR / "skills" / "furl" / "SKILL.md"
+_PLUGIN_README = _PLUGIN_DIR / "README.md"
 _MARKETPLACE_JSON = _ROOT / ".claude-plugin" / "marketplace.json"
 
 _SEMVER = r"\d+\.\d+\.\d+"
 _PIN_RE = re.compile(r"furl-ctx\[mcp\]==(" + _SEMVER + r")")
-_STATUS_VERSION_RE = re.compile(r"furl (" + _SEMVER + r") active")
+# Two capture groups in one match, not two separate regexes: this also pins the
+# *relationship* between the halves (plugin version immediately followed by
+# "· engine furl-ctx" immediately followed by the engine version), so a status
+# line with the right two numbers in the wrong shape still fails loud.
+_STATUS_VERSION_RE = re.compile(r"furl (" + _SEMVER + r") · engine furl-ctx (" + _SEMVER + r")")
 _FRONTMATTER_VERSION_RE = re.compile(r"^version:\s*(" + _SEMVER + r")\s*$", re.MULTILINE)
 
 
@@ -72,13 +83,19 @@ def _session_start_command() -> str:
     return str(hooks["SessionStart"][0]["hooks"][0]["command"])
 
 
-def _extract(pattern: re.Pattern[str], text: str, label: str) -> str:
+def _extract(pattern: re.Pattern[str], text: str, label: str, group: int = 1) -> str:
     match = pattern.search(text)
     assert match is not None, f"no {label} found in: {text!r}"
-    return match.group(1)
+    return match.group(group)
 
 
-# --- LIBRARY version: both command pins == pyproject ---
+def _pins_in(text: str) -> list[str]:
+    """Every ``furl-ctx[mcp]==X.Y.Z`` pin version mentioned in free-form prose."""
+    return _PIN_RE.findall(text)
+
+
+# --- LIBRARY version: both command pins, prose pins, and the status line's engine
+# --- half all == pyproject ---
 
 
 def test_hook_pin_matches_pyproject_version() -> None:
@@ -87,6 +104,29 @@ def test_hook_pin_matches_pyproject_version() -> None:
 
 def test_mcp_pin_matches_pyproject_version() -> None:
     assert _extract(_PIN_RE, _mcp_command(), "furl-ctx[mcp] pin") == _pyproject_version()
+
+
+def test_skill_prose_pin_matches_pyproject_version() -> None:
+    pins = _pins_in(_read(_SKILL_MD))
+    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_SKILL_MD}"
+    assert all(pin == _pyproject_version() for pin in pins), (
+        f"{_SKILL_MD} prose pin(s) {pins} != pyproject version {_pyproject_version()!r}"
+    )
+
+
+def test_plugin_readme_prose_pins_match_pyproject_version() -> None:
+    pins = _pins_in(_read(_PLUGIN_README))
+    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_PLUGIN_README}"
+    assert all(pin == _pyproject_version() for pin in pins), (
+        f"{_PLUGIN_README} prose pin(s) {pins} != pyproject version {_pyproject_version()!r}"
+    )
+
+
+def test_session_start_status_line_engine_version_matches_pyproject_version() -> None:
+    version = _extract(
+        _STATUS_VERSION_RE, _session_start_command(), "status-line engine version", group=2
+    )
+    assert version == _pyproject_version()
 
 
 # --- PLUGIN version: marketplace + skill + status line == plugin.json ---
@@ -107,5 +147,5 @@ def test_skill_frontmatter_matches_plugin_version() -> None:
 
 
 def test_session_start_status_line_version_matches_plugin_version() -> None:
-    version = _extract(_STATUS_VERSION_RE, _session_start_command(), "status-line version")
+    version = _extract(_STATUS_VERSION_RE, _session_start_command(), "status-line plugin version")
     assert version == _plugin_version()

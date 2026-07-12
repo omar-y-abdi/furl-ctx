@@ -182,7 +182,10 @@ def test_session_start_emits_valid_system_message_json() -> None:
     assert set(payload.keys()) == {"systemMessage"}
     message = payload["systemMessage"]
     assert message.startswith("furl ")
-    assert "active" in message
+    # Names the pinned engine alongside the plugin (see test_plugin_version_pins.py
+    # for the full plugin-version / engine-version cross-check); _LIB_VERSION is the
+    # same pyproject-derived constant the PostToolUse pin check above uses.
+    assert f"engine furl-ctx {_LIB_VERSION}" in message
     assert "furl_stats" in message
 
 

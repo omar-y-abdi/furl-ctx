@@ -91,6 +91,57 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PY_VERSION }}
+      # Runs unconditionally (not gated behind needs.changes.outputs.code): llms.txt
+      # is agent-orientation content, not `.md`, so a PR that edits only llms.txt
+      # never trips the `code` path filter above — gating this step the same way
+      # would let a broken README.md anchor land silently. Pure stdlib, no repo
+      # import, sub-second. Keep in sync with tests/test_llms_txt_anchors.py, which
+      # runs the same check locally as part of the full gated suite.
+      - name: llms.txt anchor guard
+        shell: python
+        run: |
+          import re
+          import sys
+          from pathlib import Path
+
+          readme = Path("README.md").read_text(encoding="utf-8")
+          llms_txt = Path("llms.txt").read_text(encoding="utf-8")
+
+
+          def github_slug(heading: str) -> str:
+              """Reproduce GitHub's heading -> anchor slug algorithm."""
+              slug = heading.strip().lower()
+              slug = re.sub(r"[^\w\- ]", "", slug)
+              return slug.replace(" ", "-")
+
+
+          valid_slugs = set()
+          seen = {}
+          in_fence = False
+          for line in readme.splitlines():
+              stripped = line.strip()
+              if stripped.startswith("```") or stripped.startswith("~~~"):
+                  in_fence = not in_fence
+                  continue
+              if in_fence:
+                  continue
+              heading = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+              if heading is None:
+                  continue
+              base = github_slug(heading.group(1))
+              count = seen.get(base, 0)
+              seen[base] = count + 1
+              valid_slugs.add(base if count == 0 else f"{base}-{count}")
+
+          refs = re.findall(r"README\.md#([A-Za-z0-9_-]+)", llms_txt)
+          missing = sorted({ref for ref in refs if ref not in valid_slugs})
+          if missing:
+              print("llms.txt references README.md anchors that do not exist:")
+              for ref in missing:
+                  print(f"  - #{ref}")
+              print(f"Valid README.md anchors: {sorted(valid_slugs)}")
+              sys.exit(1)
+          print(f"OK: {len(refs)} README.md anchor reference(s) in llms.txt all resolve.")
       - name: Cache pip
         uses: actions/cache@v6
         with:

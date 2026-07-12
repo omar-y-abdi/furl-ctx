@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c '[ \"$FURL_STATUS_LINE\" = \"0\" ] || printf \"%s\" \"{\\\"systemMessage\\\": \\\"furl 1.0.7 active — PostToolUse compression armed; store: per-project (~/.furl); verify: furl_stats\\\"}\"; true'",
+            "command": "sh -c '[ \"$FURL_STATUS_LINE\" = \"0\" ] || printf \"%s\" \"{\\\"systemMessage\\\": \\\"furl 1.0.7 · engine furl-ctx 1.0.4 — PostToolUse compression armed; store: per-project (~/.furl); verify: furl_stats\\\"}\"; true'",
             "timeout": 5
           }
         ]

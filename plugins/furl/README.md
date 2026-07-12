@@ -80,6 +80,12 @@ shrink the retention window. The
 `furl-ctx[mcp]==1.0.4` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 
+**Plugin version vs. engine version.** This plugin (`plugin.json`) and the pinned engine
+`furl-ctx` (the pin above) version independently — a plugin release doesn't imply an engine
+bump, or vice versa. The plugin version is what the SessionStart status line and the Claude
+Code plugin marketplace show; the engine version is what's pinned above and what ships to
+[PyPI](https://pypi.org/project/furl-ctx/) / [CHANGELOG.md](../../CHANGELOG.md).
+
 ### Compression hook (`hooks/hooks.json` + `hooks/compress_tool_output.py`)
 
 A `PostToolUse` hook on external-output tools (`Bash`, `WebFetch`, `WebSearch`,
