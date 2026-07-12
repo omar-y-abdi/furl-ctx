@@ -5,6 +5,13 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0](https://github.com/omar-y-abdi/furl/compare/v1.1.0...v1.2.0) (2026-07-12)
+
+
+### Features
+
+* harness adaptation — durable hook counters + opt-in PreToolUse pipe ([#81](https://github.com/omar-y-abdi/furl/issues/81)) ([f9407b9](https://github.com/omar-y-abdi/furl/commit/f9407b9a24fc9f0be790a82bfe0495c1c6e54249))
+
 ## [1.1.0](https://github.com/omar-y-abdi/furl/compare/v1.0.5...v1.1.0) (2026-07-12)
 
 
