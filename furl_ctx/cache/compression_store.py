@@ -65,17 +65,29 @@ logger = logging.getLogger(__name__)
 
 class DurableWriteError(RuntimeError):
     """Raised by ``CompressionStore.store(..., require_durable=True)`` when the
-    entry did NOT reach the durable backend — the write fell open to a volatile
-    in-process fallback (the configured durable backend is degraded, or the
-    write lost the lock-contention retry). The marker-decision caller catches it
+    entry did NOT reach the durable backend within the lock-contention retry
+    budget — the write fell open to a volatile in-process fallback (the durable
+    backend is degraded, or a sibling process held the SQLite write lock for
+    longer than the whole retry budget). The marker-decision caller catches it
     and vetoes to passthrough (serves the original uncompressed), so a
     ``<<ccr:HASH>>`` marker never ships for content whose only surviving copy is
     volatile and dies with the process (audit #3).
+
+    ``hash_key`` is the key the entry IS stored under in the volatile tier: the
+    original round-trips from THIS process right now
+    (``store.retrieve(hash_key)``); it simply is not durable (gone on restart,
+    invisible to other processes). Callers that surface a retrieval handle use
+    it to stay honest — return the hash with a precise caveat — instead of
+    dropping it and implying total loss when retrieval works this moment.
 
     Not raised for a non-durable backend (the default in-memory store): there
     the operator explicitly chose volatile storage, so there is no durability to
     lose and ``require_durable`` is a no-op.
     """
+
+    def __init__(self, message: str, *, hash_key: str) -> None:
+        super().__init__(message)
+        self.hash_key = hash_key
 
 
 # Session-scale default (Engine P0-3): agentic sessions routinely outlive
@@ -86,6 +98,24 @@ class DurableWriteError(RuntimeError):
 # FURL_CCR_TTL_SECONDS (validated in `_get_env_default_ttl_seconds`).
 DEFAULT_CCR_TTL_SECONDS = 1800
 CCR_TTL_SECONDS_ENV = "FURL_CCR_TTL_SECONDS"
+
+# Durable-write contention retry (store-concurrency-honesty). When a
+# ``require_durable`` write reports non-durable — the shared file is briefly
+# held by ANOTHER furl MCP server process (e.g. a second Claude Code session on
+# the same project), or the backend lost its own per-op busy_timeout retry — the
+# store re-attempts the durable persist a bounded number of times with capped
+# exponential backoff BEFORE vetoing. Everyday two-session contention clears
+# within this budget; only a lock held longer than the WHOLE budget (a hung or
+# stale sibling) still vetoes, and then with an honest, cause-naming message.
+#
+# Worst-case ADDED wall-clock is the sum of the backoff sleeps
+# (0.05 + 0.10 + 0.20 = 0.35 s) plus, under SUSTAINED contention, up to
+# ``attempts`` more of the backend's own busy_timeout budget (~1.3 s each) — a
+# few seconds total, far under the MCP tool-call timeout (Claude Code's default
+# is 60 s). The happy path adds nothing: the first persist already succeeded.
+_DURABLE_RETRY_MAX_ATTEMPTS = 3
+_DURABLE_RETRY_BASE_BACKOFF_SECONDS = 0.05
+_DURABLE_RETRY_MAX_BACKOFF_SECONDS = 0.20
 
 # Minimum length for a caller-supplied ``explicit_hash``. This is the LOOSE
 # recovery-floor contract, intentionally distinct from the STRICT consumer set
@@ -384,6 +414,9 @@ class CompressionStore:
         backend: CompressionStoreBackend | None = None,
         now_fn: Callable[[], float] | None = None,
         spill: CompressionStoreBackend | None = None,
+        durable_retry_attempts: int = _DURABLE_RETRY_MAX_ATTEMPTS,
+        durable_retry_base_backoff_seconds: float = _DURABLE_RETRY_BASE_BACKOFF_SECONDS,
+        durable_retry_max_backoff_seconds: float = _DURABLE_RETRY_MAX_BACKOFF_SECONDS,
     ):
         """Initialize the compression store.
 
@@ -417,6 +450,14 @@ class CompressionStore:
                    Retrieval from spill is read-only — the entry is NOT promoted
                    back into ``backend`` and its access bookkeeping is untouched,
                    so a spill hit is byte-identical to the value that was evicted.
+            durable_retry_attempts: Extra durable-persist attempts after the
+                   first, tried under capped-backoff before a ``require_durable``
+                   write vetoes (store-concurrency-honesty). Absorbs everyday
+                   cross-process (two-session) SQLite lock contention. 0 disables
+                   the store-level retry (the backend keeps its own per-op one).
+            durable_retry_base_backoff_seconds: Base sleep between retries
+                   (doubles each attempt, capped by the max below).
+            durable_retry_max_backoff_seconds: Cap on the per-retry sleep.
         """
         # Import here to avoid circular imports
         from .backends import InMemoryBackend
@@ -428,6 +469,14 @@ class CompressionStore:
         self._default_ttl = default_ttl
         self._enable_feedback = enable_feedback
         self._now: Callable[[], float] = now_fn or time.time
+
+        if durable_retry_attempts < 0:
+            raise ValueError(f"durable_retry_attempts must be >= 0, got {durable_retry_attempts!r}")
+        if durable_retry_base_backoff_seconds < 0 or durable_retry_max_backoff_seconds < 0:
+            raise ValueError("durable retry backoff seconds must be >= 0")
+        self._durable_retry_attempts = durable_retry_attempts
+        self._durable_retry_base_backoff_seconds = durable_retry_base_backoff_seconds
+        self._durable_retry_max_backoff_seconds = durable_retry_max_backoff_seconds
 
         # Local retrieval-event tracking
         self._retrieval_events: list[RetrievalEvent] = []
@@ -627,19 +676,35 @@ class CompressionStore:
             # Add to eviction heap for O(log n) eviction
             heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
 
-        # Durability veto (audit #3), raised OUTSIDE the lock. When the caller
-        # required durability but the write only reached the volatile fallback,
-        # refuse to certify the store: the marker-decision caller catches this
-        # and reverts to the ORIGINAL uncompressed content (no dangling marker).
-        # The entry stays in the volatile tier so same-process retrieval still
-        # works; it simply must not back a shipped marker.
+        # Contention retry BEFORE the veto (store-concurrency-honesty). A durable
+        # write that reported non-durable most often lost a brief cross-process
+        # lock race — a second furl MCP server (another Claude Code session)
+        # writing the shared file. Re-attempt the persist under a bounded,
+        # capped-backoff budget (sleeps OUTSIDE the lock) so everyday two-session
+        # contention lands durably instead of spuriously vetoing.
+        if require_durable and not durable:
+            durable = self._retry_durable_persist(hash_key, entry)
+
+        # Durability veto (audit #3), raised OUTSIDE the lock, only once the whole
+        # retry budget is spent. The entry stays in the volatile tier so
+        # SAME-PROCESS retrieval still works right now (hence the hash rides the
+        # error); it simply is not durable, so a marker-decision caller reverts to
+        # the ORIGINAL uncompressed content (nothing lost) and a hash-surfacing
+        # caller reports the volatile handle honestly rather than implying loss.
         if require_durable and not durable:
             raise DurableWriteError(
-                f"CCR durable write for hash {hash_key} fell open to volatile "
-                f"in-process storage (backend degraded or lock-contention retry "
-                f"lost); refusing to certify durability so the caller vetoes the "
-                f"marker rather than shipping one whose original dies with the "
-                f"process"
+                f"CCR durable write for hash {hash_key} did not reach durable "
+                f"SQLite storage within the lock-contention retry budget "
+                f"({1 + self._durable_retry_attempts} attempts). The original IS "
+                f"in this process's volatile in-memory tier — retrievable now via "
+                f"this same server (store.retrieve / furl_retrieve) — but it will "
+                f"NOT survive a restart of this server and is invisible to other "
+                f"furl processes. Likely cause: another furl MCP server process — "
+                f"possibly a second, live or stale, Claude Code session on this "
+                f"project — holds the store's SQLite write lock (or the backend "
+                f"degraded). See LIBRARY.md “Multiple sessions on one "
+                f"project”.",
+                hash_key=hash_key,
             )
         return hash_key
 
@@ -658,6 +723,29 @@ class CompressionStore:
             return bool(set_durable(hash_key, entry))
         self._backend.set(hash_key, entry)
         return True
+
+    def _retry_durable_persist(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Re-attempt the durable persist under a bounded, capped-backoff budget.
+
+        Returns ``True`` as soon as a re-attempt lands the row durably (the
+        contention cleared), else ``False`` after ``durable_retry_attempts``
+        tries — the caller then vetoes. Backoff sleeps happen OUTSIDE the store
+        lock; each persist re-acquires it (the ``_persist_and_report_durability``
+        contract). Re-persisting the same ``(hash_key, entry)`` is idempotent —
+        the heap already holds the key and the backend upserts — so a healed
+        retry never double-counts.
+        """
+        for attempt in range(1, self._durable_retry_attempts + 1):
+            backoff = min(
+                self._durable_retry_base_backoff_seconds * (2 ** (attempt - 1)),
+                self._durable_retry_max_backoff_seconds,
+            )
+            if backoff > 0:
+                time.sleep(backoff)
+            with self._lock:
+                if self._persist_and_report_durability(hash_key, entry):
+                    return True
+        return False
 
     def retrieve(
         self,

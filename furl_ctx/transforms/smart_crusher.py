@@ -858,7 +858,7 @@ class SmartCrusher(Transform):
             )
             return
         try:
-            from ..cache.compression_store import get_compression_store
+            from ..cache.compression_store import DurableWriteError, get_compression_store
         except ImportError as e:
             # The lossy row-drop has ALREADY happened in the Rust store
             # (ephemeral, process-local). If we cannot reach the Python
@@ -930,6 +930,17 @@ class SmartCrusher(Transform):
             # Raise so the failure reaches compress()'s fail-open boundary,
             # which reverts to the ORIGINAL uncompressed messages. The lossy
             # drop never stands without a recovery copy.
+            if isinstance(e, DurableWriteError):
+                # Store-concurrency-honesty: the store's veto text is already
+                # precise — the original IS retrievable from this process right
+                # now (volatile tier, under e.hash_key); it just is not durable.
+                # Appending "unrecoverable" would contradict that truth inside
+                # one user-visible string, so keep the honest inner text as-is.
+                # The fail-open boundary still reverts to the ORIGINAL rows, so
+                # nothing is lost either way.
+                raise CcrMirrorError(
+                    f"CCR mirror: store.store() failed for hash {ccr_hash} ({e})"
+                ) from e
             raise CcrMirrorError(
                 f"CCR mirror: store.store() failed for hash {ccr_hash} "
                 f"({e}); dropped rows would be unrecoverable"

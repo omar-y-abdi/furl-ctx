@@ -214,6 +214,53 @@ hitting. Two rules keep caching and compression compatible:
   best-effort detector (CCR registry hit inside the frozen prefix) surfaces
   this in `result.warnings`.
 
+## Multiple sessions on one project
+
+Two Claude Code windows (or any two MCP hosts) open on the same project run two
+Furl MCP server processes that share one per-project SQLite store —
+`~/.furl/ccr.sqlite3`, or a per-namespace `~/.furl/ccr-ns-<hash>.sqlite3`. This
+is a normal, supported setup.
+
+**What happens under concurrency.** The store runs in SQLite WAL mode: many
+readers plus one writer at a time. When two servers write at once the loser waits
+on the store's `busy_timeout` **and** a bounded retry/backoff before a durable
+write is decided, so everyday cross-session contention lands durably instead of
+failing. A durable write only *vetoes* when a sibling holds the write lock longer
+than the whole retry budget (a few seconds — a hung or stale process), and the
+veto is honest, never a false "lost":
+
+- `furl_compress` still returns the retrieval **hash** and states plainly that
+  the entry is *retrievable now from this server, but not after a restart and not
+  from other processes.* It never claims the data is gone while it is retrievable
+  this moment, and the uncompressed original is always in the caller's hands.
+- The returned note and the server log name the likely cause: *another Furl MCP
+  server process — possibly a second, live or stale, Claude Code session — holds
+  the store.*
+
+**Check for a stale server.**
+
+```bash
+pgrep -fl furl                       # Furl MCP processes (ps aux | grep furl works too)
+lsof ~/.furl/ccr.sqlite3 2>/dev/null # who currently holds the store open
+```
+
+A server from a Claude Code session you already closed can linger and keep the
+store open. If a *live* session is legitimately using it, leave it — contention
+is handled.
+
+**Killing a stale server is safe.** The store is on disk (WAL-journaled), not in
+the server's memory, so stopping a stale server loses nothing that was durably
+written; the next server reopens the same file and every retained entry
+(`furl_list` / `furl_retrieve`) is still there.
+
+```bash
+kill <pid>   # graceful; the OS releases the SQLite lock on exit
+```
+
+The only entries that live solely in one process are those a veto already flagged
+as non-durable (volatile fallback) — and the caller was told exactly that at veto
+time and still holds those originals.
+
 ## CLI
 
 `pip install furl-ctx` also installs a `furl` command — shell-native access to the

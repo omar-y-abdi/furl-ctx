@@ -940,6 +940,7 @@ class FurlMCPServer:
         from furl_ctx.cache.compression_store import DurableWriteError
 
         hash_key: str | None
+        volatile_hash: str | None = None
         try:
             hash_key = store.store(
                 original=content,
@@ -953,7 +954,15 @@ class FurlMCPServer:
                 require_durable=True,
             )
         except DurableWriteError as exc:
-            logger.error("event=mcp_compress_not_durable error=%s", exc)
+            # Durable write lost the whole lock-contention retry budget and fell
+            # open to THIS process's volatile tier. The entry IS retrievable now
+            # under exc.hash_key — carry it forward so the response stays honest
+            # (return the hash + a precise caveat) instead of dropping it. The
+            # exception message names the likely cause (a sibling MCP server).
+            volatile_hash = exc.hash_key
+            logger.warning(
+                "event=mcp_compress_volatile_fallback hash=%s error=%s", volatile_hash, exc
+            )
             hash_key = None
 
         # Track stats (the compression itself succeeded on both paths)
@@ -966,11 +975,14 @@ class FurlMCPServer:
         savings_pct = round(tokens_saved / input_tokens * 100, 1) if input_tokens > 0 else 0
 
         if hash_key is None:
-            # Durability veto: no hash, no retrieval promise. The caller still
-            # holds the original it sent; the compressed form is returned for
-            # it to use or discard, flagged in plain words.
+            # Durability veto: the write fell open to THIS process's volatile
+            # tier after the retry budget. It IS retrievable now (return the hash
+            # so the caller can), but not after a restart and not from other
+            # processes — say exactly that, and name the likely cause. The caller
+            # still holds the original it sent; nothing is lost.
             return {
                 "compressed": compressed_content,
+                "hash": volatile_hash,
                 "original_tokens": input_tokens,
                 "compressed_tokens": output_tokens,
                 "tokens_saved": tokens_saved,
@@ -978,10 +990,15 @@ class FurlMCPServer:
                 "transforms": result.transforms_applied,
                 "durably_stored": False,
                 "note": (
-                    "Original NOT durably stored: the durable store write fell "
-                    "open to volatile process-local memory, so no retrieval hash "
-                    "is provided. Keep your original content; later retrieval of "
-                    "it from this server is not guaranteed."
+                    f"Stored in THIS server process only (volatile fallback after "
+                    f"SQLite lock contention). Retrievable now via "
+                    f"mcp__furl__{CCR_TOOL_NAME} with hash={volatile_hash}, but it "
+                    f"will NOT survive a restart of this server and other furl "
+                    f"processes cannot see it. Likely another furl MCP server "
+                    f"process — a second, live or stale, Claude Code session on "
+                    f"this project — holds the store; see LIBRARY.md “Multiple "
+                    f"sessions on one project”. Keep your original if you need "
+                    f"recovery that survives a restart."
                 ),
             }
 
@@ -1028,6 +1045,7 @@ class FurlMCPServer:
 
         rendered_parts: list[str] = []
         hashes: list[str] = []
+        volatile_hashes: list[str] = []
         transforms: list[str] = []
         total_input = 0
         total_output = 0
@@ -1049,7 +1067,12 @@ class FurlMCPServer:
                 if isinstance(part["compressed"], str)
                 else json.dumps(part["compressed"])
             )
+            # A vetoed run now returns its VOLATILE hash (durably_stored False)
+            # rather than omitting "hash" — so this stays crash-free under
+            # contention and the aggregate can flag the volatile runs honestly.
             hashes.append(part["hash"])
+            if part.get("durably_stored") is False:
+                volatile_hashes.append(part["hash"])
             transforms.extend(part.get("transforms", []))
             total_input += part["original_tokens"]
             total_output += part["compressed_tokens"]
@@ -1071,7 +1094,18 @@ class FurlMCPServer:
             strategy = ", ".join(transforms) if transforms else "passthrough"
             note += f" No token savings on this content — engine transforms: {strategy}."
 
-        return {
+        if volatile_hashes:
+            note += (
+                f" WARNING: {len(volatile_hashes)} run(s) are stored in THIS "
+                f"process only (volatile fallback after SQLite lock contention) — "
+                f"retrievable now but not after a server restart, and invisible to "
+                f"other furl processes (hashes: {', '.join(volatile_hashes)}). "
+                f"Likely another furl MCP server process (a second Claude Code "
+                f"session) holds the store; see LIBRARY.md “Multiple sessions on "
+                f"one project”."
+            )
+
+        result: dict[str, Any] = {
             "compressed": rendered,
             "mode": mode.value,
             "filtered": True,
@@ -1084,6 +1118,14 @@ class FurlMCPServer:
             "transforms": transforms,
             "note": note,
         }
+        if volatile_hashes:
+            # Some runs are volatile-only: flag it so the caller does not treat
+            # every hash as durably retrievable. Absent when all runs are durable,
+            # keeping the healthy-path shape byte-identical (as the single-unit
+            # path only adds durably_stored on a veto).
+            result["durably_stored"] = False
+            result["volatile_hashes"] = volatile_hashes
+        return result
 
     async def _search_all_content(self, query: str) -> dict[str, Any]:
         """Cross-store full-text search (NR2-2 feature a).

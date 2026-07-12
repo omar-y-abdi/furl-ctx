@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 import pytest
@@ -58,6 +59,7 @@ from furl_ctx.transforms.smart_crusher import (
 
 # TEST-19: shared single-copy raising-store wrapper (was duplicated here).
 from tests._fixtures import FailingStore as _FailingStore
+from tests._fixtures import make_fail_open_sqlite_backend
 
 # Row-drop fixture: the same 1000 distinct strings the recovery-invariant
 # suite uses (``_NON_DICT_CASES["strings"]``). A homogeneous flat array this
@@ -394,3 +396,63 @@ def test_typed_row_index_miss_graceful_iff_whole_blob_present() -> None:
             tool_name=None,
             typed=True,
         )
+
+
+# ─── store-concurrency-honesty: the surfaced veto text must not self-contradict ─
+#
+# When the durable write loses the WHOLE lock-contention retry budget on the
+# row-drop (array) path, ``store.store(require_durable=True)`` raises
+# ``DurableWriteError`` whose text is already precise and honest: the original
+# IS retrievable from this process right now (volatile tier, named hash); it
+# just is not durable. The mirror's ``except Exception`` wrapper used to append
+# "; dropped rows would be unrecoverable" — producing ONE user-visible string
+# claiming BOTH "retrievable now" AND "unrecoverable". Confirmed live by an
+# external evaluator (two MCP servers sharing one namespace store).
+
+
+def test_durable_veto_on_array_path_is_honest_not_unrecoverable(tmp_path: Any) -> None:
+    """The final user-visible error keeps the DurableWriteError's honest text
+    (hash + retrievable-now) WITHOUT the contradictory "unrecoverable" suffix;
+    the existing fail-open semantics are unchanged (original intact, no
+    ``<<ccr:`` marker); and the hash in the message really resolves from this
+    process at that moment — proving the retained claim true."""
+    from furl_ctx.transforms import TransformPipeline
+
+    store = cs.CompressionStore(
+        backend=make_fail_open_sqlite_backend(tmp_path / "veto.sqlite3"),
+        enable_feedback=False,
+        durable_retry_attempts=1,
+        durable_retry_base_backoff_seconds=0.001,
+        durable_retry_max_backoff_seconds=0.001,
+    )
+    cs.set_request_compression_store(store)
+    try:
+        tool_msg = _tool_message(_ROW_DROP_ITEMS)
+        # A FRESH default pipeline (identical transforms) instead of the shared
+        # singleton: this test's injected failure must not feed the singleton's
+        # circuit breaker (3 consecutive failures → 60 s open → every later
+        # compression test in the suite silently no-ops and fails).
+        result = compress(_build_messages(tool_msg), pipeline=TransformPipeline())
+    finally:
+        cs.clear_request_compression_store()
+
+    # Existing fail-open assertions kept: the veto still fires and reverts to
+    # the ORIGINAL rows — nothing shipped lossy, no dangling marker.
+    assert result.error is not None, "durability veto did not surface through compress()"
+    assert result.messages[1]["content"] == tool_msg["content"], (
+        "row-drop output stood despite the durability veto"
+    )
+    assert "<<ccr:" not in json.dumps(result.messages)
+
+    # HONESTY: one string, no self-contradiction.
+    lowered = result.error.lower()
+    assert "retrievable now" in lowered, f"honest inner text missing: {result.error!r}"
+    assert "unrecoverable" not in lowered, (
+        f"'retrievable now' contradicted by 'unrecoverable' in one message: {result.error!r}"
+    )
+    # The surfaced hash resolves RIGHT NOW from this process — the claim holds.
+    match = re.search(r"for hash ([0-9a-f]{12,24})", result.error)
+    assert match, f"no retrieval hash surfaced in: {result.error!r}"
+    assert store.retrieve(match.group(1)) is not None, (
+        "the surfaced hash did not resolve in-process; the honest text would be false"
+    )
