@@ -87,9 +87,9 @@ The same engine drops into any Python app or MCP host:
 ```python
 from furl_ctx import compress
 
-messages = [{"role": "user", "content": "..."}]
+messages = [{"role": "tool", "content": "..."}]
 result = compress(messages, model="claude-sonnet-4")
-# result.messages → compressed; CCR keeps originals retrievable
+# result.messages → compressed when content is large enough; CCR keeps originals retrievable
 ```
 
 Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
