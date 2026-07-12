@@ -5,6 +5,13 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0](https://github.com/omar-y-abdi/furl/compare/v1.0.5...v1.1.0) (2026-07-12)
+
+
+### Features
+
+* env-expressible secret redaction + content_kind threading + truthful compression grammar docs ([#78](https://github.com/omar-y-abdi/furl/issues/78)) ([36abd67](https://github.com/omar-y-abdi/furl/commit/36abd67b0c104a6c70a7093183bee7e2ed4614dd))
+
 ## [1.0.5](https://github.com/omar-y-abdi/furl/compare/v1.0.4...v1.0.5) (2026-07-12)
 
 
