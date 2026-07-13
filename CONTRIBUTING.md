@@ -103,6 +103,8 @@ until they agree:
   `furl <version> · engine furl-ctx <version>` string in the SessionStart hook of
   `plugins/furl/hooks/hooks.json`.
 
+**Public API surface:** The `compress()` function is the stable public API. Its signature is the part downstream integrations should depend on. Internal `furl_ctx` modules may change between releases. Pin a minor version for reproducible builds.
+
 ## Development setup
 
 ```bash

@@ -12,6 +12,13 @@ every dropped byte **retrievable on demand**. It ships two things to this sessio
 1. An **MCP server** (`furl`) exposing six tools.
 2. A **PostToolUse hook** that compresses big tool outputs automatically.
 
+**Retrieval is pull-based, not push-based.** The compressed text you read does not
+contain the dropped rows. To inspect a specific dropped item, call `furl_retrieve` for
+it by pattern, field, or line range. Retrieval is byte-exact and nothing is lost, but a
+one-off anomaly buried in otherwise-repetitive data will not appear in the compressed
+view unless you query for it. Trust a compressed summary for the shape of the data, not
+for surfacing an anomaly you were not already looking for.
+
 ## Current harness status (Claude Code ≥ 2.1.163)
 
 Claude Code ≥ 2.1.163 currently **ignores a PostToolUse hook's replacement output**

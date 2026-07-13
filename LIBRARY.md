@@ -40,6 +40,14 @@ python3 -m furl_ctx.ccr.mcp_server      # exposes furl_compress / _retrieve / _s
 
 ## Retrieve — full or sliced
 
+**Retrieval is pull-based, not push-based.** A `<<ccr:HASH>>` marker replaces the
+dropped content in the compressed output, so the dropped rows are not in the view the
+model reads. To get a specific one back, an agent has to call `retrieve()` for it by
+pattern, field, or line range. The store is byte-exact and nothing is lost, but a lone
+anomaly inside otherwise-repetitive data will not surface in the compressed view unless
+someone queries for it. A compressed summary is trustworthy for the shape of the data,
+not for spotting an outlier no one thought to look for.
+
 `compress()` offloads large, low-redundancy content to the CCR store and leaves a
 `<<ccr:HASH>>` marker. `retrieve(hash)` turns a marker's hash back into content.
 With **no filter argument it is byte-identical to the full stored original** (or

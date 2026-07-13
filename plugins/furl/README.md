@@ -1,14 +1,21 @@
 # Furl — Claude Code plugin
 
-Context compression for AI agents, bundled into Claude Code as a single plugin — it
-cuts token costs by shrinking large tool outputs before they reach the model's
-context window:
+Context compression for AI agents, bundled into Claude Code as a single plugin. The
+on-demand MCP toolkit your agent calls directly works on every Claude Code version
+today. Automatic, hands-off compression is still landing, and the Current harness
+status section below states exactly where it stands. This plugin ships three things:
 
 - **MCP server** (`furl`) → the `furl_compress`, `furl_retrieve`, `furl_stats`, `furl_purge`, `furl_search`, `furl_list` tools. A seventh tool, `furl_read`, is off by default (enable with `FURL_MCP_READ=1`).
 - **PostToolUse hook** → automatically compresses large tool outputs before they
   enter context (fail-open; never breaks a tool call).
 - **Skill** (`furl`) → explains how it works, the `<<ccr:HASH>>` retrieval flow, and
   how to tune or disable it.
+
+**Retrieval is pull-based, not push-based.** Compressed output does not contain the
+dropped rows. To see a specific dropped item, the agent calls `furl_retrieve` for it
+by pattern, field, or line range. Every retrieval is byte-exact and the data is never
+lost, but a one-off anomaly buried in otherwise-repetitive data will not appear in the
+compressed view unless someone knows to query for it.
 
 ## Current harness status (Claude Code ≥ 2.1.163)
 
