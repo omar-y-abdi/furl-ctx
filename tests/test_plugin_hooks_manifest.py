@@ -259,6 +259,7 @@ _EMPTY_SETTINGS_DIR = tempfile.mkdtemp(prefix="furl-manifest-tests-home-")
 def _env_with_flag(value: str | None) -> dict[str, str]:
     env = dict(os.environ)
     env["HOME"] = _EMPTY_SETTINGS_DIR
+    env.pop("CLAUDE_PROJECT_DIR", None)  # hermetic: no ambient project scope
     env.pop("FURL_PRETOOL_PIPE", None)  # true UNSET for the None case
     if value is not None:
         env["FURL_PRETOOL_PIPE"] = value

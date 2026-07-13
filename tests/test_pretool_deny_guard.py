@@ -212,9 +212,11 @@ def _run_hook(
     cwd_settings: dict | str | None = None,
     cwd_local_settings: dict | None = None,
     home_settings: dict | None = None,
+    project_dir_settings: dict | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run pretool_pipe.py hermetically: HOME and the payload cwd are fresh
-    directories carrying exactly the settings each scenario specifies."""
+    """Run pretool_pipe.py hermetically: HOME, the payload cwd, and (when given)
+    CLAUDE_PROJECT_DIR are fresh directories carrying exactly the settings each
+    scenario specifies."""
     proj = tmp / "proj"
     home = tmp / "home"
     proj.mkdir(exist_ok=True)
@@ -228,13 +230,18 @@ def _run_hook(
         _write_settings(proj / ".claude" / "settings.local.json", cwd_local_settings)
     if home_settings is not None:
         _write_settings(home / ".claude" / "settings.json", home_settings)
+    env = {"HOME": str(home), "FURL_PRETOOL_PIPE": "1", "PATH": "/usr/bin:/bin"}
+    if project_dir_settings is not None:
+        project_root = tmp / "project-root"
+        _write_settings(project_root / ".claude" / "settings.json", project_dir_settings)
+        env["CLAUDE_PROJECT_DIR"] = str(project_root)
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(proj)}
     return subprocess.run(
         [sys.executable, str(_PRETOOL)],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={"HOME": str(home), "FURL_PRETOOL_PIPE": "1", "PATH": "/usr/bin:/bin"},
+        env=env,
     )
 
 
@@ -308,6 +315,16 @@ def test_home_settings_rules_apply(tmp_path) -> None:
     proc = _run_hook("printf hi", tmp_path, home_settings=_deny("Bash(printf:*)"))
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == ""
+
+
+def test_claude_project_dir_scope_rules_apply(tmp_path) -> None:
+    """Claude Code loads project settings from the session's PROJECT ROOT
+    (``CLAUDE_PROJECT_DIR``, which every hook receives), while the payload cwd
+    can be a subdirectory with no ``.claude`` of its own. A deny rule at the
+    project root must still gate the pipe."""
+    proc = _run_hook("printf hi", tmp_path, project_dir_settings=_deny("Bash(printf:*)"))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "project-root (CLAUDE_PROJECT_DIR) deny rules must gate"
 
 
 def test_cwd_local_settings_rules_apply(tmp_path) -> None:

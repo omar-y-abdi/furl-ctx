@@ -23,9 +23,10 @@ the REWRITTEN command, and the furl-pipe wrapper no longer matches
 ``Bash(verb:*)`` patterns — so rewriting a denied command would silently
 downgrade a hard deny to "ask" (normal mode) or trip the obfuscation classifier
 (auto mode). Before rewriting, the hook reads every ``permissions.deny`` /
-``permissions.ask`` Bash rule it CAN see — ``<cwd>/.claude/settings.json``,
-``<cwd>/.claude/settings.local.json``, ``~/.claude/settings.json``,
-``~/.claude/settings.local.json`` — and when in ANY doubt (unreadable or
+``permissions.ask`` Bash rule it CAN see — project scope (``.claude/settings.json``
++ ``.claude/settings.local.json`` under BOTH ``$CLAUDE_PROJECT_DIR`` and the
+payload cwd) and user scope (``~/.claude/settings.json`` +
+``~/.claude/settings.local.json``) — and when in ANY doubt (unreadable or
 malformed settings, unparseable command, compound command, glob rules it cannot
 interpret, same-verb near-matches) it PASSES THROUGH: no rewrite, the original
 runs, the deterministic rule fires. Fail toward no-compression, never toward
@@ -120,15 +121,23 @@ _GLOB_CHARS = ("*", "?", "[")
 
 def _settings_paths(cwd: str) -> tuple[Path, ...]:
     """The permission-rule sources this hook CAN see, in Claude Code order:
-    project settings, project-local settings, then user scope. CLI flags,
-    enterprise managed policy, and session state are invisible here — that
-    blindness is documented and bounded by the bare-``Bash``-rule passthrough."""
-    home = Path.home()
-    return (
-        Path(cwd) / ".claude" / "settings.json",
-        Path(cwd) / ".claude" / "settings.local.json",
-        home / ".claude" / "settings.json",
-        home / ".claude" / "settings.local.json",
+    project settings + project-local settings, then user scope. Project scope is
+    read from BOTH ``CLAUDE_PROJECT_DIR`` (the session's project root, provided
+    to every hook — where Claude Code actually loads project settings from) AND
+    the payload cwd — they usually coincide, but when they differ (cwd in a
+    subdirectory) the union is the conservative choice: more readable rules can
+    only mean more passthrough, never a masked rule. CLI flags, enterprise
+    managed policy, and session state remain invisible here — that blindness is
+    documented and bounded by the bare-``Bash``-rule passthrough."""
+    project_dirs: list[Path] = []
+    project_root = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    if project_root:
+        project_dirs.append(Path(project_root))
+    if Path(cwd) not in project_dirs:
+        project_dirs.append(Path(cwd))
+    scopes = [base / ".claude" for base in (*project_dirs, Path.home())]
+    return tuple(
+        scope / name for scope in scopes for name in ("settings.json", "settings.local.json")
     )
 
 

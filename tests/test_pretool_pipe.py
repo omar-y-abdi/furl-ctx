@@ -55,12 +55,14 @@ _COMPRESSOR_SEG_RE = re.compile(
 def _rewrite(command: str, cwd: str) -> str:
     """Return the rewritten command pretool_pipe.py emits for *command* (flag on)."""
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd})
+    env = {**os.environ, "FURL_PRETOOL_PIPE": "1", "HOME": _EMPTY_HOME}
+    env.pop("CLAUDE_PROJECT_DIR", None)  # hermetic: no ambient project scope
     proc = subprocess.run(
         [sys.executable, str(_PRETOOL)],
         input=payload,
         capture_output=True,
         text=True,
-        env={**os.environ, "FURL_PRETOOL_PIPE": "1", "HOME": _EMPTY_HOME},
+        env=env,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)["hookSpecificOutput"]["updatedInput"]["command"]
@@ -91,6 +93,7 @@ def _with_local_compressor(rewritten: str) -> str:
 def _pretool(payload: dict, flag: str | None) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "HOME": _EMPTY_HOME}
     env.pop("FURL_PRETOOL_PIPE", None)
+    env.pop("CLAUDE_PROJECT_DIR", None)  # hermetic: no ambient project scope
     if flag is not None:
         env["FURL_PRETOOL_PIPE"] = flag
     return subprocess.run(
