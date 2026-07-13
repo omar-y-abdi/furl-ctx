@@ -203,7 +203,6 @@ docker/differential-network-capture/captures/
 
 # Documentation build
 docs/_build/
-site/
 
 # mypy
 .mypy_cache/
