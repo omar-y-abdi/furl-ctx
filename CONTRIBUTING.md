@@ -9,11 +9,11 @@ By participating, you agree to our [Code of Conduct](CODE_OF_CONDUCT.md).
 | Type | What to do |
 | --- | --- |
 | 🐛 Bug or small fix | **Open a PR** (with repro + test) |
-| ✨ New feature / architectural change | **Open an issue or ask in Discord first.** |
+| ✨ New feature / architectural change | **Open an issue first.** |
 | 🧹 Refactor-only | **Don't.** Only if a maintainer asked, as part of a concrete fix. |
 | 🧪 Test/CI-only PR chasing a known `main` failure | **Don't.** I'm tracking it. |
 | 📦 New dep or version bump | **PR with written justification.** |
-| ❓ Question | **Discord `#help`.** |
+| ❓ Question | **Open a GitHub issue.** |
 
 **Open PR cap: 10 per author.** Get existing ones merged before opening more.
 
@@ -49,7 +49,7 @@ I can't merge what I can't verify. Include a **`Real behavior proof`** section i
 
 Before writing code:
 
-1. **Open a feature-request issue** (or raise in Discord).
+1. **Open a feature-request issue.**
 2. **Get a 👍 from a core maintainer** before implementing.
 3. **Include a short spec** covering:
    - **API surface** (public functions, config, CLI flags)

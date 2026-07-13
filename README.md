@@ -38,10 +38,6 @@ The name is nautical: to *furl* is to roll up a sail — Furl rolls long context
 
 Furl was extracted from the author's *Headroom* context-engineering experimentation project — the early commit history carries that lineage.
 
-<p align="center">
-  <img src="FurlDemo-Fast.gif" alt="Furl in action" width="820">
-</p>
-
 ## Install
 
 **Prerequisite:** [`uv`](https://docs.astral.sh/uv/) on your PATH (same as the official [serena](https://github.com/oraios/serena) plugin).
@@ -108,7 +104,7 @@ Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_
 
 ## Community
 
-Questions or bug reports → [open a GitHub issue](https://github.com/omar-y-abdi/furl-ctx/issues) (the surest way to reach the maintainer). For chat, there's a [Discord](https://discord.gg/yRmaUNpsPJ).
+Questions or bug reports → [open a GitHub issue](https://github.com/omar-y-abdi/furl-ctx/issues) (the surest way to reach the maintainer).
 
 **Maintainer note:** Furl is solo-maintained today — one person handles issues, PRs, and security reports, so response times vary with availability. [CONTRIBUTING.md](CONTRIBUTING.md) covers how PRs get reviewed and [SECURITY.md](SECURITY.md) covers the vulnerability-disclosure process; both hold regardless of team size.
 
