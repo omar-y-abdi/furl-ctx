@@ -43,15 +43,29 @@ def test_stderr_ordering_claim_is_honest_everywhere() -> None:
 
 
 def test_known_limitations_documented() -> None:
-    """F4/F5/F8 + T2: the plugin README carries a Known-limitations section naming
-    the heredoc divergence, the trailing-odd-backslash stdout caveat (line
-    continuation; bare bash itself version-divergent), the redaction gaps (incl.
-    the tempfile transit), the Bash(...) allowlist mismatch, the cold-start uv
-    resolves, and the cosmetic `line N:` prefix."""
+    """F4/F5/F8 + T2 + review-84 G6: the plugin README carries a Known-limitations
+    section naming the heredoc divergence, the trailing-odd-backslash stdout
+    caveat (line continuation; bare bash itself version-divergent), the redaction
+    gaps (incl. the tempfile transit), the Bash(...) allowlist mismatch, the
+    cold-start uv resolves, the cosmetic `line N:` prefix, and the
+    PERMISSION-rule visibility bounds of the deny/ask guard (settings files yes;
+    CLI --permission-mode flags, enterprise managed policy, session state no —
+    with the FURL_PRETOOL_PIPE=0 escape hatch)."""
     text = _read(_README)
     assert "Known limitations" in text
     section = text.split("Known limitations", 1)[1].lower()
-    needles = ("heredoc", "backslash", "redaction", "tempfile", "allowlist", "uv", "line n")
+    needles = (
+        "heredoc",
+        "backslash",
+        "redaction",
+        "tempfile",
+        "allowlist",
+        "uv",
+        "line n",
+        "permission",
+        "--permission-mode",
+        "enterprise",
+    )
     for needle in needles:
         assert needle in section, f"README Known limitations: missing {needle!r}"
 

@@ -57,8 +57,17 @@ trade-offs, up front):
 - **The command mutation is visible in the transcript** — the rewrite carries a
   `# furl-pipe (FURL_PRETOOL_PIPE=0 to disable)` comment so it is never a silent
   substitution.
-- **Permission allowlists:** the rewritten command no longer matches a user's
-  `Bash(...)` allowlist entries, so permission prompts can differ.
+- **Permission rules are respected:** the pipe **never rewrites a command that matches
+  a `permissions.deny` or `permissions.ask` rule it can read** (project
+  `.claude/settings.json` / `.claude/settings.local.json` and the user-scope
+  `~/.claude/` equivalents) — those commands pass through untouched so the rule fires
+  on the original. Compound commands, unreadable settings, and anything else doubtful
+  also pass through (conservative passthrough; visibility bounds in Known limitations).
+  `Bash(...)` **allowlist** entries may still not match the rewritten command, so
+  allow-prompts can differ.
+- **Latency:** ~0.3–0.5 s added per rewritten Bash call (two `uv` resolves: the shell
+  gate plus the in-command compressor). The first call in a fresh environment pays a
+  one-time resolve/build — seconds to tens of seconds.
 - **stderr is not captured and flows live** — but because stdout is buffered for
   compression, stderr/stdout **interleaving is not preserved**: in a merged view all
   stderr appears before the (possibly compressed) stdout. `cmd 2>&1` merges both into
@@ -72,10 +81,13 @@ How it works: a **PreToolUse** hook rewrites a `Bash` command so its stdout is p
 through the Furl compressor **before** it becomes the tool result — so the model-visible
 output **is** the compressed form (the original is stored under a `<<ccr:HASH>>` marker,
 retrievable via `furl_retrieve`, exactly like the PostToolUse path). It does **not**
-rely on `updatedToolOutput`, so it works now. Opt-out semantics: only an explicitly
-falsy value — `0`/`false`/`off`/`no`/`disabled`, case-insensitive — disables it; unset,
-empty, or any other value (including typos) leaves it ON. Disabling is cheap: the falsy
-path spends no `uv` resolve.
+rely on `updatedToolOutput`, so it works now. Before rewriting, the hook reads the
+deny/ask permission rules it can see and passes any matching, compound, or doubtful
+command through untouched — it fails toward no-compression, never toward masking a
+permission rule. Opt-out semantics: only an explicitly falsy value —
+`0`/`false`/`off`/`no`/`disabled`, case-insensitive (whitespace ignored) — disables it;
+unset, empty, or any other value (including typos) leaves it ON. Disabling is cheap:
+the falsy path spends no `uv` resolve.
 
 #### Known limitations
 
@@ -91,8 +103,17 @@ path spends no `uv` resolve.
   backslash is not preserved in stdout — and bare-bash behavior itself differs between
   versions here (GNU bash 5 `-c` keeps the dangling backslash literal; macOS bash 3.2
   drops it).
-- **Permission allowlists:** the rewritten command no longer matches a user's
-  `Bash(...)` allowlist entries, so permission prompts can differ with the pipe on.
+- **Permission-rule visibility:** the pipe never rewrites a command that matches a
+  deny/ask rule it can read (project `.claude/settings.json` /
+  `.claude/settings.local.json` and the user-scope `~/.claude/` equivalents), so those
+  rules keep working — a denied command passes through and the deterministic deny fires
+  on the original (this also avoids the auto-mode obfuscation classifier for denied
+  commands, since they are no longer rewritten). But the hook **cannot see** CLI
+  `--permission-mode` / `--disallowedTools` flags, enterprise managed policy, or
+  session state — **if you rely on those for Bash restrictions, set
+  `FURL_PRETOOL_PIPE=0`**. A bare `Bash` deny/ask rule disables rewriting entirely.
+  `Bash(...)` **allowlist** entries may still not match the rewritten command, so
+  allow-prompts can differ with the pipe on.
 - **Cold-start cost:** with the pipe and the PostToolUse hook both enabled, one Bash
   call can spend up to 3 `uv` resolves before caches warm.
 - **Cosmetic:** bash error messages gain a `line N:` prefix from the multi-line wrapper.
@@ -208,7 +229,7 @@ output that actually enters context.
 | `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tools never to compress — exact or `mcp__db__*` globs. |
 | `FURL_HOOK_MODE` | `normal` | `aggressive` compresses more (code + smaller outputs). |
 | `FURL_HOOK_VERBOSE` | off | `1` prints a one-line per-compression savings summary to stderr. |
-| `FURL_PRETOOL_PIPE` | **on** | The PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status") runs **by default**. Only an explicitly falsy value — `0`/`false`/`off`/`no`/`disabled`, case-insensitive — disables it; unset/empty/any other value leaves it on. The gate runs via `sh -lc` (a login shell), so an export in your login profile or in the environment Claude Code launches from takes effect. |
+| `FURL_PRETOOL_PIPE` | **on** | The PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status") runs **by default**. Only an explicitly falsy value — `0`/`false`/`off`/`no`/`disabled`, case-insensitive, whitespace ignored — disables it; unset/empty/any other value leaves it on. It never rewrites a command matching a readable deny/ask permission rule (conservative passthrough — see Known limitations). The gate runs via `sh -lc` (a login shell), so an export in your login profile or in the environment Claude Code launches from takes effect. |
 | `FURL_STATUS_LINE` | on | `0` silences the one-line SessionStart status signal. Export it in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 
 The full `FURL_*` reference is in [`LIBRARY.md`](../../LIBRARY.md) → "Configuration".

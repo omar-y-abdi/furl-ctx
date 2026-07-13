@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c '[ \"$FURL_STATUS_LINE\" = \"0\" ] || printf \"%s\" \"{\\\"systemMessage\\\": \\\"furl 1.2.1 · engine furl-ctx 1.2.0 — PreToolUse pipe active (FURL_PRETOOL_PIPE=0 to disable); PostToolUse compression armed; store: per-project (~/.furl); verify: furl_stats\\\"}\"; true'",
+            "command": "sh -c '[ \"$FURL_STATUS_LINE\" = \"0\" ] || printf \"%s\" \"{\\\"systemMessage\\\": \\\"furl 1.3.0 · engine furl-ctx 1.2.0 — PreToolUse pipe active (FURL_PRETOOL_PIPE=0 to disable); PostToolUse compression armed; store: per-project (~/.furl); verify: furl_stats\\\"}\"; true'",
             "timeout": 5
           }
         ]

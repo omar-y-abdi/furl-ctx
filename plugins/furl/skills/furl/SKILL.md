@@ -1,7 +1,7 @@
 ---
 name: furl
 description: How the Furl context-compression plugin works — the furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list MCP tools, the PostToolUse hook that shrinks large tool outputs, the <<ccr:HASH>> retrieval flow, and the FURL_* environment knobs to tune or disable it. Use when the user asks what Furl is doing, why a tool output looks compressed or contains <<ccr:...>> markers, how to retrieve original content, how to tune compression thresholds, or how to turn the hook off.
-version: 1.2.1
+version: 1.3.0
 ---
 
 # Furl — context compression for Claude Code
@@ -36,9 +36,16 @@ case-insensitively); unset, empty, or any other value leaves it on. Trade-offs:
 Bash-only; the rewrite is transcript-visible (a `# furl-pipe` comment); exit code
 preserved exactly; stderr is not captured and flows live, but stderr/stdout
 interleaving is not preserved (all stderr precedes the compressed stdout; `2>&1`
-merges); fail-open (worst case the command runs unwrapped, uncompressed). Known
-limitations (redaction gaps on fail-open paths, `Bash(...)` allowlist mismatch,
-heredoc edge): see the plugin README.
+merges); fail-open (worst case the command runs unwrapped, uncompressed); adds
+~0.3–0.5 s per rewritten call (two `uv` resolves; a fresh environment pays a
+one-time resolve/build on the first call). It never rewrites a command matching
+a `permissions.deny`/`ask` rule it can read from project/local/user settings
+(conservative passthrough on any doubt, compound commands included) — but it
+cannot see CLI `--permission-mode` flags, enterprise managed policy, or session
+state; if you rely on those for Bash restrictions, set `FURL_PRETOOL_PIPE=0`.
+Known limitations (redaction gaps on fail-open paths, `Bash(...)` allowlist
+mismatch, heredoc edge, permission-rule visibility bounds): see the plugin
+README.
 
 ## The MCP tools
 

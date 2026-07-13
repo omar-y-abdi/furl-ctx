@@ -330,9 +330,18 @@ disable)` comment, never a silent substitution); the original command's **exit c
 preserved exactly**; its **stderr is not captured and flows live** — but stdout is buffered
 for compression, so stderr/stdout **interleaving is not preserved** (in a merged view all
 stderr precedes the possibly-compressed stdout; `cmd 2>&1` merges both into the compressed
-stream); small outputs pass through raw; and it is **fail-open** (a compressor that cannot
-start falls back to the raw captured output, and a tempfile that cannot be created means
-the original command runs unwrapped, uncompressed — never a broken command).
+stream); small outputs pass through raw; it adds **~0.3–0.5 s per rewritten call** (two
+`uv` resolves; the first call in a fresh environment pays a one-time resolve/build —
+seconds to tens of seconds); and it is **fail-open** (a compressor that cannot start
+falls back to the raw captured output, and a tempfile that cannot be created means the
+original command runs unwrapped, uncompressed — never a broken command). **Permission
+rules are respected:** the pipe never rewrites a command that matches a
+`permissions.deny`/`ask` rule it can read (project `.claude/settings.json` /
+`settings.local.json` and the user-scope `~/.claude/` files) — matching, compound, and
+doubtful commands pass through untouched so the rule fires on the original. It cannot
+see CLI `--permission-mode` flags, enterprise managed policy, or session state; if you
+rely on those for Bash restrictions, set `FURL_PRETOOL_PIPE=0` (details in the plugin
+README's Known limitations).
 
 ## CLI
 

@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -221,10 +222,14 @@ def _pretool_gate_probe() -> str:
     return probe
 
 
-# The gate-parity contract (S1): the hooks.json SHELL gate and the python
-# ``_pipe_disabled`` gate must agree on EVERY value. ON unless explicitly
-# disabled: unset, empty, truthy spellings, and unknown junk all leave the pipe
-# ON; only the normalized falsy set turns it off.
+# The gate-parity contract (S1 + review-84 F1): the hooks.json SHELL gate and
+# the python ``_pipe_disabled`` gate must agree on EVERY value. ON unless
+# explicitly disabled: unset, empty, truthy spellings, and unknown junk all
+# leave the pipe ON; only the normalized falsy set turns it off. Both gates
+# remove ALL whitespace (the shell's ``tr -d "[:space:]"``, python's ASCII
+# whitespace-removal table) before comparing — INTERNAL whitespace included —
+# so "semantically identical" holds for every value, not just whitespace-free
+# ones.
 _GATE_PARITY_CASES: tuple[tuple[str | None, bool], ...] = (
     (None, True),  # unset → ON (the S1 smart default; pre-flip this was OFF)
     ("", True),  # empty → ON
@@ -236,13 +241,24 @@ _GATE_PARITY_CASES: tuple[tuple[str | None, bool], ...] = (
     ("1", True),
     ("TRUE", True),
     ("garbage", True),  # unknown non-falsy → ON ("on unless explicitly disabled")
+    ("o f f", False),  # INTERNAL whitespace (F1): both gates remove it → falsy
+    ("\tFALSE\n", False),  # mixed whitespace + case
+    ("d i s a b l e d", False),
+    ("g a r b a g e", True),  # collapsed junk is still junk → ON
 )
 
 _PRETOOL_SCRIPT = _PLUGIN_HOOKS_DIR / "pretool_pipe.py"
 
+# Hermetic HOME + cwd for the python-gate subprocess: the deny/ask guard
+# (reviewer-84 F3) reads permission rules from the payload cwd and HOME, and
+# this parity test targets the FLAG gate only — a developer's real ~/.claude
+# deny rules must not turn its rewrites into passthroughs.
+_EMPTY_SETTINGS_DIR = tempfile.mkdtemp(prefix="furl-manifest-tests-home-")
+
 
 def _env_with_flag(value: str | None) -> dict[str, str]:
     env = dict(os.environ)
+    env["HOME"] = _EMPTY_SETTINGS_DIR
     env.pop("FURL_PRETOOL_PIPE", None)  # true UNSET for the None case
     if value is not None:
         env["FURL_PRETOOL_PIPE"] = value
@@ -261,7 +277,13 @@ def _shell_gate_enabled(value: str | None) -> bool:
 
 
 def _python_gate_enabled(value: str | None) -> bool:
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "cwd": _EMPTY_SETTINGS_DIR,
+        }
+    )
     proc = subprocess.run(
         [sys.executable, str(_PRETOOL_SCRIPT)],
         input=payload,

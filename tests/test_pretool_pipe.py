@@ -31,11 +31,19 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _HOOKS = Path(__file__).resolve().parents[1] / "plugins" / "furl" / "hooks"
 _PRETOOL = _HOOKS / "pretool_pipe.py"
 _COMPRESSOR = _HOOKS / "pipe_compress.py"
+
+# Hermetic settings scope for every hook subprocess: the deny/ask guard
+# (reviewer-84 F3, tests/test_pretool_deny_guard.py) reads permission rules from
+# the payload cwd and HOME. These tests target the ZERO-RULES path, so both must
+# be rule-free fresh dirs regardless of the developer's real ~/.claude.
+_EMPTY_HOME = tempfile.mkdtemp(prefix="furl-pipe-tests-home-")
+_NO_RULES_CWD = tempfile.mkdtemp(prefix="furl-pipe-tests-cwd-")
 
 _UV_PREFIX_RE = re.compile(r'uv run --no-project --with "furl-ctx\[mcp\]==[^"]*" python3')
 _COMPRESSOR_SEG_RE = re.compile(
@@ -52,7 +60,7 @@ def _rewrite(command: str, cwd: str) -> str:
         input=payload,
         capture_output=True,
         text=True,
-        env={**os.environ, "FURL_PRETOOL_PIPE": "1"},
+        env={**os.environ, "FURL_PRETOOL_PIPE": "1", "HOME": _EMPTY_HOME},
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)["hookSpecificOutput"]["updatedInput"]["command"]
@@ -81,13 +89,13 @@ def _with_local_compressor(rewritten: str) -> str:
 
 
 def _pretool(payload: dict, flag: str | None) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ}
+    env = {**os.environ, "HOME": _EMPTY_HOME}
     env.pop("FURL_PRETOOL_PIPE", None)
     if flag is not None:
         env["FURL_PRETOOL_PIPE"] = flag
     return subprocess.run(
         [sys.executable, str(_PRETOOL)],
-        input=json.dumps(payload),
+        input=json.dumps({"cwd": _NO_RULES_CWD, **payload}),
         capture_output=True,
         text=True,
         env=env,

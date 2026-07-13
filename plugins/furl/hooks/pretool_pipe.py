@@ -12,9 +12,29 @@ like the PostToolUse path.
 
 SMART DEFAULT (v10, user-approved): the pipe runs UNLESS ``FURL_PRETOOL_PIPE``
 is EXPLICITLY falsy — ``0``/``false``/``off``/``no``/``disabled``
-(case-insensitive, whitespace-stripped). Unset, empty, and any other value —
+(case-insensitive, ALL whitespace removed). Unset, empty, and any other value —
 including unknown junk — leave it ON ("on unless explicitly disabled", so a typo
 never silently disables savings). Only ``Bash`` is touched.
+
+CORE PROPERTY — PERMISSION-RULE SAFETY (reviewer-84 F3, non-negotiable): this
+hook MUST NEVER rewrite a command that Claude Code would subject to a
+permissions **deny** or **ask** rule. Claude Code evaluates those rules against
+the REWRITTEN command, and the furl-pipe wrapper no longer matches
+``Bash(verb:*)`` patterns — so rewriting a denied command would silently
+downgrade a hard deny to "ask" (normal mode) or trip the obfuscation classifier
+(auto mode). Before rewriting, the hook reads every ``permissions.deny`` /
+``permissions.ask`` Bash rule it CAN see — ``<cwd>/.claude/settings.json``,
+``<cwd>/.claude/settings.local.json``, ``~/.claude/settings.json``,
+``~/.claude/settings.local.json`` — and when in ANY doubt (unreadable or
+malformed settings, unparseable command, compound command, glob rules it cannot
+interpret, same-verb near-matches) it PASSES THROUGH: no rewrite, the original
+runs, the deterministic rule fires. Fail toward no-compression, never toward
+masking a permission rule; no-savings is acceptable, defeating a deny is not.
+HONEST BLINDNESS: the hook cannot see CLI flags (``--permission-mode``,
+``--disallowedTools``), enterprise managed policy, or session-state approvals.
+A bare ``Bash`` deny/ask rule bounds that blindness (it passes everything
+through); users relying on CLI/policy-level Bash restrictions should set
+``FURL_PRETOOL_PIPE=0`` (documented in the plugin README).
 
 Contract (PreToolUse):
   stdin  : JSON {tool_name, tool_input:{command, ...}, cwd, ...}
@@ -61,23 +81,172 @@ _ENABLE_ENV = "FURL_PRETOOL_PIPE"
 # hooks.json shell gate — a parity test enumerates both.
 _DISABLE_VALUES = frozenset({"0", "false", "off", "no", "disabled"})
 
+# ASCII whitespace removal — the exact character class the shell gate's
+# ``tr -d "[:space:]"`` deletes (POSIX locale), so both gates normalize
+# identically even for values with INTERNAL whitespace (review-84 F1).
+_WS_REMOVE = str.maketrans("", "", " \t\n\r\f\v")
+
 
 def _pipe_disabled(raw: str | None) -> bool:
     """SMART DEFAULT (v10, user-approved): the pipe runs UNLESS explicitly
     disabled. True only for an explicit falsy value — 0/false/off/no/disabled,
-    case-insensitive, whitespace-stripped. Unset (None), empty, and any
-    unrecognized value return False (pipe ON): "on unless explicitly disabled",
-    so a typo like ``FURL_PRETOOL_PIPE=fasle`` never silently disables savings.
-    Must stay SEMANTICALLY IDENTICAL to the hooks.json shell gate
-    (test_pretool_gate_parity_shell_and_python enumerates both)."""
+    case-insensitive with ALL ASCII whitespace removed (so `` o f f `` is OFF,
+    matching the shell gate's ``tr -d "[:space:]"`` exactly). Unset (None),
+    empty, and any unrecognized value return False (pipe ON): "on unless
+    explicitly disabled", so a typo like ``FURL_PRETOOL_PIPE=fasle`` never
+    silently disables savings. SEMANTICALLY IDENTICAL to the hooks.json shell
+    gate for every value (test_pretool_gate_parity_shell_and_python enumerates
+    both, internal-whitespace cases included)."""
     if raw is None:
         return False
-    return raw.strip().lower() in _DISABLE_VALUES
+    return raw.translate(_WS_REMOVE).lower() in _DISABLE_VALUES
 
 
 def _passthrough() -> None:
     """Emit nothing and succeed: the original command runs unchanged."""
     sys.exit(0)
+
+
+# --- deny/ask-aware guard (reviewer-84 F3) ----------------------------------------
+# Shell constructs that can introduce ANOTHER command. If any appears and any
+# deny/ask Bash rule exists, the command is never parsed segment-by-segment —
+# it passes through wholesale. ``&`` covers ``&&``, ``|`` covers ``||``.
+_COMPOUND_MARKERS = ("\n", ";", "&", "|", "`", "$(", "<(", ">(")
+
+# Glob metacharacters we refuse to interpret in a rule verb: a rule we cannot
+# reason about is a rule that COULD match → passthrough.
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def _settings_paths(cwd: str) -> tuple[Path, ...]:
+    """The permission-rule sources this hook CAN see, in Claude Code order:
+    project settings, project-local settings, then user scope. CLI flags,
+    enterprise managed policy, and session state are invisible here — that
+    blindness is documented and bounded by the bare-``Bash``-rule passthrough."""
+    home = Path.home()
+    return (
+        Path(cwd) / ".claude" / "settings.json",
+        Path(cwd) / ".claude" / "settings.local.json",
+        home / ".claude" / "settings.json",
+        home / ".claude" / "settings.local.json",
+    )
+
+
+def _bash_bodies_from_entries(entries: object) -> tuple[list[str | None], bool]:
+    """Collect the Bash-governing rule bodies from one deny/ask array.
+
+    Returns ``(bodies, doubt)``: ``None`` in *bodies* is a BLANKET rule (a bare
+    ``Bash`` or a ``Bash(...`` we cannot parse — either could govern anything).
+    Rules for other tools (including ``BashOutput``, which merely shares the
+    prefix) are irrelevant to a Bash rewrite and are skipped. Any shape we
+    cannot read raises *doubt* instead of being guessed at."""
+    bodies: list[str | None] = []
+    if not isinstance(entries, list):
+        return bodies, True
+    doubt = False
+    for entry in entries:
+        if not isinstance(entry, str):
+            doubt = True
+            continue
+        rule = entry.strip()
+        if rule == "Bash":
+            bodies.append(None)
+        elif rule.startswith("Bash("):
+            bodies.append(rule[5:-1] if rule.endswith(")") else None)
+    return bodies, doubt
+
+
+def _load_bash_rule_bodies(paths: tuple[Path, ...]) -> tuple[list[str | None], bool]:
+    """Union of every deny/ask Bash rule body across *paths*.
+
+    Precedence is irrelevant to a conservative union: a rule in ANY scope could
+    gate the command, so all of them count. ``doubt`` is True when a source
+    EXISTS but cannot be read or parsed (unreadable file, invalid JSON, wrong
+    shapes) — the caller must pass through, because unknowable rules could
+    contain a deny. A missing file is not doubt; it simply has no rules."""
+    bodies: list[str | None] = []
+    doubt = False
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            doubt = True
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            doubt = True
+            continue
+        if not isinstance(data, dict):
+            doubt = True
+            continue
+        permissions = data.get("permissions")
+        if permissions is None:
+            continue
+        if not isinstance(permissions, dict):
+            doubt = True
+            continue
+        for key in ("deny", "ask"):
+            if key not in permissions:
+                continue
+            found, entry_doubt = _bash_bodies_from_entries(permissions[key])
+            bodies.extend(found)
+            doubt = doubt or entry_doubt
+    return bodies, doubt
+
+
+def _rule_matches_command(command: str, verb: str, body: str | None) -> bool:
+    """True whenever the rule COULD govern *command* — deliberately conservative.
+
+    Over-matching only costs compression on one call; under-matching would mask
+    a permission rule. Layers, any hit → match:
+      * blanket (``None`` body, empty/pure-wildcard prefix) → always;
+      * Claude Code's raw prefix semantics: ``Bash(P:*)`` governs commands
+        starting with ``P`` (exact-form bodies are the degenerate no-args case);
+      * verb backstop: a rule whose first word shares the command's verb (or a
+        ``gi*``-style verb-prefix glob of it) could match some spelling of this
+        command → same-verb commands are never rewritten;
+      * a rule verb containing glob characters we cannot interpret → match."""
+    if body is None:
+        return True
+    prefix = (body[:-2] if body.endswith(":*") else body).strip()
+    if not prefix:
+        return True
+    if command.startswith(prefix):
+        return True
+    core = prefix.split()[0].rstrip("*")
+    if not core or any(ch in core for ch in _GLOB_CHARS):
+        return True
+    return verb.startswith(core)
+
+
+def _deny_guard_passthrough(command: str, bodies: list[str | None]) -> bool:
+    """CORE PROPERTY decision: True → do NOT rewrite (see module docstring).
+
+    Zero rules (the common fresh-install case) → False: nothing can be masked,
+    every command rewrites, zero-config savings preserved. With rules present,
+    passthrough on: any compound construct (never parsed segment-by-segment),
+    an unparseable command, an env-assignment-obscured verb, or any rule that
+    could match. Rewrite only when the command is a SIMPLE command whose verb
+    confidently matches no deny/ask rule."""
+    if not bodies:
+        return False
+    stripped = command.strip()
+    if any(marker in stripped for marker in _COMPOUND_MARKERS):
+        return True
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        return True
+    if not tokens:
+        return True
+    verb = tokens[0]
+    if not verb or "=" in verb:
+        # No discernible verb (e.g. `''`) or an env-assignment prefix hiding it.
+        return True
+    return any(_rule_matches_command(stripped, verb, body) for body in bodies)
 
 
 def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
@@ -183,6 +352,15 @@ def main() -> None:
     # Loop guard: never double-wrap a command we (any plugin version) rewrote —
     # matches the stable "# furl-pipe" prefix, not one marker spelling.
     if _PIPE_GUARD in command:
+        _passthrough()
+
+    # SECURITY GUARD (reviewer-84 F3): never rewrite a command a deny/ask rule
+    # could govern — doubt of ANY kind (unreadable settings included) passes
+    # through so the deterministic rule fires on the ORIGINAL command.
+    raw_cwd = payload.get("cwd")
+    guard_cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else os.getcwd()
+    bodies, doubt = _load_bash_rule_bodies(_settings_paths(guard_cwd))
+    if doubt or _deny_guard_passthrough(command, bodies):
         _passthrough()
 
     compressor = str(Path(__file__).resolve().parent / "pipe_compress.py")
