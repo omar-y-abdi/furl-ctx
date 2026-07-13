@@ -26,7 +26,13 @@
 
 ---
 
-Furl is context compression for AI agents: it shrinks everything your Claude Code agent reads — tool outputs, logs, web fetches, RAG chunks — before it hits the model's context window. Same answers, a fraction of the token costs. Every dropped byte stays retrievable on demand.
+Furl is context compression for AI agents. It shrinks the large things your Claude Code agent reads, like tool outputs, logs, web fetches, and RAG chunks, so they cost far fewer tokens while the answers stay the same. Every dropped byte stays retrievable on demand.
+
+**What works today** is the on-demand toolkit. Your agent calls the MCP tools directly, `furl_compress`, `furl_retrieve`, `furl_search`, `furl_list`, `furl_stats`, and `furl_purge`, and gets real, verified compression on genuinely large payloads. Savings are typically 0-54% on high-entropy content, up to a best-case 95% ceiling on repetitive logs and fixtures, and every original comes back byte-exact through `furl_retrieve` whenever the agent needs it.
+
+**Retrieval is pull-based, not push-based.** Nothing dropped comes back on its own. The compressed view your agent reads does not contain the dropped rows, so to inspect a specific dropped item it must call `furl_retrieve` for that item by pattern, field, or line range. The data is never lost and every retrieval is byte-exact. What this costs you is anomaly visibility: a one-off outlier buried in otherwise-repetitive data will not appear in the compressed summary unless someone already knows to query for it. Trust the summary for the shape of the data, not for surfacing an anomaly you were not already looking for.
+
+**Automatic, hands-off compression is pending an upstream Claude Code fix, issue [#68951](https://github.com/anthropics/claude-code/issues/68951).** The opt-out PreToolUse pipe gives automatic Bash savings today only if you have no Bash permission rules configured. With any Bash allow, deny, or ask rule it stays out of the way, so your rules apply exactly as native.
 
 The name is nautical: to *furl* is to roll up a sail — Furl rolls long context up out of the model's way and keeps it on a line, ready to *unfurl* (retrieve) the instant you need it.
 
@@ -78,6 +84,8 @@ Token reduction on real captured data — a dated snapshot (inputs committed und
 
 Across the corpus: **95% fewer tokens** (72,903 → 3,880) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
 
+Information retention here means every byte is recoverable byte-exact through `furl_retrieve`. It does not mean the compressed view shows every row. Retrieval is pull-based, so an agent has to query for a specific dropped item to see it, and a lone anomaly will not surface in the compressed summary on its own.
+
 **Honest read:** the numbers above are best-case, low-entropy *ceilings* measured on the dev fixtures — two independent, out-of-sample audits show they degrade by 6–43pp on fresh high-entropy / near-unique / realistic data (exactly where real logs and listings live). On genuinely high-entropy content, honest lossless savings sit in the **0–54% band**, not 60–95% (code 0%, search 40%, repeated_logs 54%); read every figure here as a ceiling, not a typical, and see the tier-aware breakdown in [BENCHMARKS.md](BENCHMARKS.md).
 
 The `code` row's 99% is CCR-offload of a large non-file-read tool output (e.g. `Bash` dumping source text); an agent's own `Read`/`Grep`/`Glob` file access bypasses the compression hook by design and passes through unchanged, at 0%.
@@ -95,6 +103,8 @@ result = compress(messages, model="claude-sonnet-4")
 ```
 
 Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
+
+**Stability:** The public API is what `furl_ctx` exports at the top level, including `compress()`, `retrieve()`, `purge()`, and `resolve_markers()`. Those signatures are the surface to build against. Submodule internals under `furl_ctx.*` may change between releases, so import from the top-level package rather than reaching into submodules. Releases have been frequent during early development, so pin a minor version if you need a fixed surface to depend on.
 
 ## Community
 

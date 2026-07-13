@@ -1415,7 +1415,11 @@ class FurlMCPServer:
                         "retrieve individually); (2) pass hash with pattern/fields/line_range, "
                         "or a select_field row-filter (keep the rows of a JSON array by exact "
                         "value or numeric range), to project just part of the original. "
-                        "Filters cannot be combined with query."
+                        "Filters cannot be combined with query.\n"
+                        "Examples: furl_retrieve(hash) -> the whole original; "
+                        'furl_retrieve(hash, pattern="ERROR") -> only the matching lines; '
+                        'furl_retrieve(hash, select_field="id", select_equals=42) -> the '
+                        "rows where id==42."
                     ),
                     inputSchema={
                         "type": "object",
