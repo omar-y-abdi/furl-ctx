@@ -95,5 +95,3 @@ def test_hooks_object_with_handler_is_resolved_as_extension() -> None:
 def test_hooks_object_without_handler_is_ignored() -> None:
     manager = PipelineExtensionManager(hooks=object())
     assert not manager.enabled
-
-

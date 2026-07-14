@@ -28,7 +28,11 @@ def extract_user_query(messages: list[dict[str, Any]]) -> str:
                 return s
             if isinstance(content, list):
                 for b in content:
-                    if isinstance(b, dict) and b.get("type") == "text" and (s := str(b.get("text", "")).strip()):
+                    if (
+                        isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and (s := str(b.get("text", "")).strip())
+                    ):
                         return s
     return ""
 
@@ -39,7 +43,11 @@ def concat_text_parts(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+        return "\n".join(
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+        )
     return ""
 
 

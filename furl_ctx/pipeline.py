@@ -12,6 +12,7 @@ log = logging.getLogger(__name__)
 
 class PipelineStage(str, Enum):
     """The compression lifecycle stages emitted by compress()."""
+
     INPUT_RECEIVED = "input_received"
     INPUT_ROUTED = "input_routed"
     INPUT_COMPRESSED = "input_compressed"
@@ -20,6 +21,7 @@ class PipelineStage(str, Enum):
 @dataclass(frozen=True)
 class PipelineEvent:
     """Immutable event emitted at a canonical pipeline stage."""
+
     stage: PipelineStage
     operation: str
     model: str = ""
