@@ -73,7 +73,8 @@ class PipelineExtensionManager:
         if self._hook:
             try:
                 updated = self._hook.on_pipeline_event(event)
-                if isinstance(updated, PipelineEvent): event = updated
+                if isinstance(updated, PipelineEvent):
+                    event = updated
             except Exception as e:
                 log.warning("hook failed during %s: %s", stage.value, e)
         return event

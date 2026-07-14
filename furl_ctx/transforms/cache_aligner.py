@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import logging
 import uuid as _uuid
 from dataclasses import dataclass
@@ -36,7 +37,6 @@ from datetime import datetime
 from typing import Any
 
 from ..config import CacheAlignerConfig, CachePrefixMetrics, TransformResult
-import copy
 from ..tokenizer import Tokenizer
 from ..tokenizers import EstimatingTokenCounter
 from ..utils import compute_short_hash, concat_text_parts

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 from typing import Any
 
@@ -42,10 +41,13 @@ def extract_user_query(messages: list[dict[str, Any]]) -> str:
 
 def concat_text_parts(content: Any) -> str:
     """Concatenate text from a string or list of Anthropic-style blocks."""
-    if isinstance(content, str): return content
-    if not isinstance(content, list): return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
     return "\n".join(
-        b["text"] for b in content
+        b["text"]
+        for b in content
         if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
     )
 

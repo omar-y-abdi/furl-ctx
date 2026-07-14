@@ -45,6 +45,7 @@ fallback. Build it locally with `scripts/build_rust_extension.sh`
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -54,7 +55,6 @@ from typing import Any
 from ..ccr import marker_grammar
 from ..config import CCRConfig, TransformResult
 from ..tokenizer import Tokenizer
-import copy
 from ..utils import compute_short_hash, create_tool_digest_marker
 from .base import Transform
 
