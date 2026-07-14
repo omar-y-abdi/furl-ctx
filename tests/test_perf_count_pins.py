@@ -214,14 +214,14 @@ class TestPipelineFullConversationCounts:
         before/after (2, deliberately untouched — see module docstring)."""
         counter = SpyCounter()
         deep_copies = {"n": 0}
-        real_deep_copy = pipeline_module.deep_copy_messages
+        import copy
+        real_deep_copy = copy.deepcopy
 
-        def counting_deep_copy(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def counting_deep_copy(messages, memo=None):
             deep_copies["n"] += 1
-            return real_deep_copy(messages)
+            return real_deep_copy(messages, memo)
 
-        monkeypatch.setattr(pipeline_module, "deep_copy_messages", counting_deep_copy)
-        monkeypatch.setattr(cache_aligner_module, "deep_copy_messages", counting_deep_copy)
+        monkeypatch.setattr(copy, "deepcopy", counting_deep_copy)
 
         pipeline = TransformPipeline(
             config=FurlConfig(cache_aligner=CacheAlignerConfig(enabled=True)),

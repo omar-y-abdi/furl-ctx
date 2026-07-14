@@ -51,24 +51,14 @@ def summarize_routing_markers(transforms_applied: list[str]) -> list[str]:
 
 
 class PipelineExtensionManager:
-    """Dispatch canonical pipeline events to configured extensions."""
+    """Dispatch canonical pipeline events to configured hooks."""
 
-    def __init__(
-        self,
-        *,
-        hooks: Any = None,
-        extensions: list[Any] | None = None,
-    ) -> None:
-        resolved: list[Any] = []
-        if hooks is not None and callable(getattr(hooks, "on_pipeline_event", None)):
-            resolved.append(hooks)
-        if extensions:
-            resolved.extend(extensions)
-        self._extensions = resolved
+    def __init__(self, *, hooks: Any = None) -> None:
+        self._hook = hooks if hasattr(hooks, "on_pipeline_event") else None
 
     @property
     def enabled(self) -> bool:
-        return bool(self._extensions)
+        return self._hook is not None
 
     def emit(
         self,
@@ -79,31 +69,11 @@ class PipelineExtensionManager:
         messages: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> PipelineEvent:
-        """Emit a canonical lifecycle event and return the final event state."""
-
-        event = PipelineEvent(
-            stage=stage,
-            operation=operation,
-            model=model,
-            messages=messages,
-            metadata=metadata or {},
-        )
-
-        for extension in self._extensions:
-            handler = getattr(extension, "on_pipeline_event", None)
-            if not callable(handler):
-                continue
+        event = PipelineEvent(stage, operation, model, messages, metadata or {})
+        if self._hook:
             try:
-                updated = handler(event)
-            except Exception as exc:  # noqa: BLE001 - preserve hook fail-open behavior
-                log.warning(
-                    "pipeline extension %r failed during %s: %s",
-                    type(extension).__name__,
-                    stage.value,
-                    exc,
-                )
-                continue
-            if isinstance(updated, PipelineEvent):
-                event = updated
-
+                updated = self._hook.on_pipeline_event(event)
+                if isinstance(updated, PipelineEvent): event = updated
+            except Exception as e:
+                log.warning("hook failed during %s: %s", stage.value, e)
         return event

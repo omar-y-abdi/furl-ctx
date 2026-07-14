@@ -36,9 +36,10 @@ from datetime import datetime
 from typing import Any
 
 from ..config import CacheAlignerConfig, CachePrefixMetrics, TransformResult
+import copy
 from ..tokenizer import Tokenizer
 from ..tokenizers import EstimatingTokenCounter
-from ..utils import compute_short_hash, concat_text_parts, deep_copy_messages
+from ..utils import compute_short_hash, concat_text_parts
 from .base import Transform
 
 logger = logging.getLogger(__name__)
@@ -403,4 +404,4 @@ def align_for_cache(
             stable_hash = marker.split(":", 1)[1]
             break
 
-    return deep_copy_messages(result.messages), stable_hash
+    return copy.deepcopy(result.messages), stable_hash

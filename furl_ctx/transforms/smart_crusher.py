@@ -54,7 +54,8 @@ from typing import Any
 from ..ccr import marker_grammar
 from ..config import CCRConfig, TransformResult
 from ..tokenizer import Tokenizer
-from ..utils import compute_short_hash, create_tool_digest_marker, deep_copy_messages
+import copy
+from ..utils import compute_short_hash, create_tool_digest_marker
 from .base import Transform
 
 logger = logging.getLogger(__name__)
@@ -1115,7 +1116,7 @@ class SmartCrusher(Transform):
         Rust via `_smart_crush_content`.
         """
         tokens_before = tokenizer.count_messages(messages)
-        result_messages = deep_copy_messages(messages)
+        result_messages = copy.deepcopy(messages)
         transforms_applied: list[str] = []
         markers_inserted: list[str] = []
         warnings: list[str] = []

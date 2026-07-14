@@ -50,7 +50,7 @@ def test_no_extensions_manager_is_disabled_and_emit_is_total() -> None:
 
 def test_extensions_receive_events_in_order() -> None:
     recorder = _RecordingExtension()
-    manager = PipelineExtensionManager(extensions=[recorder])
+    manager = PipelineExtensionManager(hooks=recorder)
     assert manager.enabled
 
     manager.emit(PipelineStage.INPUT_RECEIVED, operation="compress", model="gpt-4o")
@@ -63,26 +63,24 @@ def test_extensions_receive_events_in_order() -> None:
     assert recorder.events[0].model == "gpt-4o"
 
 
-def test_raising_extension_fails_open_and_later_extensions_still_run() -> None:
+def test_rewriting_extension_replaces_the_event() -> None:
+    # Frozen events: handlers return a replacement; emit adopts it.
+    manager = PipelineExtensionManager(hooks=_RewritingExtension())
+    event = manager.emit(PipelineStage.INPUT_COMPRESSED, operation="compress")
+    assert event.metadata == {"rewritten": True}
+
+
+def test_raising_extension_fails_open() -> None:
     """The fail-open contract: an extension that raises is logged and
-    SKIPPED — the emit completes and downstream extensions still see the
-    event. This is the path that protects compress() from user hooks."""
+    SKIPPED — the emit completes. This is the path that protects
+    compress() from user hooks."""
     raiser = _RaisingExtension()
-    recorder = _RecordingExtension()
-    manager = PipelineExtensionManager(extensions=[raiser, recorder])
+    manager = PipelineExtensionManager(hooks=raiser)
 
     event = manager.emit(PipelineStage.INPUT_ROUTED, operation="compress")
 
     assert raiser.calls == 1, "the raising extension was actually invoked"
-    assert len(recorder.events) == 1, "extensions after the raiser still run"
     assert event.stage is PipelineStage.INPUT_ROUTED, "emit returns despite the raise"
-
-
-def test_rewriting_extension_replaces_the_event() -> None:
-    # Frozen events: handlers return a replacement; emit adopts it.
-    manager = PipelineExtensionManager(extensions=[_RewritingExtension()])
-    event = manager.emit(PipelineStage.INPUT_COMPRESSED, operation="compress")
-    assert event.metadata == {"rewritten": True}
 
 
 def test_hooks_object_with_handler_is_resolved_as_extension() -> None:

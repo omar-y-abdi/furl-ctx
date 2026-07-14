@@ -223,35 +223,16 @@ class CompressResult:
 def _compute_frozen_message_count(messages: list[dict[str, Any]]) -> int:
     """Return the frozen-prefix message count for a list of Anthropic messages.
 
-    The authoritative frozen-count implementation (the former Rust
-    ``cache_control::compute_frozen_count`` was orphaned — no PyO3 binding, no
-    caller — and was removed in the standalone excise):
-
-    - Walk ``messages[i].content[*]``; for each block (dict) that has a
-      top-level ``cache_control`` key, record ``i`` as the highest marker index.
-    - Return ``highest_index + 1`` (exclusive floor: the marked message is part
-      of the cached prefix and must itself be frozen), or ``0`` if no marker.
-    - String-content messages are skipped (no block list → no markers possible).
-    - Only the ``messages`` field is inspected; ``system`` and ``tools`` markers
-      are never passed here and never bump the floor.
-    - ``cache_control: null`` counts as present (key-presence, not truthiness).
-
-    Args:
-        messages: List of message dicts in Anthropic format.
-
-    Returns:
-        Frozen message count (0 if no cache_control markers found).
+    Walks ``messages[i].content[*]`` and returns ``max(i)+1`` for every message
+    carrying a ``cache_control`` block. String content never carries markers.
     """
-    highest_index: int | None = None
-    for i, message in enumerate(messages):
-        content = message.get("content")
-        if not isinstance(content, list):
-            # String content: no block list, no cache_control possible.
-            continue
-        for block in content:
-            if isinstance(block, dict) and "cache_control" in block:
-                highest_index = i if highest_index is None else max(highest_index, i)
-    return (highest_index + 1) if highest_index is not None else 0
+    indices = [
+        i
+        for i, m in enumerate(messages)
+        if isinstance(c := m.get("content"), list)
+        and any(isinstance(b, dict) and "cache_control" in b for b in c)
+    ]
+    return max(indices) + 1 if indices else 0
 
 
 def _frozen_prefix_warning(total_messages: int, frozen: int) -> str | None:
@@ -556,26 +537,12 @@ def compress(
     if not messages or not optimize:
         return CompressResult(messages=messages)
 
-    # Build config from explicit config + kwargs. Never mutate the
-    # caller's CompressConfig — a reused config object must not carry
-    # one call's kwarg overrides into the next call.
     cfg = config or CompressConfig()
-    config_fields = {f.name for f in cfg.__dataclass_fields__.values()}
-    overrides = {key: value for key, value in kwargs.items() if key in config_fields}
-    unknown = sorted(set(kwargs) - config_fields)
-    if unknown:
-        # Fail fast at the public boundary — a typo'd field (e.g.
-        # ``target_ration``) silently defaulting would hand back differently
-        # compressed output than the caller asked for. Matches the strict
-        # ``ContentRouter.apply()`` contract (and Python's own unexpected-kwarg
-        # behaviour) rather than warning-and-ignoring.
-        raise TypeError(
-            f"compress() got unexpected keyword argument(s) "
-            f"{', '.join(unknown)}; valid CompressConfig fields: "
-            f"{', '.join(sorted(config_fields))}"
-        )
-    if overrides:
-        cfg = replace(cfg, **overrides)
+    if kwargs:
+        fields = {f.name for f in cfg.__dataclass_fields__.values()}
+        if unknown := sorted(set(kwargs) - fields):
+            raise TypeError(f"compress() unexpected keyword argument(s) {', '.join(unknown)}")
+        cfg = replace(cfg, **{k: v for k, v in kwargs.items() if k in fields})
 
     # B3 SECURITY — fail-closed content redaction. This runs BEFORE and OUTSIDE
     # the fail-open ``try/except BaseException`` boundary below ON PURPOSE: if a

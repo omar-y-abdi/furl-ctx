@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import threading
@@ -15,7 +16,6 @@ from ..config import (
     TransformResult,
 )
 from ..tokenizer import Tokenizer
-from ..utils import deep_copy_messages
 from .base import Transform
 from .cache_aligner import CacheAligner
 from .content_router import ContentRouter
@@ -263,13 +263,6 @@ class TransformPipeline:
         all_warnings: list[str] = []
         all_timing: dict[str, float] = {}  # transform_name → ms
 
-        t_copy = time.perf_counter()
-        current_messages = deep_copy_messages(messages)
-        copy_ms = (time.perf_counter() - t_copy) * 1000
-
-        all_timing["_deep_copy"] = copy_ms
-        all_timing["_initial_token_count"] = count_ms
-
         pipeline_start = time.perf_counter()
 
         request_id = kwargs.get("request_id", "")
@@ -283,6 +276,10 @@ class TransformPipeline:
                 frozen_count,
                 len(messages),
             )
+
+        current_messages = copy.deepcopy(messages)
+        all_timing["_deep_copy"] = (time.perf_counter() - pipeline_start) * 1000
+        all_timing["_initial_token_count"] = count_ms
 
         for transform in self.transforms:
             # Check if transform should run
