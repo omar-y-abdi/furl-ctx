@@ -242,7 +242,7 @@ def _try_detect_diff(content: str) -> DetectionResult | None:
     covers commit messages of ~500 lines (rare; if longer, you've got
     bigger problems).
     """
-    lines = content.split("\n")[:500]
+    lines = content.split("\n", 500)[:500]
 
     header_matches = 0
     change_matches = 0
@@ -298,7 +298,7 @@ def _try_detect_csv(content: str) -> DetectionResult | None:
 
 def _try_detect_search(content: str) -> DetectionResult | None:
     """Try to detect grep/ripgrep search results."""
-    lines = content.split("\n")[:100]  # Check first 100 lines
+    lines = content.split("\n", 100)[:100]  # Check first 100 lines
     if not lines:
         return None
 
@@ -332,7 +332,7 @@ def _try_detect_search(content: str) -> DetectionResult | None:
 
 def _try_detect_log(content: str) -> DetectionResult | None:
     """Try to detect build/log output."""
-    lines = content.split("\n")[:200]  # Check first 200 lines
+    lines = content.split("\n", 200)[:200]  # Check first 200 lines
     if not lines:
         return None
 
@@ -375,7 +375,7 @@ def _try_detect_log(content: str) -> DetectionResult | None:
 
 def _try_detect_code(content: str) -> DetectionResult | None:
     """Try to detect source code and identify language."""
-    lines = content.split("\n")[:100]  # Check first 100 lines
+    lines = content.split("\n", 100)[:100]  # Check first 100 lines
     if not lines:
         return None
 

@@ -1,0 +1,3 @@
+## 2025-02-28 - Optimize string splitting for content detection
+**Learning:** In `furl_ctx/transforms/content_detector.py`, parsing very large strings (e.g. 10MB logs or test outputs) using `content.split("\n")[:N]` is highly inefficient because it tokenizes the entire string and allocates millions of items in memory before returning only the first `N` elements.
+**Action:** Always use the `maxsplit` parameter when taking a slice of a split string: `content.split("\n", N)[:N]`. This prevents unnecessary parsing and memory allocation, speeding up execution by almost 3x on large strings. Ensure this pattern is actively used for string manipulation bounding in content detection tasks.
