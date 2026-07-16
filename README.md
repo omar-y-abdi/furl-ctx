@@ -11,7 +11,7 @@
 
 
 <p align="center"><strong>0–54% token savings on real high-entropy content · reaching 95% on repetitive logs/fixtures (<a href="#proof">honest read</a>)</strong></p>
-<p align="center"><strong>A Claude Code & Codex plugin + MCP server · local-first · reversible</strong></p>
+<p align="center"><strong>Claude Code & Codex plugin · MCP server · Reversible Compression</strong></p>
 
 <p align="center">
   <a href="https://github.com/omar-y-abdi/furl-ctx/releases/latest"><img src="https://img.shields.io/github/v/release/omar-y-abdi/furl-ctx?sort=semver&color=blue" alt="Release"></a>
@@ -27,12 +27,40 @@
 
 ---
 
-**Finding yourself always waiting on the next usage limit reset?** 
+**Keep finding yourself waiting on the next usage limit reset?** 
 
-*Answer:* Stop making your AI agent read everything.
+**Answer:** Stop making your AI agent read everything.
 
 By using Furl you'll never need to touch grass again, Furl works as a context compression and retrieval layer for AI agents. It shrinks large tool outputs, logs, web fetches, and RAG chunks before they consume your agent's context window, while keeping the original data available for exact retrieval when needed.
 
+# Quick install
+
+**Prerequisite:** [`uv`](https://docs.astral.sh/uv/) on your PATH (same as the official [serena](https://github.com/oraios/serena) plugin).
+
+Then two commands inside Claude Code:
+
+```
+/plugin marketplace add omar-y-abdi/furl-ctx
+/plugin install furl@furl
+```
+
+That's it — this installs the compression hook, the MCP tools, and the skill. No `pip install`, no setup: Furl fetches itself on first use.
+
+## Furl also works as a Python library
+
+The same engine drops into any Python app or MCP host:
+
+```python
+from furl_ctx import compress
+
+messages = [{"role": "tool", "content": "..."}]
+result = compress(messages, model="claude-sonnet-4")
+# result.messages → compressed when content is large enough; CCR keeps originals retrievable
+```
+
+Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
+
+# How it works
 **Furl filters out all unwanted noise** while agent is searching for the desired sections. Resulting in decreased input token usage while the answer always staying the same. 
 
 **What works today** is a on-demand toolkit for Furl:
@@ -49,35 +77,26 @@ Instead of pushing thousands of irrelevant lines into the model, Furl gives the 
 Unlike token compressors or summarizers, Furl never throws data away. Compression is **reversible**: every original payload remains byte-exact and retrievable.
 
 **Compression savings vary by data type:**
+
 - 0–54% on high-entropy content
 - up to 95% on repetitive logs and fixtures
 
 **Retrieval model:** Furl is pull-based, not push-based.
+
 Dropped content does not automatically reappear. The compressed representation intentionally removes those sections from the model-visible context. If the agent needs a specific omitted item by pattern, field, or line range, it retrieves it explicitly. The data is never lost, every retrieval is byte-exact and done by the agent. 
 
 **Tradeoff is visibility:**
+
 A unique anomaly hidden inside repetitive data will not appear in the compressed summary unless the agent already knows to search for it. Furl preserves data availability, not automatic anomaly discovery.
 
 **Why "Furl"?**
+
 To furl a sail is to roll it up and keep it out of the way until needed.
 Furl does the same for context: it rolls large amounts of information out of the active window while keeping it ready to unfurl when retrieval is required.
 
 Furl originated from the author's *Headroom* context-engineering experimentation project, the early commit history carries that lineage.
 
-## Install
-
-**Prerequisite:** [`uv`](https://docs.astral.sh/uv/) on your PATH (same as the official [serena](https://github.com/oraios/serena) plugin).
-
-Then two commands inside Claude Code:
-
-```
-/plugin marketplace add omar-y-abdi/furl-ctx
-/plugin install furl@furl
-```
-
-That's it — this installs the compression hook, the MCP tools, and the skill. No `pip install`, no setup: Furl fetches itself on first use.
-
-**What you get**
+## **What you get**
 
 - **Auto-compression hook** — shrinks large `Bash` / `WebFetch` / `WebSearch` / `Task` (sub-agent) outputs before they enter context. Fail-open: never breaks a tool call. **It does *not* touch your `Read` / `Grep` / `Glob` file reads — by design**, so a later `Edit` still sees exact file bytes; those reads (often a coding agent's largest context cost) pass through uncompressed ([why](#proof)). One honest limit: when an output is so large that Claude Code itself persists it to a file and hands the model only a file reference, there is no inline output for the hook to compress.
 - **Known issue:** Claude Code ≥2.1.163 currently ignores hooks' replacement output ([anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951)), so the automatic PostToolUse compression above stores and accounts savings, but the model may still receive the original text until that bug is fixed. Manual tools (`furl_compress` / `furl_retrieve` / `furl_search`) are unaffected, and real savings still land today via the **on-by-default PreToolUse pipe** (Bash-only; disable with `FURL_PRETOOL_PIPE=0`). See [LIBRARY.md](LIBRARY.md) for current harness status and pipe details.
@@ -91,7 +110,7 @@ A bare MCP server without a valid `FURL_CCR_TTL_SECONDS` keeps a 1 h session TTL
 
 **A note on version numbers:** the Claude Code plugin versions independently from the `furl-ctx` engine it pins — a plugin release doesn't always mean an engine release, and vice versa. `/plugin` shows the plugin version; GitHub Releases and `CHANGELOG.md` track the engine version; the SessionStart banner shows both together (`furl <plugin> · engine furl-ctx <engine>`), which is the quickest way to see both numbers at once.
 
-## Proof
+# Proof
 
 Token reduction on real captured data — a dated snapshot (inputs committed under `benchmarks/data/` for auditability; a re-run measures the current engine, so absolute counts can drift from this table — the honest-read band below is the authoritative check). 
 Every number uses the engine's own tokenizer and measures `compress()` directly — independent of the PostToolUse hook-delivery issue noted above; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR). 
@@ -117,20 +136,6 @@ Information retention here means every byte is recoverable byte-exact through `f
 On genuinely high-entropy content, honest lossless savings sit in the **0–54% band**, not 60–95% (code 0%, search 40%, repeated_logs 54%); read every figure here as a ceiling, not a typical, and see the tier-aware breakdown in [BENCHMARKS.md](BENCHMARKS.md).
 
 The `code` row's 99% is CCR-offload of a large non-file-read tool output (e.g. `Bash` dumping source text); an agent's own `Read`/`Grep`/`Glob` file access bypasses the compression hook by design and passes through unchanged, at 0%.
-
-## Also a Python library
-
-The same engine drops into any Python app or MCP host:
-
-```python
-from furl_ctx import compress
-
-messages = [{"role": "tool", "content": "..."}]
-result = compress(messages, model="claude-sonnet-4")
-# result.messages → compressed when content is large enough; CCR keeps originals retrievable
-```
-
-Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_*` config reference live in [LIBRARY.md](LIBRARY.md).
 
 **Stability:** The public API is what `furl_ctx` exports at the top level, including `compress()`, `retrieve()`, `purge()`, and `resolve_markers()`. Those signatures are the surface to build against. Submodule internals under `furl_ctx.*` may change between releases, so import from the top-level package rather than reaching into submodules. Releases have been frequent during early development, so pin a minor version if you need a fixed surface to depend on.
 

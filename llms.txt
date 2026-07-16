@@ -16,7 +16,7 @@ Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compr
 
 ## Docs
 
-- [Get started](README.md#install): two-command Claude Code plugin install — auto-compression hook, MCP tools, and skill; no `pip install` needed.
+- [Get started](README.md#quick-install): two-command Claude Code plugin install — auto-compression hook, MCP tools, and skill; no `pip install` needed.
 - [How it works](LIBRARY.md#how-it-works): pipeline diagram + per-content-type compressors.
 - [Proof / benchmark table](README.md#proof): measured reductions on committed real captures (60–99% per dataset, redundancy-dependent; lossy rows are CCR-recoverable).
 - [Configuration (environment variables)](LIBRARY.md#configuration-environment-variables): every live `FURL_*` knob with defaults.
