@@ -56,6 +56,7 @@ from furl_ctx.ccr.compress_modes import (
     _NESTED_QUANTIFIER_RE,
     count_variable_quantifiers,
 )
+from furl_ctx.ccr.regex_budget import matches_within_budget
 
 # Bound the regex context window so a caller cannot request an unboundedly
 # large context expansion. 0..50 is far past any real "show me around this
@@ -220,6 +221,10 @@ def _reject_pathological_pattern(pattern: str) -> FilterError | None:
     nested quantifier, yet backtracks exponentially on a line WITHIN
     ``_MAX_REGEX_LINE_CHARS`` (the input cap bounds length, not backtracking
     width). Normal patterns have none of these shapes and pass untouched.
+
+    These screens are DEFENSE-IN-DEPTH, not the bound (RG1): they are syntactic,
+    and ``(a|b|ab)+Z`` passes all three while still backtracking exponentially.
+    The actual bound is the per-match budget applied in ``_line_matches``.
     """
     if len(pattern) > _MAX_PATTERN_CHARS:
         return FilterError(
@@ -235,7 +240,7 @@ def _reject_pathological_pattern(pattern: str) -> FilterError | None:
         return FilterError(
             f"pattern rejected: too many variable-length quantifiers "
             f"(>{_MAX_VARIABLE_QUANTIFIERS}); an optional-chain like '.?' repeated "
-            "many times backtracks exponentially — narrow or anchor the pattern"
+            "many times backtracks exponentially; narrow or anchor the pattern"
         )
     return None
 
@@ -485,17 +490,17 @@ def _pattern_literal_text(pattern: re.Pattern[str]) -> str | None:
 def _line_matches(pattern: re.Pattern[str], literal: str | None, text: str) -> bool:
     """Whether ``text`` matches, honoring the RF1 long-line bound.
 
-    Within the cap the full regex runs. The input cap bounds the line LENGTH but
-    not backtracking WIDTH (A12): a bounded line can still backtrack
-    exponentially against a pathological pattern, so bounded backtracking here
-    rests on ``_reject_pathological_pattern`` having rejected the nested- and
-    optional-chain shapes at parse time — the cap alone does not guarantee it.
-    Beyond the cap a pure literal is matched by plain substring containment
-    (``literal is not None``); any other pattern does NOT search the over-long
-    line (the regex engine is never handed an unbounded input), so it reports no
-    match there — the conservative pre-F3 per-line cap."""
+    Within the cap the full regex runs UNDER A WALL-CLOCK BUDGET (RG1): the input
+    cap bounds the line LENGTH but not backtracking WIDTH, and the parse-time
+    screens cannot bound it either -- ``(a|b|ab)+Z`` passes every screen and still
+    backtracks exponentially on an 80-character line. A line whose match exceeds
+    the budget is reported as NO match on that line rather than hanging; see
+    :mod:`furl_ctx.ccr.regex_budget`. Beyond the cap a pure literal is matched by
+    plain substring containment (``literal is not None``); any other pattern does
+    NOT search the over-long line (the regex engine is never handed an unbounded
+    input), so it reports no match there — the conservative pre-F3 per-line cap."""
     if len(text) <= _MAX_REGEX_LINE_CHARS:
-        return pattern.search(text) is not None
+        return matches_within_budget(pattern, text)
     if literal is not None:
         return literal in text
     return False
@@ -514,7 +519,10 @@ def _select_matching_with_context(
     filters compose without one silently overriding the other.
     """
     # SEC-2 / RF1 input bound. A line within the cap is matched by the regex
-    # engine (bounded input → bounded backtracking). A line LONGER than the cap
+    # engine under the RG1 wall-clock budget (the input cap bounds input LENGTH,
+    # NOT backtracking width -- an earlier revision claimed "bounded input →
+    # bounded backtracking", which ``(a|b|ab)+Z`` disproves on an 80-char line).
+    # A line LONGER than the cap
     # is searched ONLY when the pattern is a pure literal, and then by plain
     # substring containment — linear in the line length, no regex engine, so no
     # backtracking is possible however long the line is. A non-literal (regex)

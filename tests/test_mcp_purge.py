@@ -144,6 +144,70 @@ async def test_purge_hash_cascades_to_nested_offloaded_blobs(server) -> None:
         assert "error" in gone, f"{h} still retrievable after cascade purge"
 
 
+async def test_purge_readback_detects_a_surviving_nested_blob(server) -> None:
+    """RG6: read-back must verify the FULL set the cascade decided to delete.
+
+    Before RG6 the read-back checked only ``store.exists(top_hash)``, so a nested
+    blob that survived an incomplete cascade was invisible and the handler
+    reported success. Simulate that by making ``delete`` a no-op for the nested
+    hash only: the top goes, the nested does not, and the handler must say so
+    loudly and NAME the survivor.
+    """
+    nested = "d" * 24
+    store = server._get_local_store()
+    store.store(original=f"the dropped {_API_KEY} rows", compressed="x", explicit_hash=nested)
+    store.store(
+        original="full original payload",
+        compressed=f"summary <<ccr:{nested}>> tail",
+        explicit_hash=_HASH_A,
+    )
+
+    real_delete = store.delete
+
+    def _delete_except_nested(hash_key: str) -> bool:
+        if hash_key == nested:
+            return True  # claims success, erases nothing (an incomplete cascade)
+        return real_delete(hash_key)
+
+    store.delete = _delete_except_nested  # type: ignore[method-assign]
+    envelope = _envelope(await server._handle_purge({"hash": _HASH_A}))
+    assert "error" in envelope, "an incomplete cascade must not report success"
+    assert nested in envelope["error"], "the error must NAME the surviving hash"
+    assert "verification FAILED" in envelope["error"]
+
+
+async def test_purge_readback_passes_on_a_complete_cascade(server) -> None:
+    """RG6 control: the widened read-back must not false-positive a clean purge."""
+    nested = "d" * 24
+    store = server._get_local_store()
+    store.store(original="dropped rows", compressed="x", explicit_hash=nested)
+    store.store(
+        original="payload",
+        compressed=f"summary <<ccr:{nested}>> tail",
+        explicit_hash=_HASH_A,
+    )
+    envelope = _envelope(await server._handle_purge({"hash": _HASH_A}))
+    assert "error" not in envelope
+    assert envelope["deleted_count"] == 2
+    assert envelope["nested_deleted"] == 1
+
+
+async def test_purge_keeps_a_nested_blob_another_live_entry_shares(server) -> None:
+    """RG3 at the MCP surface: purging A must not break B's retrieval of shared C."""
+    nested = "d" * 24
+    store = server._get_local_store()
+    store.store(original="shared dropped rows", compressed="x", explicit_hash=nested)
+    store.store(original="A payload", compressed=f"A <<ccr:{nested}>>", explicit_hash=_HASH_A)
+    store.store(original="B payload", compressed=f"B <<ccr:{nested}>>", explicit_hash=_HASH_B)
+
+    envelope = _envelope(await server._handle_purge({"hash": _HASH_A}))
+    assert "error" not in envelope, "skipping a shared blob is not a verification failure"
+    assert envelope["nested_deleted"] == 0
+    # B still resolves its marker; the shared blob was never the caller's to purge.
+    still = _envelope(await server._handle_retrieve({"hash": nested}))
+    assert "error" not in still, "shared nested blob was erased out from under B"
+
+
 async def test_purge_is_cycle_safe_on_self_referencing_marker(server) -> None:
     # A compressed view whose marker points back at its OWN hash must not recurse
     # forever — the visited set bounds it, and the entry is still erased once.

@@ -78,11 +78,22 @@ Issues = "https://github.com/omar-y-abdi/furl-ctx/issues"
 furl = "furl_ctx.cli:main"
 
 [project.optional-dependencies]
+# Linear-time regex engine for AGENT-SUPPLIED filter patterns (RG1).
+# RE2 matches with an automaton, so the catastrophic-backtracking class simply
+# does not exist for it. Optional, with a graceful fallback: absent, matching
+# falls back to stdlib `re` under a SIGALRM budget (see ccr/regex_budget.py).
+# That fallback only works on the MAIN thread, which is why the `mcp` extra
+# pulls this in — the MCP server runs filter matching in worker threads
+# (asyncio.to_thread), where no stdlib watchdog can interrupt a wedged match.
+re2 = [
+    "google-re2>=1.1",
+]
 # MCP server for Claude Code integration (furl_ctx.ccr.mcp_server).
 # (httpx was dropped from this extra — nothing in the package imports it;
 # it was proxy-era residue. The mcp SDK declares its own transport deps.)
 mcp = [
     "mcp>=1.0.0",
+    "furl-ctx[re2]",
 ]
 # Opt-in AST-verified code compression (transforms.code_aware_compressor,
 # Engine P2-12; enable via ContentRouterConfig.enable_code_aware=True).

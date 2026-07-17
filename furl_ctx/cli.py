@@ -71,7 +71,7 @@ def _read_input_tolerant(path: str) -> tuple[str, str | None]:
     except UnicodeDecodeError as exc:
         warning = (
             f"input is not valid UTF-8 text ({exc.reason} at byte {exc.start}); "
-            "decoded with replacement — furl compresses text, so binary is passed "
+            "decoded with replacement; furl compresses text, so binary is passed "
             "through lossily"
         )
         return raw.decode("utf-8", errors="replace"), warning
@@ -101,10 +101,10 @@ def _cmd_compress(args: argparse.Namespace) -> int:
                     # Deprecated alias kept for compatibility — same value.
                     "compression_ratio": result.compression_ratio,
                     "reduction_note": (
-                        "visible_token_reduction is context reduction (tokens hidden "
-                        "from the model), which includes content offloaded to the CCR "
-                        "store (retrievable by hash) — NOT lossless byte compression. "
-                        "See BENCHMARKS.md for the lossless band."
+                        "visible_token_reduction is context reduction, meaning tokens "
+                        "hidden from the model, and it includes content offloaded to "
+                        "the CCR store and retrievable by hash; it is NOT lossless "
+                        "byte compression. See BENCHMARKS.md for the lossless band."
                     ),
                     "ccr_hashes": result.ccr_hashes,
                     "error": result.error,
@@ -355,6 +355,27 @@ _SEARCH_PREVIEW_MAX = 200  # hard char cap on a displayed preview
 _SEARCH_SCAN_CAP = 5000  # bound the linear scan over live entries
 
 
+_LIST_PREVIEW_MAX = 80  # hard char cap on a `furl list` preview
+
+
+def _redacted_list_preview(original: str, redactor: Any) -> str:
+    """The leading, credential-redacted window of *original* for ``furl list``.
+
+    Same discipline as :func:`_redacted_search_preview` (RG4): slice-before-redact
+    with a margin, so the O(N^2)-on-long-hex-runs credential regexes never see the
+    whole original, and a secret straddling the 80-char display edge is still seen
+    whole and masked before truncation. Total: never raises — a redactor error
+    yields the raw window rather than crashing the listing.
+    """
+    window = original[: _LIST_PREVIEW_MAX + _SEARCH_PREVIEW_MARGIN]
+    if redactor is not None:
+        try:
+            window = redactor(window)
+        except Exception:  # noqa: BLE001 — a preview must never break the listing
+            pass
+    return window.replace("\n", " ")[:_LIST_PREVIEW_MAX]
+
+
 def _redacted_search_preview(original: str, match_idx: int, needle_len: int, redactor: Any) -> str:
     """A short, credential-redacted window of *original* around a substring match.
 
@@ -405,10 +426,14 @@ def _cmd_list(args: argparse.Namespace) -> int:
     """``furl list`` — newest-first directory of stored CCR entries (MCP parity).
 
     The CLI twin of the ``furl_list`` MCP tool: inspect what originals the store
-    is holding (hash, age, size, kind, a short preview) so a lost
-    ``<<ccr:HASH>>`` marker can be recovered by eye, then retrieved by hash.
+    is holding (hash, age, size, kind, a short credential-redacted preview) so a
+    lost ``<<ccr:HASH>>`` marker can be recovered by eye, then retrieved by hash.
+    The preview is redacted exactly like ``furl search``'s (RG4): the store holds
+    whatever the agent compressed, so a listing must not print a secret back out.
     """
     import time
+
+    from furl_ctx.redaction import build_store_redactor
 
     entries = _live_store_entries(args.limit)
     if args.json:
@@ -428,8 +453,9 @@ def _cmd_list(args: argparse.Namespace) -> int:
         sys.stdout.write("furl: no live entries in the CCR store\n")
         return 0
     now = time.time()
+    redactor = build_store_redactor()
     for hash_key, entry in entries:
-        preview = entry.original_content[:80].replace("\n", " ")
+        preview = _redacted_list_preview(entry.original_content, redactor)
         age = round(now - entry.created_at)
         sys.stdout.write(
             f"{hash_key}  age={age}s  size={len(entry.original_content)}  "

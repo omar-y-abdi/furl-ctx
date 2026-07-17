@@ -50,7 +50,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from .. import paths as _paths
 from ..relevance.bm25 import BM25Scorer
@@ -88,6 +88,40 @@ class DurableWriteError(RuntimeError):
     def __init__(self, message: str, *, hash_key: str) -> None:
         super().__init__(message)
         self.hash_key = hash_key
+
+
+# Cheap pre-check that skips the marker regex scan for the common raw original
+# that embeds no marker at all. Case-INSENSITIVE (RG5): the marker grammar's
+# ``GENERIC_BRACKET_PATTERN`` is itself ``re.IGNORECASE``, so an uppercase
+# ``HASH=`` marker IS a real reference; a case-sensitive pre-check skipped it and
+# silently left its blob behind on a cascade purge.
+_MARKER_HINTS: Final = ("ccr:", "hash=")
+
+
+def _may_reference_marker(text: str) -> bool:
+    """Whether *text* might carry a CCR marker (cheap, case-insensitive)."""
+    lowered = text.lower()
+    return any(hint in lowered for hint in _MARKER_HINTS)
+
+
+@dataclass(frozen=True)
+class CascadeOutcome:
+    """What one :meth:`CompressionStore.delete_cascade_detailed` actually did.
+
+    ``nested_deleted`` is the DISTINCT nested hashes the cascade removed;
+    ``nested_shared_skipped`` is those it deliberately left because another live
+    entry still references them (RG3). ``deleted_hashes`` is the full set a
+    read-back should find gone (RG6) — the top hash only when it truly went.
+    """
+
+    top_deleted: bool
+    nested_deleted: tuple[str, ...] = ()
+    nested_shared_skipped: tuple[str, ...] = ()
+
+    def deleted_hashes(self, hash_key: str) -> tuple[str, ...]:
+        """Every hash this cascade decided to delete, for read-back verification."""
+        top = (hash_key,) if self.top_deleted else ()
+        return top + self.nested_deleted
 
 
 # Session-scale default (Engine P0-3): agentic sessions routinely outlive
@@ -1561,10 +1595,58 @@ class CompressionStore:
                     logger.warning("CCR spill delete failed (non-fatal): %s", exc)
             return primary_deleted or spill_deleted
 
-    def delete_cascade(
+    def _entry_marker_hashes(self, entry: CompressionEntry, *, exclude: str) -> list[str]:
+        """Marker hashes referenced by *entry*, minus *exclude*, first-seen order."""
+        from furl_ctx.ccr.marker_grammar import hashes_in_text
+
+        seen: dict[str, None] = {}
+        for text in (entry.compressed_content, entry.original_content):
+            if isinstance(text, str) and _may_reference_marker(text):
+                for nested_hash in hashes_in_text(text):
+                    seen.setdefault(nested_hash, None)
+        return [h for h in seen if h != exclude]
+
+    def _is_co_referenced(self, nested_hash: str, *, ignoring: set[str]) -> bool:
+        """Whether a LIVE entry outside *ignoring* still references *nested_hash*.
+
+        The store is content-addressed and deduped, so two compressions that drop
+        identical content share ONE nested entry. Deleting it because one parent
+        was purged would leave the OTHER parent's ``<<ccr:HASH>>`` marker pointing
+        at nothing — a loud miss for content the user never asked to purge (RG3).
+        *ignoring* carries this cascade's own hashes so an entry being torn down
+        does not count as a live referent.
+
+        Cost: one pass over live entries per nested candidate. Purge is a rare,
+        explicit operation and correctness outranks speed here; the cheap
+        marker pre-check skips the common marker-free original outright.
+        """
+        with self._lock:
+            items = list(self._backend.items())
+        for key, entry in items:
+            if key == nested_hash or key in ignoring:
+                continue
+            for text in (entry.compressed_content, entry.original_content):
+                if not isinstance(text, str) or not _may_reference_marker(text):
+                    continue
+                from furl_ctx.ccr.marker_grammar import hashes_in_text
+
+                if nested_hash in hashes_in_text(text):
+                    return True
+        return False
+
+    def delete_cascade(self, hash_key: str) -> tuple[bool, int]:
+        """Delete *hash_key* AND every nested blob only it referenced.
+
+        Back-compat wrapper over :meth:`delete_cascade_detailed`; returns
+        ``(top_deleted, nested_deleted_count)``.
+        """
+        outcome = self.delete_cascade_detailed(hash_key)
+        return (outcome.top_deleted, len(outcome.nested_deleted))
+
+    def delete_cascade_detailed(
         self, hash_key: str, *, _visited: set[str] | None = None
-    ) -> tuple[bool, int]:
-        """Delete *hash_key* AND every nested ``<<ccr:HASH>>`` blob it references.
+    ) -> CascadeOutcome:
+        """Delete *hash_key* AND every nested ``<<ccr:HASH>>`` blob it alone owns.
 
         A compressed view offloads dropped rows to their OWN store entries under
         markers embedded in the entry's ``compressed_content`` (and, for a
@@ -1578,36 +1660,44 @@ class CompressionStore:
         it cycle-safe and idempotent — a marker pointing back at an ancestor, or a
         blob shared by two parents, is followed at most once.
 
-        Returns ``(top_deleted, nested_deleted_count)`` — whether the named entry
-        went, and how many DISTINCT nested entries were additionally removed.
+        SHARED-BLOB RULE (RG3): the NAMED top hash always deletes, but a NESTED
+        hash is skipped when another LIVE entry still references it. Dedup means
+        two compressions of identical dropped content share one nested entry;
+        cascading through it would silently break the other parent's retrieval.
+        A skipped hash is reported in ``nested_shared_skipped``, never counted as
+        deleted, and is NOT added to ``_visited`` — a later parent in the same
+        cascade may legitimately own it once its own referents are gone.
         """
-        from furl_ctx.ccr.marker_grammar import hashes_in_text
-
         visited = _visited if _visited is not None else set()
         if hash_key in visited:
-            return (False, 0)
+            return CascadeOutcome(top_deleted=False)
         visited.add(hash_key)
 
         # Read the entry's stored text BEFORE deleting so nested markers are
-        # recoverable. The cheap ``ccr:``/``hash=`` pre-check skips the regex scan
-        # for the common raw original that embeds no marker at all.
-        nested: list[str] = []
+        # recoverable.
         with self._lock:
             entry = self._backend.get(hash_key)
-        if entry is not None:
-            seen: dict[str, None] = {}
-            for text in (entry.compressed_content, entry.original_content):
-                if isinstance(text, str) and ("ccr:" in text or "hash=" in text):
-                    for nested_hash in hashes_in_text(text):
-                        seen.setdefault(nested_hash, None)
-            nested = [h for h in seen if h != hash_key]
+        nested = [] if entry is None else self._entry_marker_hashes(entry, exclude=hash_key)
 
         top_deleted = self.delete(hash_key)
-        nested_removed = 0
+        deleted: list[str] = []
+        skipped: list[str] = []
         for nested_hash in nested:
-            child_top, child_nested = self.delete_cascade(nested_hash, _visited=visited)
-            nested_removed += (1 if child_top else 0) + child_nested
-        return (top_deleted, nested_removed)
+            if nested_hash in visited:
+                continue
+            if self._is_co_referenced(nested_hash, ignoring=visited):
+                skipped.append(nested_hash)
+                continue
+            child = self.delete_cascade_detailed(nested_hash, _visited=visited)
+            if child.top_deleted:
+                deleted.append(nested_hash)
+            deleted.extend(child.nested_deleted)
+            skipped.extend(child.nested_shared_skipped)
+        return CascadeOutcome(
+            top_deleted=top_deleted,
+            nested_deleted=tuple(deleted),
+            nested_shared_skipped=tuple(skipped),
+        )
 
     def clear(self) -> None:
         """Clear all entries. Mainly for testing."""

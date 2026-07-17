@@ -736,6 +736,49 @@ def test_doctor_reports_active_profile(inprocess_memory_store) -> None:  # type:
     assert "profile: backend=" in stdout
 
 
+def test_list_preview_redacts_credentials(inprocess_memory_store) -> None:  # type: ignore[no-untyped-def]
+    """RG4: a credential never leaks through a ``furl list`` preview either.
+
+    ``_cmd_list`` printed ``entry.original_content[:80]`` RAW while ``_cmd_search``
+    routed its preview through ``build_store_redactor``. The store holds whatever
+    the agent compressed, so a plain listing was a residual leak (legacy entries,
+    ``FURL_REDACT_BUILTINS=0``, or a secret the store-time redactor did not match).
+    """
+    from furl_ctx.cache.compression_store import get_compression_store
+
+    secret = "AK" + "IA" + "IOSFODNN7" + "EXAMPLE"  # built from parts (env secret-guard)
+    store = get_compression_store()
+    store.store(f"key={secret} and then some trailing log text", "c", tool_name="TestTool")
+    rc, stdout, _stderr = _call_main(["list", "--limit", "300"])
+    assert rc == 0
+    assert secret not in stdout, "the raw credential must never appear in a list preview"
+    assert "[REDACTED" in stdout
+
+
+def test_list_preview_redacts_secret_straddling_the_display_edge(inprocess_memory_store) -> None:  # type: ignore[no-untyped-def]
+    """RG4: slice-before-redact with a margin, so an edge-straddling secret is masked.
+
+    A naive ``redact(original[:80])`` would hand the redactor a TRUNCATED secret it
+    no longer recognizes, leaking the visible prefix. The preview redacts a
+    margin-widened window first, then truncates.
+    """
+    from furl_ctx.cache.compression_store import get_compression_store
+
+    secret = "AK" + "IA" + "IOSFODNN7" + "EXAMPLE"
+    # Start the secret at char 70 so it straddles the 80-char display edge. The
+    # padding must END on a non-word char: the credential patterns are
+    # word-bounded, so abutting the secret with `x` would make it a different
+    # (non-secret) word and the fixture would prove nothing.
+    padding = "x" * 69 + " "
+    original = f"{padding}{secret} trailing"
+    assert len(padding) == 70 and len(original) > 80, "fixture: secret must cross the edge"
+    store = get_compression_store()
+    store.store(original, "c", tool_name="TestTool")
+    rc, stdout, _stderr = _call_main(["list", "--limit", "300"])
+    assert rc == 0
+    assert secret[:10] not in stdout, "a truncated secret prefix leaked at the display edge"
+
+
 def test_search_preview_redacts_credentials(inprocess_memory_store) -> None:  # type: ignore[no-untyped-def]
     """A credential in a stored original never leaks through a ``furl search`` preview."""
     from furl_ctx.cache.compression_store import get_compression_store

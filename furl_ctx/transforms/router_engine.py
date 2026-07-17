@@ -1170,7 +1170,7 @@ class ContentCompressionEngine:
                 else ""
             )
             middle = (
-                f"\n… [{omitted_count} lines omitted, in CCR — "
+                f"\n… [{omitted_count} lines omitted, in CCR; "
                 f"{len(error_lines)} error/severity line(s) surfaced{capped}] …\n"
                 + "\n".join(error_lines)
                 + "\n… [end surfaced error lines; full log in CCR] …\n"

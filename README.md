@@ -78,7 +78,7 @@ Your agent calls the MCP tools directly
 
 Instead of pushing thousands of irrelevant lines into the model, Furl gives the agent a compressed view of the data. If it later needs something that was omitted, it explicitly retrieves just that portion—by pattern, field, or line range—without materializing the entire payload again.
 
-Unlike token compressors or summarizers, Furl never throws data away. Compression is **reversible**: every original payload remains byte-exact and retrievable.
+Unlike token compressors or summarizers, Furl never throws data away. Compression is **reversible**: every original text payload remains byte-exact and retrievable.
 
 **Compression savings vary by data type:**
 

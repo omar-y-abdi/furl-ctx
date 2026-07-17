@@ -620,9 +620,9 @@ class SessionStats:
             # Deprecated alias kept for compatibility — same value.
             "savings_percent": savings_pct,
             "reduction_note": (
-                "visible_token_reduction_percent is context reduction (tokens hidden "
-                "from the model), which includes content offloaded to the CCR store "
-                "(retrievable by hash) — NOT lossless byte compression. "
+                "visible_token_reduction_percent is context reduction, meaning tokens "
+                "hidden from the model, and it includes content offloaded to the CCR "
+                "store and retrievable by hash; it is NOT lossless byte compression. "
                 "estimated_cost_saved_usd is derived from it and is likewise a "
                 "context-reduction estimate, not a guaranteed billing delta."
             ),
@@ -2204,17 +2204,19 @@ class FurlMCPServer:
             return _err("invalid hash format (expected 12 or 24 lowercase-hex chars)")
         hash_key = hash_arg.lower()
 
-        deleted_one, nested_count, still_present = await asyncio.to_thread(
-            self._purge_one, hash_key
-        )
+        deleted_one, nested_count, survivors = await asyncio.to_thread(self._purge_one, hash_key)
         deleted_total = (1 if deleted_one else 0) + nested_count
-        if still_present:
-            # Read-back verification failed (A1): the entry is STILL retrievable
-            # after the delete. Report it loudly rather than claim success — a
-            # purge that does not purge is the top data-safety bug in the audits.
+        if survivors:
+            # Read-back verification failed (A1/RG6): something the cascade decided
+            # to delete is STILL retrievable. Report it loudly, naming every
+            # survivor, rather than claim success — a purge that does not purge is
+            # the top data-safety bug in the audits, and an incomplete cascade is
+            # invisible if only the top hash is re-checked.
             return _err(
-                f"purge verification FAILED: entry {hash_key} is still retrievable "
-                "after delete. No data was confirmed erased; retry or inspect the store."
+                f"purge verification FAILED: {len(survivors)} entr"
+                f"{'y is' if len(survivors) == 1 else 'ies are'} still retrievable "
+                f"after delete: {', '.join(survivors)}. No data was confirmed erased; "
+                "retry or inspect the store."
             )
         if nested_count:
             note = (
@@ -2246,22 +2248,36 @@ class FurlMCPServer:
             )
         ]
 
-    def _purge_one(self, hash_key: str) -> tuple[bool, int, bool]:
+    def _purge_one(self, hash_key: str) -> tuple[bool, int, tuple[str, ...]]:
         """Cascade-delete one entry via the library purge primitive (off-loop).
 
-        ``CompressionStore.delete_cascade`` is exactly what
+        ``CompressionStore.delete_cascade_detailed`` is exactly what
         ``furl_ctx.retrieve.purge`` delegates to; calling it on THIS server's
         store handle — the same one the retrieve path reads — guarantees a purged
-        hash (and every nested ``<<ccr:HASH>>`` blob it referenced) is no longer
+        hash (and every nested ``<<ccr:HASH>>`` blob it owned) is no longer
         retrievable. A read-back with :meth:`CompressionStore.exists` VERIFIES the
         erase actually took (A1: a purge that silently does not purge is the top
-        data-safety bug in both audits). Returns
-        ``(top_deleted, nested_deleted_count, still_present)``.
+        data-safety bug in both audits).
+
+        The read-back covers the FULL set the cascade decided to delete — the top
+        hash AND every nested hash it removed (RG6). Verifying only the top hash
+        could not detect an incomplete cascade, which is the exact failure the
+        cascade exists to prevent. Hashes deliberately SKIPPED as still-shared
+        (RG3) are not verified: they are meant to survive.
+
+        Returns ``(top_deleted, nested_deleted_count, survivors)``, where
+        ``survivors`` names every hash that should be gone but is still
+        retrievable (empty on success).
         """
         store = self._get_local_store()
-        top_deleted, nested_count = store.delete_cascade(hash_key)
-        still_present = store.exists(hash_key)
-        return (top_deleted, nested_count, still_present)
+        outcome = store.delete_cascade_detailed(hash_key)
+        # The named hash is always verified (even when it was already absent, so a
+        # delete that silently no-ops on a live entry is still caught); the nested
+        # hashes verified are the ones the cascade actually removed. dict.fromkeys
+        # dedupes while keeping order -- the top hash appears in both sources.
+        expected_gone = dict.fromkeys((hash_key, *outcome.deleted_hashes(hash_key)))
+        survivors = tuple(h for h in expected_gone if store.exists(h))
+        return (outcome.top_deleted, len(outcome.nested_deleted), survivors)
 
     def _purge_all(self) -> int:
         """Wipe every entry; return how many live entries were removed (off-loop).

@@ -49,8 +49,15 @@ def test_resolve_markers_expands_marker_to_original() -> None:
         reset_compression_store()
 
 
-def test_resolve_markers_provenance_is_namespace_scoped_med14() -> None:
-    """A marker minted under one namespace does NOT resolve under another (Med-14).
+def test_resolve_markers_provenance_is_namespace_scoped_characterization() -> None:
+    """A marker minted under one namespace does NOT resolve under another.
+
+    CHARACTERIZATION TEST, not a pin: this pins PRE-EXISTING namespace scoping
+    that this PR did not change. The scoping logic here is identical on
+    ``origin/main``; the PR's ``retrieve.py`` diff touches only the purge-cascade
+    docstring/wiring and the Bug-12 ``TypeError``. It is kept because the
+    behavior is worth locking down, but it must not be reported as evidence that
+    a change in this PR works (RG8).
 
     Provenance is enforced by store membership + per-namespace isolation, not by
     marker format alone: ``resolve_markers`` only expands a ``<<ccr:HASH>>`` whose
