@@ -333,11 +333,27 @@ def test_glob_filter_still_matches_after_the_ingress_screen() -> None:
 
 def test_ingress_does_not_reject_when_re2_is_absent(without_re2: None) -> None:
     """B1: an install without the ``re2`` extra cannot judge boundability, so it must
-    NOT reject everything -- it keeps the documented SIGALRM/residual behavior."""
+    NOT reject everything -- it keeps the documented SIGALRM/residual behavior.
+
+    The load-bearing detail: ``_compile_re2`` returns None for BOTH "RE2 refused
+    this pattern" and "RE2 is not installed". Conflating them would make a plain
+    ``pip install furl-ctx`` reject EVERY filter pattern, so the absence check has
+    to come first.
+    """
     regex_budget._compile_re2.cache_clear()
     assert regex_budget.classify_boundability("(a|b|ab)+(?=Z)") is regex_budget.Boundability.UNKNOWN
     assert _reject_pathological_pattern("(a|b|ab)+(?=Z)") is None
     assert _validate_pattern("(a|b|ab)+(?=Z)", "include") is None
+
+
+@pytest.mark.parametrize("pattern", ["ERROR.*", r"^\d+$", "foo|bar", "*.py"])
+def test_normal_patterns_still_accepted_without_re2(without_re2: None, pattern: str) -> None:
+    """B1: the no-re2 install must keep working. If ``_compile_re2``'s two None cases
+    were conflated, every one of these ordinary filters would be rejected."""
+    regex_budget._compile_re2.cache_clear()
+    assert regex_budget.classify_boundability(pattern) is regex_budget.Boundability.UNKNOWN
+    assert _reject_pathological_pattern(pattern) is None
+    assert _validate_pattern(pattern, "include") is None
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +412,43 @@ def test_pre_armed_itimer_survives_a_budgeted_match(without_re2: None) -> None:
         remaining, _interval = signal.getitimer(signal.ITIMER_REAL)
         assert remaining > 0, "caller's pending alarm was cancelled by the budget"
         assert signal.getsignal(signal.SIGALRM) is not regex_budget._raise_budget_exceeded
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_restored_itimer_does_not_gain_the_match_time(without_re2: None) -> None:
+    """B7: the restored deadline must have the match's own time SUBTRACTED.
+
+    Re-arming the value setitimer returned at entry would silently push the
+    caller's deadline out by however long the match ran -- a 0.5 s alarm becoming
+    0.5 s + match. Uses an adversarial pattern so the match burns the full budget.
+    """
+    regex_budget._compile_re2.cache_clear()
+    pattern, text = ADVERSARIAL[0]
+    previous = signal.signal(signal.SIGALRM, lambda *_: None)
+    signal.setitimer(signal.ITIMER_REAL, 5.0)
+    try:
+        assert matches_within_budget(re.compile(pattern), text) is False
+        remaining, _interval = signal.getitimer(signal.ITIMER_REAL)
+        # The match consumed ~budget_seconds; the caller's 5s must have shrunk by
+        # at least that, never grown.
+        assert remaining < 5.0, "restored timer gained the match's runtime"
+        assert remaining > 4.0, "restored timer lost far more than the budget"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_unarmed_caller_timer_stays_unarmed(without_re2: None) -> None:
+    """B7: 0.0 from setitimer means "was not armed" -- it must NOT be re-armed with
+    the epsilon, which would hand the caller an alarm they never asked for."""
+    regex_budget._compile_re2.cache_clear()
+    previous = signal.signal(signal.SIGALRM, lambda *_: None)
+    try:
+        assert signal.getitimer(signal.ITIMER_REAL)[0] == 0.0
+        assert matches_within_budget(re.compile("ERROR"), "some line") is False
+        assert signal.getitimer(signal.ITIMER_REAL)[0] == 0.0, "invented a timer"
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)

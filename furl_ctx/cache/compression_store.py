@@ -1479,23 +1479,32 @@ class CompressionStore:
 
         ``exists``'s primary-only semantics are deliberately left alone; other
         callers (capacity/liveness checks) depend on them.
+
+        Mirrors ``_recover_from_spill``'s semantics exactly, because agreeing with
+        ``retrieve`` is the entire point: TTL is honored in BOTH tiers (an expired
+        row is not retrievable, so it is not a survivor), and a spill hit is NOT
+        promoted back into the primary — a read-back must observe, never mutate.
+        Unlike ``_recover_from_spill`` it also does not reap the expired spill row,
+        keeping this a pure check like ``exists(clean_expired=False)``.
         """
         with self._lock:
+            now = self._now()
             # Mirror exists(): an expired primary entry is not retrievable. A
             # miss (or an expired hit) still has to check the spill below.
             entry = self._backend.get(hash_key)
-            if entry is not None and not entry.is_expired(self._now()):
+            if entry is not None and not entry.is_expired(now):
                 return True
             if self._spill is None:
                 return False
             try:
-                return self._spill.get(hash_key) is not None
+                spilled = self._spill.get(hash_key)
             except Exception as exc:  # noqa: BLE001 — a spill that cannot be read
                 # cannot prove the entry is GONE. Treat an unreadable spill as
                 # "still there": a false survivor is a loud, retryable purge
                 # error; a false all-clear is the silent data-safety bug.
                 logger.warning("CCR spill existence check failed (assuming present): %s", exc)
                 return True
+            return spilled is not None and not spilled.is_expired(now)
 
     def get_entry_status(
         self,
@@ -1712,13 +1721,12 @@ class CompressionStore:
         deleted, and is NOT added to ``_visited`` — a later parent in the same
         cascade may legitimately own it once its own referents are gone.
 
+        ``nested_deleted`` and ``nested_shared_skipped`` are DISJOINT: a diamond
+        can skip a hash under one branch and delete it under a later one, and the
+        deletion is the truth (see the dedupe at the end of this method).
+
         Known, deliberately deferred (tracked, not dropped):
 
-        * #9 — because a skipped hash stays out of ``_visited``, a diamond (two
-          parents inside ONE cascade both referencing a blob) can report the same
-          hash in both ``nested_deleted`` and ``nested_shared_skipped``. No
-          production consumer reads both lists together, and the erase itself is
-          correct; only the report is redundant.
         * #11 — two entries whose markers reference EACH OTHER protect one another
           forever, so neither is cascade-deleted while both are live. Reaching it
           needs a contrived mutual reference (content-derived hashes make a natural
@@ -1749,10 +1757,18 @@ class CompressionStore:
                 deleted.append(nested_hash)
             deleted.extend(child.nested_deleted)
             skipped.extend(child.nested_shared_skipped)
+        # A hash can be skipped by one branch and then legitimately deleted by a
+        # later one (a skip deliberately does not enter ``visited``, so a diamond
+        # T->[A,B] with A->[C] and B->[C] skips C under A, then deletes it under
+        # B once A is gone). DELETED WINS: the erase is what actually happened,
+        # and reporting C as "kept because another entry references it" would be
+        # a false claim about live data -- the exact class of bug the read-back
+        # and the kept-shared disclosure exist to prevent.
+        deleted_set = set(deleted)
         return CascadeOutcome(
             top_deleted=top_deleted,
             nested_deleted=tuple(deleted),
-            nested_shared_skipped=tuple(skipped),
+            nested_shared_skipped=tuple(h for h in skipped if h not in deleted_set),
         )
 
     def clear(self) -> None:

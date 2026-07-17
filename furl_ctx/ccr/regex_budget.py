@@ -55,6 +55,17 @@ reject and the SIGALRM/residual path above still applies -- an install without
 the ``re2`` extra (the ``mcp`` extra pulls it in) keeps the old behavior rather
 than rejecting every pattern it cannot classify.
 
+The reject is UNIFORM, and that is a deliberate choice, not an oversight. On the
+main thread (the CLI) the SIGALRM watchdog CAN bound a lookaround pattern, so a
+thread-conditional reject would keep it working there. Ingress runs before
+dispatch and cannot know which thread will execute the match, so a precise rule
+would have to be re-evaluated at match time -- splitting the accept/reject
+contract across two places and making a filter's validity depend on the surface
+that happens to run it. One rule everywhere is simpler to reason about and to
+document, and it means an agent cannot craft a pattern that a CLI accepts and an
+MCP server chokes on. The cost is real but small: lookaround is removed from CLI
+filters too, and no caller or test used it.
+
 Why NOT a thread-based watchdog
 -------------------------------
 Running the match in a ``ThreadPoolExecutor`` and waiting with
@@ -95,6 +106,7 @@ from __future__ import annotations
 import re
 import signal
 import threading
+import time
 from enum import Enum
 from functools import lru_cache
 from types import FrameType
@@ -104,6 +116,11 @@ from typing import Any, Final
 # ``ERROR.*`` search over a 5 000-character line measured 0.01 ms, ~4 orders of
 # magnitude under) and small enough that a wedge is a blip rather than a hang.
 DEFAULT_MATCH_BUDGET_SECONDS: Final = 0.1
+
+# The smallest interval a restored caller timer may be re-armed with (B7).
+# ``setitimer(0.0)`` DISARMS, so a caller deadline that elapsed during our match
+# must be re-armed just above zero to fire immediately rather than never.
+_MIN_RESTORED_TIMER: Final = 1e-6
 
 
 class MatchVerdict(Enum):
@@ -257,13 +274,15 @@ def _search_with_watchdog(
     embedder's or ``pytest-timeout``'s pending alarm used to be silently dropped,
     the exact opposite of what this docstring promised).
 
-    The restore is COARSE: the remaining interval is re-armed as it read at entry,
-    without subtracting the time this match spent. That over-grants at most
-    ``budget_seconds`` (0.1 s by default), which is why it is preferred over
-    leaving the caller with no timer at all.
+    The restored deadline has the time THIS match consumed subtracted from it, so
+    a caller's 0.5 s alarm stays a 0.5 s alarm rather than becoming 0.5 s plus the
+    match. A deadline that already passed while we held the timer is re-armed at
+    ``_MIN_RESTORED_TIMER`` (arming exactly 0.0 would DISARM it), so it fires
+    immediately after instead of never.
     """
     previous_handler = signal.signal(signal.SIGALRM, _raise_budget_exceeded)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, budget_seconds)
+    previous_remaining, previous_interval = signal.setitimer(signal.ITIMER_REAL, budget_seconds)
+    started = time.monotonic()
     try:
         return MatchVerdict.MATCH if compiled.search(text) else MatchVerdict.NO_MATCH
     except _BudgetExceeded:
@@ -274,13 +293,16 @@ def _search_with_watchdog(
         return MatchVerdict.NO_MATCH
     finally:
         # Disarm ours first, then restore the caller's handler, then re-arm what
-        # the caller had pending (0.0 from setitimer means "was not armed", and
-        # setitimer(0.0) is itself the disarm, so the same call covers both).
+        # the caller had pending. A 0.0 remaining from setitimer means "was not
+        # armed at all", and setitimer(0.0) IS the disarm, so that case needs no
+        # re-arm and must not get an epsilon.
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
-        remaining, interval = previous_timer
-        if remaining:
-            signal.setitimer(signal.ITIMER_REAL, remaining, interval)
+        if previous_remaining:
+            restored = previous_remaining - (time.monotonic() - started)
+            signal.setitimer(
+                signal.ITIMER_REAL, max(restored, _MIN_RESTORED_TIMER), previous_interval
+            )
 
 
 def search_within_budget(

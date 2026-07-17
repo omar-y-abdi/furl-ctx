@@ -171,6 +171,78 @@ def test_cascade_follows_a_unicode_folded_marker() -> None:
     assert store.exists(NESTED_HASH) is False
 
 
+def test_exists_any_tier_honors_ttl_in_the_spill_like_retrieve_does() -> None:
+    """B3: an EXPIRED spill row is not retrievable, so it is not a survivor.
+
+    ``_recover_from_spill`` returns None for an expired row, so counting one as a
+    survivor would fail a purge that actually succeeded -- a loud false alarm.
+    """
+    store = CompressionStore(default_ttl=1)
+    store.store("payload", "view", explicit_hash=PARENT_A)
+    live_copy = store._backend.get(PARENT_A)
+    assert live_copy is not None
+
+    class _Spill:
+        def get(self, hash_key: str):
+            return live_copy if hash_key == PARENT_A else None
+
+        def delete(self, hash_key: str) -> bool:
+            return False
+
+    store._spill = _Spill()  # type: ignore[assignment]
+    store._backend.delete(PARENT_A)  # primary gone, spill still holds it
+    assert store.exists_any_tier(PARENT_A) is True, "a live spill row IS a survivor"
+
+    # Push time past the TTL: retrieve() now misses, so the read-back must agree.
+    store._now = lambda: live_copy.created_at + 10_000  # type: ignore[method-assign]
+    assert store.retrieve(PARENT_A) is None
+    assert store.exists_any_tier(PARENT_A) is False, "an expired spill row is not a survivor"
+
+
+def test_exists_any_tier_does_not_promote_the_spill_row_into_primary() -> None:
+    """B3: a read-back observes; it must never mutate the store it is checking."""
+    store = CompressionStore()
+    store.store("payload", "view", explicit_hash=PARENT_A)
+    copy = store._backend.get(PARENT_A)
+
+    class _Spill:
+        def get(self, hash_key: str):
+            return copy if hash_key == PARENT_A else None
+
+        def delete(self, hash_key: str) -> bool:
+            return False
+
+    store._spill = _Spill()  # type: ignore[assignment]
+    store._backend.delete(PARENT_A)
+    assert store.exists_any_tier(PARENT_A) is True
+    assert store._backend.get(PARENT_A) is None, "read-back promoted the row back into primary"
+
+
+def test_diamond_never_reports_a_deleted_hash_as_kept_shared() -> None:
+    """#9: the two outcome lists must be DISJOINT.
+
+    Diamond TOP->[A,B], A->[C], B->[C]: C is skipped under A (B still referenced
+    it), then legitimately deleted under B once A was gone -- so C landed in BOTH
+    ``nested_deleted`` and ``nested_shared_skipped``. Harmless while nothing read
+    the skip list; the moment the purge tool surfaces it (B2), the agent is told
+    "kept because another entry references it" about a hash that IS erased. A
+    false claim about live data is exactly what the disclosure exists to prevent.
+    """
+    top = "d" * 24
+    store = CompressionStore()
+    store.store("C original", "C view", explicit_hash=NESTED_HASH)
+    store.store("A original", f"A {_marker(NESTED_HASH)}", explicit_hash=PARENT_A)
+    store.store("B original", f"B {_marker(NESTED_HASH)}", explicit_hash=PARENT_B)
+    store.store("TOP original", f"TOP {_marker(PARENT_A)} {_marker(PARENT_B)}", explicit_hash=top)
+
+    outcome = store.delete_cascade_detailed(top)
+    assert NESTED_HASH in outcome.nested_deleted, "C is genuinely deleted by this cascade"
+    assert NESTED_HASH not in outcome.nested_shared_skipped, "and must not ALSO be reported kept"
+    assert not set(outcome.nested_deleted) & set(outcome.nested_shared_skipped)
+    # The report matches reality: C really is gone.
+    assert store.exists(NESTED_HASH) is False
+
+
 def test_unicode_folded_marker_also_counts_as_sharing() -> None:
     """B6: a U+017F marker is a real reference, so it must PROTECT a shared blob
     too -- under-detection is a dangling marker, over-deletion is data loss."""
