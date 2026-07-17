@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ except ImportError:
     from furl_ctx import compress, retrieve  # type: ignore[assignment]
 
 from benchmarks._eval_corpora import CORPUS_BUILDERS
+from benchmarks.metrics import BenchmarkAbortedError, _abort_if_fail_open
 
 MODEL = "gpt-4o"
 TOKEN_METHOD = "len//4 estimate"
@@ -178,6 +180,11 @@ def run_corpus(
     """Compress corpus once; emit one record per (corpus, archetype)."""
     messages = [{"role": "tool", "content": corpus_str}]
     result = compress(messages, model=MODEL)
+    # A2 / B4: fail closed, never measure a broken engine. compress() never
+    # raises — it fail-opens with `error` set and tokens_after == 0, which this
+    # harness would otherwise record as compression_ratio 1.0 and write out as a
+    # "Baseline". Abort before any measurement derives from it.
+    _abort_if_fail_open(f"agent_utility:{corpus_id}", result)
 
     blob = blob_str(result.messages)
     blob_chars = len(blob)
@@ -278,41 +285,71 @@ def print_summary(all_records: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="furl agent-utility baseline harness")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--seed", type=int, default=42, help="RNG seed for generated corpora")
     args = parser.parse_args()
 
+    # A2 / B4: fail CLOSED on a broken engine, matching run_bench.main(). Running
+    # this from the repo root puts the extension-less source tree ahead of the
+    # built wheel on sys.path, so every compress() fail-opens and this harness
+    # would otherwise write a fictional baseline at rc=0. Verify the native core
+    # imports up front and abort BEFORE measuring or writing anything.
+    try:
+        import furl_ctx._core  # noqa: F401  (native extension presence check)
+    except Exception as exc:  # noqa: BLE001 - any import failure is fatal here
+        print(
+            "ERROR: furl_ctx._core native extension is not importable "
+            f"({exc}).\n  compress() would fail open on every corpus and produce a "
+            "fictional baseline. Build/install the wheel (maturin develop) and run "
+            "from OUTSIDE the source tree, or `pip install -e .`. "
+            "Refusing to write a misleading baseline.",
+            file=sys.stderr,
+        )
+        return 1
+
     all_records: list[dict] = []
     print("Building corpora and compressing...")
 
-    for corpus_id, builder_fn, gt_fn in CORPUS_BUILDERS:
-        print(f"  [{corpus_id}] ", end="", flush=True)
-        try:
-            # Pass seed to generated corpora
-            if corpus_id in ("app_log", "json_api", "stacktrace"):
-                corpus_str, corpus_meta, source_label = builder_fn(args.seed)
-            else:
-                corpus_str, corpus_meta, source_label = builder_fn()
+    try:
+        for corpus_id, builder_fn, gt_fn in CORPUS_BUILDERS:
+            print(f"  [{corpus_id}] ", end="", flush=True)
+            try:
+                # Pass seed to generated corpora
+                if corpus_id in ("app_log", "json_api", "stacktrace"):
+                    corpus_str, corpus_meta, source_label = builder_fn(args.seed)
+                else:
+                    corpus_str, corpus_meta, source_label = builder_fn()
 
-            print(f"{len(corpus_str):,} chars  ", end="", flush=True)
-            gt_all = gt_fn(corpus_str, corpus_meta)
-            records = run_corpus(corpus_id, corpus_str, corpus_meta, source_label, gt_all)
-            all_records.extend(records)
-            r0 = records[0]
-            print(
-                f"ratio={r0['compression_ratio']:.4f}  "
-                f"blob={r0['blob_chars']:,}ch  "
-                f"off={r0['offloaded']}  "
-                f"transforms={r0['transforms']}"
-            )
-        except Exception as exc:
-            import traceback
+                print(f"{len(corpus_str):,} chars  ", end="", flush=True)
+                gt_all = gt_fn(corpus_str, corpus_meta)
+                records = run_corpus(corpus_id, corpus_str, corpus_meta, source_label, gt_all)
+                all_records.extend(records)
+                r0 = records[0]
+                print(
+                    f"ratio={r0['compression_ratio']:.4f}  "
+                    f"blob={r0['blob_chars']:,}ch  "
+                    f"off={r0['offloaded']}  "
+                    f"transforms={r0['transforms']}"
+                )
+            except BenchmarkAbortedError:
+                # MUST precede the bare handler below (B4): a fail-open abort is
+                # not a per-corpus hiccup to log and skip past — it means the
+                # engine is broken, so nothing may be measured or written.
+                # `continue` would swallow it and still emit a baseline at rc=0.
+                raise
+            except Exception as exc:
+                import traceback
 
-            print(f"ERROR: {exc}")
-            traceback.print_exc()
-            continue
+                print(f"ERROR: {exc}")
+                traceback.print_exc()
+                continue
+    except BenchmarkAbortedError as exc:
+        # Fail closed: return nonzero BEFORE the emit block below, so a broken
+        # engine never produces a baseline file at all.
+        print(f"ERROR: benchmark aborted (fail-closed): {exc}", file=sys.stderr)
+        return 1
 
     # Emit JSON
     out_path: Path = args.out
@@ -330,6 +367,8 @@ def main() -> None:
             print(f"\n=== BLOB PREVIEW: {cid} (first 1500 chars) ===")
             print(recs[0]["blob"][:1500])
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

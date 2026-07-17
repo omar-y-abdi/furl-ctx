@@ -99,9 +99,22 @@ _MARKER_HINTS: Final = ("ccr:", "hash=")
 
 
 def _may_reference_marker(text: str) -> bool:
-    """Whether *text* might carry a CCR marker (cheap, case-insensitive)."""
-    lowered = text.lower()
-    return any(hint in lowered for hint in _MARKER_HINTS)
+    """Whether *text* might carry a CCR marker (cheap, case-insensitive).
+
+    Uses ``casefold``, not ``lower`` (review B6): the grammar's ``re.IGNORECASE``
+    applies full Unicode case-folding, which is WIDER than ``str.lower``, so this
+    pre-check must fold at least as widely or it skips entries the grammar would
+    have matched. Measured bypass: ``ſ`` (U+017F LATIN SMALL LETTER LONG S) is
+    unchanged by ``lower`` but folds to ``s``, so a marker written
+    ``[10 rows compressed to 2. Retrieve more: haſh=<24hex>]`` matched the grammar
+    while this screen returned False, silently orphaning the nested blob.
+
+    Over-matching is safe here: a false positive only costs one grammar scan that
+    finds nothing. A false NEGATIVE is a data-safety bug, which is the asymmetry
+    this screen must be tuned for.
+    """
+    folded = text.casefold()
+    return any(hint in folded for hint in _MARKER_HINTS)
 
 
 @dataclass(frozen=True)
@@ -1453,6 +1466,37 @@ class CompressionStore:
                 return False
             return True
 
+    def exists_any_tier(self, hash_key: str) -> bool:
+        """Whether *hash_key* is still retrievable from ANY tier. Never raises.
+
+        :meth:`exists` is primary-tier only, but :meth:`retrieve` falls through to
+        the durable spill tier on a primary miss (Q10). Verifying an erase with
+        ``exists`` therefore interrogates a tier ``retrieve`` can bypass: with
+        ``delete``'s fail-open spill delete, a purge can leave an entry
+        RETRIEVABLE while ``exists`` reports it gone (review B3). This is the
+        predicate a read-back must use — it asks the same question ``retrieve``
+        answers: can a caller still get this content back?
+
+        ``exists``'s primary-only semantics are deliberately left alone; other
+        callers (capacity/liveness checks) depend on them.
+        """
+        with self._lock:
+            # Mirror exists(): an expired primary entry is not retrievable. A
+            # miss (or an expired hit) still has to check the spill below.
+            entry = self._backend.get(hash_key)
+            if entry is not None and not entry.is_expired(self._now()):
+                return True
+            if self._spill is None:
+                return False
+            try:
+                return self._spill.get(hash_key) is not None
+            except Exception as exc:  # noqa: BLE001 — a spill that cannot be read
+                # cannot prove the entry is GONE. Treat an unreadable spill as
+                # "still there": a false survivor is a loud, retryable purge
+                # error; a false all-clear is the silent data-safety bug.
+                logger.warning("CCR spill existence check failed (assuming present): %s", exc)
+                return True
+
     def get_entry_status(
         self,
         hash_key: str,
@@ -1667,6 +1711,18 @@ class CompressionStore:
         A skipped hash is reported in ``nested_shared_skipped``, never counted as
         deleted, and is NOT added to ``_visited`` — a later parent in the same
         cascade may legitimately own it once its own referents are gone.
+
+        Known, deliberately deferred (tracked, not dropped):
+
+        * #9 — because a skipped hash stays out of ``_visited``, a diamond (two
+          parents inside ONE cascade both referencing a blob) can report the same
+          hash in both ``nested_deleted`` and ``nested_shared_skipped``. No
+          production consumer reads both lists together, and the erase itself is
+          correct; only the report is redundant.
+        * #11 — two entries whose markers reference EACH OTHER protect one another
+          forever, so neither is cascade-deleted while both are live. Reaching it
+          needs a contrived mutual reference (content-derived hashes make a natural
+          cycle near-impossible), and each is still individually purgeable by name.
         """
         visited = _visited if _visited is not None else set()
         if hash_key in visited:

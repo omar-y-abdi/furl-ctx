@@ -56,7 +56,7 @@ from furl_ctx.ccr.compress_modes import (
     _NESTED_QUANTIFIER_RE,
     count_variable_quantifiers,
 )
-from furl_ctx.ccr.regex_budget import matches_within_budget
+from furl_ctx.ccr.regex_budget import Boundability, classify_boundability, matches_within_budget
 
 # Bound the regex context window so a caller cannot request an unboundedly
 # large context expansion. 0..50 is far past any real "show me around this
@@ -225,11 +225,24 @@ def _reject_pathological_pattern(pattern: str) -> FilterError | None:
     These screens are DEFENSE-IN-DEPTH, not the bound (RG1): they are syntactic,
     and ``(a|b|ab)+Z`` passes all three while still backtracking exponentially.
     The actual bound is the per-match budget applied in ``_line_matches``.
+
+    The FOURTH screen is the bound for the one case the budget cannot cover (B1):
+    a pattern RE2 refuses (lookaround/backreferences) cannot be time-bounded on a
+    worker thread, where the MCP server runs this match, and a wedged match there
+    freezes the whole event loop for every session on the process. Such a pattern
+    is rejected here rather than accepted and run unbounded. When RE2 is absent
+    boundability is not knowable, so nothing is rejected on that basis; see
+    :func:`furl_ctx.ccr.regex_budget.classify_boundability`.
     """
     if len(pattern) > _MAX_PATTERN_CHARS:
         return FilterError(
             f"pattern too long (>{_MAX_PATTERN_CHARS} chars); "
             "narrow the pattern to avoid catastrophic backtracking"
+        )
+    if classify_boundability(pattern) is Boundability.UNBOUNDABLE:
+        return FilterError(
+            "pattern rejected: lookaround/backreferences cannot be time-bounded "
+            "off the main thread; anchor or rewrite the pattern without lookaround"
         )
     if _NESTED_QUANTIFIER_RE.search(pattern):
         return FilterError(

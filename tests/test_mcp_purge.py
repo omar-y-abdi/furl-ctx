@@ -208,6 +208,84 @@ async def test_purge_keeps_a_nested_blob_another_live_entry_shares(server) -> No
     assert "error" not in still, "shared nested blob was erased out from under B"
 
 
+async def test_purge_discloses_a_nested_blob_it_kept_as_shared(server) -> None:
+    """B2: retaining a shared blob is correct; NOT SAYING SO is the bug.
+
+    The response used to read "erased ... (verified no longer retrievable)" with
+    ``nested_deleted: 0`` while the shared blob was still fully retrievable, and
+    the agent had no field to learn otherwise. The retention must be disclosed.
+    """
+    nested = "d" * 24
+    store = server._get_local_store()
+    store.store(original="shared dropped rows", compressed="x", explicit_hash=nested)
+    store.store(original="A payload", compressed=f"A <<ccr:{nested}>>", explicit_hash=_HASH_A)
+    store.store(original="B payload", compressed=f"B <<ccr:{nested}>>", explicit_hash=_HASH_B)
+
+    envelope = _envelope(await server._handle_purge({"hash": _HASH_A}))
+    assert envelope["nested_kept_shared"] == [nested], "the kept blob must be named"
+    assert nested in envelope["note"], "the note must disclose what was kept"
+    assert "still references" in envelope["note"]
+    # The claim in the note is TRUE: the blob really is still retrievable.
+    assert store.exists(nested) is True
+
+
+async def test_purge_reports_no_kept_shared_when_nothing_was_kept(server) -> None:
+    """B2 control: the disclosure must not appear on an ordinary complete purge."""
+    nested = "d" * 24
+    store = server._get_local_store()
+    store.store(original="dropped rows", compressed="x", explicit_hash=nested)
+    store.store(original="payload", compressed=f"s <<ccr:{nested}>> t", explicit_hash=_HASH_A)
+
+    envelope = _envelope(await server._handle_purge({"hash": _HASH_A}))
+    assert envelope["nested_kept_shared"] == []
+    assert "still references" not in envelope["note"]
+
+
+async def test_purge_readback_detects_a_survivor_in_the_spill_tier(server) -> None:
+    """B3: the read-back must interrogate the tier ``retrieve`` actually reads.
+
+    ``exists`` is primary-only, but ``retrieve`` falls back to the spill tier. With
+    ``delete``'s fail-open spill delete, a raising spill backend leaves the entry
+    RETRIEVABLE while a primary-only read-back reports it gone — the tool then
+    claims "verified no longer retrievable" about live content.
+    """
+    store = server._get_local_store()
+    store.store(original="payload", compressed="summary", explicit_hash=_HASH_A)
+    spilled_copy = store._backend.get(_HASH_A)
+    assert spilled_copy is not None
+
+    class _RaisingSpill:
+        """A spill tier still holding the entry, whose delete fails (fail-open)."""
+
+        def get(self, hash_key: str):
+            return spilled_copy if hash_key == _HASH_A else None
+
+        def delete(self, hash_key: str) -> bool:
+            raise OSError("spill delete failed")
+
+    store._spill = _RaisingSpill()  # type: ignore[assignment]
+    envelope = _envelope(await server._handle_purge({"hash": _HASH_A}))
+    assert "error" in envelope, "an entry still readable via spill is not erased"
+    assert _HASH_A in envelope["error"]
+    assert "verification FAILED" in envelope["error"]
+
+
+async def test_purge_all_readback_detects_entries_that_survived_clear(server) -> None:
+    """Reviewer #13: `purge --all` claimed "Erased N entries" with no read-back.
+
+    The single-hash path verifies its erase; the wider blast radius should not be
+    the one that trusts `clear()`. A clear that silently leaves entries behind now
+    reports failure instead of success.
+    """
+    store = server._get_local_store()
+    store.store(original="payload", compressed="summary", explicit_hash=_HASH_A)
+    store.clear = lambda: None  # type: ignore[method-assign]  # a clear that does nothing
+
+    envelope = _envelope(await server._handle_purge({"all": True}))
+    assert "error" in envelope, "a clear() that erased nothing must not report success"
+    assert "verification FAILED" in envelope["error"]
+
+
 async def test_purge_is_cycle_safe_on_self_referencing_marker(server) -> None:
     # A compressed view whose marker points back at its OWN hash must not recurse
     # forever — the visited set bounds it, and the entry is still erased once.

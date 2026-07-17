@@ -27,6 +27,7 @@ from furl_ctx.ccr.compress_modes import (
     _NESTED_QUANTIFIER_RE,
     SectionPatterns,
     _resolve_matcher,
+    _validate_pattern,
     count_variable_quantifiers,
 )
 from furl_ctx.ccr.regex_budget import (
@@ -35,7 +36,12 @@ from furl_ctx.ccr.regex_budget import (
     re2_available,
     search_within_budget,
 )
-from furl_ctx.ccr.retrieve_filters import _line_matches
+from furl_ctx.ccr.retrieve_filters import (
+    FilterError,
+    RetrieveFilters,
+    _line_matches,
+    _reject_pathological_pattern,
+)
 
 # Each pattern is agent-supplyable and passes the parse-time screens (or, for
 # ``(a+)+Z``, is the classic shape the screens DO catch -- pinned here so the
@@ -224,30 +230,29 @@ def test_lookaround_and_backref_fall_back_to_re() -> None:
     assert matches_within_budget(re.compile(r"(\w)\1"), "abc") is False
 
 
-@pytest.mark.skipif(not re2_available(), reason="documents the RE2-path residual")
-def test_known_residual_lookaround_is_not_re2_compilable() -> None:
-    """KNOWN LIMITATION (RG1), pinned so it is visible rather than assumed away.
+@pytest.mark.skipif(not re2_available(), reason="the ingress bound requires RE2 to judge")
+def test_residual_lookaround_is_closed_at_ingress_not_left_unbounded() -> None:
+    """B1: the RG1 residual is now REJECTED at ingress instead of run unbounded.
 
-    RE2 refuses lookaround, so ``(a|b|ab)+(?=Z)`` falls back to stdlib ``re``.
-    On the main thread SIGALRM still bounds it (asserted below). Off the main
-    thread -- the MCP server's ``asyncio.to_thread`` path -- nothing can, and that
-    pattern remains unbounded. Closing it means rejecting lookaround/backrefs in
-    agent-supplied filters, a capability removal that is a product call.
+    RE2 refuses lookaround, so ``(a|b|ab)+(?=Z)`` cannot be bounded off the main
+    thread -- and the MCP server matches on worker threads, where a wedged ``sre``
+    holds the GIL and freezes the whole event loop for every session on the
+    process. This previously shipped as a documented residual. It no longer
+    reaches the matcher at all: both validators reject it.
 
-    This test does NOT run the unbounded case (it would hang the suite by
-    construction); it pins the two facts that make the residual real.
+    The facts that made the residual real are still pinned below, because they are
+    exactly why ingress rejection (not a budget) has to be the bound here.
     """
     import furl_ctx.ccr.regex_budget as rb
 
     assert rb._compile_re2("(a|b|ab)+(?=Z)") is None, "RE2 must refuse the lookahead"
-    # The screens do not catch it either, so nothing else is bounding it.
+    # The syntactic screens do not catch it, so nothing else could bound it.
     assert _NESTED_QUANTIFIER_RE.search("(a|b|ab)+(?=Z)") is None
     assert count_variable_quantifiers("(a|b|ab)+(?=Z)") <= _MAX_VARIABLE_QUANTIFIERS
-    # On the main thread the SIGALRM watchdog still bounds it.
-    start = time.monotonic()
-    verdict = search_within_budget(re.compile("(a|b|ab)+(?=Z)"), "ab" * 2600)
-    assert verdict is MatchVerdict.BUDGET_EXCEEDED
-    assert time.monotonic() - start < _CEILING_SECONDS
+    # Which is why ingress must refuse it outright, on BOTH agent-reachable paths.
+    assert rb.classify_boundability("(a|b|ab)+(?=Z)") is rb.Boundability.UNBOUNDABLE
+    assert _reject_pathological_pattern("(a|b|ab)+(?=Z)") is not None
+    assert _validate_pattern("(a|b|ab)+(?=Z)", "include") is not None
 
 
 @pytest.mark.skipif(not re2_available(), reason="documents an RE2-only divergence")
@@ -265,3 +270,132 @@ def test_re2_ascii_class_divergence_is_known_and_pinned() -> None:
     assert matches_within_budget(re.compile(r"^\d+$"), arabic_indic) is False
     # ASCII digits agree under both engines -- the common case is unaffected.
     assert matches_within_budget(re.compile(r"^\d+$"), "12345") is True
+
+
+# ---------------------------------------------------------------------------
+# B1 -- ingress rejects what cannot be bounded off the main thread
+# ---------------------------------------------------------------------------
+
+# Patterns RE2 refuses. Each is agent-supplyable, passes every syntactic screen,
+# and would otherwise run unbudgeted on the MCP worker thread.
+UNBOUNDABLE_PATTERNS = ["(a|b|ab)+(?=Z)", r"(a)\1", "foo(?!bar)", "(?<=x)y"]
+
+
+@pytest.mark.skipif(not re2_available(), reason="ingress cannot pre-judge without RE2")
+@pytest.mark.parametrize("pattern", UNBOUNDABLE_PATTERNS)
+def test_retrieve_ingress_rejects_unboundable_pattern(pattern: str) -> None:
+    """B1: furl_retrieve refuses a pattern it could not time-bound, loudly."""
+    error = _reject_pathological_pattern(pattern)
+    assert error is not None, f"{pattern!r} must not reach the matcher"
+    assert "lookaround" in error.reason
+    # And end-to-end through the real parse entry point the MCP tool calls.
+    parsed = RetrieveFilters.parse({"pattern": pattern})
+    assert isinstance(parsed, FilterError)
+
+
+@pytest.mark.skipif(not re2_available(), reason="ingress cannot pre-judge without RE2")
+@pytest.mark.parametrize("pattern", UNBOUNDABLE_PATTERNS)
+def test_compress_ingress_rejects_unboundable_pattern(pattern: str) -> None:
+    """B1: furl_compress include/exclude filters refuse it too, with a typed error."""
+    error = _validate_pattern(pattern, "include")
+    assert error is not None, f"{pattern!r} must not reach the matcher"
+    assert "lookaround" in error
+
+
+@pytest.mark.skipif(not re2_available(), reason="ingress cannot pre-judge without RE2")
+def test_ingress_still_accepts_the_benign_catastrophic_pattern() -> None:
+    """B1 must not over-reject: ``(a|b|ab)+Z`` is catastrophic under ``re`` but RE2
+    bounds it, so it stays a working filter and answers fast."""
+    assert _reject_pathological_pattern("(a|b|ab)+Z") is None
+    assert _validate_pattern("(a|b|ab)+Z", "include") is None
+    start = time.monotonic()
+    assert matches_within_budget(re.compile("(a|b|ab)+Z"), "ab" * 2600) is False
+    assert time.monotonic() - start < _CEILING_SECONDS
+
+
+@pytest.mark.skipif(not re2_available(), reason="ingress cannot pre-judge without RE2")
+@pytest.mark.parametrize("pattern", ["ERROR.*", r"^\d+$", "foo|bar", "*.py", "[unclosed"])
+def test_ingress_accepts_normal_and_non_regex_patterns(pattern: str) -> None:
+    """B1 must not break globs: a source that is not a Python regex at all (``*.py``)
+    is UNKNOWN, not UNBOUNDABLE -- ``compress_modes`` still matches it via fnmatch,
+    and ``retrieve_filters`` still reports its own ``invalid regex`` error."""
+    assert _validate_pattern(pattern, "include") is None
+    assert regex_budget.classify_boundability("*.py") is regex_budget.Boundability.UNKNOWN
+
+
+def test_glob_filter_still_matches_after_the_ingress_screen() -> None:
+    """B1 regression guard: rejecting on 'RE2 cannot compile it' alone would have
+    killed every glob filter, since ``*.py`` fails BOTH engines."""
+    matcher = _resolve_matcher("*.py")
+    assert matcher("foo.py") is True
+    assert matcher("foo.txt") is False
+
+
+def test_ingress_does_not_reject_when_re2_is_absent(without_re2: None) -> None:
+    """B1: an install without the ``re2`` extra cannot judge boundability, so it must
+    NOT reject everything -- it keeps the documented SIGALRM/residual behavior."""
+    regex_budget._compile_re2.cache_clear()
+    assert regex_budget.classify_boundability("(a|b|ab)+(?=Z)") is regex_budget.Boundability.UNKNOWN
+    assert _reject_pathological_pattern("(a|b|ab)+(?=Z)") is None
+    assert _validate_pattern("(a|b|ab)+(?=Z)", "include") is None
+
+
+# ---------------------------------------------------------------------------
+# B5 -- RE2 must not silently drop a caller's regex flags
+# ---------------------------------------------------------------------------
+
+
+def test_constructor_flags_are_honored_under_re2() -> None:
+    """B5: ``re.compile(src, re.IGNORECASE)`` carries a flag RE2 never sees (it has
+    no flags argument), so the RE2 path must be skipped rather than answer a
+    different question case-sensitively."""
+    assert matches_within_budget(re.compile("error", re.IGNORECASE), "ERROR") is True
+    assert matches_within_budget(re.compile("error"), "ERROR") is False
+
+
+def test_flag_handling_is_identical_with_and_without_re2(without_re2: None) -> None:
+    """B5: the two engines must agree on a flagged pattern -- that is the whole point."""
+    regex_budget._compile_re2.cache_clear()
+    assert matches_within_budget(re.compile("error", re.IGNORECASE), "ERROR") is True
+    assert matches_within_budget(re.compile("error"), "ERROR") is False
+
+
+@pytest.mark.skipif(not re2_available(), reason="asserts the RE2 path is kept")
+def test_inline_flags_stay_on_the_re2_path() -> None:
+    """B5 must not reopen B1. ``re.compile("(?i)x").flags`` is INDISTINGUISHABLE from
+    ``re.compile("x", re.I).flags`` (both ``UNICODE|IGNORECASE``), so rejecting the
+    RE2 path on ``flags & ~re.UNICODE`` would push inline-flag patterns onto the
+    unbudgeted path -- making ``(?i)(a|b|ab)+Z`` a freeze again. RE2 parses ``(?i)``
+    from the source itself, so it stays bounded AND correct.
+    """
+    assert re.compile("(?i)error").flags == re.compile("error", re.IGNORECASE).flags
+    assert regex_budget._re2_sees_same_flags(re.compile("(?i)error")) is True
+    assert regex_budget._re2_sees_same_flags(re.compile("error", re.IGNORECASE)) is False
+    # Correct answer AND bounded: it must not fall through to unbudgeted `re`.
+    assert matches_within_budget(re.compile("(?i)error"), "ERROR") is True
+    start = time.monotonic()
+    assert matches_within_budget(re.compile("(?i)(a|b|ab)+Z"), "ab" * 2600) is False
+    assert time.monotonic() - start < _CEILING_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# B7 -- the watchdog must not eat a caller's pending alarm
+# ---------------------------------------------------------------------------
+
+
+def test_pre_armed_itimer_survives_a_budgeted_match(without_re2: None) -> None:
+    """B7: an embedder (or pytest-timeout) may already have ITIMER_REAL armed. The
+    watchdog used to overwrite it and zero it on the way out, silently cancelling a
+    timeout the caller was relying on."""
+    regex_budget._compile_re2.cache_clear()
+    fired: list[str] = []
+    previous = signal.signal(signal.SIGALRM, lambda *_: fired.append("caller"))
+    signal.setitimer(signal.ITIMER_REAL, 30.0)
+    try:
+        assert matches_within_budget(re.compile("ERROR"), "some line") is False
+        remaining, _interval = signal.getitimer(signal.ITIMER_REAL)
+        assert remaining > 0, "caller's pending alarm was cancelled by the budget"
+        assert signal.getsignal(signal.SIGALRM) is not regex_budget._raise_budget_exceeded
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)

@@ -2180,7 +2180,13 @@ class FurlMCPServer:
             )
 
         if all_arg:
-            deleted = await asyncio.to_thread(self._purge_all)
+            deleted, still_present = await asyncio.to_thread(self._purge_all)
+            if still_present:
+                return _err(
+                    f"purge verification FAILED: {still_present} entr"
+                    f"{'y is' if still_present == 1 else 'ies are'} still in the store "
+                    "after clear(). No data was confirmed erased; retry or inspect the store."
+                )
             plural = "y" if deleted == 1 else "ies"
             return [
                 TextContent(
@@ -2204,7 +2210,9 @@ class FurlMCPServer:
             return _err("invalid hash format (expected 12 or 24 lowercase-hex chars)")
         hash_key = hash_arg.lower()
 
-        deleted_one, nested_count, survivors = await asyncio.to_thread(self._purge_one, hash_key)
+        deleted_one, nested_count, survivors, kept_shared = await asyncio.to_thread(
+            self._purge_one, hash_key
+        )
         deleted_total = (1 if deleted_one else 0) + nested_count
         if survivors:
             # Read-back verification failed (A1/RG6): something the cascade decided
@@ -2231,6 +2239,17 @@ class FurlMCPServer:
                 f"No entry {hash_key} in the store (already erased, evicted, or "
                 "never stored); nothing to delete."
             )
+        if kept_shared:
+            # B2: a blob deliberately RETAINED because another live entry still
+            # references it must be disclosed. Without this the agent reads
+            # "verified no longer retrievable" while the content is still there,
+            # which is exactly the false-erase claim the read-back exists to
+            # prevent. The retention is correct (RG3); hiding it is not.
+            note += (
+                f" {len(kept_shared)} nested blob{'s' if len(kept_shared) != 1 else ''} "
+                f"kept because another live entry still references "
+                f"{'them' if len(kept_shared) != 1 else 'it'}: {', '.join(kept_shared)}."
+            )
         return [
             TextContent(
                 type="text",
@@ -2241,6 +2260,7 @@ class FurlMCPServer:
                         "found": deleted_one,
                         "deleted_count": deleted_total,
                         "nested_deleted": nested_count,
+                        "nested_kept_shared": list(kept_shared),
                         "note": note,
                     },
                     indent=2,
@@ -2248,16 +2268,17 @@ class FurlMCPServer:
             )
         ]
 
-    def _purge_one(self, hash_key: str) -> tuple[bool, int, tuple[str, ...]]:
+    def _purge_one(self, hash_key: str) -> tuple[bool, int, tuple[str, ...], tuple[str, ...]]:
         """Cascade-delete one entry via the library purge primitive (off-loop).
 
         ``CompressionStore.delete_cascade_detailed`` is exactly what
         ``furl_ctx.retrieve.purge`` delegates to; calling it on THIS server's
         store handle — the same one the retrieve path reads — guarantees a purged
         hash (and every nested ``<<ccr:HASH>>`` blob it owned) is no longer
-        retrievable. A read-back with :meth:`CompressionStore.exists` VERIFIES the
-        erase actually took (A1: a purge that silently does not purge is the top
-        data-safety bug in both audits).
+        retrievable. A read-back with
+        :meth:`CompressionStore.exists_any_tier` VERIFIES the erase actually took
+        (A1: a purge that silently does not purge is the top data-safety bug in
+        both audits).
 
         The read-back covers the FULL set the cascade decided to delete — the top
         hash AND every nested hash it removed (RG6). Verifying only the top hash
@@ -2265,9 +2286,17 @@ class FurlMCPServer:
         cascade exists to prevent. Hashes deliberately SKIPPED as still-shared
         (RG3) are not verified: they are meant to survive.
 
-        Returns ``(top_deleted, nested_deleted_count, survivors)``, where
+        It uses ``exists_any_tier``, not ``exists`` (review B3): ``exists`` is
+        primary-only while ``retrieve`` falls back to the spill tier, so a
+        primary-only read-back could report success on an entry that is still
+        retrievable through the spill after a fail-open spill delete.
+
+        Returns ``(top_deleted, nested_deleted_count, survivors, kept_shared)``:
         ``survivors`` names every hash that should be gone but is still
-        retrievable (empty on success).
+        retrievable (empty on success), and ``kept_shared`` names every nested
+        blob deliberately RETAINED because another live entry still references it
+        — the agent is told about those rather than left to infer an erase that
+        did not happen (review B2).
         """
         store = self._get_local_store()
         outcome = store.delete_cascade_detailed(hash_key)
@@ -2276,19 +2305,27 @@ class FurlMCPServer:
         # hashes verified are the ones the cascade actually removed. dict.fromkeys
         # dedupes while keeping order -- the top hash appears in both sources.
         expected_gone = dict.fromkeys((hash_key, *outcome.deleted_hashes(hash_key)))
-        survivors = tuple(h for h in expected_gone if store.exists(h))
-        return (outcome.top_deleted, len(outcome.nested_deleted), survivors)
+        survivors = tuple(h for h in expected_gone if store.exists_any_tier(h))
+        return (
+            outcome.top_deleted,
+            len(outcome.nested_deleted),
+            survivors,
+            outcome.nested_shared_skipped,
+        )
 
-    def _purge_all(self) -> int:
-        """Wipe every entry; return how many live entries were removed (off-loop).
+    def _purge_all(self) -> tuple[int, int]:
+        """Wipe every entry; return ``(removed, still_present)`` (off-loop).
 
         Reads the live ``entry_count`` before ``clear()`` so the reported count
-        reflects what was actually erasable (get_stats prunes expired rows first).
+        reflects what was actually erasable (get_stats prunes expired rows first),
+        then reads it back AFTER (reviewer #13): the single-hash path verifies its
+        erase, and claiming "erased N entries" without checking is the same
+        unverified claim on a wider blast radius. ``still_present`` is 0 on success.
         """
         store = self._get_local_store()
         count = int(store.get_stats().get("entry_count", 0))
         store.clear()
-        return count
+        return count, int(store.get_stats().get("entry_count", 0))
 
     async def _handle_search(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_search — case-insensitive SUBSTRING search over originals.

@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from .regex_budget import matches_within_budget
+from .regex_budget import Boundability, classify_boundability, matches_within_budget
 
 # ── ReDoS guards (SEC-1, A12, RG1) ──────────────────────────────────────────
 # The include/exclude patterns are caller-supplied and run over caller-supplied
@@ -351,9 +351,23 @@ def _validate_pattern(pattern: str, name: str) -> str | None:
     applied by ``_resolve_matcher`` (RG1): the per-line input cap does NOT bound
     backtracking, only input length. Normal filters (``ERROR.*``, ``*.py``,
     ``^\\d+$``) have none of these shapes and pass untouched.
+
+    The fourth screen IS a bound (B1): a pattern RE2 refuses
+    (lookaround/backreferences) cannot be time-bounded off the main thread, and a
+    wedged match on the MCP worker thread freezes the whole event loop, so it is
+    rejected here instead of run unbounded. Only a pattern that is a valid Python
+    regex RE2 declines is rejected — a glob like ``*.py`` is not a regex at all
+    and is classified ``UNKNOWN``, so it still reaches the ``fnmatch`` path in
+    ``_resolve_matcher``. With RE2 absent nothing is rejected on this basis.
     """
     if len(pattern) > _MAX_PATTERN_CHARS:
         return f"{name} pattern too long (>{_MAX_PATTERN_CHARS} chars): {pattern[:40]!r}…"
+    if classify_boundability(pattern) is Boundability.UNBOUNDABLE:
+        return (
+            f"{name} pattern rejected: lookaround/backreferences cannot be "
+            f"time-bounded off the main thread; anchor or rewrite the pattern "
+            f"without lookaround: {pattern!r}"
+        )
     if _NESTED_QUANTIFIER_RE.search(pattern):
         return (
             f"{name} pattern rejected: nested unbounded quantifier "

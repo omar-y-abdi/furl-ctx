@@ -33,15 +33,27 @@ Engine strategy (in order)
    RE2 refuses because it cannot match them in linear time). The syntactic
    screens and the input cap still apply, but they do not bound backtracking.
 
-   KNOWN LIMITATION, measured, not theoretical: ``(a|b|ab)+(?=Z)`` passes every
-   screen, is refused by RE2 for the lookahead, and backtracks for minutes under
-   ``re``. On the MCP server -- which matches in worker threads -- that pattern is
-   still unbounded. Closing it needs either a bounded engine that supports
-   lookaround (none available here) or rejecting lookaround/backreferences in
-   agent-supplied filters outright, which would remove a working capability and
-   is a product decision, not a bug fix. Installing the ``re2`` extra (the ``mcp``
-   extra pulls it in) bounds every pattern RE2 can compile, which is everything
-   except lookaround/backreferences.
+Why the residual is closed at INGRESS (review B1)
+-------------------------------------------------
+The residual is not merely "a slow match", which is how an earlier revision of
+this docstring framed it. Because CPython's ``sre`` holds the GIL for the whole
+match, a wedged worker thread starves the ENTIRE asyncio event loop: measured on
+the MCP server, 1 event-loop tick during a 1.48 s match where a healthy loop
+ticks ~30. Every session served by the process freezes until the match ends, and
+an agent picks the duration -- the input cap is 10 000 characters and the cost of
+``(a|b|ab)+(?=Z)`` grows ~4x per 2 extra characters (measured 0.14 s / 0.56 s /
+2.3 s at 18 / 20 / 22 ``ab`` pairs). That is a process-wide denial of service
+reachable from one ordinary tool call, not a slow filter.
+
+So a pattern RE2 cannot compile is REJECTED at ingress by both validators
+(``retrieve_filters._reject_pathological_pattern`` and
+``compress_modes._validate_pattern``) via :func:`classify_boundability`, rather
+than accepted and run unbounded. This removes lookaround/backreferences from
+agent-supplied filters; no production caller and no test used them. When RE2 is
+absent the boundability of a pattern cannot be pre-judged, so ingress does NOT
+reject and the SIGALRM/residual path above still applies -- an install without
+the ``re2`` extra (the ``mcp`` extra pulls it in) keeps the old behavior rather
+than rejecting every pattern it cannot classify.
 
 Why NOT a thread-based watchdog
 -------------------------------
@@ -64,6 +76,18 @@ exist" verdict, so leftmost-first vs leftmost-longest -- the usual RE2/``re``
 difference -- cannot matter: it changes which span wins, never whether one exists.
 
 Totality: every entry point returns a verdict and NEVER raises to the caller.
+
+Known, deliberately deferred (tracked, not dropped)
+---------------------------------------------------
+* #7 -- the budget is PER LINE, not per operation, so a filter over very many
+  lines can still take a long total wall-clock. CLI-only in practice and
+  Ctrl-C-interruptible; the MCP path is bounded by RE2's linear-time match.
+* #10 -- ``MatchVerdict.BUDGET_EXCEEDED`` is distinguishable but no production
+  caller reads it: both call sites use :func:`matches_within_budget`, which folds
+  it into "no match". Kept distinct so an overrun CAN be reported.
+* #12 -- ``$`` means ``\\Z`` in RE2 but ``\\z``-with-trailing-newline in ``re``.
+  Both filter callers split content on ``"\\n"`` first, so no line carries the
+  trailing newline that would expose the difference.
 """
 
 from __future__ import annotations
@@ -134,6 +158,75 @@ def _compile_re2(source: str) -> Any | None:
         return None
 
 
+class Boundability(Enum):
+    """Whether a pattern SOURCE can be proven time-bounded before it is run.
+
+    Three states, not a boolean, because "RE2 refuses it" and "RE2 cannot judge
+    it" demand opposite responses at ingress: the first is the B1 freeze and must
+    be rejected; the second must be let through (rejecting it would break every
+    glob filter and every install without the ``re2`` extra).
+    """
+
+    BOUNDABLE = "boundable"
+    """RE2 compiles it: the match is linear-time on any thread."""
+
+    UNBOUNDABLE = "unboundable"
+    """A valid Python regex that RE2 refuses (lookaround/backreferences).
+
+    Off the main thread nothing can bound it -- the B1 process-wide freeze.
+    """
+
+    UNKNOWN = "unknown"
+    """Not judgeable here: RE2 is absent, or the source is not a Python regex.
+
+    A non-regex source is NOT a filter defect -- ``compress_modes`` matches such a
+    pattern (e.g. ``*.py``) with ``fnmatch`` glob semantics, and
+    ``retrieve_filters`` reports its own ``invalid regex`` error. Both would
+    break if this were folded into ``UNBOUNDABLE``.
+    """
+
+
+def classify_boundability(pattern: str) -> Boundability:
+    """Classify whether ``pattern``'s source can be time-bounded. Never raises.
+
+    Ingress validators reject ONLY :attr:`Boundability.UNBOUNDABLE`; see the
+    module docstring for why ``UNKNOWN`` must pass through.
+    """
+    if _RE2 is None:
+        return Boundability.UNKNOWN
+    try:
+        re.compile(pattern)
+    except re.error:
+        # Not a Python regex at all -- the caller's own glob/invalid-regex
+        # handling owns this case, so refuse to judge it.
+        return Boundability.UNKNOWN
+    if _compile_re2(pattern) is not None:
+        return Boundability.BOUNDABLE
+    return Boundability.UNBOUNDABLE
+
+
+def _re2_sees_same_flags(compiled: re.Pattern[str]) -> bool:
+    """Whether RE2 compiling ``compiled.pattern`` honors every flag it carries.
+
+    RE2 has no flags argument (there is no ``re2.IGNORECASE``), so it only ever
+    sees flags written INTO the source, like ``(?i)``. Those it honors natively.
+    Flags passed to ``re.compile(source, flags)`` are invisible to it, and using
+    RE2 there would silently answer a DIFFERENT question than the caller asked
+    (review B5: ``re.compile("error", re.IGNORECASE)`` matching case-sensitively).
+
+    ``compiled.flags`` CANNOT distinguish the two: ``re.compile("error", re.I)``
+    and ``re.compile("(?i)error")`` both report exactly ``re.UNICODE|re.IGNORECASE``.
+    Recompiling the bare source and comparing does distinguish them -- if the
+    source alone reproduces the flags, every flag is inline and RE2 sees it.
+    Rejecting all flags instead (the obvious fix) would push inline-``(?i)``
+    patterns onto the unbudgeted path and reopen B1 for ``(?i)(a|b|ab)+Z``.
+    """
+    try:
+        return re.compile(compiled.pattern).flags == compiled.flags
+    except re.error:
+        return False
+
+
 class _BudgetExceeded(Exception):
     """Internal: raised from the SIGALRM handler to unwind a wedged match."""
 
@@ -158,11 +251,19 @@ def _search_with_watchdog(
 ) -> MatchVerdict:
     """Run ``compiled.search(text)`` under a SIGALRM budget (main thread only).
 
-    Restores the previous handler and disarms the itimer unconditionally, so a
-    budgeted match never leaks timer state into the caller.
+    Restores BOTH the previous handler and the caller's previous ``ITIMER_REAL``
+    unconditionally, so a budgeted match never leaks timer state into the caller
+    and never cancels a timer the caller had already armed (review B7: an
+    embedder's or ``pytest-timeout``'s pending alarm used to be silently dropped,
+    the exact opposite of what this docstring promised).
+
+    The restore is COARSE: the remaining interval is re-armed as it read at entry,
+    without subtracting the time this match spent. That over-grants at most
+    ``budget_seconds`` (0.1 s by default), which is why it is preferred over
+    leaving the caller with no timer at all.
     """
-    previous = signal.signal(signal.SIGALRM, _raise_budget_exceeded)
-    signal.setitimer(signal.ITIMER_REAL, budget_seconds)
+    previous_handler = signal.signal(signal.SIGALRM, _raise_budget_exceeded)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, budget_seconds)
     try:
         return MatchVerdict.MATCH if compiled.search(text) else MatchVerdict.NO_MATCH
     except _BudgetExceeded:
@@ -172,8 +273,14 @@ def _search_with_watchdog(
         # never an exception escaping into a filter loop.
         return MatchVerdict.NO_MATCH
     finally:
+        # Disarm ours first, then restore the caller's handler, then re-arm what
+        # the caller had pending (0.0 from setitimer means "was not armed", and
+        # setitimer(0.0) is itself the disarm, so the same call covers both).
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.signal(signal.SIGALRM, previous_handler)
+        remaining, interval = previous_timer
+        if remaining:
+            signal.setitimer(signal.ITIMER_REAL, remaining, interval)
 
 
 def search_within_budget(
@@ -187,7 +294,7 @@ def search_within_budget(
     Total: returns a verdict for every input and never raises. See the module
     docstring for the engine order and the disclosed RE2/``re`` divergence.
     """
-    engine = _compile_re2(compiled.pattern)
+    engine = _compile_re2(compiled.pattern) if _re2_sees_same_flags(compiled) else None
     if engine is not None:
         try:
             return MatchVerdict.MATCH if engine.search(text) else MatchVerdict.NO_MATCH

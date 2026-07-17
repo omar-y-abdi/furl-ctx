@@ -88,3 +88,44 @@ def test_main_aborts_and_writes_nothing_on_needle_recall_fail_open(tmp_path, mon
     assert rc == 1
     assert not (out / "BASELINE.md").exists()
     assert not (out / "baseline_results.json").exists()
+
+
+def test_agent_utility_eval_aborts_and_writes_no_baseline_on_fail_open(
+    tmp_path, monkeypatch
+) -> None:
+    """B4: RG2's "no path remains" was false — this harness also writes a baseline.
+
+    ``agent_utility_eval`` binds ``compress`` directly, had no fail-open guard, and
+    wrapped every corpus in a bare ``except Exception: continue`` under a
+    ``main() -> None`` invoked bare — so a fail-open engine produced records at
+    compression_ratio 1.0, wrote the JSON it labels a "Baseline", and exited 0.
+    Three things are pinned: it aborts, it exits NONZERO, and it writes NOTHING.
+    """
+    import benchmarks.agent_utility_eval as agent_utility_eval
+
+    def _fail_open(messages, *a, **k):
+        return _FakeResult(error="simulated fail-open", messages=messages)
+
+    monkeypatch.setattr(agent_utility_eval, "compress", _fail_open)
+    out = tmp_path / "agent_utility_baseline.json"
+    monkeypatch.setattr(sys, "argv", ["agent_utility_eval.py", "--out", str(out)])
+
+    rc = agent_utility_eval.main()
+    assert rc == 1, "a fail-open engine must not exit 0"
+    assert not out.exists(), "no baseline may be written from a broken engine"
+
+
+def test_agent_utility_eval_abort_is_not_swallowed_by_the_bare_except(monkeypatch) -> None:
+    """B4: the bare ``except Exception ... continue`` would have eaten the abort.
+
+    Pins the handler ORDER, not just the guard's presence: ``BenchmarkAbortedError``
+    must propagate out of the per-corpus loop rather than be logged and skipped.
+    """
+    import benchmarks.agent_utility_eval as agent_utility_eval
+
+    def _fail_open(messages, *a, **k):
+        return _FakeResult(error="simulated fail-open", messages=messages)
+
+    monkeypatch.setattr(agent_utility_eval, "compress", _fail_open)
+    with pytest.raises(BenchmarkAbortedError, match="fail-opened"):
+        agent_utility_eval.run_corpus("app_log", "a log line\n" * 10, {}, "generated", {})

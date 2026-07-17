@@ -15,7 +15,8 @@ IDENTICAL dropped content share ONE nested entry. Three defects around that:
 
 from __future__ import annotations
 
-from furl_ctx.cache.compression_store import CompressionStore
+from furl_ctx.cache.compression_store import CompressionStore, _may_reference_marker
+from furl_ctx.ccr.marker_grammar import hashes_in_text
 
 NESTED_HASH = "c" * 24
 PARENT_A = "a" * 24
@@ -137,3 +138,46 @@ def test_deleted_hashes_reports_the_full_set_for_readback() -> None:
     store2.store("A original", f"A view {_marker(NESTED_HASH)}", explicit_hash=PARENT_A)
     outcome2 = store2.delete_cascade_detailed(PARENT_A)
     assert set(outcome2.deleted_hashes(PARENT_A)) == {PARENT_A, NESTED_HASH}
+
+
+# ---------------------------------------------------------------------------
+# B6 -- the pre-check must fold at least as widely as the grammar
+# ---------------------------------------------------------------------------
+
+# U+017F LATIN SMALL LETTER LONG S. `.lower()` leaves it alone; `.casefold()`
+# maps it to "s", and the grammar's re.IGNORECASE matches it against "s".
+_LONG_S_MARKER = f"[10 rows compressed to 2. Retrieve more: haſh={NESTED_HASH}]"
+
+
+def test_casefold_precheck_agrees_with_the_grammar_on_unicode_folding() -> None:
+    """B6: `.lower()` is NARROWER than the grammar's IGNORECASE, so it skipped a
+    marker the grammar matches -- silently orphaning the nested blob."""
+    # The grammar DOES see this as a real reference...
+    assert hashes_in_text(_LONG_S_MARKER) == [NESTED_HASH]
+    # ...so the cheap pre-check must not veto it. (`.lower()` returned False here.)
+    assert _may_reference_marker(_LONG_S_MARKER) is True
+    assert "hash=" not in _LONG_S_MARKER.lower()  # the exact old-code bypass
+    assert "hash=" in _LONG_S_MARKER.casefold()
+
+
+def test_cascade_follows_a_unicode_folded_marker() -> None:
+    """B6 end-to-end: the blob behind a U+017F marker is cascade-deleted, not left."""
+    store = CompressionStore()
+    store.store("nested original rows", "nested view", explicit_hash=NESTED_HASH)
+    store.store("A original", f"A view {_LONG_S_MARKER}", explicit_hash=PARENT_A)
+    outcome = store.delete_cascade_detailed(PARENT_A)
+    assert outcome.top_deleted is True
+    assert NESTED_HASH in outcome.nested_deleted
+    assert store.exists(NESTED_HASH) is False
+
+
+def test_unicode_folded_marker_also_counts_as_sharing() -> None:
+    """B6: a U+017F marker is a real reference, so it must PROTECT a shared blob
+    too -- under-detection is a dangling marker, over-deletion is data loss."""
+    store = CompressionStore()
+    store.store("nested original rows", "nested view", explicit_hash=NESTED_HASH)
+    store.store("A original", f"A view {_marker(NESTED_HASH)}", explicit_hash=PARENT_A)
+    store.store("B original", f"B view {_LONG_S_MARKER}", explicit_hash=PARENT_B)
+    outcome = store.delete_cascade_detailed(PARENT_A)
+    assert outcome.nested_shared_skipped == (NESTED_HASH,)
+    assert store.exists(NESTED_HASH) is True
