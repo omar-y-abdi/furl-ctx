@@ -302,11 +302,12 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
         return f"Entry expired (CCR TTL: {ttl_seconds} seconds)"
 
     max_entries = status.get("max_entries")
-    capacity_note = f" (store capacity: {max_entries} entries)" if max_entries else ""
+    capacity_note = f" Store capacity is {max_entries} entries." if max_entries else ""
     return (
-        f"Entry no longer retrievable from the CCR store: it was evicted under "
-        f"capacity pressure{capacity_note}, expired (TTL {default_ttl}s), or was "
-        f"never stored. Recompute the source content."
+        f"No entry for this hash in the CCR store. It may never have been "
+        f"stored, or it may have been purged, evicted under capacity pressure, "
+        f"or expired past its TTL of {default_ttl}s.{capacity_note} "
+        f"Recompute the source content."
     )
 
 
@@ -1072,12 +1073,26 @@ class CompressionStore:
             return []
 
         now = self._now()
+        # Snapshot only the KEYS under the lock, which is cheap and decodes no
+        # content, then decode and expiry-filter each entry under a brief per-key
+        # lock so a concurrent store op is never blocked for the whole decode.
+        # Holding the lock across ``items()`` used to freeze every writer for the
+        # full materialize-and-decode of up to the cap of large entries; the
+        # sibling eviction path was already narrowed off ``items()`` this way
+        # (audit #2, ``created_at_index``). ``created_at_index()`` and ``items()``
+        # iterate the backend in the same order and ``get`` reproduces each entry,
+        # so a stable store yields byte-identical results and ranking order.
         with self._lock:
-            live_entries = [
-                (hash_key, entry)
-                for hash_key, entry in self._backend.items()
-                if not entry.is_expired(now)
-            ]
+            snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
+
+        live_entries: list[tuple[str, CompressionEntry]] = []
+        for hash_key in snapshot_keys:
+            with self._lock:
+                entry = self._backend.get(hash_key)
+            # A key evicted between the snapshot and its decode simply drops out,
+            # which is correct for a live search over the current window.
+            if entry is not None and not entry.is_expired(now):
+                live_entries.append((hash_key, entry))
 
         if not live_entries:
             return []

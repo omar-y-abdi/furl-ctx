@@ -14,11 +14,10 @@ shape). With no filter it is byte-identical to a plain full retrieve.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from .cache.compression_store import CompressionStore, _active_ccr_store
-from .ccr.marker_grammar import hash_of_match, marker_patterns
+from .ccr.marker_grammar import hash_of_match, marker_patterns, sub_within_budget
 from .ccr.retrieve_filters import FilterError, RetrieveFilters, apply_filters
 
 # Distinguishes "select_equals was omitted" from an explicit ``select_equals=None``
@@ -185,14 +184,14 @@ def resolve_markers(
     def _expand(text: str) -> str:
         for pattern in marker_patterns():
 
-            def _sub(match: re.Match[str]) -> str:
+            def _sub(match: Any) -> str:
                 # lazy: bulk expansion does NOT feed the retrieval-feedback loop
                 # (record_feedback_signal=False) — it mechanically restores every
                 # marker, not the model selectively fetching one.
                 entry = active.retrieve(hash_of_match(match), record_feedback_signal=False)
                 return entry.original_content if entry is not None else match.group(0)
 
-            text = pattern.sub(_sub, text)
+            text = sub_within_budget(pattern, _sub, text)
         return text
 
     resolved: list[dict[str, Any]] = []
