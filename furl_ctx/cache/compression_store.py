@@ -1079,9 +1079,9 @@ class CompressionStore:
         # Holding the lock across ``items()`` used to freeze every writer for the
         # full materialize-and-decode of up to the cap of large entries; the
         # sibling eviction path was already narrowed off ``items()`` this way
-        # (audit #2, ``created_at_index``). ``keys()`` and ``items()`` iterate the
-        # backend in the same order and ``get`` reproduces each entry, so a stable
-        # store yields byte-identical results and ranking order.
+        # (audit #2, ``created_at_index``). ``created_at_index()`` and ``items()``
+        # iterate the backend in the same order and ``get`` reproduces each entry,
+        # so a stable store yields byte-identical results and ranking order.
         with self._lock:
             snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
 

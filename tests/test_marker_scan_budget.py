@@ -36,6 +36,7 @@ from furl_ctx.ccr.marker_grammar import (
     GENERIC_BRACKET_PATTERN,
     finditer_within_budget,
     hashes_in_text,
+    sub_within_budget,
 )
 
 _H24 = "abcdef0123456789abcdef01"
@@ -170,6 +171,23 @@ def test_finditer_within_budget_matches_re_finditer_for_generic() -> None:
         got = [m.group(m.lastindex) for m in finditer_within_budget(GENERIC_BRACKET_PATTERN, text)]
         exp = [m.group(m.lastindex) for m in GENERIC_BRACKET_PATTERN.finditer(text)]
         assert got == exp, f"RE2 twin diverged from re on {text!r}: {got} != {exp}"
+
+    # Character-offset invariant that sub_within_budget depends on: it splices the
+    # str by match.start and match.end, correct only if the RE2 twin returns
+    # CHARACTER offsets like google-re2, not byte offsets. With non-ASCII before
+    # the marker a byte-offset twin would slice mid-character and silently corrupt
+    # resolve_markers while the group-parity checks above stayed green.
+    multibyte = f"café 🚀 [x compressed y hash={_H24}] 日本"
+    twin_spans = [
+        (m.start(), m.end()) for m in finditer_within_budget(GENERIC_BRACKET_PATTERN, multibyte)
+    ]
+    re_spans = [(m.start(), m.end()) for m in GENERIC_BRACKET_PATTERN.finditer(multibyte)]
+    assert twin_spans == re_spans, (
+        f"twin span diverged from re on multibyte: {twin_spans} != {re_spans}"
+    )
+    got_sub = sub_within_budget(GENERIC_BRACKET_PATTERN, lambda m: "<X>", multibyte)
+    exp_sub = GENERIC_BRACKET_PATTERN.sub(lambda m: "<X>", multibyte)
+    assert got_sub == exp_sub, "sub_within_budget diverged from re.sub on multibyte input"
 
 
 def test_scan_is_total_on_lone_surrogate() -> None:
