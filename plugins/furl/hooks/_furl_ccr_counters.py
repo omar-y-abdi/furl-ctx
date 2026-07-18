@@ -40,10 +40,13 @@ PIPE_NOOP_PREFIX = "pipe_noop:"
 # the FIRST durably-recorded PostToolUse invocation per project store. Gated so
 # it fires once, not on every tool call — see ``emit_first_run_note_if_first``.
 FIRST_RUN_NOTE = (
-    "furl: note — PostToolUse output compression is active and now mirrors each "
-    "tool's output shape, so Claude Code >=2.1.163 honors the replacement "
-    "(anthropics/claude-code#68951 fix); the PreToolUse pipe also runs by default "
-    "(FURL_PRETOOL_PIPE=0 to disable); see furl_stats counters"
+    "furl: PostToolUse output compression is active and mirrors each tool's "
+    "output shape, so Claude Code 2.1.163 and newer honor the replacement for "
+    "the shapes furl mirrors, reflecting the anthropics/claude-code#68951 fix; "
+    "the counter hook_compressions_applied counts replacements produced, not "
+    "proven delivered, so watch furl_stats for invocations climbing while "
+    "compressions stay flat; the PreToolUse pipe also runs by default, set "
+    "FURL_PRETOOL_PIPE=0 to disable"
 )
 
 

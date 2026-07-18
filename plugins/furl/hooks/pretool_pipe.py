@@ -323,8 +323,8 @@ def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
     Design:
       * ``if [ -n "$f" ] && : >"$f"`` — review F1 guard: PROBE that the tempfile
         is actually creatable/writable BEFORE any capture redirect touches the
-        original. If the probe fails (mktemp unavailable AND the ``${TMPDIR}``
-        fallback path unwritable), the ``else`` branch runs the ORIGINAL COMMAND
+        original. If the probe fails (mktemp unavailable, so the substitution is
+        empty, or the mktemp file is unwritable), the ``else`` branch runs the ORIGINAL COMMAND
         with no redirect — inside a SUBSHELL whose ``)`` sits on its own line
         (review R1), exactly like the then branch: a bare interpolation would let
         an original ending in an ODD number of trailing backslashes line-continue
@@ -339,6 +339,13 @@ def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
         since stdout is buffered here and emitted at the end, stderr/stdout
         interleaving is NOT preserved: merged views show all stderr before the
         (possibly compressed) stdout; ``2>&1`` merges into the compressed stream.
+      * an INT/TERM ``trap`` set before the capture and cleared right after it
+        (F-A2): because stdout is buffered, a command KILLED mid-run by Claude
+        Code's timeout or a ``run_in_background`` kill would otherwise lose ALL
+        its output; the trap flushes whatever was captured so the partial stdout
+        still reaches the transcript, then re-raises the signal for a faithful
+        128+signal exit. Cleared after capture so the compressor path owns its
+        own stdout.
       * ``__furl_ec=$?`` right after captures the original's exact exit code
         (the subshell's = its last command's), restored by the final ``exit``.
       * the compressor reads the tempfile; ``|| cat "$f"`` is the shell-level
@@ -352,15 +359,26 @@ def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
     qcomp = shlex.quote(compressor)
     return (
         f"{_PIPE_MARKER}\n"
-        "__furl_f=$(mktemp 2>/dev/null || mktemp -t furlpipe 2>/dev/null"
-        ' || printf %s "${TMPDIR:-/tmp}/furl-pipe.$$")\n'
+        # F-A3: mktemp ONLY. mktemp makes a unique 0600 file atomically, so no
+        # predictable-name symlink race exists; if mktemp is unavailable the
+        # substitution is empty and the guard below runs the command UNWRAPPED
+        # (clean fail-open), so the 0600 posture holds on every path.
+        "__furl_f=$(mktemp 2>/dev/null || mktemp -t furlpipe 2>/dev/null)\n"
         # NOTE: ``2>/dev/null`` BEFORE ``>"$f"`` — redirections process left to
         # right, so suppression must be in place before the probe redirect can
         # fail, or the failure message would leak to the live stderr stream.
         'if [ -n "$__furl_f" ] && : 2>/dev/null >"$__furl_f"; then\n'
+        # F-A2: on a fatal signal (Claude Code timeout / run_in_background kill)
+        # flush the captured partial stdout so it still reaches the transcript
+        # (bare bash streams live; this capture buffers), remove the tempfile,
+        # then die by the same signal for a faithful 128+signal status. Cleared
+        # right after capture so the compressor path owns its own stdout.
+        'trap \'cat "$__furl_f" 2>/dev/null; rm -f "$__furl_f" 2>/dev/null; trap - INT; kill -INT $$\' INT\n'
+        'trap \'cat "$__furl_f" 2>/dev/null; rm -f "$__furl_f" 2>/dev/null; trap - TERM; kill -TERM $$\' TERM\n'
         f"( {original}\n"
         ') >"$__furl_f"\n'
         "__furl_ec=$?\n"
+        "trap - INT TERM\n"
         f"FURL_CCR_PROJECT_DIR={qdir} FURL_CCR_BACKEND=sqlite "
         f'uv run --no-project --with "{_FURL_CTX_PIN}" python3 {qcomp} <"$__furl_f"'
         ' || cat "$__furl_f"\n'
