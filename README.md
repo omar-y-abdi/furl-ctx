@@ -100,7 +100,7 @@ A unique anomaly hidden inside repetitive data will not appear in the compressed
 To furl a sail is to roll it up and keep it out of the way until needed.
 Furl does the same for context: it rolls large amounts of information out of the active window while keeping it ready to unfurl when retrieval is required.
 
-Furl originated from the author's *Headroom* context-engineering experimentation project, the early commit history carries that lineage.
+Furl is a hard fork of [Headroom](https://github.com/headroomlabs-ai/headroom)'s compression engine, stripped and rebuilt around the reversible-compression core. About a third of the engine still has traces of Headroom (see [NOTICE](NOTICE)).
 
 ## **What you get**
 
