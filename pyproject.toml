@@ -92,7 +92,7 @@ re2 = [
 # (httpx was dropped from this extra — nothing in the package imports it;
 # it was proxy-era residue. The mcp SDK declares its own transport deps.)
 mcp = [
-    "mcp>=1.0.0",
+    "mcp>=1.28.1",
     "furl-ctx[re2]",
 ]
 # Opt-in AST-verified code compression (transforms.code_aware_compressor,
