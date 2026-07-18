@@ -1,0 +1,177 @@
+name: perf
+
+# Performance + tool-regression gate. Runs the Rust checks that ci.yml's
+# required set does not (fmt/clippy/test), then a determinism gate:
+# verify.run's tool-regression counters plus a benchmark comparison against the
+# committed baseline floor.
+#
+# NEVER a required check, so paths-filtering is SAFE here: a PR that touches
+# none of these paths simply does not run this workflow, and nothing waits on
+# it. (In ci.yml the same filter would deadlock the required checks, which is
+# why ci.yml must never paths-filter — see tests/test_ci_required_checks_guard.py.)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "furl_ctx/**"
+      - "pyproject.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "benchmarks/**"
+      - "verify/**"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "furl_ctx/**"
+      - "pyproject.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "benchmarks/**"
+      - "verify/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  # Cancel superseded PR runs; never cancel a main build (no wasted signal on
+  # PRs, full history of trend on main).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PY_VERSION: "3.12"
+
+jobs:
+  rust-checks:
+    # The fmt/clippy/test gap in the REQUIRED PR path: rust.yml runs these but is
+    # not required, and ci.yml's required jobs never invoke cargo. Mirrors
+    # rust.yml's toolchain pins and cache.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.95.0 # keep in sync with rust-toolchain.toml
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace
+
+  perf-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # Full history so the baseline-bump detection can diff
+          # origin/main...HEAD for benchmarks/baseline_results.json.
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PY_VERSION }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.95.0 # keep in sync with rust-toolchain.toml
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build wheel (fast CI cargo profile)
+        # Same build as ci.yml's build-wheel: fast `ci` cargo profile, single
+        # interpreter, output to dist/.
+        run: |
+          python -m pip install --upgrade pip 'maturin>=1.9,<2.0'
+          maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
+
+      - name: Install wheel + measurement deps
+        # [dev] per the gate spec; google-re2 mirrors the environment the
+        # committed baseline and the pinned verify.run counters were captured in.
+        # RE2 is otherwise an optional, graceful-fallback dependency (absent, the
+        # engine falls back to stdlib re), so this is parity, not a hard runtime
+        # need. verify.run and benchmarks.run_bench import neither pytest nor the
+        # mcp SDK, so neither is installed.
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL="$(ls dist/*.whl)"
+          pip install "${WHEEL}[dev]" google-re2
+          # The in-tree furl_ctx/ source shadows the installed wheel when running
+          # from the repo root; copy the compiled extension in so imports resolve
+          # (no second cargo build), exactly as ci.yml's test job does.
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+          python -c "from furl_ctx._core import DiffCompressor; print('furl_ctx._core OK')"
+
+      - name: Tool-regression sweep (verify.run)
+        run: |
+          set -o pipefail
+          python -m verify.run | tee "${RUNNER_TEMP}/verify.out"
+
+      - name: Assert verify.run counters
+        # Parse the summary line and assert the pinned counters EXACTLY. verify.run
+        # always exits 0, so the gate lives here, not in its return code. Parsing
+        # the identified summary line (not a loose grep) keeps a stray match in
+        # earlier output from satisfying the check.
+        shell: python
+        env:
+          VERIFY_OUT: ${{ runner.temp }}/verify.out
+        run: |
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          text = Path(os.environ["VERIFY_OUT"]).read_text(encoding="utf-8")
+          summary = [ln for ln in text.splitlines() if ln.startswith("default_params_confirmed=")]
+          if not summary:
+              sys.exit("verify.run summary line not found in output")
+          line = summary[-1]
+          expected = {
+              "degradations": 6,
+              "hash_failures": 0,
+              "silent_loss": 0,
+              "cache_prefix_violations": 0,
+          }
+          got: dict[str, int] = {}
+          for key in expected:
+              match = re.search(rf"\b{key}=(\d+)\b", line)
+              if match is None:
+                  sys.exit(f"verify.run summary missing counter {key!r}: {line!r}")
+              got[key] = int(match.group(1))
+          if got != expected:
+              sys.exit(f"verify.run regression: expected {expected}, got {got}\nsummary line: {line}")
+          print(f"verify.run counters OK: {got}")
+
+      - name: Detect baseline bump
+        id: baseline
+        # A PR may intentionally re-baseline; detect whether it changed the
+        # committed baseline file relative to main. The comparison still runs
+        # against the committed file either way; this only flags the summary.
+        run: |
+          if git diff --name-only origin/main...HEAD -- benchmarks/baseline_results.json | grep -q .; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            echo "This PR updates benchmarks/baseline_results.json."
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run benchmarks
+        run: python -m benchmarks.run_bench --out "${RUNNER_TEMP}/bench-now"
+
+      - name: Compare against baseline
+        # Nonzero exit on any regression or invalid input fails the job.
+        env:
+          BASELINE_UPDATED: ${{ steps.baseline.outputs.updated }}
+        run: |
+          FLAG=""
+          if [ "$BASELINE_UPDATED" = "true" ]; then FLAG="--baseline-updated"; fi
+          python -m benchmarks.compare_baseline \
+            --baseline benchmarks/baseline_results.json \
+            --candidate "${RUNNER_TEMP}/bench-now/baseline_results.json" \
+            --markdown-summary "$GITHUB_STEP_SUMMARY" $FLAG

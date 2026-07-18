@@ -1,0 +1,202 @@
+name: autofix
+
+# Auto-format and auto-fix lint on a pull request, then either push the fix back
+# to the PR branch (full mode, needs a PAT) or attach it as a downloadable patch
+# (degraded mode, no PAT). This is NEVER a required check: the ruleset-required
+# `lint` job in ci.yml stays the enforcement. If autofix pushes, ci.yml re-runs;
+# if it cannot, `lint` still fails red and the human fixes it from the patch.
+#
+# Deliberately `pull_request`, NOT `pull_request_target`: fork PR code must never
+# run with this repo's secrets in scope. Secrets are further withheld from fork
+# runs by GitHub, and the fork guard below skips the job for forks outright, so
+# the PAT push path is unreachable from untrusted code.
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+
+# Read-only by default. The write (push) happens ONLY through AUTOFIX_TOKEN, a
+# fine-grained PAT with Contents: write; the GITHUB_TOKEN never needs write here.
+# Artifact upload uses the Actions runtime token, not GITHUB_TOKEN, so it works
+# under contents: read too.
+permissions:
+  contents: read
+
+concurrency:
+  group: autofix-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    # Fork guard (job level): only same-repo PRs reach any step. A fork's
+    # head.repo.full_name differs from base, so this is false and the whole job
+    # is skipped — the push path can never run for a fork. The loop guard (skip
+    # our own autofix commits) is a STEP below, not here, because the head commit
+    # message is not carried in the pull_request event payload and so cannot be
+    # read from a job-level `if:`; it needs a checkout first.
+    if: >-
+      github.event.pull_request.head.repo.full_name ==
+      github.event.pull_request.base.repo.full_name
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout PR head branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # Check out the branch (not the detached merge ref) so a commit lands
+          # on it and can be pushed back. fetch-depth 2 gives HEAD plus its parent.
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 2
+          # Do NOT leave the token in .git/config: the formatters run on PR content
+          # right after checkout, and a persisted PAT would sit in the config that
+          # whole time. The push step below re-adds auth via an explicit remote URL
+          # only at the moment it pushes.
+          persist-credentials: false
+          # The PAT (when present) still authenticates the initial fetch here, and
+          # a later PAT push RE-TRIGGERS CI (a default-GITHUB_TOKEN push does not,
+          # which would strand the PR on never-concluding checks). Falls back to the
+          # default token when the secret is absent (degraded patch-only mode).
+          token: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+
+      - name: Loop guard
+        id: guard
+        # The head commit message is untrusted PR data: it is read into a shell
+        # variable via git (never interpolated as `${{ }}` into this script) and
+        # only prefix-tested, so it cannot inject. If HEAD is one of our own
+        # "ci: autofix ..." commits, every following step is skipped and the job
+        # still concludes green — this is what stops the push -> re-run -> push
+        # loop.
+        run: |
+          subject="$(git log -1 --pretty=format:%s)"
+          if [ "${subject#ci: autofix}" != "$subject" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Head commit is an autofix commit; nothing to do."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect autofix token
+        id: token
+        if: steps.guard.outputs.run == 'true'
+        env:
+          # Secrets cannot be read from a job-level or step-level `if:`, so map
+          # the secret to env and emit a boolean presence flag. The token value
+          # itself is never printed.
+          AUTOFIX_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
+        run: |
+          if [ -n "$AUTOFIX_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust toolchain
+        if: steps.guard.outputs.run == 'true'
+        # Same pins as ci.yml/rust.yml: action code @stable, compiler version via
+        # input (keep in sync with rust-toolchain.toml). Only rustfmt is needed
+        # for `cargo fmt`.
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: Apply formatters and lint fixes
+        if: steps.guard.outputs.run == 'true'
+        # ruff pinned to the version pyproject.toml declares (>=0.15.19) and that
+        # ci.yml's required lint check pins, so autofix produces byte-identical
+        # output to what lint verifies.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ruff==0.15.19
+          ruff format .
+          ruff check --fix-only .
+          cargo fmt --all
+
+      - name: Detect changes
+        id: dirty
+        if: steps.guard.outputs.run == 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "dirty=true" >> "$GITHUB_OUTPUT"
+            echo "Formatters/lint produced changes."
+          else
+            echo "dirty=false" >> "$GITHUB_OUTPUT"
+            echo "Working tree clean; nothing to fix."
+          fi
+
+      - name: Commit and push fix
+        # Full mode: dirty tree AND a PAT present. Fork PRs never reach here (job
+        # skipped) and the loop guard prevents re-triggering on our own commit.
+        if: >-
+          steps.guard.outputs.run == 'true' &&
+          steps.dirty.outputs.dirty == 'true' &&
+          steps.token.outputs.present == 'true'
+        env:
+          # head.ref is untrusted PR data; pass it via env, never interpolate it
+          # into the script body. AUTOFIX_TOKEN is mapped so the push can build an
+          # authenticated remote URL without the token being persisted at checkout.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          AUTOFIX_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
+        run: |
+          # Backstop: never build a remote URL with an empty token. The step `if:`
+          # already requires the token be present; this guards against any regression.
+          if [ -z "$AUTOFIX_TOKEN" ]; then
+            echo "AUTOFIX_TOKEN is empty in the push step; refusing to push." >&2
+            exit 1
+          fi
+          git config user.name "furl-autofix"
+          git config user.email "furl-autofix@users.noreply.github.com"
+          git commit --all --message "ci: autofix formatting and lint"
+          # Scope the PAT to this push only: credentials were not persisted at
+          # checkout, so set the authenticated remote right before pushing. The
+          # token is never echoed, and git does not print the remote URL on push.
+          git remote set-url origin "https://x-access-token:${AUTOFIX_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${HEAD_REF}"
+
+      - name: Build patch
+        # Degraded mode: dirty tree but no PAT. `git diff` captures the tracked
+        # formatter edits (the untracked patch file is not part of the diff).
+        if: >-
+          steps.guard.outputs.run == 'true' &&
+          steps.dirty.outputs.dirty == 'true' &&
+          steps.token.outputs.present != 'true'
+        run: |
+          git diff > autofix.patch
+          echo "Wrote autofix.patch ($(wc -l < autofix.patch) lines)."
+
+      - name: Upload patch artifact
+        if: >-
+          steps.guard.outputs.run == 'true' &&
+          steps.dirty.outputs.dirty == 'true' &&
+          steps.token.outputs.present != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: autofix-patch
+          path: autofix.patch
+          retention-days: 7
+
+      - name: Summarize degraded mode
+        if: >-
+          steps.guard.outputs.run == 'true' &&
+          steps.dirty.outputs.dirty == 'true' &&
+          steps.token.outputs.present != 'true'
+        run: |
+          {
+            echo "## autofix: fixes available, no push token configured"
+            echo ""
+            echo "Formatting or lint fixes are ready but AUTOFIX_TOKEN is not set,"
+            echo "so they could not be pushed. The required lint check stays red"
+            echo "until they land. Download the autofix-patch artifact and apply:"
+            echo ""
+            echo '```bash'
+            echo "git apply autofix.patch"
+            echo "git commit --all --message 'ci: autofix formatting and lint'"
+            echo "git push"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

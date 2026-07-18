@@ -1,10 +1,10 @@
 {
   "schema": "furl_ctx.imp3.baseline.v1",
-  "captured_at_utc": "2026-07-03T14:59:06.963731+00:00",
-  "git_commit": "bb931959be9e0f6ea16d4b4b05eeee8d63070236",
+  "captured_at_utc": "2026-07-18T21:25:46.470659+00:00",
+  "git_commit": "6c6f56f971be1f475f525ba86f1c7a2c59f829d2",
   "engine_model": "gpt-4o",
-  "python": "3.14.2",
-  "platform": "macOS-15.7.6-x86_64-i386-64bit-Mach-O",
+  "python": "3.12.13",
+  "platform": "macOS-15.7.8-x86_64-i386-64bit",
   "provenance": [
     {
       "dataset": "code",
@@ -82,8 +82,8 @@
       "name": "code@7",
       "n_input_items": 7,
       "tokens_before": 41025,
-      "tokens_after": 471,
-      "lossless_reduction": 0.9885191956124314,
+      "tokens_after": 1678,
+      "lossless_reduction": 0.9590981109079829,
       "n_present": 0,
       "n_dropped": 7,
       "n_recoverable": 7,
@@ -92,15 +92,15 @@
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:ccr_offload:0.01"
+        "router:ccr_offload:0.04"
       ]
     },
     {
       "name": "logs@90",
       "n_input_items": 90,
-      "tokens_before": 8595,
-      "tokens_after": 619,
-      "lossless_reduction": 0.9279813845258872,
+      "tokens_before": 8556,
+      "tokens_after": 618,
+      "lossless_reduction": 0.9277699859747546,
       "n_present": 8,
       "n_dropped": 82,
       "n_recoverable": 82,
@@ -116,8 +116,8 @@
       "name": "search@90",
       "n_input_items": 90,
       "tokens_before": 4102,
-      "tokens_after": 318,
-      "lossless_reduction": 0.9224768405655778,
+      "tokens_after": 322,
+      "lossless_reduction": 0.9215017064846417,
       "n_present": 13,
       "n_dropped": 77,
       "n_recoverable": 77,
@@ -166,9 +166,9 @@
     {
       "name": "multiturn@135",
       "n_input_items": 135,
-      "tokens_before": 14866,
-      "tokens_after": 2073,
-      "lossless_reduction": 0.8605542849455132,
+      "tokens_before": 14686,
+      "tokens_after": 2061,
+      "lossless_reduction": 0.8596622633800899,
       "n_present": 40,
       "n_dropped": 95,
       "n_recoverable": 95,
@@ -186,7 +186,7 @@
         "router:smart_crusher:0.14",
         "router:smart_crusher:0.38",
         "router:smart_crusher:0.39",
-        "router:mixed:0.14",
+        "router:mixed:0.15",
         "router:mixed:0.15"
       ]
     },
@@ -194,17 +194,17 @@
       "name": "ci_log@212",
       "n_input_items": 212,
       "tokens_before": 5161,
-      "tokens_after": 576,
-      "lossless_reduction": 0.8883937221468707,
-      "n_present": 34,
-      "n_dropped": 178,
-      "n_recoverable": 178,
-      "lossy_drop_ratio": 0.839622641509434,
+      "tokens_after": 692,
+      "lossless_reduction": 0.8659174578570045,
+      "n_present": 44,
+      "n_dropped": 168,
+      "n_recoverable": 168,
+      "lossy_drop_ratio": 0.7924528301886793,
       "information_retention": 1.0,
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:log:0.11"
+        "router:log:0.13"
       ]
     },
     {
