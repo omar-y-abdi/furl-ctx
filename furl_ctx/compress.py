@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -466,6 +467,29 @@ def _redact_messages(
     return redacted
 
 
+def _unknown_model_warning(model: str) -> str | None:
+    """A warning when *model* matches no known tokenizer family (F-alpha4).
+
+    ``get_tokenizer`` silently falls back to generic character-estimation for an
+    unrecognized model name, so token counts can be off with no signal. This
+    surfaces that fallback through ``result.warnings``. Returns None for a
+    recognized model, using the public ``list_supported_models`` pattern set as
+    the single source of truth (the same patterns ``_detect_backend`` matches on),
+    so a real model family is never flagged.
+    """
+    from furl_ctx.tokenizers import list_supported_models
+
+    model_lower = model.lower()
+    if any(re.match(pattern, model_lower) for pattern in list_supported_models()):
+        return None
+    return (
+        f"model '{model}' is not a recognized tokenizer family, so token counts use "
+        "the generic character-estimation fallback and can be off for this model. "
+        "Pass a known model name, for example a gpt, claude, gemini, or command "
+        "family name, or register a tokenizer for it."
+    )
+
+
 def compress(
     messages: list[dict[str, Any]],
     model: str = "claude-sonnet-4-5-20250929",
@@ -712,6 +736,12 @@ def compress(
         frozen_content_warning = _frozen_transformed_content_warning(messages, frozen)
         if frozen_content_warning is not None:
             compress_warnings.append(frozen_content_warning)
+        # F-alpha4: an unrecognized model silently falls back to generic
+        # character-estimation for token counting. Surface that fallback so a
+        # caller is not misled by counts computed for a model Furl does not know.
+        unknown_model_warning = _unknown_model_warning(model)
+        if unknown_model_warning is not None:
+            compress_warnings.append(unknown_model_warning)
         for warning in compress_warnings:
             logger.warning("%s", warning)
 

@@ -45,6 +45,7 @@ from furl_ctx.ccr.compress_modes import (
     partition_content,
 )
 from furl_ctx.ccr.marker_grammar import CCR_TOOL_NAME, is_valid_ccr_hash
+from furl_ctx.ccr.regex_budget import re2_available
 from furl_ctx.ccr.retrieve_filters import (
     FilterError,
     RetrieveFilters,
@@ -825,6 +826,22 @@ class FurlMCPServer:
         )
         self._setup_handlers()
 
+        # F-alpha2: the shipped MCP config runs agent-supplied regex filters (the
+        # furl_retrieve pattern and the furl_compress include/exclude patterns) on
+        # the RE2 linear-time engine. Without RE2 they fall to the ReDoS-degraded
+        # fallback, where a crafted pattern can freeze the event loop for every
+        # session on this process. Warn ONCE at server init so the degraded state
+        # is visible; a per-request log would spam.
+        if not re2_available():
+            logger.warning(
+                "RE2 is not importable, so agent-supplied regex filters in "
+                "furl_retrieve and furl_compress run on the ReDoS-degraded "
+                "fallback path where a crafted pattern can freeze the event loop "
+                "for every session on this process. Install the re2 or mcp extra "
+                "to restore linear-time matching, for example pip install "
+                "'furl-ctx[mcp]'."
+            )
+
     def _get_local_store(self) -> Any:
         """Get the shared compression store singleton (lazy init).
 
@@ -1401,7 +1418,7 @@ class FurlMCPServer:
                 "hash": hash_key,
                 "source": "local",
             }
-        return {
+        result: dict[str, Any] = {
             "hash": hash_key,
             "source": "local",
             "content_kind": entry.tool_name,
@@ -1414,6 +1431,13 @@ class FurlMCPServer:
             "compressed_item_count": entry.compressed_item_count,
             "retrieval_count": entry.retrieval_count,
         }
+        # F-alpha1: surface the regex line-cap skip signal so an agent sees a
+        # signalled gap, not a bare matched_count of 0, when a non-literal pattern
+        # could not search one or more over-length lines.
+        if outcome.lines_skipped_over_cap > 0:
+            result["lines_skipped_over_cap"] = outcome.lines_skipped_over_cap
+            result["note"] = outcome.note
+        return result
 
     def _setup_handlers(self) -> None:
         """Register all MCP tool handlers."""
@@ -1604,11 +1628,14 @@ class FurlMCPServer:
                                 "type": "integer",
                                 "minimum": 1,
                                 "description": (
-                                    "Max rows a select_field row-select returns (positive "
-                                    "integer; defaults to 1000 when a select is requested "
-                                    "without it). When more rows match, only the first "
-                                    "'limit' ship plus one explicit truncation-marker row. "
-                                    "Applies only to select_field row-selects."
+                                    "Max rows returned by a select_field row-select OR a "
+                                    "fields projection; a positive integer. A select "
+                                    "without an explicit limit defaults to 1000; a fields "
+                                    "projection without a limit is unbounded. When more rows "
+                                    "match than the limit, only the first 'limit' ship plus "
+                                    "one explicit truncation-marker row. It does not bound a "
+                                    "pattern or line_range window, which line_range bounds "
+                                    "instead."
                                 ),
                             },
                         },

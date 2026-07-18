@@ -183,7 +183,7 @@ class RetrieveFilters:
                 "Use one representation per call."
             )
 
-        select = _parse_select(arguments)
+        select = _parse_select(arguments, fields_present=fields is not None)
         if isinstance(select, FilterError):
             return select
         select_field, select_equals, select_min, select_max, limit = select
@@ -312,18 +312,25 @@ def _parse_line_range(
 _SelectSpec = tuple[str | None, Any | None, float | None, float | None, int | None]
 
 
-def _parse_select(arguments: dict[str, Any]) -> _SelectSpec | FilterError:
+def _parse_select(arguments: dict[str, Any], *, fields_present: bool) -> _SelectSpec | FilterError:
     """Validate the SELECT family from the loose ``arguments``. Fail-closed.
 
-    ``select_field`` is the anchor: any ``select_*`` value without it is a
-    ``FilterError`` (a range/equals with no field is meaningless). ``select_equals``
-    and a range (``select_min``/``select_max``) are mutually exclusive — equality
-    OR range, never both. ``select_equals`` must be a JSON scalar; a container
-    (list/dict) is rejected because comparing a cell to a container is not a
-    row-select. Range bounds must be real numbers (``bool`` excluded — ``True`` is
-    not the number 1 here) and ordered. ``limit`` must be a positive int
-    (``bool`` excluded); when a select is requested without an explicit ``limit``
-    it defaults to :data:`_DEFAULT_SELECT_LIMIT` so the slice is always bounded.
+    ``select_field`` is the row-select anchor: ``select_equals`` /
+    ``select_min`` / ``select_max`` without it is a ``FilterError`` (a
+    range/equals with no field is meaningless). ``select_equals`` and a range
+    (``select_min``/``select_max``) are mutually exclusive — equality OR range,
+    never both. ``select_equals`` must be a JSON scalar; a container (list/dict)
+    is rejected because comparing a cell to a container is not a row-select.
+    Range bounds must be real numbers (``bool`` excluded — ``True`` is not the
+    number 1 here) and ordered.
+
+    ``limit`` (F-alpha3) is a general positive-int row bound (``bool`` excluded).
+    It bounds EITHER a ``select_field`` row-select OR a ``fields`` projection
+    (``fields_present``): a select without an explicit ``limit`` defaults to
+    :data:`_DEFAULT_SELECT_LIMIT`, while a ``fields`` projection stays unbounded
+    unless a ``limit`` is given. A ``limit`` with neither a ``select_field`` nor
+    ``fields`` (nothing to bound) is a truthful ``FilterError`` — no longer the
+    old "select_field is required" message that misdescribed the real constraint.
     """
     field_raw = arguments.get("select_field")
     equals_present = "select_equals" in arguments
@@ -332,25 +339,34 @@ def _parse_select(arguments: dict[str, Any]) -> _SelectSpec | FilterError:
     max_raw = arguments.get("select_max")
     limit_raw = arguments.get("limit")
 
-    any_select = (
-        field_raw is not None
-        or equals_present
-        or min_raw is not None
-        or max_raw is not None
-        or limit_raw is not None
-    )
-    if not any_select:
+    has_range = min_raw is not None or max_raw is not None
+    any_select_anchor = field_raw is not None or equals_present or has_range
+    if not any_select_anchor and limit_raw is None:
         return (None, None, None, None, None)
 
+    limit, limit_err = _parse_limit(limit_raw)
+    if limit_err is not None:
+        return limit_err
+
     if field_raw is None:
-        return FilterError(
-            "select_field is required for a row-select (select_equals / "
-            "select_min / select_max / limit); it names the field to match on"
-        )
+        if equals_present or has_range:
+            return FilterError(
+                "select_field is required for select_equals / select_min / "
+                "select_max; it names the field to match on"
+            )
+        # Only a bare ``limit`` reached here. It bounds a fields projection or a
+        # row-select; with neither there are no rows for it to bound.
+        if not fields_present:
+            return FilterError(
+                "limit needs a row-producing filter: pass 'fields' to bound a "
+                "projection or 'select_field' to bound a row-select; a line "
+                "window is bounded by line_range instead"
+            )
+        return (None, None, None, None, limit)
+
     if not isinstance(field_raw, str):
         return FilterError(f"select_field must be a string, got {type(field_raw).__name__}")
 
-    has_range = min_raw is not None or max_raw is not None
     if equals_present and has_range:
         return FilterError(
             "select_equals and select_min/select_max are mutually exclusive: "
@@ -375,9 +391,6 @@ def _parse_select(arguments: dict[str, Any]) -> _SelectSpec | FilterError:
     if select_min is not None and select_max is not None and select_max < select_min:
         return FilterError(f"select_max ({select_max}) must be >= select_min ({select_min})")
 
-    limit, limit_err = _parse_limit(limit_raw)
-    if limit_err is not None:
-        return limit_err
     if limit is None:
         limit = _DEFAULT_SELECT_LIMIT
 
@@ -410,12 +423,23 @@ def _parse_limit(raw: Any) -> tuple[int | None, FilterError | None]:
 
 @dataclass(frozen=True)
 class FilteredContent:
-    """Successful filter result: the projected text plus what it represents."""
+    """Successful filter result: the projected text plus what it represents.
+
+    ``lines_skipped_over_cap`` and ``note`` are the F-alpha1 honesty signal for
+    the "lines" kind: a non-literal ``pattern`` is never run on a line longer
+    than :data:`_MAX_REGEX_LINE_CHARS` (the ReDoS input cap), so a match on such
+    a line cannot be reported. When that cap skipped one or more lines,
+    ``lines_skipped_over_cap`` counts them and ``note`` explains the miss, so an
+    agent sees a signalled gap instead of a bare ``matched_count`` of 0. Both
+    default to the no-skip values, so every other path stays byte-identical.
+    """
 
     content: str
     kind: str  # "lines" | "fields" | "rows"
     matched_count: int
     total_count: int
+    lines_skipped_over_cap: int = 0
+    note: str | None = None
 
 
 def apply_filters(original_content: str, filters: RetrieveFilters) -> FilteredContent | FilterError:
@@ -429,7 +453,7 @@ def apply_filters(original_content: str, filters: RetrieveFilters) -> FilteredCo
     if filters.has_select:
         return _select_rows(original_content, filters)
     if filters.fields is not None:
-        return _project_fields(original_content, filters.fields)
+        return _project_fields(original_content, filters.fields, filters.limit)
     return _filter_lines(original_content, filters)
 
 
@@ -457,10 +481,20 @@ def _filter_lines(original_content: str, filters: RetrieveFilters) -> FilteredCo
     else:
         windowed = [(i + 1, lines[i]) for i in range(start - 1, end)]
 
+    skipped_over_cap = 0
     if filters.pattern is None:
         selected = windowed
     else:
         selected = _select_matching_with_context(windowed, filters.pattern, filters.context_lines)
+        # F-alpha1 honesty signal: a NON-literal pattern is never run on a line
+        # longer than the cap (``_line_matches`` returns no-match there without
+        # searching), so a real match on such a line is unreportable. Count those
+        # lines so the miss is signalled, not a bare zero. A pure literal DOES
+        # search an over-cap line by substring, so it skips nothing.
+        if _pattern_literal_text(filters.pattern) is None:
+            skipped_over_cap = sum(
+                1 for _num, text in windowed if len(text) > _MAX_REGEX_LINE_CHARS
+            )
 
     rendered = "\n".join(f"{num}:{text}" for num, text in selected)
     return FilteredContent(
@@ -468,6 +502,20 @@ def _filter_lines(original_content: str, filters: RetrieveFilters) -> FilteredCo
         kind="lines",
         matched_count=len(selected),
         total_count=total,
+        lines_skipped_over_cap=skipped_over_cap,
+        note=_over_cap_note(skipped_over_cap) if skipped_over_cap else None,
+    )
+
+
+def _over_cap_note(skipped_count: int) -> str:
+    """The machine-readable warning attached when the regex line cap skipped
+    lines from a non-literal pattern search. AI-TELL-FREE prose, no round
+    brackets or dashes."""
+    return (
+        f"{skipped_count} lines longer than the {_MAX_REGEX_LINE_CHARS}-character "
+        "regex line cap were not searched by this non-literal pattern, so a match "
+        "on them cannot be reported. Search the long line with a pure literal "
+        "substring, or narrow the view with line_range."
     )
 
 
@@ -564,7 +612,7 @@ def _select_matching_with_context(
 
 
 def _project_fields(
-    original_content: str, fields: tuple[str, ...]
+    original_content: str, fields: tuple[str, ...], limit: int | None = None
 ) -> FilteredContent | FilterError:
     """Project ``fields`` out of a JSON array of objects.
 
@@ -574,6 +622,12 @@ def _project_fields(
     from that element — a projection, not a lookup that must hit); non-object
     elements are dropped from the projection with the count reflecting how many
     of the array's elements were projectable.
+
+    ``limit`` (F-alpha3) bounds a ``fields``-only projection exactly as it bounds
+    a row-select: without it the projection is unbounded (byte-identical to
+    before), and with it only the first ``limit`` projected rows ship plus one
+    explicit truncation-marker row so a truncated slice is never mistaken for the
+    complete projection. ``matched_count`` stays the full projectable count.
     """
     try:
         parsed = json.loads(original_content)
@@ -593,11 +647,25 @@ def _project_fields(
             continue
         projected.append(_project_row(element, fields))
 
-    rendered = json.dumps(projected, ensure_ascii=False, indent=2)
+    matched_count = len(projected)
+    if limit is not None and matched_count > limit:
+        shown: list[dict[str, Any]] = list(projected[:limit])
+        shown.append(
+            {
+                _TRUNCATION_KEY: (
+                    f"showing {limit} of {matched_count} projected rows; raise 'limit' "
+                    "or narrow the filter"
+                )
+            }
+        )
+    else:
+        shown = projected
+
+    rendered = json.dumps(shown, ensure_ascii=False, indent=2)
     return FilteredContent(
         content=rendered,
         kind="fields",
-        matched_count=len(projected),
+        matched_count=matched_count,
         total_count=len(parsed),
     )
 
