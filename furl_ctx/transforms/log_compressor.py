@@ -109,6 +109,8 @@ class LogCompressorConfig:
     max_total_lines: int = 100
     enable_ccr: bool = True
     min_lines_for_ccr: int = 50
+    max_unique_logs: int = 10
+    unique_log_threshold: int = 3
 
 
 @dataclass
@@ -123,6 +125,7 @@ class LogCompressionResult:
     compression_ratio: float
     cache_key: str | None = None
     stats: dict[str, int] = field(default_factory=dict)
+    unique_logs_kept: int = 0
 
     @property
     def tokens_saved_estimate(self) -> int:
@@ -187,6 +190,8 @@ class LogCompressor:
                 enable_ccr=cfg.enable_ccr,
                 min_lines_for_ccr=cfg.min_lines_for_ccr,
                 min_compression_ratio_for_ccr=0.5,
+                max_unique_logs=cfg.max_unique_logs,
+                unique_log_threshold=cfg.unique_log_threshold,
             )
         )
 
@@ -216,6 +221,7 @@ class LogCompressor:
             compression_ratio=rust_result.compression_ratio,
             cache_key=cache_key,
             stats=stats_dict,
+            unique_logs_kept=rust_result.unique_logs_kept,
         )
 
     # ─── Internal CCR persistence ───────────────────────────────────────

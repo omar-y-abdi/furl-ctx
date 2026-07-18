@@ -1675,6 +1675,8 @@ impl PyLogCompressorConfig {
         enable_ccr = true,
         min_lines_for_ccr = 50,
         min_compression_ratio_for_ccr = 0.5,
+        max_unique_logs = 10,
+        unique_log_threshold = 3,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1691,6 +1693,8 @@ impl PyLogCompressorConfig {
         enable_ccr: bool,
         min_lines_for_ccr: usize,
         min_compression_ratio_for_ccr: f64,
+        max_unique_logs: usize,
+        unique_log_threshold: usize,
     ) -> Self {
         Self {
             inner: RustLogConfig {
@@ -1707,6 +1711,8 @@ impl PyLogCompressorConfig {
                 enable_ccr,
                 min_lines_for_ccr,
                 min_compression_ratio_for_ccr,
+                max_unique_logs,
+                unique_log_threshold,
             },
         }
     }
@@ -1776,6 +1782,10 @@ impl PyLogCompressionResult {
     #[getter]
     fn ccr_skip_reason(&self) -> Option<&str> {
         self.stats.ccr_skip_reason
+    }
+    #[getter]
+    fn unique_logs_kept(&self) -> usize {
+        self.stats.unique_logs_kept
     }
 }
 

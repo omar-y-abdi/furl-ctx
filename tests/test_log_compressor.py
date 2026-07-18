@@ -13,6 +13,10 @@ those helpers, so this suite exercises them only through `compress()`.
 
 import re
 
+from furl_ctx.cache.compression_store import (
+    get_compression_store,
+    reset_compression_store,
+)
 from furl_ctx.transforms.log_compressor import (
     LogCompressionResult,
     LogCompressor,
@@ -500,3 +504,193 @@ class TestMinLinesBoundary:
     def test_above_floor_attempts_compression(self):
         result = self._compress(6)
         assert result.compression_ratio < 1.0
+
+
+class TestUniqueUnexpectedLogs:
+    """Integration tests for unique/unexpected logs extraction (PR #97)."""
+
+    def test_python_unique_logs_extraction(self):
+        """Unique log lines are extracted and kept in the compressed output."""
+        lines = [f"INFO: connection pool status active {i % 5}" for i in range(100)]
+        lines[15] = "INFO: unique database checkpoint reached"
+        lines[45] = "INFO: unexpected background task failed due to disk"
+        content = "\n".join(lines)
+
+        compressor = LogCompressor(
+            config=LogCompressorConfig(
+                min_lines_for_ccr=50,
+                enable_ccr=False,
+                max_unique_logs=5,
+                unique_log_threshold=3,
+            )
+        )
+        result = compressor.compress(content)
+
+        assert "unique database checkpoint" in result.compressed
+        assert "unexpected background task" in result.compressed
+
+    def test_python_unique_logs_deduplicated_by_template(self):
+        """Unique log lines are deduplicated by their template to save tokens."""
+        lines = [f"INFO: heartbeat tick {i % 3}" for i in range(100)]
+        lines[15] = "INFO: unique error signature x"
+        lines[35] = "INFO: unique error signature x"  # duplicate template
+        content = "\n".join(lines)
+
+        compressor = LogCompressor(
+            config=LogCompressorConfig(
+                min_lines_for_ccr=50,
+                enable_ccr=False,
+                max_unique_logs=5,
+                unique_log_threshold=3,
+            )
+        )
+        result = compressor.compress(content)
+
+        assert "unique error signature x" in result.compressed
+
+    def test_python_unique_logs_config_bounds(self):
+        """max_unique_logs strictly bounds the selection of unique log lines."""
+        lines = [f"INFO: standard line {i % 5}" for i in range(100)]
+        lines[15] = "INFO: first unique message"
+        lines[25] = "INFO: second unique message"
+        content = "\n".join(lines)
+
+        compressor = LogCompressor(
+            config=LogCompressorConfig(
+                min_lines_for_ccr=50,
+                enable_ccr=False,
+                max_unique_logs=1,  # only allow 1 unique log
+                unique_log_threshold=3,
+            )
+        )
+        result = compressor.compress(content)
+
+        assert "first unique message" in result.compressed
+        assert "second unique message" not in result.compressed
+
+
+class TestUniqueLogRegressionGuards:
+    """Fix 1-3 regression guards for the unique-log feature."""
+
+    def test_dropped_lines_are_ccr_recoverable_no_silent_loss(self):
+        """Fix 1: with enable_ccr=True, dropped lines must stay CCR-recoverable.
+
+        Unique-line preservation inflates the compressed body and can push
+        the byte ratio ABOVE the 0.5 CCR threshold while lines are still
+        dropped. Pre-fix that SUPPRESSED the recovery marker => silent loss.
+        The marker must fire whenever any line is dropped, so the full
+        original round-trips out of the store and nothing is silently lost.
+        """
+        reset_compression_store()
+        try:
+            # 40 identical heartbeats + 15 rare long INFO lines with DISTINCT
+            # word stems. Distinct stems (not a varying digit) matter: they do
+            # NOT collapse under template normalization, so they are kept as
+            # unique lines and INFLATE the compressed body past ratio 0.5.
+            # That is the exact bug region — pre-fix, ratio >= 0.5 suppressed
+            # the recovery marker even though lines were still dropped.
+            stems = [
+                "quokka",
+                "narwhal",
+                "axolotl",
+                "pangolin",
+                "capybara",
+                "meerkat",
+                "ocelot",
+                "tapir",
+                "wombat",
+                "lemur",
+                "gecko",
+                "ibis",
+                "manta",
+                "heron",
+                "civet",
+            ]
+            lines = ["INFO: hb ping"] * 40
+            for s in stems:
+                lines.append(
+                    f"INFO: subsystem {s} emitted an unexpected and fairly long diagnostic payload line"
+                )
+            content = "\n".join(lines)
+
+            compressor = LogCompressor(
+                config=LogCompressorConfig(enable_ccr=True, min_lines_for_ccr=50)
+            )
+            result = compressor.compress(content)
+
+            # Body was inflated by kept unique lines, landing ABOVE the 0.5
+            # CCR threshold, yet lines were still dropped — the bug region.
+            assert result.unique_logs_kept > 0, "rare lines must be kept as unique"
+            assert result.compression_ratio > 0.5, (
+                "ratio must exceed the 0.5 CCR threshold so this exercises the "
+                "region where pre-fix code suppressed the recovery marker"
+            )
+            assert result.compressed_line_count < result.original_line_count
+            # Fix 1: despite ratio > 0.5, a recovery key is emitted because
+            # lines were dropped, and it round-trips the FULL original — zero
+            # silent loss. Pre-fix this returned None (silent loss).
+            assert result.cache_key is not None, (
+                "dropped lines require a recovery key even when ratio > 0.5"
+            )
+            entry = get_compression_store().retrieve(result.cache_key)
+            assert entry is not None, "cache_key must resolve in the store"
+            assert entry.original_content == content
+            # Some rare lines are dropped from the visible output by the unique
+            # cap (10 < 15) yet remain recoverable: nothing silently lost.
+            dropped = [s for s in stems if s not in result.compressed]
+            assert dropped, "unique cap (10 < 15) must drop some rare lines"
+            for s in dropped:
+                assert s in entry.original_content
+        finally:
+            reset_compression_store()
+
+    def test_colon_less_warnings_stay_distinct(self):
+        """Fix 2: distinct colon-less warnings differing only by variable
+        DIGITS must NOT be collapsed by the shared dedupe normalizer.
+
+        Digit-differing (not hex) inputs are the discriminating case: under
+        whole-line normalization (the reverted bug) `\\d+` templates 5/6/7 to
+        N and the three collapse to one, so only the first survives dedupe.
+        The correct normalizer keeps colon-less lines verbatim, so all three
+        survive.
+        """
+        lines = [f"INFO connection tick {i % 4}" for i in range(60)]
+        lines[10] = "WARN queue depth exceeded 5 items"
+        lines[20] = "WARN queue depth exceeded 6 items"
+        lines[30] = "WARN queue depth exceeded 7 items"
+        content = "\n".join(lines)
+
+        compressor = LogCompressor(
+            config=LogCompressorConfig(
+                enable_ccr=False,
+                min_lines_for_ccr=50,
+                max_warnings=5,
+                dedupe_warnings=True,
+            )
+        )
+        result = compressor.compress(content)
+
+        # All three distinct warnings survive (not collapsed to one template).
+        assert "exceeded 5 items" in result.compressed
+        assert "exceeded 6 items" in result.compressed
+        assert "exceeded 7 items" in result.compressed
+
+    def test_python_unique_logs_kept_is_surfaced(self):
+        """Fix 3: the Rust `unique_logs_kept` stat must reach the Python
+        result (the shim built results only from the stats BTreeMap before)."""
+        lines = [f"INFO: connection pool status active {i % 5}" for i in range(100)]
+        lines[15] = "INFO: unique database checkpoint reached"
+        lines[45] = "INFO: unexpected background task failed due to disk"
+        content = "\n".join(lines)
+
+        compressor = LogCompressor(
+            config=LogCompressorConfig(
+                min_lines_for_ccr=50,
+                enable_ccr=False,
+                max_unique_logs=5,
+                unique_log_threshold=3,
+            )
+        )
+        result = compressor.compress(content)
+
+        assert result.unique_logs_kept == 2
