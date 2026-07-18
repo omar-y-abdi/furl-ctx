@@ -74,6 +74,8 @@ no framework and no build command.
 
 - These captures are repetitive machine output, the case furl is built for. On
   high-entropy prose the honest range is lower, roughly zero to 54 percent.
-- Automatic hands-off compression is pending an upstream Claude Code fix, issue
-  68951. The furl API and the MCP tools deliver verified compression today, and
-  every original returns byte-exact through retrieve. That is what this page shows.
+- Automatic hands-off compression works on Claude Code 2.1.163 and newer; the PostToolUse
+  hook mirrors each replacement to the tool's output shape, so the harness honors it. It was
+  built for issue 68951. The furl API and the MCP tools also deliver verified compression on
+  every version, and every original returns byte-exact through retrieve. That is what this
+  page shows.

@@ -1,6 +1,6 @@
 # furl
 
-furl is context compression for AI agents. It folds repeated tool output into a small hash-addressed marker, keeps the lines that matter so an agent spends fewer tokens, and returns any original the moment the agent asks, byte-exact for raw text and a semantically-complete re-serialization for structured JSON arrays. furl ships as a Claude Code plugin and an MCP server, and nothing is ever thrown away.
+furl is context compression, prompt compression, and token optimization for AI agents that reduces Claude Code token usage. It folds repeated tool output into a small hash-addressed marker, keeps the lines that matter so an agent spends fewer tokens, and returns any original the moment the agent asks, byte-exact for raw text and a semantically-complete re-serialization for structured JSON arrays. furl ships as a Claude Code plugin and an MCP server, and nothing is ever thrown away.
 
 ## Six real captures
 
@@ -17,7 +17,7 @@ Across all six, 22,630 tokens in and 1,922 out, which is 91.5 percent fewer.
 
 ## Honest bounds
 
-furl folds only what repeats. On repetitive machine output the best case reaches up to about 95 percent fewer tokens. On high-entropy prose the honest range is lower, roughly 0 to 54 percent. Hands-off automatic compression is pending the upstream fix anthropics/claude-code#68951. Until it lands, the manual API and the MCP tools are how you use furl, and they lose nothing. The 95 percent ceiling, the 91.5 percent six-capture figure above, and this 0 to 54 percent band are reconciled in one place: BENCHMARKS.md, the section The three public headline numbers.
+furl folds only what repeats. On repetitive machine output the best case reaches up to about 95 percent fewer tokens. On high-entropy prose the honest range is lower, roughly 0 to 54 percent. Hands-off automatic compression works on Claude Code 2.1.163 and newer; the PostToolUse hook mirrors each replacement to the tool's output shape, so the harness honors it. It was built for anthropics/claude-code#68951. The manual API and the MCP tools work on every version and lose nothing. The 95 percent ceiling, the 91.5 percent six-capture figure above, and this 0 to 54 percent band are reconciled in one place: BENCHMARKS.md, the section The three public headline numbers.
 
 ## Links
 

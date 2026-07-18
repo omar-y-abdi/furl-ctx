@@ -43,6 +43,10 @@
   ],
   "keywords": [
     "context compression",
+    "prompt compression",
+    "token optimization",
+    "context pruning",
+    "reduce Claude Code token usage",
     "token management",
     "reduce token costs",
     "AI agents",
@@ -84,7 +88,7 @@
       </div>
       <div class="proof-copy">
         <p class="proof-head">fewer tokens across six real captures</p>
-        <p class="proof-sub"><span data-agg="total_tokens_before">22,630</span> tokens in, <span data-agg="total_tokens_after">1,922</span> out. The per-capture range is <span data-agg="min_percent_saved" data-suffix="%">87.2%</span> to <span data-agg="max_percent_saved" data-suffix="%">95.8%</span>, and nothing was cherry-picked.</p>
+        <p class="proof-sub"><span data-agg="total_tokens_before">22,630</span> tokens in, <span data-agg="total_tokens_after">1,922</span> out. The per-capture range is <span data-agg="min_percent_saved" data-suffix="%">87.2%</span> to <span data-agg="max_percent_saved" data-suffix="%">95.8%</span>, and nothing was cherry-picked. These six are repetitive machine captures, furl-ctx's best case; on high-entropy prose the honest range is roughly 0 to 54 percent.</p>
       </div>
       <a class="cta" href="#demo">See it fold<span class="cta-arrow" aria-hidden="true">↓</span></a>
     </div>
@@ -164,8 +168,8 @@
         <p class="note-v">The furl API and the MCP tools give real, verified compression on large tool outputs, and every original returns byte-exact through retrieve. That is the path this page demonstrates.</p>
       </div>
       <div class="note reveal">
-        <span class="note-k">Pending</span>
-        <p class="note-v">Hands-off automatic compression waits on an upstream Claude Code fix, issue 68951. Until it lands, the manual and MCP paths are how you use furl, and they lose nothing.</p>
+        <span class="note-k">Automatic</span>
+        <p class="note-v">Hands-off automatic compression works on Claude Code 2.1.163 and newer. The PostToolUse hook mirrors each replacement to the tool's output shape, so the harness honors it. It was built for upstream issue 68951, and the manual API and MCP tools work on every version and lose nothing.</p>
       </div>
       <div class="note reveal">
         <span class="note-k">Bounds</span>

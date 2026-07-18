@@ -293,7 +293,12 @@ host's built-in read for repeat-read token savings.
 - **SmartCrusher** — universal JSON: arrays of dicts, nested objects, mixed types.
 - **SearchCompressor / LogCompressor / DiffCompressor** — search results, build logs, diffs.
 - **CrossMessageDeduper** — deduplicates repeated content across conversation turns.
-- **CacheAligner** — stabilizes prefixes so Anthropic/OpenAI KV caches actually hit.
+- **CacheAligner**, opt-in and OFF by default: a detector-only prefix-stability check.
+  Even when enabled it never rewrites or reorders messages; it only measures the frozen
+  prefix and reports cache metrics, so it changes no bytes the model sees.
+- **CodeAwareCompressor**, opt-in and OFF by default, needs the `[code]` extra: tree-sitter
+  AST-verified source-code compression. With the default config, or without that extra
+  installed, source code passes through untouched.
 - **CCR** — reversible compression; the LLM retrieves originals on demand. Large
   distinct content no compressor can shrink (e.g. source files) takes the
   reversible CCR offload: an identity preview plus a retrieval marker.
@@ -304,7 +309,9 @@ host's built-in read for repeat-read token savings.
 
 `Input Received` → `Input Routed` → `Input Compressed`
 
-- **Transforms** do the work: CacheAligner, CrossMessageDeduper, ContentRouter, SmartCrusher.
+- **Transforms** do the work. The default chain is CrossMessageDeduper then ContentRouter,
+  which owns SmartCrusher and the per-content-type compressors. CacheAligner is opt-in and,
+  even when enabled, only measures the prefix.
 - **Pipeline extensions** observe or customize these stages via `on_pipeline_event(...)`; `compress()` passes your `hooks` object as the extension.
 - **Compression hooks** sit alongside the lifecycle as an additional extension seam.
 
@@ -375,27 +382,40 @@ The only entries that live solely in one process are those a veto already flagge
 as non-durable (volatile fallback) — and the caller was told exactly that at veto
 time and still holds those originals.
 
-## Claude Code harness status (≥ 2.1.163) — the PostToolUse drop and the default-on pipe
+## Claude Code harness status, 2.1.163 and newer
+
+This is the canonical harness-status statement; the README, the plugin README, the skill,
+and the site all point here.
 
 The Claude Code plugin's PostToolUse compression hook replaces a large tool output by
-emitting `hookSpecificOutput.updatedToolOutput`. On Claude Code **≥ 2.1.163 that
-replacement is silently dropped** — the hook runs, stores the original, and exits 0
-cleanly, but the model still receives the **original** output
-([anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951);
-[our 2.1.207 repro](https://github.com/anthropics/claude-code/issues/68951#issuecomment-4951540435)).
-Everything else is unaffected: the MCP tools (`furl_compress`/`furl_retrieve`/…), durable
-`<<ccr:HASH>>` storage and retrieval, and the SessionStart status line all work. The hook
-keeps emitting the replacement, so the default path revives automatically — with no
-release — once upstream fixes the drop.
+emitting `hookSpecificOutput.updatedToolOutput`, mirrored to the originating tool's output
+shape. Claude Code 2.1.163 and newer validate that replacement against the tool's output
+schema and keep the original on a shape mismatch. Because the hook mirrors the exact
+incoming shape, the replacement passes that validation by construction and **is honored**,
+so automatic hands-off compression reaches the model today. Both external auditors
+confirmed this live on Claude Code 2.1.212. The shapes furl mirrors, and therefore
+compresses automatically, are `Bash` stdout, `WebFetch` results, and `Task` sub-agent
+output. `WebSearch` results still pass through uncompressed for now, because their
+whole-object shape carries no single text field to mirror the compressed text onto.
 
-**Observability counters.** Every hook run tallies into the shared per-project CCR store
-(cross-process, cumulative — they survive entry eviction), surfaced by `furl_stats` under
-`store.hook_activity` as `hook_invocations_seen` and `hook_compressions_applied` (plus
-bucketed `hook_noop_reasons`). **If `hook_invocations_seen` is rising but your context
-still shows raw tool output, the harness is dropping the replacements — see
-[#68951](https://github.com/anthropics/claude-code/issues/68951).** The counters are
-stored via `CompressionStore.increment_counter` / `get_counters` and read back cross-process
-through the durable SQLite backend.
+Shape-mirroring exists because of upstream issue
+[anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951): an
+earlier bare-string replacement did not match the tool's schema and was silently dropped,
+so no compressed output reached the model. Mirroring the incoming shape removed that
+failure by construction, which is why the automatic path works now rather than waiting on
+an upstream change. Everything alongside the hook is independent of it and works on every
+Claude Code version: the manual MCP tools `furl_compress`, `furl_retrieve`, and
+`furl_search`, durable `<<ccr:HASH>>` storage and retrieval, and the SessionStart status
+line. The opt-out PreToolUse pipe below adds automatic `Bash` savings whenever no Bash
+permission rules are configured.
+
+**Observability counters.** Every hook run tallies into the shared per-project CCR store,
+cross-process and cumulative, surviving entry eviction, surfaced by `furl_stats` under
+`store.hook_activity` as `hook_invocations_seen` and `hook_compressions_applied`, plus
+bucketed `hook_noop_reasons`. A rising `hook_compressions_applied` confirms the hook is
+both compressing and, on 2.1.163 and newer, delivering the shorter output the model reads.
+The counters are stored via `CompressionStore.increment_counter` and `get_counters` and
+read back cross-process through the durable SQLite backend.
 
 **`FURL_PRETOOL_PIPE` — real savings on today's harness (on by default).** Unless
 explicitly disabled, a **PreToolUse** hook rewrites a `Bash` command so its stdout is piped
@@ -484,6 +504,11 @@ has no effect. Set them before the first `compress()` or `retrieve()`.
 | `FURL_PIPELINE_BREAKER_COOLDOWN_S` | `60` | Seconds an open circuit breaker keeps passing messages through untouched before retrying. |
 | `FURL_COMPACTION_FORMAT` | `csv-schema` | Lossless render format for SmartCrusher compaction: `csv-schema`, `json`, or `markdown-kv`. Unknown values raise. |
 | `FURL_COST_RATE_USD_PER_MTOK` | `3.0` | Blended $/1M-token rate for the MCP `furl_stats` cost-saved estimate. Invalid/negative values fall back to the default. |
+| `FURL_CCR_NAMESPACE` | unset | Names a shared CCR store, overriding per-project scoping. When set, the isolation key becomes this namespace plus any `session_id` and `agent_id`, so several projects or agents can deliberately share one store. Takes precedence over `FURL_CCR_PROJECT_DIR`. |
+| `FURL_REDACT_BUILTINS` | `on` | Built-in credential redaction, ON by default. High-confidence secret shapes, among them private keys, AWS `AKIA`/`ASIA` keys, GCP, OpenAI, GitHub, and Slack tokens, and JWTs, are scrubbed from the stored original before compression, on every store path. Set `0`/`false`/`no`/`off` to opt out. Security-relevant: opting out stores those secrets verbatim in the CCR store. Composes with `FURL_REDACT_PATTERNS`, built-ins first. See SECURITY.md. |
+| `FURL_MCP_LEGEND` | `on` | Prepends the columnar-table legend that decodes the `[N]{col:type,...}` compaction grammar to MCP tool output. ON by default; `off`/`false`/`0`/`no`/`disabled` hides it for callers that already know the grammar. |
+| `FURL_MAX_COMPRESS_BYTES` | `8388608` | Byte ceiling, 8 MB by default. A content block larger than this is offloaded straight to the reversible CCR store instead of the super-linear mixed compression path. Positive integer; invalid values fall back to the default. |
+| `FURL_PROFILE_BANNER` | `1` | `furl` CLI only. Prints a one-line profile banner to stderr on `furl` commands, keeping stdout pure compressed output. Set `0`/`false`/`no`/`off`/`disabled` to silence it. |
 
 The Claude Code plugin's own hook/MCP knobs (`FURL_HOOK_*`) are documented in
 [`plugins/furl/README.md`](plugins/furl/README.md).
@@ -498,15 +523,20 @@ reason rather than a silent pass-through.
 
 ## Compared to
 
-Furl runs **locally**, covers **every** content type, and is **reversible**.
+furl-ctx runs **locally** as a native Claude Code plugin, compresses **every content type** in the tool outputs it sees, and is **reversible**. It is its own upstream Headroom with the ML compressor, the proxy transport, and the telemetry plane removed.
 
-|                                                                              | Scope                                          | Deploy                             | Local | Reversible |
-|------------------------------------------------------------------------------|------------------------------------------------|------------------------------------|:-----:|:----------:|
-| **Furl**                                                                 | All context — tools, RAG, logs, files, history | library · MCP                      | Yes   | Yes        |
-| [RTK](https://github.com/rtk-ai/rtk)                                        | CLI command outputs                            | CLI wrapper                        | Yes   | No         |
-| [lean-ctx](https://github.com/yvgude/lean-ctx)                               | CLI commands, MCP tools, editor rules          | CLI wrapper · MCP                  | Yes   | No         |
-| [Compresr](https://compresr.ai), [Token Co.](https://thetokencompany.ai)    | Text sent to their API                         | Hosted API call                    | No    | No         |
-| OpenAI Compaction                                                            | Conversation history                           | Provider-native                    | No    | No         |
+| | Scope | Deploy | Local | Reversible |
+|---|---|---|:-:|:-:|
+| **furl-ctx** | Tool outputs, logs, RAG chunks; not file reads or history | native plugin · library · MCP | Yes | Yes |
+| [Headroom](https://github.com/headroomlabs-ai/headroom) | All context, through a request-compression proxy | proxy | Yes | Yes |
+| [RTK](https://github.com/rtk-ai/rtk) | CLI command outputs | CLI wrapper | Yes | No |
+| [lean-ctx](https://github.com/yvgude/lean-ctx) | File reads, shell output, plus history and tool results through a local proxy | CLI wrapper · MCP · proxy | Yes | Yes |
+| [LLMLingua](https://github.com/microsoft/LLMLingua) | Prompt text | Python library | Yes | No |
+| [Compresr](https://compresr.ai), [Token Co.](https://thetokencompany.ai) | Text sent to their API | Hosted API call | No | No |
+| OpenAI Compaction | Conversation history | Provider-native | No | No |
+| Claude Code compaction | Conversation history | Provider-native | No | No |
+
+Local and reversible no longer set furl-ctx apart on their own: lean-ctx and Headroom share both. furl-ctx's real difference is delivery. It is a native Claude Code plugin with no ML model, no proxy process, and no telemetry, scoped to tool outputs rather than reaching into your file reads or conversation history. LLMLingua drops tokens with a small language model, so its output is lossy and not recoverable; furl-ctx keeps every original byte retrievable instead.
 
 > **RTK** ([rtk-ai/rtk](https://github.com/rtk-ai/rtk)) is a complementary CLI-output rewriter — a peer in the table above, **not** bundled with or a dependency of Furl. If you already use it for shell-output rewriting, Furl compresses everything downstream; the two compose cleanly. Credit to the RTK team for a great tool.
 

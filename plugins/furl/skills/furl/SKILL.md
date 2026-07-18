@@ -21,21 +21,11 @@ buried in otherwise-repetitive data will not appear in the compressed
 view unless you query for it. Trust a compressed summary for the shape of the data, not
 for surfacing an anomaly you were not already looking for.
 
-## Current harness status (Claude Code ≥ 2.1.163)
+## Current harness status
 
-Claude Code ≥ 2.1.163 currently **ignores a PostToolUse hook's replacement output**
-(`updatedToolOutput` is silently dropped — the model still sees the *original*;
-[anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951),
-[our 2.1.207 repro](https://github.com/anthropics/claude-code/issues/68951#issuecomment-4951540435)).
-The hook still runs and still stores originals; what's lost is the automatic token
-saving. Unaffected: the MCP tools (manual `furl_compress`/`furl_retrieve`/…), durable
-`<<ccr:HASH>>` storage + retrieval, and the SessionStart status line. The hook keeps
-emitting the replacement, so the default path revives itself when upstream fixes the drop.
+Automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `updatedToolOutput` mirrored to the originating tool's output shape; Claude Code 2.1.163 and newer validate that replacement against the tool's schema, and the mirrored shape passes, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. Shape-mirroring was built for [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. `WebSearch` still passes through uncompressed, because its whole-object result has no single text field to mirror onto. Unaffected on every version: the manual MCP tools furl_compress, furl_retrieve, and the rest, durable `<<ccr:HASH>>` storage and retrieval, and the SessionStart status line. LIBRARY.md carries the canonical harness status.
 
-**Counters:** `furl_stats` shows `store.hook_activity.hook_invocations_seen` and
-`hook_compressions_applied` (cross-process, cumulative). **If invocations are rising but
-your context still shows raw tool output, the harness is dropping the replacements — see
-[#68951](https://github.com/anthropics/claude-code/issues/68951).**
+**Counters:** `furl_stats` shows `store.hook_activity.hook_invocations_seen` and `hook_compressions_applied`, cross-process and cumulative. A rising `hook_compressions_applied` confirms the hook is compressing and, on 2.1.163 and newer, delivering the shorter output the model reads.
 
 **Real savings now (enabled by default):** a **PreToolUse** pipe compresses a `Bash`
 command's stdout at the source (so the tool result *is* the compressed form, original

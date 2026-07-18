@@ -167,11 +167,38 @@ about that posture (audit High-6):
 - **`--no-project` bypasses any lockfile**, and the engine's own dependencies
   (`tiktoken`, the `mcp` SDK) resolve to the newest compatible versions at install
   time, so transitive versions can float between installs.
-- **Hardening path for high-assurance environments.** Pre-install a hash-verified
-  engine into a controlled environment — e.g. `pip install --require-hashes -r`
-  a lockfile you generated and reviewed, or a private index/mirror you trust —
-  and run the `furl` CLI from it. The plugin honors a `furl` already on `PATH`,
-  so a vetted install takes over the fetch. Track hash-pinning progress in the
-  repository issues.
+- **Hardening path for high-assurance environments.** The plugin always resolves the
+  engine through `uv run --no-project --with 'furl-ctx[mcp]==1.2.0'`. It does not consult
+  or prefer a `furl` already on `PATH`, so placing a vetted binary on `PATH` does not
+  change what the hooks or the MCP server run. To control the fetch, point `uv` at a
+  private index or mirror you trust, or pre-populate `uv`'s cache with a wheel you
+  generated and reviewed, so the pinned version resolves from a source you control. Track
+  hash-pinning progress in the repository issues.
+
+## Inbound `<<ccr:HASH>>` markers in compressed content
+
+A `<<ccr:HASH>>` marker is furl-ctx's retrieval pointer. When furl-ctx compresses
+third-party content, for example a web page or a tool output furl-ctx did not itself
+produce, that content could carry attacker-planted text shaped like a real pointer. This
+is a same-project confused-deputy risk: on a bulk `resolve_markers` pass, a planted marker
+whose hash happens to match a live entry in the same project's store could expand that
+entry's original content into the model's context.
+
+What bounds the risk today:
+
+- **Store-lookup gating.** `resolve_markers` and `furl_retrieve` expand a marker only when
+  its hash resolves to a real entry in the active store; an unknown hash is returned
+  verbatim, never fabricated. A planted marker does nothing unless its hash already keys a
+  stored original.
+- **Syntactic hash validation.** Only 12-hex or 24-hex lowercase hashes are accepted at
+  the retrieval ingress, so malformed marker text is rejected outright.
+- **Per-project isolation.** Stores are scoped per project by default, so a planted marker
+  cannot reach another project's originals.
+
+Intended mitigation, not yet landed: neutralize inbound `<<ccr:HASH>>` marker text at
+compression time on the retrieve-facing surface, so marker text arriving inside newly
+compressed third-party content can never be treated as a furl-ctx-issued pointer. Until
+that ships, treat markers found inside untrusted content as data, not as retrieval
+instructions, and rely on the per-project store boundary above.
 
 Thank you for helping keep Furl and its users safe!
