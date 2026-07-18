@@ -169,6 +169,11 @@ pub struct LogCompressorConfig {
     /// Compression ratio threshold for CCR storage. Python defaults to
     /// 0.5 inline; promoted to a config field here.
     pub min_compression_ratio_for_ccr: f64,
+    /// Max number of distinct unique/unexpected log templates to preserve.
+    pub max_unique_logs: usize,
+    /// A log template occurring more than this many times is repetitive
+    /// noise and is never treated as a unique/unexpected line.
+    pub unique_log_threshold: usize,
 }
 
 impl Default for LogCompressorConfig {
@@ -187,6 +192,8 @@ impl Default for LogCompressorConfig {
             enable_ccr: true,
             min_lines_for_ccr: 50,
             min_compression_ratio_for_ccr: 0.5,
+            max_unique_logs: 10,
+            unique_log_threshold: 3,
         }
     }
 }
@@ -225,6 +232,7 @@ pub struct LogCompressorStats {
     pub lines_dropped_by_global_cap: usize,
     pub ccr_emitted: bool,
     pub ccr_skip_reason: Option<&'static str>,
+    pub unique_logs_kept: usize,
 }
 
 // ─── Format detector ────────────────────────────────────────────────────
@@ -737,8 +745,17 @@ impl LogCompressor {
         let ratio = compressed.len() as f64 / content.len().max(1) as f64;
 
         let mut cache_key = None;
+        // No-silent-loss contract: a recovery marker MUST be emitted
+        // whenever ANY line is dropped, so every dropped line stays
+        // CCR-recoverable. The ratio threshold is only an optimization for
+        // the case where NOTHING was dropped (nothing to recover) — it must
+        // NOT gate recovery. Unique/unexpected-line preservation inflates
+        // the compressed body and can push the ratio above the threshold
+        // while lines are still dropped; gating on ratio alone would then
+        // silently lose them.
+        let lines_dropped = selected.len() < original_line_count;
         if self.config.enable_ccr {
-            if ratio >= self.config.min_compression_ratio_for_ccr {
+            if ratio >= self.config.min_compression_ratio_for_ccr && !lines_dropped {
                 stats.ccr_skip_reason = Some("compression ratio too high");
             } else {
                 // Shared key→[put]→marker tail (`ccr::persist`, ARCH-5);
@@ -1002,6 +1019,63 @@ impl LogCompressor {
             selected.extend(summaries);
         }
 
+        // ─── Unique / unexpected log selection ────────────────────────────
+        // Surface rare INFO/DEBUG-class lines that carry signal but would
+        // otherwise be dropped as "just noise". A line is a candidate when
+        // its normalized template occurs <= `unique_log_threshold` times;
+        // repetitive lines collapse to a high count and are excluded.
+        //
+        // Templates are counted with the LOCAL `normalize_for_unique_count`
+        // (whole-line collapse) — NOT the shared `normalize_for_dedupe`,
+        // which preserves the message prefix so distinct warnings never
+        // merge (fixed_in_3e5). This path wants the OPPOSITE for colon-less
+        // lines: repetitive ones (e.g. `worker 5 done`) must collapse to a
+        // single template so they are not each counted as "unique".
+        let mut template_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut unique_norms: Vec<String> = Vec::with_capacity(log_lines.len());
+        for line in log_lines {
+            let norm = normalize_for_unique_count(&line.content);
+            *template_counts.entry(norm.clone()).or_insert(0) += 1;
+            unique_norms.push(norm);
+        }
+
+        let mut unique_candidates: Vec<usize> = Vec::new();
+        for (i, line) in log_lines.iter().enumerate() {
+            if matches!(
+                line.level,
+                LogLevel::Info | LogLevel::Unknown | LogLevel::Debug | LogLevel::Trace
+            ) && !line.is_stack_trace
+                && !line.is_summary
+            {
+                let count = *template_counts.get(&unique_norms[i]).unwrap_or(&0);
+                if count <= self.config.unique_log_threshold {
+                    unique_candidates.push(i);
+                }
+            }
+        }
+
+        // Rarest first, ties by line order: the cap keeps the most
+        // unexpected lines and ties resolve deterministically.
+        unique_candidates.sort_by(|&a, &b| {
+            let count_a = template_counts.get(&unique_norms[a]).unwrap_or(&0);
+            let count_b = template_counts.get(&unique_norms[b]).unwrap_or(&0);
+            count_a.cmp(count_b).then_with(|| a.cmp(&b))
+        });
+
+        let mut unique_templates_selected: BTreeSet<String> = BTreeSet::new();
+        let mut unique_kept = 0;
+        for &i in &unique_candidates {
+            if unique_kept >= self.config.max_unique_logs {
+                break;
+            }
+            if unique_templates_selected.insert(unique_norms[i].clone()) {
+                selected.insert(i);
+                unique_kept += 1;
+            }
+        }
+        stats.unique_logs_kept = unique_kept;
+        // ──────────────────────────────────────────────────────────────────
+
         // Add context lines around every selected entry.
         let mut context_indices: BTreeSet<usize> = BTreeSet::new();
         for &idx in &selected {
@@ -1263,6 +1337,23 @@ fn normalize_for_dedupe(content: &str) -> String {
     let stage2 = hex_re.replace_all(&stage1, "ADDR");
     let stage3 = path_re.replace_all(&stage2, "/PATH/");
     format!("{}{}", prefix, stage3)
+}
+
+/// Whole-line template normalizer for the unique/unexpected-log counter.
+///
+/// Unlike [`normalize_for_dedupe`] — which preserves the message prefix
+/// (everything before the first `:` or `=`) so distinct warnings never
+/// merge (fixed_in_3e5) — this path WANTS repetitive lines to collapse to
+/// a single template. A colon-less repetitive line (e.g. `worker 5 done`,
+/// `worker 6 done`) must normalize to ONE template so it is counted as
+/// noise, not surfaced as many distinct "unique" lines. So it normalizes
+/// the WHOLE line (digits/hex/paths) and never splits on `:`/`=`.
+fn normalize_for_unique_count(content: &str) -> String {
+    let content = strip_leading_identity(content);
+    let stage1 = digit_regex().replace_all(&content, "N");
+    let stage2 = hex_regex().replace_all(&stage1, "ADDR");
+    let stage3 = path_regex().replace_all(&stage2, "/PATH/");
+    stage3.into_owned()
 }
 
 /// Template a single leading identity token (ISO-8601 datetime, UUID, or
@@ -1744,6 +1835,161 @@ mod tests {
         assert!(stats.ccr_emitted);
         let key = result.cache_key.as_ref().unwrap();
         assert_eq!(store.get(key).unwrap(), content);
+    }
+
+    // ─── Unique / unexpected log preservation (PR #97 feature) ───────────
+
+    #[test]
+    fn test_unique_logs_extracted() {
+        let c = cmp(); // max_unique_logs=10, unique_log_threshold=3 (defaults)
+        let mut lines = Vec::new();
+        for i in 0..60 {
+            lines.push(format!("INFO: connection pool status active {}", i % 5));
+        }
+        lines[10] = "INFO: unique database checkpoint reached".to_string(); // once
+        lines[30] = "INFO: unexpected background task failed due to disk".to_string(); // once
+
+        let content = lines.join("\n");
+        let (result, stats) = c.compress(&content, 1.0);
+
+        assert_eq!(stats.unique_logs_kept, 2);
+        assert!(result.compressed.contains("unique database checkpoint"));
+        assert!(result.compressed.contains("unexpected background task"));
+    }
+
+    #[test]
+    fn test_unique_logs_deduplicated() {
+        let c = LogCompressor::new(LogCompressorConfig {
+            unique_log_threshold: 3,
+            max_unique_logs: 10,
+            ..Default::default()
+        });
+        let mut lines = Vec::new();
+        for i in 0..60 {
+            lines.push(format!("INFO: heartbeat ping {}", i % 3));
+        }
+        lines[10] = "INFO: unique error signature x".to_string(); // occurs twice
+        lines[25] = "INFO: unique error signature x".to_string(); // duplicate template
+
+        let content = lines.join("\n");
+        let (result, stats) = c.compress(&content, 1.0);
+
+        // Second occurrence is a duplicate template and is deduplicated.
+        assert_eq!(stats.unique_logs_kept, 1);
+        assert!(result.compressed.contains("unique error signature x"));
+    }
+
+    #[test]
+    fn test_unique_logs_config_bounds() {
+        let c = LogCompressor::new(LogCompressorConfig {
+            unique_log_threshold: 3,
+            max_unique_logs: 1, // keep at most one unique log
+            ..Default::default()
+        });
+        let mut lines = Vec::new();
+        for i in 0..60 {
+            lines.push(format!("INFO: connection tick {}", i % 5));
+        }
+        lines[10] = "INFO: first unique log line here".to_string();
+        lines[20] = "INFO: second unique log line here".to_string();
+
+        let content = lines.join("\n");
+        let (result, stats) = c.compress(&content, 1.0);
+
+        assert_eq!(stats.unique_logs_kept, 1);
+        // Both have count 1; the lower index wins the single slot.
+        assert!(result.compressed.contains("first unique log line"));
+        assert!(!result.compressed.contains("second unique log line"));
+    }
+
+    // ─── Fix 1: no-silent-loss — recovery decoupled from ratio ───────────
+
+    #[test]
+    fn ccr_marker_fires_when_lines_dropped_even_at_high_ratio() {
+        // Unique-line preservation inflates the compressed body, so the byte
+        // ratio can land ABOVE min_compression_ratio_for_ccr while lines are
+        // still dropped. The recovery marker must be decoupled from the
+        // ratio optimization and fire whenever ANY line is dropped. A
+        // near-zero ratio floor forces the "ratio too high" region that
+        // pre-fix suppressed CCR in — proving the decoupling.
+        let c = LogCompressor::new(LogCompressorConfig {
+            min_compression_ratio_for_ccr: 0.01,
+            ..Default::default()
+        });
+        let mut lines: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            lines.push("INFO: hb ping".to_string());
+        }
+        for i in 0..15 {
+            lines.push(format!(
+                "INFO: rare diagnostic {i} carrying a distinct and fairly long unique payload"
+            ));
+        }
+        let content = lines.join("\n");
+        let store = InMemoryCcrStore::new();
+        let (result, stats) = c.compress_with_store(&content, 1.0, Some(&store));
+
+        assert!(
+            result.compressed_line_count < result.original_line_count,
+            "fixture must drop lines"
+        );
+        assert!(
+            result.compression_ratio >= 0.01,
+            "fixture must sit in the ratio region pre-fix suppressed CCR in"
+        );
+        assert!(
+            stats.ccr_emitted,
+            "recovery marker must fire whenever lines are dropped, regardless of ratio"
+        );
+        let key = result
+            .cache_key
+            .as_ref()
+            .expect("cache_key must be present when lines are dropped");
+        assert_eq!(
+            store.get(key).unwrap(),
+            content,
+            "the full original must be recoverable => zero silent loss"
+        );
+    }
+
+    // ─── Fix 2: shared dedupe normalizer must stay unmutated ─────────────
+
+    #[test]
+    fn colon_less_warnings_differing_only_by_address_stay_distinct() {
+        // Re-applying the unique-log feature must NOT mutate the shared
+        // `normalize_for_dedupe`: it keeps its `.unwrap_or(content.len())`
+        // split so colon-less warnings that differ only by variable data (a
+        // hex address) are NOT collapsed into one (fixed_in_3e5).
+        let c = cmp();
+        let warnings = vec![
+            LogLine::new(0, "WARN heap corruption near 0xdeadbeef"),
+            LogLine::new(1, "WARN heap corruption near 0xcafef00d"),
+            LogLine::new(2, "WARN heap corruption near 0xba5eba11"),
+        ];
+        let deduped = c.dedupe_similar(warnings);
+        assert_eq!(
+            deduped.len(),
+            3,
+            "distinct colon-less warnings must survive the shared dedupe normalizer"
+        );
+    }
+
+    #[test]
+    fn unique_count_normalizer_collapses_colon_less_variants() {
+        // The unique-log path's LOCAL normalizer collapses colon-less
+        // repetitive lines (whole-line digit templating) — the SHARED
+        // dedupe normalizer deliberately does not (it preserves the prefix
+        // so distinct warnings stay distinct). This asymmetry is Fix 2.
+        assert_eq!(
+            normalize_for_unique_count("worker 5 heartbeat"),
+            normalize_for_unique_count("worker 6 heartbeat"),
+            "colon-less variants must collapse to one unique template"
+        );
+        assert_ne!(
+            normalize_for_dedupe("worker 5 heartbeat"),
+            normalize_for_dedupe("worker 6 heartbeat"),
+            "shared dedupe normalizer must NOT collapse colon-less distinct lines"
+        );
     }
 
     #[test]
