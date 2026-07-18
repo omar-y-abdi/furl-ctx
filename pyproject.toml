@@ -113,6 +113,10 @@ dev = [
     "ruff>=0.15.19",
     "mypy>=1.14.1",
     "pre-commit>=3.0.0",
+    # Parses .github/workflows/ci.yml in tests/test_ci_required_checks_guard.py,
+    # the meta-test that keeps the required-check deadlock (#15/#32/#56) from
+    # re-entering the workflow. >=6 for the safe_load-by-default API.
+    "pyyaml>=6",
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
