@@ -132,10 +132,18 @@ def test_offload_object_with_dominant_array_previews_inner_array():
     rows = json.loads(result.compressed)
     summary = rows[0]["_ccr_summary"]
 
-    # The summary names the dominant array and the object's OTHER top-level
-    # keys — here "metadata".
+    # The summary names the dominant array and keeps the object's OTHER
+    # top-level fields WITH their values (review F2) — here "metadata" and its
+    # tiny scalar leaves, not just the bare key name.
     assert summary["array"] == "traceEvents"
-    assert summary["other_keys"] == ["metadata"]
+    assert summary["other_fields"] == {
+        "metadata": {
+            "enhancedTraceVersion": 1,
+            "source": "DevTools",
+            "hostDPR": 2.0,
+            "sourceMaps": [],
+        }
+    }
     assert summary["count"] == 200
 
     # The summary is built from the ACTUAL events, not the metadata header: the
@@ -146,7 +154,11 @@ def test_offload_object_with_dominant_array_previews_inner_array():
     assert "cat" in summary["value_counts"]
     example_rows = list(summary["examples"]["by_value"].values())
     assert example_rows and {"name", "cat", "ph", "ts"} <= set(example_rows[0])
-    assert "enhancedTraceVersion" not in result.compressed
+    # Metadata is NOT summarized as if it were events — it never leaks into the
+    # event schema. It IS kept (review F2) as the sibling field values, confined
+    # to `other_fields`, so the header's scalars stay readable inline.
+    assert "enhancedTraceVersion" not in summary["schema"]
+    assert summary["other_fields"]["metadata"]["enhancedTraceVersion"] == 1
 
     # Sentinel + both marker grammars intact; byte-exact recovery preserved.
     assert set(rows[-1]) == {"_ccr_dropped"}

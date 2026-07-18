@@ -1,0 +1,1227 @@
+{
+  "id": "crash",
+  "label": "Crash report",
+  "kind_label": "deep stack trace",
+  "tagline": "The same frame, over and over, around one root cause.",
+  "story": "A runaway recursion repeats one frame down the whole stack. furl folds the repeated frames and keeps the root cause reachable.",
+  "transform": "router:ccr_offload:0.12",
+  "transforms_applied": [
+    "router:protected:user_message",
+    "router:ccr_offload:0.12"
+  ],
+  "fold_mode": "lines",
+  "tokens_before": 2445,
+  "tokens_after": 302,
+  "tokens_saved": 2143,
+  "compression_ratio": 0.876482617586912,
+  "percent_saved": 87.6,
+  "original": "Traceback (most recent call last):\n  File \"/srv/app/main.py\", line 42, in <module>\n    orchestrate(payload)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 121, in run_stage\n    raise RecursionError(\"stage graph did not terminate: cycle via node reduce to reduce\")\nRecursionError: stage graph did not terminate: cycle via node reduce to reduce\n",
+  "original_line_count": 186,
+  "original_bytes": 8528,
+  "compressed": "Traceback (most recent call last):\n  File \"/srv/app/main.py\", line 42, in <module>\n    orchestrate(payload)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage\n… [170 lines omitted, in CCR] …\n    return run_stage(next_ctx)\n  File \"/srv/app/pipeline/stage.py\", line 121, in run_stage\n    raise RecursionError(\"stage graph did not terminate: cycle via node reduce to reduce\")\nRecursionError: stage graph did not terminate: cycle via node reduce to reduce\n{\"_ccr_dropped\": \"<<ccr:9b73d68d0418f9ba1fc97496>> [1 items compressed to 0. Retrieve more: hash=9b73d68d0418f9ba1fc97496]\"}",
+  "compressed_bytes": 953,
+  "hash": "9b73d68d0418f9ba1fc97496",
+  "marker_text": "170 repeated lines offloaded to CCR",
+  "keep_count": 16,
+  "before_lines": [
+    {
+      "text": "Traceback (most recent call last):",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "  File \"/srv/app/main.py\", line 42, in <module>",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    orchestrate(payload)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "kept": true,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 121, in run_stage",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    raise RecursionError(\"stage graph did not terminate: cycle via node reduce to reduce\")",
+      "kept": true,
+      "anomaly": true,
+      "role": "keep"
+    },
+    {
+      "text": "RecursionError: stage graph did not terminate: cycle via node reduce to reduce",
+      "kept": true,
+      "anomaly": true,
+      "role": "keep"
+    }
+  ],
+  "after_lines": [
+    {
+      "text": "Traceback (most recent call last):",
+      "marker": false
+    },
+    {
+      "text": "  File \"/srv/app/main.py\", line 42, in <module>",
+      "marker": false
+    },
+    {
+      "text": "    orchestrate(payload)",
+      "marker": false
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "marker": false
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "marker": false
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "marker": false
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "marker": false
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "marker": false
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "marker": false
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "marker": false
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "marker": false
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 118, in run_stage",
+      "marker": false
+    },
+    {
+      "text": "… [170 lines omitted, in CCR] …",
+      "marker": true
+    },
+    {
+      "text": "    return run_stage(next_ctx)",
+      "marker": false
+    },
+    {
+      "text": "  File \"/srv/app/pipeline/stage.py\", line 121, in run_stage",
+      "marker": false
+    },
+    {
+      "text": "    raise RecursionError(\"stage graph did not terminate: cycle via node reduce to reduce\")",
+      "marker": false
+    },
+    {
+      "text": "RecursionError: stage graph did not terminate: cycle via node reduce to reduce",
+      "marker": false
+    },
+    {
+      "text": "{\"_ccr_dropped\": \"<<ccr:9b73d68d0418f9ba1fc97496>> [1 items compressed to 0. Retrieve more: hash=9b73d68d0418f9ba1fc97496]\"}",
+      "marker": true
+    }
+  ],
+  "after_display": null,
+  "retrieval": {
+    "kind": "pattern",
+    "control_label": "Show the root cause",
+    "caption": "Pull the RecursionError line back out of the folded trace, byte-exact.",
+    "call": "retrieve(\"9b73d68d0418f9ba1fc97496\", pattern=\"RecursionError\")",
+    "result": "185:    raise RecursionError(\"stage graph did not terminate: cycle via node reduce to reduce\")\n186:RecursionError: stage graph did not terminate: cycle via node reduce to reduce",
+    "full_byte_exact": true
+  }
+}

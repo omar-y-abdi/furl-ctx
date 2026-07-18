@@ -36,6 +36,18 @@ _JSON_BLOCK_START = re.compile(r"^\s*[\[{]", re.MULTILINE)
 _SEARCH_RESULT_PATTERN = re.compile(r"^\S+:\d+:", re.MULTILINE)
 _PROSE_PATTERN = re.compile(r"[A-Z][a-z]+\s+\w+\s+\w+")
 
+# A markdown task-list checkbox: "[ ] todo", "[x] done", "[X] done", optionally
+# bulleted ("- [ ] …"). It starts with "[" but is NOT JSON (Bug-10) — the JSON
+# block detector only balances brackets, it never parses, so an unguarded "[x]
+# done" was extracted as a JSON_ARRAY section and handed to the JSON compressor.
+_CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s+)?\[[ xX]\]")
+
+
+def _starts_json_block(line: str) -> bool:
+    """True when *line* begins a JSON array/object section (starts with ``[`` or
+    ``{``) and is NOT a markdown checklist item (Bug-10)."""
+    return line.strip().startswith(("[", "{")) and not _CHECKLIST_ITEM_RE.match(line)
+
 
 def is_mixed_content(content: str) -> bool:
     """Detect if content contains multiple distinct types.
@@ -97,8 +109,9 @@ def split_into_sections(content: str) -> list[ContentSection]:
             i += 1  # Skip closing ```
             continue
 
-        # JSON block
-        if line.strip().startswith(("[", "{")):
+        # JSON block (a markdown checklist "[x] done" starts with "[" but is not
+        # JSON — Bug-10 — so _starts_json_block excludes it).
+        if _starts_json_block(line):
             json_content, end_i = _extract_json_block(lines, i)
             if json_content:
                 sections.append(
@@ -139,7 +152,7 @@ def split_into_sections(content: str) -> list[ContentSection]:
             # Stop if we hit a special section
             if (
                 _CODE_FENCE_PATTERN.match(next_line)
-                or next_line.strip().startswith(("[", "{"))
+                or _starts_json_block(next_line)
                 or _SEARCH_RESULT_PATTERN.match(next_line)
             ):
                 break

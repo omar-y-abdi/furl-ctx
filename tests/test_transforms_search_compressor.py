@@ -53,7 +53,7 @@ def test_search_compressor_persist_to_python_ccr(monkeypatch: pytest.MonkeyPatch
         "furl_ctx.cache.compression_store",
         SimpleNamespace(
             get_compression_store=lambda: SimpleNamespace(
-                store=lambda original, compressed, original_item_count=0, explicit_hash=None, compression_strategy=None: (
+                store=lambda original, compressed, original_item_count=0, explicit_hash=None, compression_strategy=None, require_durable=False: (
                     seen.setdefault(
                         "call", (original, compressed, explicit_hash, compression_strategy)
                     )

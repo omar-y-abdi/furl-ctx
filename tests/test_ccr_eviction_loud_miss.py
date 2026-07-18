@@ -23,7 +23,6 @@ True cross-call retention (so the data is actually still there) is the open
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import types
@@ -57,7 +56,10 @@ def _model_sees(store: object, hash_key: str) -> tuple[bool, dict]:
     by its absence.
     """
     stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
-    payload = asyncio.run(FurlMCPServer._retrieve_content(stub, hash_key, None))
+    # PERF-16 relocated the retrieve branch logic into the synchronous
+    # ``_retrieve_content_sync`` core (async ``_retrieve_content`` is now a thin
+    # ``asyncio.to_thread`` wrapper); drive the core directly with the stub self.
+    payload = FurlMCPServer._retrieve_content_sync(stub, hash_key, None)
     return ("error" not in payload), payload
 
 
@@ -179,7 +181,7 @@ def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
     assert store.retrieve(victim) is None, "precondition: victim evicted"
 
     stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
-    result = asyncio.run(FurlMCPServer._retrieve_content(stub, victim, None))
+    result = FurlMCPServer._retrieve_content_sync(stub, victim, None)
 
     assert "error" in result and result["hash"] == victim, "MCP miss must be loud"
     err = result["error"].lower()

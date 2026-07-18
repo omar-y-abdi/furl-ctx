@@ -15,7 +15,6 @@ Compression-neutral (retrieve plane only).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import types
 
@@ -49,7 +48,11 @@ def _store_live_entry(store, h: str) -> None:
 
 
 def _retrieve(store, h, query):
-    return asyncio.run(FurlMCPServer._retrieve_content(_stub_server(store), h, query))
+    # PERF-16 relocated the retrieve branch logic into the synchronous
+    # ``_retrieve_content_sync`` core (async ``_retrieve_content`` is now a thin
+    # ``asyncio.to_thread`` wrapper). Exercise the core directly — identical
+    # branch logic, no event loop needed for this stubbed-store unit test.
+    return FurlMCPServer._retrieve_content_sync(_stub_server(store), h, query)
 
 
 def test_nonmatching_query_on_live_entry_is_not_an_eviction_error() -> None:

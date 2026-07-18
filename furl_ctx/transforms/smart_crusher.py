@@ -858,7 +858,7 @@ class SmartCrusher(Transform):
             )
             return
         try:
-            from ..cache.compression_store import get_compression_store
+            from ..cache.compression_store import DurableWriteError, get_compression_store
         except ImportError as e:
             # The lossy row-drop has ALREADY happened in the Rust store
             # (ephemeral, process-local). If we cannot reach the Python
@@ -901,14 +901,27 @@ class SmartCrusher(Transform):
                 query_context=query_context if query_context else None,
                 compression_strategy=strategy,
                 explicit_hash=ccr_hash,
+                # A durable write that fell open to the volatile fallback raises
+                # DurableWriteError (audit #3); the `except Exception` below
+                # turns it into CcrMirrorError so compress() reverts to the
+                # ORIGINAL rows rather than shipping a marker whose only copy
+                # dies with the process.
+                require_durable=True,
             )
-        except ValueError:
-            # explicit_hash validation failed — the marker had a
-            # malformed hash (shouldn't happen in practice).
-            logger.warning(
-                "CCR mirror: invalid hash %r from rendered marker",
-                ccr_hash,
-            )
+        except ValueError as e:
+            # store.store() rejects a malformed explicit_hash / non-positive ttl
+            # with ValueError. It "shouldn't happen in practice", but the lossy
+            # Rust row-drop is ALREADY committed and the <<ccr:HASH>> marker
+            # ships — so swallowing it is the SAME signalled-but-unrecoverable
+            # silent loss the sibling branch guards against (the earlier
+            # log-and-return here was an asymmetry that defeated the invariant it
+            # sat next to). Fail the drop: raise CcrMirrorError so compress()'s
+            # fail-open boundary reverts to the ORIGINAL rows (audit #10). A
+            # marker never stands without a backing store entry.
+            raise CcrMirrorError(
+                f"CCR mirror: store.store() rejected hash {ccr_hash} ({e}); "
+                f"dropped rows would be unrecoverable"
+            ) from e
         except Exception as e:
             # CORE silent-loss branch: the lossy row-drop is committed in the
             # ephemeral Rust store, but the Python store write FAILED, so the
@@ -917,6 +930,17 @@ class SmartCrusher(Transform):
             # Raise so the failure reaches compress()'s fail-open boundary,
             # which reverts to the ORIGINAL uncompressed messages. The lossy
             # drop never stands without a recovery copy.
+            if isinstance(e, DurableWriteError):
+                # Store-concurrency-honesty: the store's veto text is already
+                # precise — the original IS retrievable from this process right
+                # now (volatile tier, under e.hash_key); it just is not durable.
+                # Appending "unrecoverable" would contradict that truth inside
+                # one user-visible string, so keep the honest inner text as-is.
+                # The fail-open boundary still reverts to the ORIGINAL rows, so
+                # nothing is lost either way.
+                raise CcrMirrorError(
+                    f"CCR mirror: store.store() failed for hash {ccr_hash} ({e})"
+                ) from e
             raise CcrMirrorError(
                 f"CCR mirror: store.store() failed for hash {ccr_hash} "
                 f"({e}); dropped rows would be unrecoverable"

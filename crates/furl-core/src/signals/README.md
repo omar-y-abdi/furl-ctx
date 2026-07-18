@@ -12,16 +12,24 @@ Cross-cutting classifiers used by transforms. Lives at the crate root because th
 
 ## Tiering — composition, not inheritance
 
-`Tiered<dyn Trait>` chains an ordered stack. The first tier whose signal exceeds `ESCALATE_THRESHOLD` (0.7) confidence wins; lower-confidence tiers fall through. If nothing crosses the threshold, the highest-confidence signal seen is returned so the caller still gets the best guess.
+A `Tiered<dyn Trait>` chaining combinator (ordered stack, first tier whose
+signal exceeds `ESCALATE_THRESHOLD` (0.7) confidence wins, highest-confidence
+fallback otherwise) previously lived here. It had zero production
+constructions and was **deleted (SIMP-5b)** — see `signals/mod.rs`'s doc
+comment for the record. Composition of a future second tier now happens **at
+the call site**, not through a shared combinator type in this module.
 
-Today `KeywordDetector` is the only tier registered. The tier API is the seam where future ML detectors slot in.
+Today `KeywordDetector` is the only tier registered — there is no chaining to
+demonstrate yet. When a real second tier lands, wire the ordered-fallback
+logic where the caller consumes both detectors' signals, per the current
+`signals/mod.rs` guidance, rather than reintroducing a shared `Tiered<T>`.
 
 ## How to add a new detector
 
 1. **Confirm granularity.** A line classifier implements `LineImportanceDetector`. A blob classifier gets a new trait. Don't shoehorn cross-granularity work into one trait.
 2. **Implement `score(&self, ...) -> ImportanceSignal`.** Set `confidence` honestly: 0.7+ if the detector is the right authority for this input, lower if you want the next tier to override on disagreement.
 3. **No silent fallbacks.** Per project conventions, return `ImportanceSignal::neutral()` when you have no information — never fabricate a positive answer with low confidence to "fail open".
-4. **Wire into `Tiered` at the consumer**, not in this module. The detector itself doesn't know about other tiers.
+4. **Compose at the consumer**, not in this module — there is no shared `Tiered` combinator (deleted, SIMP-5b; see above). The detector itself doesn't know about other tiers; ordering/fallback between tiers is the caller's responsibility.
 5. **Add parity fixtures** if the detector replaces or augments an existing one. Mark divergence lines with `// fixed_in_<phase>` markers.
 
 ## Canonical future ML extension — BGE classifier head
@@ -55,4 +63,4 @@ The trait shape accepts all three without changes.
 
 - Concrete transforms — they go in `crates/furl-core/src/transforms/`.
 - Static keyword data tables — they're configuration for `KeywordDetector`, not detection logic. They live alongside the detector that consumes them (`signals/keyword_detector.rs::KeywordRegistry`).
-- Tag protection (`<headroom:keep>` markers) — that's user intent, not classification.
+- Tag protection (`<furl:keep>` markers) — that's user intent, not classification.

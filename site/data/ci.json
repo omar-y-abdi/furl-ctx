@@ -1,0 +1,1119 @@
+{
+  "id": "ci",
+  "label": "CI build log",
+  "kind_label": "repetitive compile lines",
+  "tagline": "Compile line after compile line, and one warning.",
+  "story": "Every compile line looks the same. furl folds them and keeps the single warning where you can see it.",
+  "transform": "router:ccr_offload:0.12",
+  "transforms_applied": [
+    "router:protected:user_message",
+    "router:ccr_offload:0.12"
+  ],
+  "fold_mode": "lines",
+  "tokens_before": 2400,
+  "tokens_after": 307,
+  "tokens_saved": 2093,
+  "compression_ratio": 0.8720833333333333,
+  "percent_saved": 87.2,
+  "original": "#1 [internal] load build definition\n#2 resolving provenance for metadata\n   Compiling tokio v2.1.1 (13ms)\n   Compiling hyper v3.2.2 (14ms)\n   Compiling regex v1.3.3 (15ms)\n   Compiling syn v2.4.4 (16ms)\n   Compiling quote v3.5.0 (17ms)\n   Compiling clap v1.6.1 (18ms)\n   Compiling anyhow v2.7.2 (19ms)\n   Compiling thiserror v3.8.3 (20ms)\n   Compiling rayon v1.0.4 (21ms)\n   Compiling serde v2.1.0 (22ms)\n   Compiling tokio v3.2.1 (23ms)\n   Compiling hyper v1.3.2 (24ms)\n   Compiling regex v2.4.3 (25ms)\n   Compiling syn v3.5.4 (26ms)\n   Compiling quote v1.6.0 (27ms)\n   Compiling clap v2.7.1 (28ms)\n   Compiling anyhow v3.8.2 (29ms)\n   Compiling thiserror v1.0.3 (30ms)\n   Compiling rayon v2.1.4 (31ms)\n   Compiling serde v3.2.0 (32ms)\n   Compiling tokio v1.3.1 (33ms)\n   Compiling hyper v2.4.2 (34ms)\n   Compiling regex v3.5.3 (35ms)\n   Compiling syn v1.6.4 (36ms)\n   Compiling quote v2.7.0 (37ms)\n   Compiling clap v3.8.1 (38ms)\n   Compiling anyhow v1.0.2 (39ms)\n   Compiling thiserror v2.1.3 (40ms)\n   Compiling rayon v3.2.4 (41ms)\n   Compiling serde v1.3.0 (42ms)\n   Compiling tokio v2.4.1 (43ms)\n   Compiling hyper v3.5.2 (44ms)\n   Compiling regex v1.6.3 (45ms)\n   Compiling syn v2.7.4 (46ms)\n   Compiling quote v3.8.0 (47ms)\n   Compiling clap v1.0.1 (48ms)\n   Compiling anyhow v2.1.2 (49ms)\n   Compiling thiserror v3.2.3 (50ms)\n   Compiling rayon v1.3.4 (51ms)\n   Compiling serde v2.4.0 (52ms)\n   Compiling tokio v3.5.1 (53ms)\n   Compiling hyper v1.6.2 (54ms)\n   Compiling regex v2.7.3 (55ms)\n   Compiling syn v3.8.4 (56ms)\n   Compiling quote v1.0.0 (57ms)\n   Compiling clap v2.1.1 (58ms)\n   Compiling anyhow v3.2.2 (59ms)\n   Compiling thiserror v1.3.3 (60ms)\n   Compiling rayon v2.4.4 (61ms)\n   Compiling serde v3.5.0 (62ms)\n   Compiling tokio v1.6.1 (63ms)\n   Compiling hyper v2.7.2 (64ms)\n   Compiling regex v3.8.3 (65ms)\n   Compiling syn v1.0.4 (66ms)\n   Compiling quote v2.1.0 (67ms)\n   Compiling clap v3.2.1 (68ms)\n   Compiling anyhow v1.3.2 (69ms)\n   Compiling thiserror v2.4.3 (70ms)\n   Compiling rayon v3.5.4 (71ms)\n   Compiling serde v1.6.0 (72ms)\n   Compiling tokio v2.7.1 (73ms)\n   Compiling hyper v3.8.2 (74ms)\n   Compiling regex v1.0.3 (75ms)\n   Compiling syn v2.1.4 (76ms)\n   Compiling quote v3.2.0 (77ms)\n   Compiling clap v1.3.1 (78ms)\n   Compiling anyhow v2.4.2 (79ms)\n   Compiling thiserror v3.5.3 (80ms)\n   Compiling rayon v1.6.4 (81ms)\n   Compiling serde v2.7.0 (82ms)\n   Compiling tokio v3.8.1 (83ms)\n   Compiling hyper v1.0.2 (84ms)\n   Compiling regex v2.1.3 (85ms)\n   Compiling syn v3.2.4 (86ms)\n   Compiling quote v1.3.0 (87ms)\n   Compiling clap v2.4.1 (88ms)\n   Compiling anyhow v3.5.2 (89ms)\n   Compiling thiserror v1.6.3 (90ms)\n   Compiling rayon v2.7.4 (91ms)\n   Compiling serde v3.8.0 (12ms)\n   Compiling tokio v1.0.1 (13ms)\n   Compiling hyper v2.1.2 (14ms)\n   Compiling regex v3.2.3 (15ms)\n   Compiling syn v1.3.4 (16ms)\n   Compiling quote v2.4.0 (17ms)\n   Compiling clap v3.5.1 (18ms)\n   Compiling anyhow v1.6.2 (19ms)\n   Compiling thiserror v2.7.3 (20ms)\n   Compiling rayon v3.8.4 (21ms)\n   Compiling serde v1.0.0 (22ms)\n   Compiling tokio v2.1.1 (23ms)\n   Compiling hyper v3.2.2 (24ms)\n   Compiling regex v1.3.3 (25ms)\n   Compiling syn v2.4.4 (26ms)\n   Compiling quote v3.5.0 (27ms)\n   Compiling clap v1.6.1 (28ms)\n   Compiling anyhow v2.7.2 (29ms)\n   Compiling thiserror v3.8.3 (30ms)\n   Compiling rayon v1.0.4 (31ms)\n   Compiling serde v2.1.0 (32ms)\n   Compiling tokio v3.2.1 (33ms)\n   Compiling hyper v1.3.2 (34ms)\n   Compiling regex v2.4.3 (35ms)\n   Compiling syn v3.5.4 (36ms)\n   Compiling quote v1.6.0 (37ms)\n   Compiling clap v2.7.1 (38ms)\n   Compiling anyhow v3.8.2 (39ms)\n   Compiling thiserror v1.0.3 (40ms)\n   Compiling rayon v2.1.4 (41ms)\n   Compiling serde v3.2.0 (42ms)\n   Compiling tokio v1.3.1 (43ms)\n   Compiling hyper v2.4.2 (44ms)\n   Compiling regex v3.5.3 (45ms)\n   Compiling syn v1.6.4 (46ms)\n   Compiling quote v2.7.0 (47ms)\n   Compiling clap v3.8.1 (48ms)\n   Compiling anyhow v1.0.2 (49ms)\n   Compiling thiserror v2.1.3 (50ms)\n   Compiling rayon v3.2.4 (51ms)\n   Compiling serde v1.3.0 (52ms)\n   Compiling tokio v2.4.1 (53ms)\n   Compiling hyper v3.5.2 (54ms)\n   Compiling regex v1.6.3 (55ms)\n   Compiling syn v2.7.4 (56ms)\n   Compiling quote v3.8.0 (57ms)\n   Compiling clap v1.0.1 (58ms)\n   Compiling anyhow v2.1.2 (59ms)\n   Compiling thiserror v3.2.3 (60ms)\n   Compiling rayon v1.3.4 (61ms)\n   Compiling serde v2.4.0 (62ms)\n   Compiling tokio v3.5.1 (63ms)\n   Compiling hyper v1.6.2 (64ms)\n   Compiling regex v2.7.3 (65ms)\n   Compiling syn v3.8.4 (66ms)\n   Compiling quote v1.0.0 (67ms)\n   Compiling clap v2.1.1 (68ms)\n   Compiling anyhow v3.2.2 (69ms)\n   Compiling thiserror v1.3.3 (70ms)\n   Compiling rayon v2.4.4 (71ms)\nwarning: unused variable `ctx` in crate `serde`, build continued\n   Compiling tokio v1.6.1 (73ms)\n   Compiling hyper v2.7.2 (74ms)\n   Compiling regex v3.8.3 (75ms)\n   Compiling syn v1.0.4 (76ms)\n   Compiling quote v2.1.0 (77ms)\n   Compiling clap v3.2.1 (78ms)\n   Compiling anyhow v1.3.2 (79ms)\n   Compiling thiserror v2.4.3 (80ms)\n   Compiling rayon v3.5.4 (81ms)\n   Compiling serde v1.6.0 (82ms)\n   Compiling tokio v2.7.1 (83ms)\n   Compiling hyper v3.8.2 (84ms)\n   Compiling regex v1.0.3 (85ms)\n   Compiling syn v2.1.4 (86ms)\n   Compiling quote v3.2.0 (87ms)\n   Compiling clap v1.3.1 (88ms)\n   Compiling anyhow v2.4.2 (89ms)\n   Compiling thiserror v3.5.3 (90ms)\n   Compiling rayon v1.6.4 (91ms)\n   Compiling serde v2.7.0 (12ms)\n   Compiling tokio v3.8.1 (13ms)\n   Compiling hyper v1.0.2 (14ms)\n   Compiling regex v2.1.3 (15ms)\n   Compiling syn v3.2.4 (16ms)\n   Compiling quote v1.3.0 (17ms)\n    Finished `release` profile [optimized] target(s) in 41.87s\n",
+  "original_line_count": 168,
+  "original_bytes": 5643,
+  "compressed": "#1 [internal] load build definition\n#2 resolving provenance for metadata\n   Compiling tokio v2.1.1 (13ms)\n   Compiling hyper v3.2.2 (14ms)\n   Compiling regex v1.3.3 (15ms)\n   Compiling syn v2.4.4 (16ms)\n   Compiling quote v3.5.0 (17ms)\n   Compiling clap v1.6.1 (18ms)\n   Compiling anyhow v2.7.2 (19ms)\n   Compiling thiserror v3.8.3 (20ms)\n   Compiling rayon v1.0.4 (21ms)\n   Compiling serde v2.1.0 (22ms)\n… [152 lines omitted, in CCR] …\n   Compiling regex v2.1.3 (15ms)\n   Compiling syn v3.2.4 (16ms)\n   Compiling quote v1.3.0 (17ms)\n    Finished `release` profile [optimized] target(s) in 41.87s\n{\"_ccr_dropped\": \"<<ccr:24004dc7e2a0ac2059fd6e97>> [1 items compressed to 0. Retrieve more: hash=24004dc7e2a0ac2059fd6e97]\"}",
+  "compressed_bytes": 725,
+  "hash": "24004dc7e2a0ac2059fd6e97",
+  "marker_text": "152 repeated lines offloaded to CCR",
+  "keep_count": 17,
+  "before_lines": [
+    {
+      "text": "#1 [internal] load build definition",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "#2 resolving provenance for metadata",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling tokio v2.1.1 (13ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling hyper v3.2.2 (14ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling regex v1.3.3 (15ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling syn v2.4.4 (16ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling quote v3.5.0 (17ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling clap v1.6.1 (18ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling anyhow v2.7.2 (19ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling thiserror v3.8.3 (20ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling rayon v1.0.4 (21ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling serde v2.1.0 (22ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling tokio v3.2.1 (23ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v1.3.2 (24ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v2.4.3 (25ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v3.5.4 (26ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v1.6.0 (27ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v2.7.1 (28ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v3.8.2 (29ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v1.0.3 (30ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v2.1.4 (31ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v3.2.0 (32ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v1.3.1 (33ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v2.4.2 (34ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v3.5.3 (35ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v1.6.4 (36ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v2.7.0 (37ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v3.8.1 (38ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v1.0.2 (39ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v2.1.3 (40ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v3.2.4 (41ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v1.3.0 (42ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v2.4.1 (43ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v3.5.2 (44ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v1.6.3 (45ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v2.7.4 (46ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v3.8.0 (47ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v1.0.1 (48ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v2.1.2 (49ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v3.2.3 (50ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v1.3.4 (51ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v2.4.0 (52ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v3.5.1 (53ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v1.6.2 (54ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v2.7.3 (55ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v3.8.4 (56ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v1.0.0 (57ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v2.1.1 (58ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v3.2.2 (59ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v1.3.3 (60ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v2.4.4 (61ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v3.5.0 (62ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v1.6.1 (63ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v2.7.2 (64ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v3.8.3 (65ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v1.0.4 (66ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v2.1.0 (67ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v3.2.1 (68ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v1.3.2 (69ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v2.4.3 (70ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v3.5.4 (71ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v1.6.0 (72ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v2.7.1 (73ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v3.8.2 (74ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v1.0.3 (75ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v2.1.4 (76ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v3.2.0 (77ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v1.3.1 (78ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v2.4.2 (79ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v3.5.3 (80ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v1.6.4 (81ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v2.7.0 (82ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v3.8.1 (83ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v1.0.2 (84ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v2.1.3 (85ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v3.2.4 (86ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v1.3.0 (87ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v2.4.1 (88ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v3.5.2 (89ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v1.6.3 (90ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v2.7.4 (91ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v3.8.0 (12ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v1.0.1 (13ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v2.1.2 (14ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v3.2.3 (15ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v1.3.4 (16ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v2.4.0 (17ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v3.5.1 (18ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v1.6.2 (19ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v2.7.3 (20ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v3.8.4 (21ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v1.0.0 (22ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v2.1.1 (23ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v3.2.2 (24ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v1.3.3 (25ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v2.4.4 (26ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v3.5.0 (27ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v1.6.1 (28ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v2.7.2 (29ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v3.8.3 (30ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v1.0.4 (31ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v2.1.0 (32ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v3.2.1 (33ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v1.3.2 (34ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v2.4.3 (35ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v3.5.4 (36ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v1.6.0 (37ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v2.7.1 (38ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v3.8.2 (39ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v1.0.3 (40ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v2.1.4 (41ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v3.2.0 (42ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v1.3.1 (43ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v2.4.2 (44ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v3.5.3 (45ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v1.6.4 (46ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v2.7.0 (47ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v3.8.1 (48ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v1.0.2 (49ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v2.1.3 (50ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v3.2.4 (51ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v1.3.0 (52ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v2.4.1 (53ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v3.5.2 (54ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v1.6.3 (55ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v2.7.4 (56ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v3.8.0 (57ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v1.0.1 (58ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v2.1.2 (59ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v3.2.3 (60ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v1.3.4 (61ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v2.4.0 (62ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v3.5.1 (63ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v1.6.2 (64ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v2.7.3 (65ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v3.8.4 (66ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v1.0.0 (67ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v2.1.1 (68ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v3.2.2 (69ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v1.3.3 (70ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v2.4.4 (71ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "warning: unused variable `ctx` in crate `serde`, build continued",
+      "kept": false,
+      "anomaly": true,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling tokio v1.6.1 (73ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v2.7.2 (74ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v3.8.3 (75ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v1.0.4 (76ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v2.1.0 (77ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v3.2.1 (78ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v1.3.2 (79ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v2.4.3 (80ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v3.5.4 (81ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v1.6.0 (82ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v2.7.1 (83ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v3.8.2 (84ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v1.0.3 (85ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling syn v2.1.4 (86ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling quote v3.2.0 (87ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling clap v1.3.1 (88ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling anyhow v2.4.2 (89ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling thiserror v3.5.3 (90ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling rayon v1.6.4 (91ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling serde v2.7.0 (12ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling tokio v3.8.1 (13ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling hyper v1.0.2 (14ms)",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "   Compiling regex v2.1.3 (15ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling syn v3.2.4 (16ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "   Compiling quote v1.3.0 (17ms)",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "    Finished `release` profile [optimized] target(s) in 41.87s",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    }
+  ],
+  "after_lines": [
+    {
+      "text": "#1 [internal] load build definition",
+      "marker": false
+    },
+    {
+      "text": "#2 resolving provenance for metadata",
+      "marker": false
+    },
+    {
+      "text": "   Compiling tokio v2.1.1 (13ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling hyper v3.2.2 (14ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling regex v1.3.3 (15ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling syn v2.4.4 (16ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling quote v3.5.0 (17ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling clap v1.6.1 (18ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling anyhow v2.7.2 (19ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling thiserror v3.8.3 (20ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling rayon v1.0.4 (21ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling serde v2.1.0 (22ms)",
+      "marker": false
+    },
+    {
+      "text": "… [152 lines omitted, in CCR] …",
+      "marker": true
+    },
+    {
+      "text": "   Compiling regex v2.1.3 (15ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling syn v3.2.4 (16ms)",
+      "marker": false
+    },
+    {
+      "text": "   Compiling quote v1.3.0 (17ms)",
+      "marker": false
+    },
+    {
+      "text": "    Finished `release` profile [optimized] target(s) in 41.87s",
+      "marker": false
+    },
+    {
+      "text": "{\"_ccr_dropped\": \"<<ccr:24004dc7e2a0ac2059fd6e97>> [1 items compressed to 0. Retrieve more: hash=24004dc7e2a0ac2059fd6e97]\"}",
+      "marker": true
+    }
+  ],
+  "after_display": null,
+  "retrieval": {
+    "kind": "pattern",
+    "control_label": "Show the warning",
+    "caption": "Pull the one warning line back out of the folded build log.",
+    "call": "retrieve(\"24004dc7e2a0ac2059fd6e97\", pattern=\"warning\")",
+    "result": "142:warning: unused variable `ctx` in crate `serde`, build continued",
+    "full_byte_exact": true
+  }
+}

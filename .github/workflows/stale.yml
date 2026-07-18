@@ -29,7 +29,7 @@ jobs:
             --description "No recent activity; may be closed if it stays inactive" \
             --force
 
-      - uses: actions/stale@v10
+      - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           operations-per-run: 200

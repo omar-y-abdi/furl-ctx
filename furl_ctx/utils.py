@@ -6,10 +6,6 @@ import copy
 import hashlib
 from typing import Any
 
-# Marker format for Furl modifications
-MARKER_PREFIX = "<headroom:"
-MARKER_SUFFIX = ">"
-
 
 def compute_hash(data: str | bytes) -> str:
     """Compute SHA256 hash, returning hex string."""
@@ -75,26 +71,15 @@ def concat_text_parts(content: Any) -> str:
     return ""
 
 
-def create_marker(marker_type: str, **kwargs: Any) -> str:
-    """
-    Create a Furl marker string.
-
-    Args:
-        marker_type: Type of marker (e.g., "tool_digest", "dropped_context").
-        **kwargs: Attributes to include in the marker.
-
-    Returns:
-        Formatted marker string.
-    """
-    attrs = " ".join(f'{k}="{v}"' for k, v in kwargs.items())
-    if attrs:
-        return f"{MARKER_PREFIX}{marker_type} {attrs}{MARKER_SUFFIX}"
-    return f"{MARKER_PREFIX}{marker_type}{MARKER_SUFFIX}"
-
-
 def create_tool_digest_marker(original_hash: str) -> str:
-    """Create marker for crushed tool output."""
-    return create_marker("tool_digest", sha256=original_hash)
+    """Create marker for crushed tool output.
+
+    Uses the ``<furl:...>`` namespace (A11): the residual ``<headroom:...>``
+    branding from the upstream lineage was renamed to Furl's own name. This is a
+    display annotation on the compressed view, not a stored-then-retrieved marker,
+    so the rename touches no persisted bytes; it aligns with the Rust
+    tag-protector docs, which already reference ``<furl:tool_digest>``."""
+    return f'<furl:tool_digest sha256="{original_hash}">'
 
 
 def deep_copy_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -30,8 +30,8 @@ class PipelineEvent:
     """Immutable event emitted at a canonical pipeline stage.
 
     The event is frozen: extensions MUST NOT mutate it in place. To change
-    ``messages``, ``tools``, ``headers``, or ``metadata``, return a replacement
-    ``PipelineEvent`` from ``on_pipeline_event`` (e.g. via
+    ``messages`` or ``metadata``, return a replacement ``PipelineEvent`` from
+    ``on_pipeline_event`` (e.g. via
     ``dataclasses.replace(event, messages=...)``); ``emit`` adopts whatever the
     handler returns. This keeps the prompt-cache-sensitive ``messages`` list free
     of the hidden in-place effects the project's RULES.md forbids.
@@ -39,21 +39,9 @@ class PipelineEvent:
 
     stage: PipelineStage
     operation: str
-    request_id: str = ""
-    provider: str = ""
     model: str = ""
     messages: list[dict[str, Any]] | None = None
-    tools: list[dict[str, Any]] | None = None
-    headers: dict[str, str] | None = None
-    response: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class PipelineExtension(Protocol):
-    """Request lifecycle extension contract for the canonical pipeline."""
-
-    def on_pipeline_event(self, event: PipelineEvent) -> PipelineEvent | None:
-        """Handle a canonical pipeline event."""
 
 
 def summarize_routing_markers(transforms_applied: list[str]) -> list[str]:
@@ -87,13 +75,8 @@ class PipelineExtensionManager:
         stage: PipelineStage,
         *,
         operation: str,
-        request_id: str = "",
-        provider: str = "",
         model: str = "",
         messages: list[dict[str, Any]] | None = None,
-        tools: list[dict[str, Any]] | None = None,
-        headers: dict[str, str] | None = None,
-        response: Any = None,
         metadata: dict[str, Any] | None = None,
     ) -> PipelineEvent:
         """Emit a canonical lifecycle event and return the final event state."""
@@ -101,13 +84,8 @@ class PipelineExtensionManager:
         event = PipelineEvent(
             stage=stage,
             operation=operation,
-            request_id=request_id,
-            provider=provider,
             model=model,
             messages=messages,
-            tools=tools,
-            headers=headers,
-            response=response,
             metadata=metadata or {},
         )
 

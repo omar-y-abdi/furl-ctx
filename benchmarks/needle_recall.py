@@ -40,6 +40,7 @@ from typing import Any
 from benchmarks.datasets import build_logs_dataset, search_rows
 from benchmarks.metrics import (
     BENCH_MODEL,
+    _abort_if_fail_open,
     _decoded_row_signatures,
     _emitted_recovery_hashes,
     _item_in_recovered,
@@ -193,6 +194,11 @@ def _trial(
         {"role": "tool", "content": content, "tool_call_id": "needle_call"},
     ]
     result = compress(messages, model=model)
+    # A2 / RG2: fail closed, never measure a broken engine. A fail-open returns
+    # the ORIGINAL messages, so the needle is trivially present and recall reads
+    # a fabricated 100% -- the most flattering possible number from a dead
+    # engine. Same contract as the dataset path in ``metrics``.
+    _abort_if_fail_open(f"needle:{family.name}@{cardinality}/{position}/{arm}", result)
     output_text = _stringify(result.messages[-1].get("content"))
 
     row_sigs = _output_row_signatures(output_text)

@@ -1,0 +1,15 @@
+# The image installs furl-ctx from PyPI and copies no repo sources into the
+# build, so keep the context small for a fast daemon upload.
+.git/
+.venv/
+target/
+site/
+tests/
+benchmarks/
+*.gif
+*.svg
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

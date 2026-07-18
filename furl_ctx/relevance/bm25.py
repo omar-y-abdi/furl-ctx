@@ -41,11 +41,11 @@ class BM25Scorer(RelevanceScorer):
 
     Example:
         scorer = BM25Scorer()
-        score = scorer.score(
-            '{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "Alice"}',
+        scores = scorer.score_batch(
+            ['{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "Alice"}'],
             "find record 550e8400-e29b-41d4-a716-446655440000"
         )
-        # score.score > 0.5 (UUID matches exactly)
+        # scores[0].score > 0.5 (UUID matches exactly)
     """
 
     # Tokenization pattern: alphanumeric sequences, UUIDs, numeric IDs
@@ -170,47 +170,6 @@ class BM25Scorer(RelevanceScorer):
             score += term_score * qf  # Weight by query frequency
 
         return score, matched_terms
-
-    def score(self, item: str, context: str) -> RelevanceScore:
-        """Score item relevance to context using BM25.
-
-        Args:
-            item: Item text (typically JSON string).
-            context: Query context.
-
-        Returns:
-            RelevanceScore with BM25-based score.
-        """
-        item_tokens = self._tokenize(item)
-        context_tokens = self._tokenize(context)
-
-        raw_score, matched = self._bm25_score(item_tokens, context_tokens)
-
-        # Normalize to [0, 1]
-        if self.normalize_score:
-            normalized = min(1.0, raw_score / self.max_score)
-        else:
-            normalized = raw_score
-
-        # Bonus for exact long-token matches (UUIDs, long IDs)
-        # These are high-value matches that should be preserved
-        long_matches = [t for t in matched if len(t) >= 8]
-        if long_matches:
-            normalized = min(1.0, normalized + 0.3)
-
-        match_count = len(matched)
-        if match_count == 0:
-            reason = "BM25: no term matches"
-        elif match_count == 1:
-            reason = f"BM25: matched '{matched[0]}'"
-        else:
-            reason = f"BM25: matched {match_count} terms ({', '.join(matched[:3])}{'...' if match_count > 3 else ''})"
-
-        return RelevanceScore(
-            score=normalized,
-            reason=reason,
-            matched_terms=matched[:10],  # Limit for readability
-        )
 
     def score_batch(self, items: list[str], context: str) -> list[RelevanceScore]:
         """Score multiple items.

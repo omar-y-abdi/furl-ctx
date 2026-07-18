@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-07-13",
+  "furl_version": "1.2.0",
+  "model": "claude-sonnet-4-5-20250929",
+  "tokenizer": "furl_ctx built-in, tiktoken cl100k_base family",
+  "prompt": "Here is the tool output from the last run.",
+  "config": "furl_ctx default CompressConfig",
+  "sample_count": 6,
+  "aggregate": {
+    "total_tokens_before": 22630,
+    "total_tokens_after": 1922,
+    "total_tokens_saved": 20708,
+    "avg_percent_saved": 90.6,
+    "overall_percent_saved": 91.5,
+    "min_percent_saved": 87.2,
+    "max_percent_saved": 95.8
+  }
+}

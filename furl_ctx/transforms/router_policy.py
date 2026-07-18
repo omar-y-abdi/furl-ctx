@@ -21,6 +21,7 @@ importing it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 from typing import Protocol
 
@@ -137,3 +138,58 @@ def adaptive_min_ratio(config: RatioPolicyConfig, context_pressure: float) -> fl
     aggressive: float = config.min_ratio_aggressive
     min_ratio = relaxed + (aggressive - relaxed) * context_pressure
     return max(relaxed, min(aggressive, min_ratio))
+
+
+# Route-count lanes that can coexist with an all-passthrough router result,
+# paired with the machine-readable reason each contributes. Dominance is
+# computed over ALL of these lanes — the highest count wins; ties fall to this
+# declaration order, which is two-tiered on purpose: GRANULAR lanes first (each
+# names the specific gate that stopped content), then the SHAPE/PINNING lanes
+# the content-block walk books without a transform (``content_blocks`` /
+# ``nested_blocks`` per container walked, ``cache_control_protected`` per
+# pinned block). The latter fold into the umbrella ``no_eligible_content`` —
+# true of any no-op by definition — so a specific explanation always beats the
+# umbrella on equal counts. Counts are heuristic weights, not a partition:
+# string-path lanes book per message, block-path lanes per block, and one
+# message may book several lanes. Protection lanes (excluded_tool / user_msg /
+# recent_code / analysis_ctx / error_protected / feedback_skip) are absent by
+# construction — each books a ``router:protected:*``-style transform, so a
+# protected message or block is never part of a bare no-op. Cache bookkeeping
+# (cache_hit / cache_miss) is absent too: it records HOW a lane resolved, not
+# WHY nothing shipped.
+_NOOP_REASON_BY_COUNTER: tuple[tuple[str, str], ...] = (
+    ("ratio_too_high", "no_savings"),
+    ("small", "below_min_tokens"),
+    ("net_mutation_gate", "net_mutation_gate"),
+    ("non_string", "non_string"),
+    ("already_compressed", "already_compressed"),
+    ("content_blocks", "no_eligible_content"),
+    ("nested_blocks", "no_eligible_content"),
+    ("cache_control_protected", "no_eligible_content"),
+)
+
+
+def noop_transform(route_counts: Mapping[str, int]) -> str:
+    """The self-explaining ``router:noop:{reason}`` transform label.
+
+    ``run_router_passes`` books a router no-op only when NO transform —
+    compression OR protection — fired for any message. ``route_counts`` still
+    records WHY every message shipped through untouched (the lane each hit);
+    collapse it to the single dominant reason so ``transforms_applied`` explains
+    a 0% result instead of a bare, silent ``router:noop`` (the evaluator saw the
+    bare form and read the tool as broken).
+
+    The ``router:noop`` PREFIX is preserved, so ``summarize_routing_markers``
+    and every ``startswith("router:")`` consumer stay byte-unaffected. Total: an
+    all-zero or unrecognised ``route_counts`` (a fully-frozen prefix or empty
+    input) falls through to ``router:noop:no_eligible_content`` — the same
+    umbrella reason the transform-less shape/pinning lanes map to.
+    """
+    dominant = "no_eligible_content"
+    best = 0
+    for counter, reason in _NOOP_REASON_BY_COUNTER:
+        count = route_counts.get(counter, 0)
+        if count > best:
+            best = count
+            dominant = reason
+    return f"router:noop:{dominant}"

@@ -36,7 +36,6 @@ class RelevanceScorer(ABC):
     """Abstract base class for relevance scoring.
 
     All relevance scorers must implement:
-    - score(): Score a single item against context
     - score_batch(): Score multiple items efficiently
 
     Example usage:
@@ -46,19 +45,6 @@ class RelevanceScorer(ABC):
         scores = scorer.score_batch(items, context)
         # scores[0].score > scores[1].score (item 0 matches "123")
     """
-
-    @abstractmethod
-    def score(self, item: str, context: str) -> RelevanceScore:
-        """Score a single item's relevance to the context.
-
-        Args:
-            item: String representation of the item (typically JSON).
-            context: Query context (user message, tool call args, etc.).
-
-        Returns:
-            RelevanceScore with score [0.0, 1.0] and explanation.
-        """
-        pass
 
     @abstractmethod
     def score_batch(self, items: list[str], context: str) -> list[RelevanceScore]:
@@ -77,14 +63,3 @@ class RelevanceScorer(ABC):
             List of RelevanceScore objects, one per item.
         """
         pass
-
-    @classmethod
-    def is_available(cls) -> bool:
-        """Check if this scorer is available (dependencies installed).
-
-        Override in subclasses that have optional dependencies.
-
-        Returns:
-            True if the scorer can be instantiated.
-        """
-        return True

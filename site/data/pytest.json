@@ -1,0 +1,1473 @@
+{
+  "id": "pytest",
+  "label": "Test output",
+  "kind_label": "pytest run, one failure",
+  "tagline": "A long green run with a single red line.",
+  "story": "furl offloads the passing lines and keeps the failure and its assertion in view. The full run stays retrievable.",
+  "transform": "router:ccr_offload:0.10",
+  "transforms_applied": [
+    "router:protected:user_message",
+    "router:ccr_offload:0.10"
+  ],
+  "fold_mode": "lines",
+  "tokens_before": 2745,
+  "tokens_after": 283,
+  "tokens_saved": 2462,
+  "compression_ratio": 0.8969034608378871,
+  "percent_saved": 89.7,
+  "original": "============================= test session starts =============================\nplatform darwin -- Python 3.13.1, pytest-8.3.2, pluggy-1.5.0\ncollected 210 items\n\ntests/test_api.py::test_case_001 PASSED\ntests/test_store.py::test_case_002 PASSED\ntests/test_ccr.py::test_case_003 PASSED\ntests/test_router.py::test_case_004 PASSED\ntests/test_core.py::test_case_005 PASSED\ntests/test_api.py::test_case_006 PASSED\ntests/test_store.py::test_case_007 PASSED\ntests/test_ccr.py::test_case_008 PASSED\ntests/test_router.py::test_case_009 PASSED\ntests/test_core.py::test_case_010 PASSED\ntests/test_api.py::test_case_011 PASSED\ntests/test_store.py::test_case_012 PASSED\ntests/test_ccr.py::test_case_013 PASSED\ntests/test_router.py::test_case_014 PASSED\ntests/test_core.py::test_case_015 PASSED\ntests/test_api.py::test_case_016 PASSED\ntests/test_store.py::test_case_017 PASSED\ntests/test_ccr.py::test_case_018 PASSED\ntests/test_router.py::test_case_019 PASSED\ntests/test_core.py::test_case_020 PASSED\ntests/test_api.py::test_case_021 PASSED\ntests/test_store.py::test_case_022 PASSED\ntests/test_ccr.py::test_case_023 PASSED\ntests/test_router.py::test_case_024 PASSED\ntests/test_core.py::test_case_025 PASSED\ntests/test_api.py::test_case_026 PASSED\ntests/test_store.py::test_case_027 PASSED\ntests/test_ccr.py::test_case_028 PASSED\ntests/test_router.py::test_case_029 PASSED\ntests/test_core.py::test_case_030 PASSED\ntests/test_api.py::test_case_031 PASSED\ntests/test_store.py::test_case_032 PASSED\ntests/test_ccr.py::test_case_033 PASSED\ntests/test_router.py::test_case_034 PASSED\ntests/test_core.py::test_case_035 PASSED\ntests/test_api.py::test_case_036 PASSED\ntests/test_store.py::test_case_037 PASSED\ntests/test_ccr.py::test_case_038 PASSED\ntests/test_router.py::test_case_039 PASSED\ntests/test_core.py::test_case_040 PASSED\ntests/test_api.py::test_case_041 PASSED\ntests/test_store.py::test_case_042 PASSED\ntests/test_ccr.py::test_case_043 PASSED\ntests/test_router.py::test_case_044 PASSED\ntests/test_core.py::test_case_045 PASSED\ntests/test_api.py::test_case_046 PASSED\ntests/test_store.py::test_case_047 PASSED\ntests/test_ccr.py::test_case_048 PASSED\ntests/test_router.py::test_case_049 PASSED\ntests/test_core.py::test_case_050 PASSED\ntests/test_api.py::test_case_051 PASSED\ntests/test_store.py::test_case_052 PASSED\ntests/test_ccr.py::test_case_053 PASSED\ntests/test_router.py::test_case_054 PASSED\ntests/test_core.py::test_case_055 PASSED\ntests/test_api.py::test_case_056 PASSED\ntests/test_store.py::test_case_057 PASSED\ntests/test_ccr.py::test_case_058 PASSED\ntests/test_router.py::test_case_059 PASSED\ntests/test_core.py::test_case_060 PASSED\ntests/test_api.py::test_case_061 PASSED\ntests/test_store.py::test_case_062 PASSED\ntests/test_ccr.py::test_case_063 PASSED\ntests/test_router.py::test_case_064 PASSED\ntests/test_core.py::test_case_065 PASSED\ntests/test_api.py::test_case_066 PASSED\ntests/test_store.py::test_case_067 PASSED\ntests/test_ccr.py::test_case_068 PASSED\ntests/test_router.py::test_case_069 PASSED\ntests/test_core.py::test_case_070 PASSED\ntests/test_api.py::test_case_071 PASSED\ntests/test_store.py::test_case_072 PASSED\ntests/test_ccr.py::test_case_073 PASSED\ntests/test_router.py::test_case_074 PASSED\ntests/test_core.py::test_case_075 PASSED\ntests/test_api.py::test_case_076 PASSED\ntests/test_store.py::test_case_077 PASSED\ntests/test_ccr.py::test_case_078 PASSED\ntests/test_router.py::test_case_079 PASSED\ntests/test_core.py::test_case_080 PASSED\ntests/test_api.py::test_case_081 PASSED\ntests/test_store.py::test_case_082 PASSED\ntests/test_ccr.py::test_case_083 PASSED\ntests/test_router.py::test_case_084 PASSED\ntests/test_core.py::test_case_085 PASSED\ntests/test_api.py::test_case_086 PASSED\ntests/test_store.py::test_case_087 PASSED\ntests/test_ccr.py::test_case_088 PASSED\ntests/test_router.py::test_case_089 PASSED\ntests/test_core.py::test_case_090 PASSED\ntests/test_api.py::test_case_091 PASSED\ntests/test_store.py::test_case_092 PASSED\ntests/test_ccr.py::test_case_093 PASSED\ntests/test_router.py::test_case_094 PASSED\ntests/test_core.py::test_case_095 PASSED\ntests/test_api.py::test_case_096 PASSED\ntests/test_store.py::test_case_097 PASSED\ntests/test_ccr.py::test_case_098 PASSED\ntests/test_router.py::test_case_099 PASSED\ntests/test_core.py::test_case_100 PASSED\ntests/test_api.py::test_case_101 PASSED\ntests/test_store.py::test_case_102 PASSED\ntests/test_ccr.py::test_case_103 PASSED\ntests/test_router.py::test_case_104 PASSED\ntests/test_core.py::test_case_105 PASSED\ntests/test_api.py::test_case_106 PASSED\ntests/test_store.py::test_case_107 PASSED\ntests/test_ccr.py::test_case_108 PASSED\ntests/test_router.py::test_case_109 PASSED\ntests/test_core.py::test_case_110 PASSED\ntests/test_api.py::test_case_111 PASSED\ntests/test_store.py::test_case_112 PASSED\ntests/test_ccr.py::test_case_113 PASSED\ntests/test_router.py::test_case_114 PASSED\ntests/test_core.py::test_case_115 PASSED\ntests/test_api.py::test_case_116 PASSED\ntests/test_store.py::test_case_117 PASSED\ntests/test_ccr.py::test_case_118 PASSED\ntests/test_router.py::test_case_119 PASSED\ntests/test_core.py::test_case_120 PASSED\ntests/test_api.py::test_case_121 PASSED\ntests/test_store.py::test_case_122 PASSED\ntests/test_ccr.py::test_case_123 PASSED\ntests/test_router.py::test_case_124 PASSED\ntests/test_core.py::test_case_125 PASSED\ntests/test_api.py::test_case_126 PASSED\ntests/test_store.py::test_case_127 PASSED\ntests/test_ccr.py::test_case_128 PASSED\ntests/test_router.py::test_case_129 PASSED\ntests/test_core.py::test_case_130 PASSED\ntests/test_api.py::test_case_131 PASSED\ntests/test_store.py::test_case_132 PASSED\ntests/test_ccr.py::test_case_133 PASSED\ntests/test_router.py::test_case_134 PASSED\ntests/test_core.py::test_case_135 PASSED\ntests/test_api.py::test_case_136 PASSED\ntests/test_store.py::test_case_137 PASSED\ntests/test_ccr.py::test_case_138 PASSED\ntests/test_router.py::test_case_139 PASSED\ntests/test_core.py::test_case_140 PASSED\ntests/test_api.py::test_case_141 PASSED\ntests/test_store.py::test_case_142 PASSED\ntests/test_ccr.py::test_case_143 PASSED\ntests/test_router.py::test_case_144 PASSED\ntests/test_core.py::test_case_145 PASSED\ntests/test_api.py::test_case_146 PASSED\ntests/test_store.py::test_case_147 PASSED\ntests/test_ccr.py::test_case_148 PASSED\ntests/test_router.py::test_case_149 PASSED\ntests/test_core.py::test_case_150 FAILED\ntests/test_api.py::test_case_151 PASSED\ntests/test_store.py::test_case_152 PASSED\ntests/test_ccr.py::test_case_153 PASSED\ntests/test_router.py::test_case_154 PASSED\ntests/test_core.py::test_case_155 PASSED\ntests/test_api.py::test_case_156 PASSED\ntests/test_store.py::test_case_157 PASSED\ntests/test_ccr.py::test_case_158 PASSED\ntests/test_router.py::test_case_159 PASSED\ntests/test_core.py::test_case_160 PASSED\ntests/test_api.py::test_case_161 PASSED\ntests/test_store.py::test_case_162 PASSED\ntests/test_ccr.py::test_case_163 PASSED\ntests/test_router.py::test_case_164 PASSED\ntests/test_core.py::test_case_165 PASSED\ntests/test_api.py::test_case_166 PASSED\ntests/test_store.py::test_case_167 PASSED\ntests/test_ccr.py::test_case_168 PASSED\ntests/test_router.py::test_case_169 PASSED\ntests/test_core.py::test_case_170 PASSED\ntests/test_api.py::test_case_171 PASSED\ntests/test_store.py::test_case_172 PASSED\ntests/test_ccr.py::test_case_173 PASSED\ntests/test_router.py::test_case_174 PASSED\ntests/test_core.py::test_case_175 PASSED\ntests/test_api.py::test_case_176 PASSED\ntests/test_store.py::test_case_177 PASSED\ntests/test_ccr.py::test_case_178 PASSED\ntests/test_router.py::test_case_179 PASSED\ntests/test_core.py::test_case_180 PASSED\ntests/test_api.py::test_case_181 PASSED\ntests/test_store.py::test_case_182 PASSED\ntests/test_ccr.py::test_case_183 PASSED\ntests/test_router.py::test_case_184 PASSED\ntests/test_core.py::test_case_185 PASSED\ntests/test_api.py::test_case_186 PASSED\ntests/test_store.py::test_case_187 PASSED\ntests/test_ccr.py::test_case_188 PASSED\ntests/test_router.py::test_case_189 PASSED\ntests/test_core.py::test_case_190 PASSED\ntests/test_api.py::test_case_191 PASSED\ntests/test_store.py::test_case_192 PASSED\ntests/test_ccr.py::test_case_193 PASSED\ntests/test_router.py::test_case_194 PASSED\ntests/test_core.py::test_case_195 PASSED\ntests/test_api.py::test_case_196 PASSED\ntests/test_store.py::test_case_197 PASSED\ntests/test_ccr.py::test_case_198 PASSED\ntests/test_router.py::test_case_199 PASSED\ntests/test_core.py::test_case_200 PASSED\ntests/test_api.py::test_case_201 PASSED\ntests/test_store.py::test_case_202 PASSED\ntests/test_ccr.py::test_case_203 PASSED\ntests/test_router.py::test_case_204 PASSED\ntests/test_core.py::test_case_205 PASSED\ntests/test_api.py::test_case_206 PASSED\ntests/test_store.py::test_case_207 PASSED\ntests/test_ccr.py::test_case_208 PASSED\ntests/test_router.py::test_case_209 PASSED\ntests/test_core.py::test_case_210 PASSED\n\n=================================== FAILURES ===================================\n____________________________ test_case_150 ____________________________\n    def test_case_150():\n        got = normalize(' Tenant ID ')\n>       assert got == 'tenant_id'\nE       AssertionError: assert 'tenant id' == 'tenant_id'\nE         - tenant_id\nE         + tenant id\ntests/test_store.py:317: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_store.py::test_case_150 - AssertionError: assert 'tenant id'\n======================== 1 failed, 209 passed in 5.44s ========================\n",
+  "original_line_count": 227,
+  "original_bytes": 9447,
+  "compressed": "============================= test session starts =============================\nplatform darwin -- Python 3.13.1, pytest-8.3.2, pluggy-1.5.0\ncollected 210 items\n\ntests/test_api.py::test_case_001 PASSED\ntests/test_store.py::test_case_002 PASSED\ntests/test_ccr.py::test_case_003 PASSED\ntests/test_router.py::test_case_004 PASSED\ntests/test_core.py::test_case_005 PASSED\ntests/test_api.py::test_case_006 PASSED\ntests/test_store.py::test_case_007 PASSED\ntests/test_ccr.py::test_case_008 PASSED\n… [211 lines omitted, in CCR] …\ntests/test_store.py:317: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_store.py::test_case_150 - AssertionError: assert 'tenant id'\n======================== 1 failed, 209 passed in 5.44s ========================\n{\"_ccr_dropped\": \"<<ccr:cd0e1e42d349e6ce6f488006>> [1 items compressed to 0. Retrieve more: hash=cd0e1e42d349e6ce6f488006]\"}",
+  "compressed_bytes": 929,
+  "hash": "cd0e1e42d349e6ce6f488006",
+  "marker_text": "211 repeated lines offloaded to CCR",
+  "keep_count": 17,
+  "before_lines": [
+    {
+      "text": "============================= test session starts =============================",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "platform darwin -- Python 3.13.1, pytest-8.3.2, pluggy-1.5.0",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "collected 210 items",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "",
+      "kept": false,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_api.py::test_case_001 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_store.py::test_case_002 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_003 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_router.py::test_case_004 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_core.py::test_case_005 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_api.py::test_case_006 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_store.py::test_case_007 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_008 PASSED",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_router.py::test_case_009 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_010 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_011 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_012 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_013 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_014 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_015 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_016 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_017 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_018 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_019 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_020 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_021 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_022 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_023 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_024 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_025 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_026 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_027 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_028 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_029 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_030 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_031 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_032 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_033 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_034 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_035 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_036 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_037 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_038 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_039 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_040 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_041 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_042 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_043 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_044 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_045 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_046 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_047 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_048 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_049 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_050 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_051 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_052 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_053 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_054 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_055 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_056 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_057 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_058 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_059 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_060 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_061 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_062 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_063 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_064 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_065 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_066 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_067 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_068 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_069 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_070 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_071 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_072 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_073 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_074 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_075 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_076 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_077 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_078 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_079 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_080 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_081 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_082 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_083 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_084 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_085 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_086 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_087 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_088 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_089 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_090 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_091 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_092 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_093 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_094 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_095 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_096 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_097 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_098 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_099 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_100 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_101 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_102 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_103 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_104 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_105 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_106 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_107 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_108 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_109 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_110 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_111 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_112 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_113 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_114 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_115 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_116 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_117 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_118 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_119 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_120 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_121 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_122 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_123 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_124 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_125 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_126 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_127 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_128 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_129 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_130 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_131 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_132 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_133 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_134 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_135 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_136 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_137 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_138 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_139 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_140 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_141 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_142 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_143 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_144 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_145 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_146 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_147 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_148 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_149 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_150 FAILED",
+      "kept": false,
+      "anomaly": true,
+      "role": "keep"
+    },
+    {
+      "text": "tests/test_api.py::test_case_151 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_152 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_153 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_154 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_155 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_156 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_157 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_158 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_159 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_160 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_161 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_162 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_163 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_164 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_165 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_166 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_167 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_168 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_169 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_170 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_171 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_172 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_173 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_174 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_175 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_176 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_177 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_178 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_179 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_180 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_181 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_182 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_183 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_184 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_185 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_186 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_187 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_188 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_189 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_190 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_191 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_192 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_193 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_194 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_195 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_196 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_197 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_198 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_199 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_200 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_201 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_202 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_203 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_204 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_205 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_api.py::test_case_206 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py::test_case_207 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_208 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_router.py::test_case_209 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_core.py::test_case_210 PASSED",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "=================================== FAILURES ===================================",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "____________________________ test_case_150 ____________________________",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "    def test_case_150():",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "        got = normalize(' Tenant ID ')",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": ">       assert got == 'tenant_id'",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "E       AssertionError: assert 'tenant id' == 'tenant_id'",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "E         - tenant_id",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "E         + tenant id",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "tests/test_store.py:317: AssertionError",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "=========================== short test summary info ===========================",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "FAILED tests/test_store.py::test_case_150 - AssertionError: assert 'tenant id'",
+      "kept": true,
+      "anomaly": true,
+      "role": "keep"
+    },
+    {
+      "text": "======================== 1 failed, 209 passed in 5.44s ========================",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    }
+  ],
+  "after_lines": [
+    {
+      "text": "============================= test session starts =============================",
+      "marker": false
+    },
+    {
+      "text": "platform darwin -- Python 3.13.1, pytest-8.3.2, pluggy-1.5.0",
+      "marker": false
+    },
+    {
+      "text": "collected 210 items",
+      "marker": false
+    },
+    {
+      "text": "",
+      "marker": false
+    },
+    {
+      "text": "tests/test_api.py::test_case_001 PASSED",
+      "marker": false
+    },
+    {
+      "text": "tests/test_store.py::test_case_002 PASSED",
+      "marker": false
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_003 PASSED",
+      "marker": false
+    },
+    {
+      "text": "tests/test_router.py::test_case_004 PASSED",
+      "marker": false
+    },
+    {
+      "text": "tests/test_core.py::test_case_005 PASSED",
+      "marker": false
+    },
+    {
+      "text": "tests/test_api.py::test_case_006 PASSED",
+      "marker": false
+    },
+    {
+      "text": "tests/test_store.py::test_case_007 PASSED",
+      "marker": false
+    },
+    {
+      "text": "tests/test_ccr.py::test_case_008 PASSED",
+      "marker": false
+    },
+    {
+      "text": "… [211 lines omitted, in CCR] …",
+      "marker": true
+    },
+    {
+      "text": "tests/test_store.py:317: AssertionError",
+      "marker": false
+    },
+    {
+      "text": "=========================== short test summary info ===========================",
+      "marker": false
+    },
+    {
+      "text": "FAILED tests/test_store.py::test_case_150 - AssertionError: assert 'tenant id'",
+      "marker": false
+    },
+    {
+      "text": "======================== 1 failed, 209 passed in 5.44s ========================",
+      "marker": false
+    },
+    {
+      "text": "{\"_ccr_dropped\": \"<<ccr:cd0e1e42d349e6ce6f488006>> [1 items compressed to 0. Retrieve more: hash=cd0e1e42d349e6ce6f488006]\"}",
+      "marker": true
+    }
+  ],
+  "after_display": null,
+  "retrieval": {
+    "kind": "pattern",
+    "control_label": "Show the failure",
+    "caption": "Ask for FAILED. Both the failing test line and the summary come back byte-exact.",
+    "call": "retrieve(\"cd0e1e42d349e6ce6f488006\", pattern=\"FAILED\")",
+    "result": "154:tests/test_core.py::test_case_150 FAILED\n226:FAILED tests/test_store.py::test_case_150 - AssertionError: assert 'tenant id'",
+    "full_byte_exact": true
+  }
+}

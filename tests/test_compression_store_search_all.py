@@ -116,7 +116,7 @@ def test_search_all_is_side_effect_free() -> None:
     entry = store._backend.get("a" * 12)
     assert entry is not None
     assert entry.retrieval_count == 0
-    assert store.get_retrieval_events() == []
+    assert store._retrieval_events == []
 
 
 def test_search_all_respects_max_results() -> None:

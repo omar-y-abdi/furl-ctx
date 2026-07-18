@@ -1,6 +1,6 @@
 # Contributing to Furl
 
-Thanks for contributing! Please skim this before opening a PR : the policies exist because we've been burned skipping them, not because we love paperwork.
+Thanks for contributing! Please skim this before opening a PR : the policies exist because I've been burned skipping them, not because I love paperwork.
 
 By participating, you agree to our [Code of Conduct](CODE_OF_CONDUCT.md).
 
@@ -9,11 +9,11 @@ By participating, you agree to our [Code of Conduct](CODE_OF_CONDUCT.md).
 | Type | What to do |
 | --- | --- |
 | 🐛 Bug or small fix | **Open a PR** (with repro + test) |
-| ✨ New feature / architectural change | **Open an issue or ask in Discord first.** |
+| ✨ New feature / architectural change | **Open an issue first.** |
 | 🧹 Refactor-only | **Don't.** Only if a maintainer asked, as part of a concrete fix. |
-| 🧪 Test/CI-only PR chasing a known `main` failure | **Don't.** We're tracking it. |
+| 🧪 Test/CI-only PR chasing a known `main` failure | **Don't.** I'm tracking it. |
 | 📦 New dep or version bump | **PR with written justification.** |
-| ❓ Question | **Discord `#help`.** |
+| ❓ Question | **Open a GitHub issue.** |
 
 **Open PR cap: 10 per author.** Get existing ones merged before opening more.
 
@@ -33,7 +33,7 @@ If you genuinely can't write a test, say so explicitly and explain how you verif
 
 ## "Real behavior proof" — required on every external PR
 
-We can't merge what we can't verify. Include a **`Real behavior proof`** section in the PR body covering:
+I can't merge what I can't verify. Include a **`Real behavior proof`** section in the PR body covering:
 
 - **Setup you tested on** (OS, Python, config, provider/model)
 - **Exact command or steps you ran after the patch**
@@ -49,7 +49,7 @@ We can't merge what we can't verify. Include a **`Real behavior proof`** section
 
 Before writing code:
 
-1. **Open a feature-request issue** (or raise in Discord).
+1. **Open a feature-request issue.**
 2. **Get a 👍 from a core maintainer** before implementing.
 3. **Include a short spec** covering:
    - **API surface** (public functions, config, CLI flags)
@@ -84,6 +84,27 @@ A human maintainer reviews every dep change. PRs that add or bump a package must
 
 **Review:** CI green, one maintainer review, coverage held/improved.
 
+## Releasing / version bumps
+
+Two versions ship independently, and each has files that must move together — the guards
+in `tests/test_plugin_version_pins.py` fail CI (including the release-please release PR)
+until they agree:
+
+- **Library version** (`pyproject.toml` `project.version`): release-please bumps it on the
+  release PR. release-please has **no updater that can rewrite a version embedded inside a
+  shell command**, so hand-sync the `furl-ctx[mcp]==X.Y.Z` pins in
+  `plugins/furl/hooks/hooks.json` and `plugins/furl/.mcp.json`, the same pin in the prose
+  examples of `plugins/furl/skills/furl/SKILL.md` and `plugins/furl/README.md`, and the
+  engine half of the baked SessionStart status line in `plugins/furl/hooks/hooks.json`, to
+  the new version on that same PR before merging.
+- **Plugin version** (`plugins/furl/.claude-plugin/plugin.json` `version`): bump it together
+  with both `version` fields in `.claude-plugin/marketplace.json`, the `version:` in
+  `plugins/furl/skills/furl/SKILL.md` frontmatter, and the plugin half of the baked
+  `furl <version> · engine furl-ctx <version>` string in the SessionStart hook of
+  `plugins/furl/hooks/hooks.json`.
+
+**Public API surface:** The stable public API is what `furl_ctx` exports at the top level, including `compress()`, `retrieve()`, `purge()`, and `resolve_markers()`. Those signatures are what downstream integrations should depend on. Submodule internals under `furl_ctx.*` may change between releases, so import from the top-level package rather than from submodules. Pin a minor version for reproducible builds.
+
 ## Development setup
 
 ```bash
@@ -93,6 +114,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
+
+`pytest` failing with a "build the extension first" message? `make test-python` builds the Rust extension then runs the suite in one step.
 
 ### Dev Containers
 

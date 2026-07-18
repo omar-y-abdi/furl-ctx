@@ -133,9 +133,13 @@ def _apply(messages: list[dict], **config_kwargs) -> tuple[list[dict], list[str]
 
 def _is_compression_transform(t: str) -> bool:
     # An ACCEPTED compression books "router:{strategy}:{ratio}"; bookkeeping
-    # entries ("router:noop", "router:protected:user_message", ...) are not
-    # compressions.
-    return t.startswith("router:") and not t.startswith("router:protected:") and t != "router:noop"
+    # entries ("router:noop:{reason}", "router:protected:user_message", ...) are
+    # not compressions.
+    return (
+        t.startswith("router:")
+        and not t.startswith("router:protected:")
+        and not t.startswith("router:noop")
+    )
 
 
 class TestRouterGate:

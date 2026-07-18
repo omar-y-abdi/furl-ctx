@@ -104,20 +104,11 @@ def _create_anthropic(model: str) -> TokenCounter:
         return EstimatingTokenCounter(chars_per_token=3.5)
 
 
-def _create_google(model: str) -> TokenCounter:
-    """Create Google tokenizer.
+def _create_fixed_estimation(model: str) -> TokenCounter:
+    """Create fixed-ratio estimation tokenizer (Google/Cohere).
 
-    Gemini uses SentencePiece which isn't easily accessible.
-    We use estimation calibrated for Gemini models.
-    """
-    # Gemini models use ~4 chars per token
-    return EstimatingTokenCounter(chars_per_token=4.0)
-
-
-def _create_cohere(model: str) -> TokenCounter:
-    """Create Cohere tokenizer.
-
-    Cohere has its own tokenizer, we use estimation.
+    Gemini uses SentencePiece and Cohere has its own tokenizer, neither
+    easily accessible. Both estimate at ~4 chars per token.
     """
     return EstimatingTokenCounter(chars_per_token=4.0)
 
@@ -139,8 +130,8 @@ _tokenizers: dict[str, TokenCounter] = {}
 _factories: dict[str, Callable[[str], TokenCounter]] = {
     "tiktoken": _create_tiktoken,
     "anthropic": _create_anthropic,
-    "google": _create_google,
-    "cohere": _create_cohere,
+    "google": _create_fixed_estimation,
+    "cohere": _create_fixed_estimation,
     "estimation": _create_estimation,
 }
 
@@ -279,16 +270,6 @@ def register_backend(backend: str, factory: Callable[[str], TokenCounter]) -> No
     _factories[backend] = factory
 
 
-def list_backends() -> list[str]:
-    """List available backends."""
-    return list(_factories.keys())
-
-
-def list_registered() -> list[str]:
-    """List explicitly registered models."""
-    return list(_tokenizers.keys())
-
-
 def clear_cache() -> None:
     """Clear the tokenizer cache."""
     _cache.clear()
@@ -311,9 +292,8 @@ class TokenizerRegistry:
 
     The registry used to be a singleton-of-classmethods; the state and
     logic now live at module level (SIMP-11). The public entry points
-    (``get`` / ``register`` / ``register_backend`` / ``list_backends`` /
-    ``list_registered`` / ``clear_cache``) are preserved as static
-    delegates so existing call sites keep working.
+    (``get`` / ``register`` / ``register_backend`` / ``clear_cache``)
+    are preserved as static delegates so existing call sites keep working.
 
     Example:
         # Auto-detect tokenizer
@@ -329,6 +309,4 @@ class TokenizerRegistry:
     get = staticmethod(get_tokenizer)
     register = staticmethod(register_tokenizer)
     register_backend = staticmethod(register_backend)
-    list_backends = staticmethod(list_backends)
-    list_registered = staticmethod(list_registered)
     clear_cache = staticmethod(clear_cache)

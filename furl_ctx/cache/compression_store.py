@@ -50,7 +50,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from .. import paths as _paths
 from ..relevance.bm25 import BM25Scorer
@@ -62,6 +62,81 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class DurableWriteError(RuntimeError):
+    """Raised by ``CompressionStore.store(..., require_durable=True)`` when the
+    entry did NOT reach the durable backend within the lock-contention retry
+    budget — the write fell open to a volatile in-process fallback (the durable
+    backend is degraded, or a sibling process held the SQLite write lock for
+    longer than the whole retry budget). The marker-decision caller catches it
+    and vetoes to passthrough (serves the original uncompressed), so a
+    ``<<ccr:HASH>>`` marker never ships for content whose only surviving copy is
+    volatile and dies with the process (audit #3).
+
+    ``hash_key`` is the key the entry IS stored under in the volatile tier: the
+    original round-trips from THIS process right now
+    (``store.retrieve(hash_key)``); it simply is not durable (gone on restart,
+    invisible to other processes). Callers that surface a retrieval handle use
+    it to stay honest — return the hash with a precise caveat — instead of
+    dropping it and implying total loss when retrieval works this moment.
+
+    Not raised for a non-durable backend (the default in-memory store): there
+    the operator explicitly chose volatile storage, so there is no durability to
+    lose and ``require_durable`` is a no-op.
+    """
+
+    def __init__(self, message: str, *, hash_key: str) -> None:
+        super().__init__(message)
+        self.hash_key = hash_key
+
+
+# Cheap pre-check that skips the marker regex scan for the common raw original
+# that embeds no marker at all. Case-INSENSITIVE (RG5): the marker grammar's
+# ``GENERIC_BRACKET_PATTERN`` is itself ``re.IGNORECASE``, so an uppercase
+# ``HASH=`` marker IS a real reference; a case-sensitive pre-check skipped it and
+# silently left its blob behind on a cascade purge.
+_MARKER_HINTS: Final = ("ccr:", "hash=")
+
+
+def _may_reference_marker(text: str) -> bool:
+    """Whether *text* might carry a CCR marker (cheap, case-insensitive).
+
+    Uses ``casefold``, not ``lower`` (review B6): the grammar's ``re.IGNORECASE``
+    applies full Unicode case-folding, which is WIDER than ``str.lower``, so this
+    pre-check must fold at least as widely or it skips entries the grammar would
+    have matched. Measured bypass: ``ſ`` (U+017F LATIN SMALL LETTER LONG S) is
+    unchanged by ``lower`` but folds to ``s``, so a marker written
+    ``[10 rows compressed to 2. Retrieve more: haſh=<24hex>]`` matched the grammar
+    while this screen returned False, silently orphaning the nested blob.
+
+    Over-matching is safe here: a false positive only costs one grammar scan that
+    finds nothing. A false NEGATIVE is a data-safety bug, which is the asymmetry
+    this screen must be tuned for.
+    """
+    folded = text.casefold()
+    return any(hint in folded for hint in _MARKER_HINTS)
+
+
+@dataclass(frozen=True)
+class CascadeOutcome:
+    """What one :meth:`CompressionStore.delete_cascade_detailed` actually did.
+
+    ``nested_deleted`` is the DISTINCT nested hashes the cascade removed;
+    ``nested_shared_skipped`` is those it deliberately left because another live
+    entry still references them (RG3). ``deleted_hashes`` is the full set a
+    read-back should find gone (RG6) — the top hash only when it truly went.
+    """
+
+    top_deleted: bool
+    nested_deleted: tuple[str, ...] = ()
+    nested_shared_skipped: tuple[str, ...] = ()
+
+    def deleted_hashes(self, hash_key: str) -> tuple[str, ...]:
+        """Every hash this cascade decided to delete, for read-back verification."""
+        top = (hash_key,) if self.top_deleted else ()
+        return top + self.nested_deleted
+
+
 # Session-scale default (Engine P0-3): agentic sessions routinely outlive
 # 5 minutes, and an entry that expires mid-session silently converts
 # "lossless + retrieval" into lossy. 1800 s (30 min) matches the Rust
@@ -70,6 +145,24 @@ logger = logging.getLogger(__name__)
 # FURL_CCR_TTL_SECONDS (validated in `_get_env_default_ttl_seconds`).
 DEFAULT_CCR_TTL_SECONDS = 1800
 CCR_TTL_SECONDS_ENV = "FURL_CCR_TTL_SECONDS"
+
+# Durable-write contention retry (store-concurrency-honesty). When a
+# ``require_durable`` write reports non-durable — the shared file is briefly
+# held by ANOTHER furl MCP server process (e.g. a second Claude Code session on
+# the same project), or the backend lost its own per-op busy_timeout retry — the
+# store re-attempts the durable persist a bounded number of times with capped
+# exponential backoff BEFORE vetoing. Everyday two-session contention clears
+# within this budget; only a lock held longer than the WHOLE budget (a hung or
+# stale sibling) still vetoes, and then with an honest, cause-naming message.
+#
+# Worst-case ADDED wall-clock is the sum of the backoff sleeps
+# (0.05 + 0.10 + 0.20 = 0.35 s) plus, under SUSTAINED contention, up to
+# ``attempts`` more of the backend's own busy_timeout budget (~1.3 s each) — a
+# few seconds total, far under the MCP tool-call timeout (Claude Code's default
+# is 60 s). The happy path adds nothing: the first persist already succeeded.
+_DURABLE_RETRY_MAX_ATTEMPTS = 3
+_DURABLE_RETRY_BASE_BACKOFF_SECONDS = 0.05
+_DURABLE_RETRY_MAX_BACKOFF_SECONDS = 0.20
 
 # Minimum length for a caller-supplied ``explicit_hash``. This is the LOOSE
 # recovery-floor contract, intentionally distinct from the STRICT consumer set
@@ -88,6 +181,17 @@ _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
 # design: the snippet is a disambiguation preview so the caller can pick a hash
 # to retrieve in full, not a content channel. Redacted before truncation.
 _CROSS_STORE_PREVIEW_CHARS = 200
+# ReDoS guard (PERF/SEC). The credential regexes below — chiefly
+# ``_SECRET_KEY_VALUE_RE`` — are O(N^2) on a long unbroken base64url/hex/minified
+# run: a ``-`` sits INSIDE the ``[A-Z0-9_-]`` secret-key class yet is a word
+# boundary, so ``\b([A-Z0-9_-]*KEYWORD...)`` opens O(N) anchor positions each
+# scanning O(N). Empirically a 64 KB dashed run took ~82 s. Every preview/log
+# surface keeps only a bounded head, so callers redact the kept window PLUS this
+# margin (never the whole multi-MB original) — bounding the regex input to a
+# constant. The margin lets a secret straddling the budget edge be seen whole
+# and masked before truncation; real secrets (keys/tokens/URL passwords) fit
+# inside it.
+_REDACT_WINDOW_MARGIN_CHARS = 256
 # Match ``<sensitive-key><sep><value>`` in both plain (``api_key=...``) and JSON
 # quoted-key (``"api_key": "..."``) form. Group 2 allows an OPTIONAL closing quote
 # before the separator: in JSON the key's own closing ``"`` sits between the key
@@ -150,7 +254,9 @@ def _get_env_default_ttl_seconds() -> int:
         ttl_seconds = int(raw_value)
     except ValueError:
         logger.warning(
-            "%s must be a positive integer number of seconds, got %r; using %s",
+            "%s must be a positive integer number of seconds, got %r; using %s "
+            "(library-store fallback; the MCP server's own writes fall back to 3600 s "
+            "separately — see furl_ctx.ccr.mcp_server._mcp_session_ttl)",
             CCR_TTL_SECONDS_ENV,
             raw_value,
             DEFAULT_CCR_TTL_SECONDS,
@@ -159,7 +265,9 @@ def _get_env_default_ttl_seconds() -> int:
 
     if ttl_seconds <= 0:
         logger.warning(
-            "%s must be greater than 0, got %s; using %s",
+            "%s must be greater than 0, got %s; using %s "
+            "(library-store fallback; the MCP server's own writes fall back to 3600 s "
+            "separately — see furl_ctx.ccr.mcp_server._mcp_session_ttl)",
             CCR_TTL_SECONDS_ENV,
             ttl_seconds,
             DEFAULT_CCR_TTL_SECONDS,
@@ -194,11 +302,12 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
         return f"Entry expired (CCR TTL: {ttl_seconds} seconds)"
 
     max_entries = status.get("max_entries")
-    capacity_note = f" (store capacity: {max_entries} entries)" if max_entries else ""
+    capacity_note = f" Store capacity is {max_entries} entries." if max_entries else ""
     return (
-        f"Entry no longer retrievable from the CCR store: it was evicted under "
-        f"capacity pressure{capacity_note}, expired (TTL {default_ttl}s), or was "
-        f"never stored. Recompute the source content."
+        f"No entry for this hash in the CCR store. It may never have been "
+        f"stored, or it may have been purged, evicted under capacity pressure, "
+        f"or expired past its TTL of {default_ttl}s.{capacity_note} "
+        f"Recompute the source content."
     )
 
 
@@ -222,9 +331,16 @@ def _redact_retrieval_log_payload(payload: str) -> str:
 
 
 def _payload_for_retrieval_log(payload: str) -> dict[str, Any]:
-    redacted = _redact_retrieval_log_payload(payload)
-    preview = redacted[:_RETRIEVAL_LOG_PREVIEW_CHARS]
-    truncated = len(redacted) > len(preview)
+    # SLICE-before-REDACT (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``).
+    # Redacting the FULL payload first is O(N^2) on unbroken base64url/hex runs
+    # and this fires on EVERY retrieve (full-body log redact). The preview keeps
+    # only ``_RETRIEVAL_LOG_PREVIEW_CHARS`` regardless, so redact just the bounded
+    # window that feeds it. ``payload_chars`` still reports the FULL length, and
+    # ``payload_truncated`` still reflects whether content was cut.
+    window = payload[: _RETRIEVAL_LOG_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS]
+    redacted_window = _redact_retrieval_log_payload(window)
+    preview = redacted_window[:_RETRIEVAL_LOG_PREVIEW_CHARS]
+    truncated = len(payload) > len(window) or len(redacted_window) > _RETRIEVAL_LOG_PREVIEW_CHARS
     return {
         "payload_chars": len(payload),
         "payload_preview_chars": len(preview),
@@ -346,6 +462,9 @@ class CompressionStore:
         backend: CompressionStoreBackend | None = None,
         now_fn: Callable[[], float] | None = None,
         spill: CompressionStoreBackend | None = None,
+        durable_retry_attempts: int = _DURABLE_RETRY_MAX_ATTEMPTS,
+        durable_retry_base_backoff_seconds: float = _DURABLE_RETRY_BASE_BACKOFF_SECONDS,
+        durable_retry_max_backoff_seconds: float = _DURABLE_RETRY_MAX_BACKOFF_SECONDS,
     ):
         """Initialize the compression store.
 
@@ -379,6 +498,14 @@ class CompressionStore:
                    Retrieval from spill is read-only — the entry is NOT promoted
                    back into ``backend`` and its access bookkeeping is untouched,
                    so a spill hit is byte-identical to the value that was evicted.
+            durable_retry_attempts: Extra durable-persist attempts after the
+                   first, tried under capped-backoff before a ``require_durable``
+                   write vetoes (store-concurrency-honesty). Absorbs everyday
+                   cross-process (two-session) SQLite lock contention. 0 disables
+                   the store-level retry (the backend keeps its own per-op one).
+            durable_retry_base_backoff_seconds: Base sleep between retries
+                   (doubles each attempt, capped by the max below).
+            durable_retry_max_backoff_seconds: Cap on the per-retry sleep.
         """
         # Import here to avoid circular imports
         from .backends import InMemoryBackend
@@ -390,6 +517,14 @@ class CompressionStore:
         self._default_ttl = default_ttl
         self._enable_feedback = enable_feedback
         self._now: Callable[[], float] = now_fn or time.time
+
+        if durable_retry_attempts < 0:
+            raise ValueError(f"durable_retry_attempts must be >= 0, got {durable_retry_attempts!r}")
+        if durable_retry_base_backoff_seconds < 0 or durable_retry_max_backoff_seconds < 0:
+            raise ValueError("durable retry backoff seconds must be >= 0")
+        self._durable_retry_attempts = durable_retry_attempts
+        self._durable_retry_base_backoff_seconds = durable_retry_base_backoff_seconds
+        self._durable_retry_max_backoff_seconds = durable_retry_max_backoff_seconds
 
         # Local retrieval-event tracking
         self._retrieval_events: list[RetrievalEvent] = []
@@ -426,6 +561,7 @@ class CompressionStore:
         compression_strategy: str | None = None,
         ttl: int | None = None,
         explicit_hash: str | None = None,
+        require_durable: bool = False,
     ) -> str:
         """Store compressed content and return hash for retrieval.
 
@@ -449,14 +585,31 @@ class CompressionStore:
                 string, raises ``ValueError``. The marker hash and the
                 store key MUST match — otherwise a ``furl_retrieve`` of the
                 marker hash misses even though the data is present.
+            require_durable: When True and the configured backend is durable
+                (exposes ``set_durable``), raise ``DurableWriteError`` if the
+                write only reached the volatile fallback (backend degraded or
+                lock-contention retry lost). Marker-decision callers pass True so
+                a lost durable write vetoes the ``<<ccr:HASH>>`` marker instead
+                of shipping one whose original dies with the process (audit #3).
+                No-op for the in-memory backend (nothing durable to lose).
 
         Returns:
             Hash key for retrieving this content. On a true hash collision
-            (same key, different live content) the store KEEPS the first
-            binding and refuses the overwrite — the returned key then
-            resolves to the earlier content and the refusal is logged at
-            ERROR.
+            (same key, different live content) the store DROPS the ambiguous
+            binding — the stored entry is deleted, the new one refused, and the
+            collision logged at ERROR — so a later ``retrieve`` of the key is a
+            LOUD, cause-honest miss (recompute) rather than a silent resolution
+            to the other producer's foreign content. The key is still returned
+            (signature unchanged); its marker simply no longer resolves.
         """
+        # content_kind threading: a writer that did not attribute a tool (the
+        # router CCR offload, SmartCrusher on a single wrapped tool output)
+        # inherits the request-scoped originating tool that compress() bound for
+        # this call, so its entry still surfaces a content_kind. An explicit
+        # tool_name is never overridden; unbound context => None, unchanged.
+        if tool_name is None:
+            tool_name = _request_tool_name.get()
+
         # Reject a non-positive TTL loudly. ttl=0 (or negative) produces an
         # entry that is_expired() immediately (time.time()-created_at > 0), so it
         # would be stored in the backend + heap, never retrievable, and leak until
@@ -532,45 +685,146 @@ class CompressionStore:
             compression_strategy=compression_strategy,
         )
 
+        durable = False
+        collision_dropped = False
         with self._lock:
             self._evict_if_needed()
 
             # Hash collision handling. If the key already exists with
             # DIFFERENT content it is a true hash collision (astronomically
-            # rare at 96-/48-bit keys) — KEEP-FIRST: refuse the overwrite.
-            # Rebinding would silently corrupt the already-emitted marker that
-            # points at the existing entry; refusing means the NEW caller's
-            # marker dangles instead, and dangles LOUDLY (error log here,
-            # cause-honest miss on retrieval of the changed content) rather
-            # than resolving old markers to foreign content. An expired
-            # same-key entry never reaches this branch: _evict_if_needed()
-            # above already reaped it, so a dead binding cannot wedge its key.
+            # rare at 96-/48-bit keys). Both producers' ``<<ccr:HASH>>`` markers
+            # now point at the SAME key, and retrieval — a bare
+            # ``backend.get(hash_key)`` with no per-marker content identity —
+            # cannot tell them apart. Serving the stored entry would hand the
+            # SECOND producer the FIRST producer's bytes: foreign content, i.e.
+            # silent corruption, the exact outcome this store exists to prevent.
+            # We cannot safely serve EITHER binding, so we DROP the binding
+            # entirely: delete the stored entry and refuse the new one. Every
+            # marker on this key then resolves to a LOUD, cause-honest miss
+            # (recompute) instead of foreign content. An expired same-key entry
+            # never reaches this branch: _evict_if_needed() above already reaped
+            # it, so a dead binding cannot wedge its key.
             existing = self._backend.get(hash_key)
             if existing is not None:
                 if existing.original_content != original:
                     logger.error(
                         "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
-                        "new_len=%d) — keeping first binding, refusing overwrite; "
-                        "the new content is NOT stored and its marker will miss",
+                        "new_len=%d) — dropping the ambiguous binding; NEITHER content "
+                        "is served (both markers now loud-miss) rather than resolving "
+                        "to foreign content",
                         hash_key,
                         tool_name,
                         len(existing.original_content),
                         len(original),
                     )
-                    return hash_key
-                # Same content being stored again - this is fine, just update
-                logger.debug(
-                    "Duplicate store for hash=%s, updating entry",
-                    hash_key,
+                    # Drop the stored entry so retrieve() loud-misses instead of
+                    # serving foreign bytes; its heap tuple is now stale. The
+                    # binding reached NEITHER a durable nor a volatile tier, so a
+                    # require_durable caller must veto below (Bug-6) rather than
+                    # receive the hash as if the content were stored.
+                    self._backend.delete(hash_key)
+                    self._stale_heap_entries += 1
+                    collision_dropped = True
+                else:
+                    # Same content being stored again - this is fine, just update
+                    logger.debug(
+                        "Duplicate store for hash=%s, updating entry",
+                        hash_key,
+                    )
+                    # Mark old heap entry as stale since we're replacing
+                    self._stale_heap_entries += 1
+
+            if not collision_dropped:
+                durable = self._persist_and_report_durability(hash_key, entry)
+                # Add to eviction heap for O(log n) eviction
+                heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
+
+        # Collision-drop veto (Bug-6): the ambiguous binding was dropped, so
+        # NOTHING is retrievable under this key. A require_durable caller reverts
+        # to the original (the veto contract) exactly as for a failed durable
+        # write; a non-durable caller keeps today's behavior (the returned hash
+        # loud-misses, never serves foreign content).
+        if collision_dropped:
+            if require_durable:
+                raise DurableWriteError(
+                    f"CCR store for hash {hash_key} hit a true hash collision "
+                    "(different content, same key); the ambiguous binding was dropped "
+                    "so NEITHER content is served. The original was NOT stored — revert "
+                    "to the uncompressed content.",
+                    hash_key=hash_key,
                 )
-                # Mark old heap entry as stale since we're replacing
-                self._stale_heap_entries += 1
+            return hash_key
 
-            self._backend.set(hash_key, entry)
-            # Add to eviction heap for O(log n) eviction
-            heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
+        # Contention retry BEFORE the veto (store-concurrency-honesty). A durable
+        # write that reported non-durable most often lost a brief cross-process
+        # lock race — a second furl MCP server (another Claude Code session)
+        # writing the shared file. Re-attempt the persist under a bounded,
+        # capped-backoff budget (sleeps OUTSIDE the lock) so everyday two-session
+        # contention lands durably instead of spuriously vetoing.
+        if require_durable and not durable:
+            durable = self._retry_durable_persist(hash_key, entry)
 
+        # Durability veto (audit #3), raised OUTSIDE the lock, only once the whole
+        # retry budget is spent. The entry stays in the volatile tier so
+        # SAME-PROCESS retrieval still works right now (hence the hash rides the
+        # error); it simply is not durable, so a marker-decision caller reverts to
+        # the ORIGINAL uncompressed content (nothing lost) and a hash-surfacing
+        # caller reports the volatile handle honestly rather than implying loss.
+        if require_durable and not durable:
+            raise DurableWriteError(
+                f"CCR durable write for hash {hash_key} did not reach durable "
+                f"SQLite storage within the lock-contention retry budget "
+                f"({1 + self._durable_retry_attempts} attempts). The original IS "
+                f"in this process's volatile in-memory tier — retrievable now via "
+                f"this same server (store.retrieve / furl_retrieve) — but it will "
+                f"NOT survive a restart of this server and is invisible to other "
+                f"furl processes. Likely cause: another furl MCP server process — "
+                f"possibly a second, live or stale, Claude Code session on this "
+                f"project — holds the store's SQLite write lock (or the backend "
+                f"degraded). See LIBRARY.md “Multiple sessions on one "
+                f"project”.",
+                hash_key=hash_key,
+            )
         return hash_key
+
+    def _persist_and_report_durability(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Write ``entry`` and report whether it reached a DURABLE backend.
+
+        A backend that distinguishes durable from volatile writes exposes
+        ``set_durable`` (the ``SqliteBackend`` does); its bool is returned
+        verbatim. A backend without it (the in-memory default) is treated as
+        durability-satisfied — the operator chose volatile storage, so
+        ``require_durable`` has nothing to veto. Must be called with the store
+        lock held.
+        """
+        set_durable = getattr(self._backend, "set_durable", None)
+        if set_durable is not None:
+            return bool(set_durable(hash_key, entry))
+        self._backend.set(hash_key, entry)
+        return True
+
+    def _retry_durable_persist(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Re-attempt the durable persist under a bounded, capped-backoff budget.
+
+        Returns ``True`` as soon as a re-attempt lands the row durably (the
+        contention cleared), else ``False`` after ``durable_retry_attempts``
+        tries — the caller then vetoes. Backoff sleeps happen OUTSIDE the store
+        lock; each persist re-acquires it (the ``_persist_and_report_durability``
+        contract). Re-persisting the same ``(hash_key, entry)`` is idempotent —
+        the heap already holds the key and the backend upserts — so a healed
+        retry never double-counts.
+        """
+        for attempt in range(1, self._durable_retry_attempts + 1):
+            backoff = min(
+                self._durable_retry_base_backoff_seconds * (2 ** (attempt - 1)),
+                self._durable_retry_max_backoff_seconds,
+            )
+            if backoff > 0:
+                time.sleep(backoff)
+            with self._lock:
+                if self._persist_and_report_durability(hash_key, entry):
+                    return True
+        return False
 
     def retrieve(
         self,
@@ -819,12 +1073,26 @@ class CompressionStore:
             return []
 
         now = self._now()
+        # Snapshot only the KEYS under the lock, which is cheap and decodes no
+        # content, then decode and expiry-filter each entry under a brief per-key
+        # lock so a concurrent store op is never blocked for the whole decode.
+        # Holding the lock across ``items()`` used to freeze every writer for the
+        # full materialize-and-decode of up to the cap of large entries; the
+        # sibling eviction path was already narrowed off ``items()`` this way
+        # (audit #2, ``created_at_index``). ``created_at_index()`` and ``items()``
+        # iterate the backend in the same order and ``get`` reproduces each entry,
+        # so a stable store yields byte-identical results and ranking order.
         with self._lock:
-            live_entries = [
-                (hash_key, entry)
-                for hash_key, entry in self._backend.items()
-                if not entry.is_expired(now)
-            ]
+            snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
+
+        live_entries: list[tuple[str, CompressionEntry]] = []
+        for hash_key in snapshot_keys:
+            with self._lock:
+                entry = self._backend.get(hash_key)
+            # A key evicted between the snapshot and its decode simply drops out,
+            # which is correct for a live search over the current window.
+            if entry is not None and not entry.is_expired(now):
+                live_entries.append((hash_key, entry))
 
         if not live_entries:
             return []
@@ -860,14 +1128,18 @@ class CompressionStore:
     def _cross_store_preview(original_content: str) -> str:
         """Redacted, truncated preview of an original for a cross-store hit.
 
-        Redact FIRST, then truncate: truncating first could sever a credential
-        mid-token and leave a recognizable head un-redacted. The redaction
-        rules are shared with the retrieval-log preview so both surfaces mask
-        exactly the same secret shapes.
+        Slice-before-redact (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``):
+        redact only the bounded window the 200-char preview can show, never the
+        whole multi-MB original. The margin still lets a secret straddling the
+        preview edge be seen whole and masked before truncation, so a truncated
+        head cannot leave a recognizable credential prefix in the clear. The
+        redaction rules are shared with the retrieval-log preview so both
+        surfaces mask exactly the same secret shapes.
         """
-        redacted = _redact_retrieval_log_payload(original_content)
+        window = original_content[: _CROSS_STORE_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS]
+        redacted = _redact_retrieval_log_payload(window)
         preview = redacted[:_CROSS_STORE_PREVIEW_CHARS]
-        if len(redacted) > len(preview):
+        if len(original_content) > len(window) or len(redacted) > _CROSS_STORE_PREVIEW_CHARS:
             preview = preview + "…"
         return preview
 
@@ -1209,6 +1481,50 @@ class CompressionStore:
                 return False
             return True
 
+    def exists_any_tier(self, hash_key: str) -> bool:
+        """Whether *hash_key* is still retrievable from ANY tier. Never raises.
+
+        :meth:`exists` is primary-tier only, but :meth:`retrieve` falls through to
+        the durable spill tier on a primary miss (Q10). Verifying an erase with
+        ``exists`` therefore interrogates a tier ``retrieve`` can bypass: with
+        ``delete``'s fail-open spill delete, a purge can leave an entry
+        RETRIEVABLE while ``exists`` reports it gone (review B3). This is the
+        predicate a read-back must use — it asks the same question ``retrieve``
+        answers: can a caller still get this content back?
+
+        ``exists``'s primary-only semantics are deliberately left alone; other
+        callers (capacity/liveness checks) depend on them.
+
+        Mirrors ``_recover_from_spill``'s semantics exactly, because agreeing with
+        ``retrieve`` is the entire point: TTL is honored in BOTH tiers (an expired
+        row is not retrievable, so it is not a survivor), and a spill hit is NOT
+        promoted back into the primary — a read-back must observe, never mutate.
+        Unlike ``_recover_from_spill`` it also does not reap the expired spill row,
+        keeping this a pure check like ``exists(clean_expired=False)``.
+
+        Acquires ``self._lock`` and is NOT re-entrant (review F5): never call it
+        while already holding the lock -- take the read-back after the locked
+        mutation returns, as the purge paths do.
+        """
+        with self._lock:
+            now = self._now()
+            # Mirror exists(): an expired primary entry is not retrievable. A
+            # miss (or an expired hit) still has to check the spill below.
+            entry = self._backend.get(hash_key)
+            if entry is not None and not entry.is_expired(now):
+                return True
+            if self._spill is None:
+                return False
+            try:
+                spilled = self._spill.get(hash_key)
+            except Exception as exc:  # noqa: BLE001 — a spill that cannot be read
+                # cannot prove the entry is GONE. Treat an unreadable spill as
+                # "still there": a false survivor is a loud, retryable purge
+                # error; a false all-clear is the silent data-safety bug.
+                logger.warning("CCR spill existence check failed (assuming present): %s", exc)
+                return True
+            return spilled is not None and not spilled.is_expired(now)
+
     def get_entry_status(
         self,
         hash_key: str,
@@ -1272,46 +1588,287 @@ class CompressionStore:
                 "backend": backend_stats,
             }
 
-    def get_retrieval_events(
-        self,
-        limit: int = 100,
-        tool_name: str | None = None,
-    ) -> list[RetrievalEvent]:
-        """Get recent retrieval events for feedback analysis.
+    def increment_counter(self, name: str, amount: int = 1) -> int | None:
+        """Add ``amount`` to a named cross-process observability counter.
 
-        Args:
-            limit: Maximum number of events to return.
-            tool_name: Filter by tool name if specified.
+        Advisory and FAIL-OPEN: a backend without counter support, or any counter
+        error, is a silent no-op returning ``None`` — a broken counter must never
+        break storage or a tool call. Returns the new value ONLY when it was
+        durably persisted (cross-process visible via the SqliteBackend); ``None``
+        otherwise (unsupported backend, or a volatile fallback write). The hook's
+        once-per-namespace first-run note reads a ``1`` here (see
+        ``counters_durable``); furl_stats reads the totals via ``get_counters``.
+        """
+        inc = getattr(self._backend, "increment_counter", None)
+        if inc is None:
+            return None
+        try:
+            with self._lock:
+                result = inc(name, amount)
+        except Exception as exc:  # noqa: BLE001 — counters are advisory, never fatal
+            logger.debug("CCR counter increment dropped (non-fatal): %s=%s", name, exc)
+            return None
+        return result if result is None or isinstance(result, int) else None
 
-        Returns:
-            List of recent retrieval events (copies to prevent mutation).
+    def get_counters(self) -> dict[str, int]:
+        """Snapshot of all named counters (cumulative, cross-process for sqlite).
+
+        FAIL-OPEN: an unsupported backend or a read error returns ``{}`` — the
+        observability read must never raise into furl_stats.
+        """
+        getter = getattr(self._backend, "get_counters", None)
+        if getter is None:
+            return {}
+        try:
+            with self._lock:
+                counters = getter()
+        except Exception as exc:  # noqa: BLE001 — advisory read, never fatal
+            logger.debug("CCR counter read dropped (non-fatal): %s", exc)
+            return {}
+        return dict(counters) if isinstance(counters, dict) else {}
+
+    @property
+    def counters_durable(self) -> bool:
+        """True iff this store's backend persists counters DURABLY (cross-process).
+
+        A durable counter backend exposes BOTH ``increment_counter`` and
+        ``set_durable`` — the SqliteBackend does; the in-memory default does not
+        (its counters are process-local). The hook uses this to gate its
+        once-per-namespace first-run note so a per-process ``1`` from the volatile
+        backend (library / unit tests) never fires it.
+        """
+        return (
+            getattr(self._backend, "increment_counter", None) is not None
+            and getattr(self._backend, "set_durable", None) is not None
+        )
+
+    def delete(self, hash_key: str) -> bool:
+        """Delete the entry for *hash_key* from the store. Returns whether one went.
+
+        The purge surface (B3): removes a single stored original outright so its
+        content is no longer recoverable via ``retrieve``. Deletes from BOTH the
+        primary backend and the durable spill tier (Q10), so a purge leaves no
+        recoverable copy behind; the spill delete is fail-open (logged, never
+        raises) exactly like the other spill operations. Returns True when an
+        entry was removed from EITHER tier, False when the hash was absent from
+        both. Bumps the stale-heap counter on a primary hit so the eviction heap
+        cleans up the dangling ``(created_at, hash_key)`` tuple, matching every
+        other in-store delete path (expiry reaping, collision replace).
         """
         with self._lock:
-            # Take a slice copy immediately to avoid race conditions
-            # if another thread modifies _retrieval_events after we release the lock
-            events_copy = list(self._retrieval_events)
-
-        # Filter and slice outside lock (safe since we have a copy)
-        if tool_name:
-            events_copy = [e for e in events_copy if e.tool_name == tool_name]
-
-        return list(reversed(events_copy[-limit:]))
-
-    def clear(self) -> None:
-        """Clear all entries. Mainly for testing."""
-        with self._lock:
-            self._backend.clear()
-            # Q10 spill tier: clear the durable spill too, so ``clear`` empties
-            # every place an entry can live. Fail-open — a spill clear error
-            # must not break the primary reset.
+            primary_deleted = self._backend.delete(hash_key)
+            if primary_deleted:
+                self._stale_heap_entries += 1
+            spill_deleted = False
             if self._spill is not None:
                 try:
-                    self._spill.clear()
+                    spill_deleted = self._spill.delete(hash_key)
                 except Exception as exc:  # noqa: BLE001 — fail-open, logged below
-                    logger.warning("CCR spill clear failed (non-fatal): %s", exc)
+                    logger.warning("CCR spill delete failed (non-fatal): %s", exc)
+            return primary_deleted or spill_deleted
+
+    def _entry_marker_hashes(self, entry: CompressionEntry, *, exclude: str) -> list[str]:
+        """Marker hashes referenced by *entry*, minus *exclude*, first-seen order."""
+        from furl_ctx.ccr.marker_grammar import hashes_in_text
+
+        seen: dict[str, None] = {}
+        for text in (entry.compressed_content, entry.original_content):
+            if isinstance(text, str) and _may_reference_marker(text):
+                for nested_hash in hashes_in_text(text):
+                    seen.setdefault(nested_hash, None)
+        return [h for h in seen if h != exclude]
+
+    def _is_co_referenced(self, nested_hash: str, *, ignoring: set[str]) -> bool:
+        """Whether a LIVE entry outside *ignoring* still references *nested_hash*.
+
+        The store is content-addressed and deduped, so two compressions that drop
+        identical content share ONE nested entry. Deleting it because one parent
+        was purged would leave the OTHER parent's ``<<ccr:HASH>>`` marker pointing
+        at nothing — a loud miss for content the user never asked to purge (RG3).
+        *ignoring* carries this cascade's own hashes so an entry being torn down
+        does not count as a live referent.
+
+        Cost: one pass over live entries per nested candidate. Purge is a rare,
+        explicit operation and correctness outranks speed here; the cheap
+        marker pre-check skips the common marker-free original outright.
+        """
+        with self._lock:
+            items = list(self._backend.items())
+        for key, entry in items:
+            if key == nested_hash or key in ignoring:
+                continue
+            for text in (entry.compressed_content, entry.original_content):
+                if not isinstance(text, str) or not _may_reference_marker(text):
+                    continue
+                from furl_ctx.ccr.marker_grammar import hashes_in_text
+
+                if nested_hash in hashes_in_text(text):
+                    return True
+        return False
+
+    def delete_cascade(self, hash_key: str) -> tuple[bool, int]:
+        """Delete *hash_key* AND every nested blob only it referenced.
+
+        Back-compat wrapper over :meth:`delete_cascade_detailed`; returns
+        ``(top_deleted, nested_deleted_count)``.
+        """
+        outcome = self.delete_cascade_detailed(hash_key)
+        return (outcome.top_deleted, len(outcome.nested_deleted))
+
+    def delete_cascade_detailed(
+        self, hash_key: str, *, _visited: set[str] | None = None
+    ) -> CascadeOutcome:
+        """Delete *hash_key* AND every nested ``<<ccr:HASH>>`` blob it alone owns.
+
+        A compressed view offloads dropped rows to their OWN store entries under
+        markers embedded in the entry's ``compressed_content`` (and, for a
+        multi-level crush, in those blobs in turn). A plain :meth:`delete` removes
+        only the named entry, leaving those nested originals independently
+        retrievable — so a caller who purged sensitive data believes it gone while
+        a copy survives under another hash (the audit's non-cascading-purge
+        finding, B3). This reads the entry's stored text FIRST, collects the
+        markers it references (in the compressed view AND the original), deletes
+        the entry, then recurses into each nested hash. The ``_visited`` set makes
+        it cycle-safe and idempotent — a marker pointing back at an ancestor, or a
+        blob shared by two parents, is followed at most once.
+
+        SHARED-BLOB RULE (RG3): the NAMED top hash always deletes, but a NESTED
+        hash is skipped when another LIVE entry still references it. Dedup means
+        two compressions of identical dropped content share one nested entry;
+        cascading through it would silently break the other parent's retrieval.
+        A skipped hash is reported in ``nested_shared_skipped``, never counted as
+        deleted, and is NOT added to ``_visited`` — a later parent in the same
+        cascade may legitimately own it once its own referents are gone.
+
+        ``nested_deleted`` and ``nested_shared_skipped`` are DISJOINT: a diamond
+        can skip a hash under one branch and delete it under a later one, and the
+        deletion is the truth (see the dedupe at the end of this method).
+
+        Known, deliberately deferred (tracked, not dropped):
+
+        * #11 — two entries whose markers reference EACH OTHER protect one another
+          forever, so neither is cascade-deleted while both are live. Reaching it
+          needs a contrived mutual reference (content-derived hashes make a natural
+          cycle near-impossible), and each is still individually purgeable by name.
+        """
+        visited = _visited if _visited is not None else set()
+        if hash_key in visited:
+            return CascadeOutcome(top_deleted=False)
+        visited.add(hash_key)
+
+        # Read the entry's stored text BEFORE deleting so nested markers are
+        # recoverable.
+        with self._lock:
+            entry = self._backend.get(hash_key)
+        nested = [] if entry is None else self._entry_marker_hashes(entry, exclude=hash_key)
+
+        top_deleted = self.delete(hash_key)
+        deleted: list[str] = []
+        skipped: list[str] = []
+        for nested_hash in nested:
+            if nested_hash in visited:
+                continue
+            if self._is_co_referenced(nested_hash, ignoring=visited):
+                skipped.append(nested_hash)
+                continue
+            child = self.delete_cascade_detailed(nested_hash, _visited=visited)
+            if child.top_deleted:
+                deleted.append(nested_hash)
+            deleted.extend(child.nested_deleted)
+            skipped.extend(child.nested_shared_skipped)
+        # A hash can be skipped by one branch and then legitimately deleted by a
+        # later one (a skip deliberately does not enter ``visited``, so a diamond
+        # T->[A,B] with A->[C] and B->[C] skips C under A, then deletes it under
+        # B once A is gone). DELETED WINS: the erase is what actually happened,
+        # and reporting C as "kept because another entry references it" would be
+        # a false claim about live data -- the exact class of bug the read-back
+        # and the kept-shared disclosure exist to prevent.
+        deleted_set = set(deleted)
+        return CascadeOutcome(
+            top_deleted=top_deleted,
+            nested_deleted=tuple(deleted),
+            nested_shared_skipped=tuple(h for h in skipped if h not in deleted_set),
+        )
+
+    def clear(self) -> int:
+        """Clear all entries; return the count STILL reachable after the wipe.
+
+        Mainly for testing, but also the wipe primitive behind ``furl_purge
+        all=true``. Returns how many entries remain reachable via
+        :meth:`retrieve` once the wipe has run (0 on a clean wipe), so the purge
+        path can VERIFY the erase instead of claiming success blindly (review
+        F1). The single-hash path already read-backs each deletion with
+        :meth:`exists_any_tier`; ``--all`` was the one erase that trusted a
+        primary-only count and could report "erased" while spill rows stayed
+        retrievable.
+
+        The primary reset ALWAYS proceeds -- every caller that ignores the
+        return value still gets a working reset. The honesty was lost in the
+        spill clear: it used to swallow its own failure silently (Q10 fail-open),
+        leaving rows RETRIEVABLE through the spill tier while ``get_stats``
+        (primary-only) reported an empty store. An un-cleared spill is now
+        surfaced as residual, fail-CLOSED like :meth:`exists_any_tier`: a spill
+        that cannot be cleared -- or cannot even be counted -- is reported as
+        ``>= 1`` survivor, a loud retryable purge error, never a false all-clear.
+        """
+        with self._lock:
+            self._backend.clear()
+            spill_residual = self._clear_spill_residual()
             self._retrieval_events.clear()
             self._eviction_heap.clear()  # Clear heap too
             self._stale_heap_entries = 0  # CRITICAL FIX: Reset stale counter
+            return self._backend.count() + spill_residual
+
+    def _clear_spill_residual(self) -> int:
+        """Clear the durable spill; return how many rows survived the attempt.
+
+        Called with ``self._lock`` held. Returns 0 when the spill is disabled or
+        cleanly emptied. A spill whose ``clear`` raises still holds its rows
+        (reachable via :meth:`retrieve`), so they are COUNTED and surfaced rather
+        than swallowed -- that swallow was the ``furl_purge all=true`` false-erase
+        bug (review F1: ``get_stats`` counts the primary tier only, so a spill
+        survivor was invisible and the purge claimed success).
+
+        Fail-CLOSED, matching :meth:`exists_any_tier`: if the survivors cannot
+        even be counted, return 1 -- an un-provably-empty spill is a survivor,
+        not an all-clear. ``count`` is a Protocol method the sqlite/in-memory
+        backends never raise from; the guard covers a hostile or degraded spill.
+        """
+        if self._spill is None:
+            return 0
+        try:
+            self._spill.clear()
+        except Exception as exc:  # noqa: BLE001 — surfaced as residual, not raised
+            logger.warning("CCR spill clear failed (entries may remain): %s", exc)
+        else:
+            return 0
+        try:
+            return self._spill.count()
+        except Exception as exc:  # noqa: BLE001 — cannot prove the spill empty
+            logger.warning("CCR spill count after failed clear failed: %s", exc)
+            return 1
+
+    def close(self) -> None:
+        """Release backend resources (sqlite connections / file descriptors).
+
+        Distinct from ``clear`` (which empties entries but keeps the backend
+        open): a dropped store — e.g. a per-namespace store retired by
+        ``reset_compression_store`` — must close its sqlite handles or they leak
+        as ``ResourceWarning``-flagged unclosed connections (P5). Idempotent and
+        fail-open: a backend without ``close`` (the in-memory default) is
+        skipped, and a close error is logged, never raised, so teardown always
+        proceeds. The spill tier is closed too, so no durable handle survives.
+        """
+        for backend in (self._backend, self._spill):
+            if backend is None:
+                continue
+            close = getattr(backend, "close", None)
+            if close is None:
+                continue
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 — teardown must not raise
+                logger.warning("CCR backend close failed (non-fatal): %s", exc)
 
     def _spill_evicted(self, hash_key: str, entry: CompressionEntry) -> None:
         """Demote a capacity-evicted (still-live) entry to the spill tier.
@@ -1427,15 +1984,18 @@ class CompressionStore:
     def _clean_expired(self) -> None:
         """Remove expired entries. Must be called with lock held.
 
-        CRITICAL FIX: Track stale heap entries when deleting to prevent memory leak.
+        Delegates to the backend's expiry GC (audit #2) instead of
+        materializing every row into Python just to find the expired keys —
+        this runs on the store() write hot path (via ``_evict_if_needed``), so
+        for the durable backend it is now an indexed range delete, not a full
+        scan + decode of the whole shared file. Each purged entry leaves a stale
+        ``(created_at, hash_key)`` tuple in the eviction heap; the counter bump
+        keeps the heap-staleness accounting exactly as the old per-key delete
+        loop did (the tuples are found stale on pop, or reaped by the
+        ratio-guard rebuild).
         """
-        now = self._now()
-        expired_keys = [key for key, entry in self._backend.items() if entry.is_expired(now)]
-        for key in expired_keys:
-            self._backend.delete(key)
-            # CRITICAL FIX: Increment stale counter - the heap still has an entry
-            # for this key that will be stale when we try to evict
-            self._stale_heap_entries += 1
+        purged = self._backend.purge_expired(self._now())
+        self._stale_heap_entries += purged
 
     def _rebuild_heap(self) -> None:
         """Rebuild heap from current store entries. Must be called with lock held.
@@ -1443,10 +2003,10 @@ class CompressionStore:
         CRITICAL FIX: This removes stale heap entries that accumulate when entries
         are deleted or replaced. Without this, the heap grows unboundedly.
         """
-        # Build new heap from current store entries only
-        self._eviction_heap = [
-            (entry.created_at, hash_key) for hash_key, entry in self._backend.items()
-        ]
+        # Build new heap from current store entries only. Uses the backend's
+        # projected (created_at, hash_key) read (audit #2) so a rebuild on the
+        # store() hot path does not decode every content BLOB out of the file.
+        self._eviction_heap = list(self._backend.created_at_index())
         heapq.heapify(self._eviction_heap)
         # Reset stale counter - heap is now clean
         self._stale_heap_entries = 0
@@ -1487,6 +2047,18 @@ _request_ccr_store: ContextVar[CompressionStore | None] = ContextVar(
     "furl_request_ccr_store", default=None
 )
 
+# Request-scoped ORIGINATING TOOL NAME (content_kind threading). ``compress()``
+# binds this to the tool whose output it is compressing (e.g. "Bash" from the
+# PostToolUse hook, "mcp:furl_compress" from the MCP server). ``store()`` reads
+# it as the DEFAULT ``tool_name`` when a writer does not supply one — so the
+# router's CCR offload and SmartCrusher (which have no per-message tool
+# attribution for a single wrapped tool output) still label their entries,
+# surfacing as ``content_kind`` in furl_list / furl_retrieve. A writer that
+# DOES pass a concrete ``tool_name`` (read_lifecycle's "Read", dedup's
+# message-derived name) is never overridden. Default ``None`` => today's
+# behavior, byte-identical.
+_request_tool_name: ContextVar[str | None] = ContextVar("furl_request_tool_name", default=None)
+
 # Global store instance (lazy initialization)
 _compression_store: CompressionStore | None = None
 _store_lock = threading.Lock()
@@ -1524,11 +2096,40 @@ def clear_request_compression_store() -> None:
 
 FURL_CCR_NAMESPACE_ENV = "FURL_CCR_NAMESPACE"
 
+# Per-project isolation (audit #4). When set — the plugin deployment exports it
+# from the project root — an otherwise un-namespaced call is scoped to a
+# per-project store instead of the process-global singleton, closing the
+# cross-project commingling + eviction hole with zero user config. Absent
+# (library / unit tests) the global singleton serves, byte-for-byte unchanged.
+FURL_CCR_PROJECT_DIR_ENV = "FURL_CCR_PROJECT_DIR"
+
 # Registry of namespace-key -> store, so identical (namespace, session, agent)
 # tuples converge on the SAME store across calls (cross-turn retrieval works)
 # and in-memory tenants do not lose their entries between compress() calls.
 _namespace_stores: dict[str, CompressionStore] = {}
 _namespace_lock = threading.Lock()
+
+
+def _project_scope_key() -> str | None:
+    """Per-project namespace key from ``FURL_CCR_PROJECT_DIR`` (audit #4).
+
+    Returns ``None`` when the variable is unset/blank, so the caller keeps
+    today's global-singleton behavior (library, unit tests). When set, the raw
+    project root is canonicalized (``expanduser().resolve()``) so the hook and
+    MCP processes — which may observe the same project via different spellings
+    or a symlink — converge on ONE key, and thus ONE sqlite file. The ``\\x01``
+    prefix marks this as a project-scope key so it can never alias an explicit
+    ``(namespace, session, agent)`` tuple; the value is opaque and only ever
+    hashed into the sqlite filename, never interpolated into a path.
+    """
+    raw = (os.environ.get(FURL_CCR_PROJECT_DIR_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        resolved = str(Path(raw).expanduser().resolve())
+    except OSError:
+        resolved = raw
+    return "\x01".join(("furl-project", resolved))
 
 
 def _namespace_key(session_id: str | None, agent_id: str | None) -> str | None:
@@ -1537,15 +2138,18 @@ def _namespace_key(session_id: str | None, agent_id: str | None) -> str | None:
     The three segments together define the tenant boundary: an identical tuple
     maps to the same store (so a later turn recovers what an earlier turn
     stored), any difference maps to a different store. Blank/None segments
-    contribute an empty field. When NONE of the three is set the caller wants
-    today's global behavior, so this returns ``None`` — the resolver then
-    touches nothing and the global singleton serves.
+    contribute an empty field. When none of the three is set the call carries no
+    explicit tenant identity, so it falls back to the per-project scope
+    (``FURL_CCR_PROJECT_DIR``); with neither present this returns ``None`` and
+    the global singleton serves — today's behavior, byte-for-byte.
     """
     env_ns = (os.environ.get(FURL_CCR_NAMESPACE_ENV) or "").strip()
     session = (session_id or "").strip()
     agent = (agent_id or "").strip()
     if not env_ns and not session and not agent:
-        return None
+        # No explicit tenant identity: prefer per-project isolation when the
+        # deployment provides a project root, else None (global singleton).
+        return _project_scope_key()
     # NUL-joined so distinct segmentations cannot alias (``a`` + ``bc`` vs
     # ``ab`` + ``c``); the raw values are opaque and never touch a filesystem
     # path directly — the sqlite filename is derived by hashing this key.
@@ -1788,11 +2392,13 @@ def reset_compression_store() -> None:
     with _store_lock:
         if _compression_store is not None:
             _compression_store.clear()
+            _compression_store.close()  # release sqlite fds before dropping (P5 leak)
         _compression_store = None
 
     with _namespace_lock:
         for store in _namespace_stores.values():
             store.clear()
+            store.close()  # each per-namespace backend holds its own fds — close them
         _namespace_stores.clear()
 
 

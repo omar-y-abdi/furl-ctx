@@ -220,3 +220,48 @@ def test_cache_does_not_mutate_input() -> None:
     compress_with_cache(messages, 2, model=_MODEL)
 
     assert messages == snapshot
+
+
+# ─── Bug-5: _with_cache_marker must never emit an empty text block ───────────
+# An empty ``{"type": "text", "text": ""}`` block is a 400 from the Anthropic
+# API. _with_cache_marker anchors cache_control on a valid, non-empty block for
+# every content shape.
+
+from furl_ctx.chat import _with_cache_marker  # noqa: E402
+
+
+def _text_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    content = msg["content"]
+    assert isinstance(content, list)
+    return [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
+
+
+def test_cache_marker_never_emits_empty_text_block() -> None:
+    shapes = [
+        {"role": "user", "content": ""},  # empty string
+        {"role": "user", "content": "hello"},  # normal string
+        {"role": "user", "content": []},  # empty list
+        {"role": "user", "content": None},  # None
+        {"role": "user", "content": ["bare-string-not-a-dict"]},  # list, no dict block
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},  # dict block
+        {"role": "tool"},  # missing content key
+    ]
+    for shape in shapes:
+        marked = _with_cache_marker(shape)
+        blocks = marked["content"]
+        assert isinstance(blocks, list) and blocks, f"no content list for {shape}"
+        # Exactly one block carries the cache_control anchor.
+        anchored = [b for b in blocks if isinstance(b, dict) and "cache_control" in b]
+        assert len(anchored) == 1, f"expected one anchor for {shape}, got {anchored}"
+        # No text block is empty (would 400 on the Anthropic API).
+        for b in _text_blocks(marked):
+            assert b["text"] != "", f"empty text block emitted for {shape}"
+
+
+def test_cache_marker_prefers_existing_dict_block_over_injecting() -> None:
+    # A non-empty last dict block is marked in place — no extra block injected.
+    msg = {"role": "user", "content": [{"type": "text", "text": "keep me"}]}
+    marked = _with_cache_marker(msg)
+    assert marked["content"] == [
+        {"type": "text", "text": "keep me", "cache_control": {"type": "ephemeral"}}
+    ]

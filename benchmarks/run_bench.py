@@ -33,6 +33,7 @@ from typing import Any, cast
 from benchmarks import datasets as ds_mod
 from benchmarks.metrics import (
     BENCH_MODEL,
+    BenchmarkAbortedError,
     CaseMetrics,
     measure_case,
     measure_conversation_case,
@@ -50,9 +51,8 @@ BASELINE_MD = HERE / "BASELINE.md"
 DATA_DIR = HERE / "data"
 
 # Default out-dir for normal (non-re-baselining) runs.
-# floor_check.py uses the same constant so the two ends stay in sync.
 # Must be outside benchmarks/ so default runs leave `git status benchmarks/` clean.
-DEFAULT_OUT_DIR: Path = Path(tempfile.gettempdir()) / "headroom_bench"
+DEFAULT_OUT_DIR: Path = Path(tempfile.gettempdir()) / "furl_bench"
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ def build_results_payload(
 
     The top-level ``needle_recall`` numbers are the NAMING arm — the same
     best-case-by-construction semantics the committed floor was captured
-    with, and what ``floor_check.py`` gates on (== 100%). The honest
+    with (== 100%). The honest
     non-quoting-user numbers live SEPARATELY under ``needle_recall.control``
     (EFF-7): the control arm is expected to be lower on the lossy path and
     is deliberately NOT part of the 100% gate.
@@ -385,6 +385,25 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     refresh = "--refresh" in args
 
+    # A2: fail CLOSED on a broken engine. Running `python -m benchmarks.run_bench`
+    # from the repo root puts the extension-less source tree ahead of the built
+    # wheel on sys.path, so every compress() fail-opens ("No module named
+    # 'furl_ctx._core'") and the harness would otherwise write a plausible-looking
+    # all-zero baseline (0% reduction, "lossless", 100% recall). Verify the native
+    # core imports up front and abort BEFORE measuring or writing anything.
+    try:
+        import furl_ctx._core  # noqa: F401  (native extension presence check)
+    except Exception as exc:  # noqa: BLE001 - any import failure is fatal here
+        print(
+            "ERROR: furl_ctx._core native extension is not importable "
+            f"({exc}).\n  compress() would fail open on every case and produce a "
+            "fictional all-zero baseline. Build/install the wheel (maturin develop) "
+            "and run from OUTSIDE the source tree, or `pip install -e .`. "
+            "Refusing to write a misleading baseline.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Parse --out <dir>
     out_dir = DEFAULT_OUT_DIR
     if "--out" in args:
@@ -416,8 +435,14 @@ def main(argv: list[str] | None = None) -> int:
     if refresh:
         ds_mod.all_datasets(refresh=True)
 
-    cases = run_datasets()
-    needles = run_needle_recall()
+    # A2: any per-item compress() fail-open aborts the whole run BEFORE the write
+    # below, so a broken engine never produces a baseline file at all.
+    try:
+        cases = run_datasets()
+        needles = run_needle_recall()
+    except BenchmarkAbortedError as exc:
+        print(f"ERROR: benchmark aborted (fail-closed): {exc}", file=sys.stderr)
+        return 1
 
     print_table(cases, needles)
 

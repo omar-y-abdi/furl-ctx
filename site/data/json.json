@@ -1,0 +1,536 @@
+{
+  "id": "json",
+  "label": "JSON API response",
+  "kind_label": "array of near-identical rows",
+  "tagline": "Row after near-identical row, and one status that is not 200.",
+  "story": "furl reads the shape once, writes a compact table, and offloads the rows. Any row is addressable by value.",
+  "transform": "router:smart_crusher:0.05",
+  "transforms_applied": [
+    "router:protected:user_message",
+    "router:smart_crusher:0.05"
+  ],
+  "fold_mode": "table",
+  "tokens_before": 3791,
+  "tokens_after": 218,
+  "tokens_saved": 3573,
+  "compression_ratio": 0.9424953838037458,
+  "percent_saved": 94.2,
+  "original": "[\n{\"id\": 1001, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 13, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},\n{\"id\": 1002, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 14, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},\n{\"id\": 1003, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 15, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},\n{\"id\": 1004, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 16, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},\n{\"id\": 1005, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 17, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},\n{\"id\": 1006, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 18, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},\n{\"id\": 1007, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 19, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},\n{\"id\": 1008, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 20, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},\n{\"id\": 1009, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 21, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},\n{\"id\": 1010, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 22, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},\n{\"id\": 1011, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 23, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},\n{\"id\": 1012, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 24, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},\n{\"id\": 1013, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 25, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},\n{\"id\": 1014, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 26, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},\n{\"id\": 1015, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 27, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},\n{\"id\": 1016, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 28, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},\n{\"id\": 1017, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 29, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},\n{\"id\": 1018, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 30, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},\n{\"id\": 1019, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 31, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},\n{\"id\": 1020, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 32, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},\n{\"id\": 1021, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 33, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},\n{\"id\": 1022, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 34, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},\n{\"id\": 1023, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 35, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},\n{\"id\": 1024, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 36, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},\n{\"id\": 1025, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 37, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},\n{\"id\": 1026, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 38, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},\n{\"id\": 1027, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 39, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},\n{\"id\": 1028, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 40, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},\n{\"id\": 1029, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 41, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},\n{\"id\": 1030, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 12, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},\n{\"id\": 1031, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 13, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},\n{\"id\": 1032, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 14, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},\n{\"id\": 1033, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 15, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},\n{\"id\": 1034, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 16, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},\n{\"id\": 1035, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 17, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},\n{\"id\": 1036, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 18, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},\n{\"id\": 1037, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 19, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},\n{\"id\": 1038, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 20, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},\n{\"id\": 1039, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 21, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},\n{\"id\": 1040, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 22, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},\n{\"id\": 1041, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 23, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},\n{\"id\": 1042, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 24, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},\n{\"id\": 1043, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 25, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},\n{\"id\": 1044, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 26, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},\n{\"id\": 1045, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 27, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},\n{\"id\": 1046, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 28, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},\n{\"id\": 1047, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 29, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},\n{\"id\": 1048, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 503, \"ms\": 30, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},\n{\"id\": 1049, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 31, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},\n{\"id\": 1050, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 32, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},\n{\"id\": 1051, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 33, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},\n{\"id\": 1052, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 34, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},\n{\"id\": 1053, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 35, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},\n{\"id\": 1054, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 36, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},\n{\"id\": 1055, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 37, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},\n{\"id\": 1056, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 38, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},\n{\"id\": 1057, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 39, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},\n{\"id\": 1058, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 40, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},\n{\"id\": 1059, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 41, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},\n{\"id\": 1060, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 12, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},\n{\"id\": 1061, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 13, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},\n{\"id\": 1062, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 14, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},\n{\"id\": 1063, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 15, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},\n{\"id\": 1064, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 16, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},\n{\"id\": 1065, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 17, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},\n{\"id\": 1066, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 18, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},\n{\"id\": 1067, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 19, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},\n{\"id\": 1068, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 20, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},\n{\"id\": 1069, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 21, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},\n{\"id\": 1070, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 22, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},\n{\"id\": 1071, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 23, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},\n{\"id\": 1072, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 24, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"}\n]",
+  "original_line_count": 74,
+  "original_bytes": 9481,
+  "compressed": "\"[7]{action:string=page_view,id:int,ms:int,path:string^,region:string,status:int,user:string^}\\n__dict:region=eu-west,ap-south,us-east\\n__affix:path=/api/v2/resource/,\\n__affix:user=user_,\\n1001,13,1,0,200,1\\n1002,14,2,1,=,2\\n1003,15,3,2,=,3\\n1019,31,4,0,=,1\\n1048,30,3,2,503,3\\n1071,23,11,1,200,8\\n1072,24,12,2,=,0\\n{\\\"_ccr_dropped\\\":\\\"<<ccr:80684132edf9 65_rows_offloaded>>\\\",\\\"_ccr_rows\\\":\\\"<<ccr:80684132edf9#rows 65_chunks>>\\\"}\"",
+  "compressed_bytes": 433,
+  "hash": "80684132edf9",
+  "marker_text": "65 rows offloaded to a compact table",
+  "keep_count": 1,
+  "before_lines": [
+    {
+      "text": "[",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1001, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 13, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1002, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 14, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1003, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 15, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1004, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 16, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1005, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 17, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1006, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 18, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1007, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 19, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1008, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 20, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1009, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 21, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1010, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 22, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1011, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 23, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1012, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 24, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1013, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 25, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1014, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 26, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1015, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 27, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1016, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 28, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1017, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 29, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1018, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 30, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1019, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 31, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1020, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 32, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1021, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 33, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1022, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 34, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1023, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 35, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1024, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 36, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1025, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 37, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1026, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 38, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1027, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 39, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1028, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 40, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1029, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 41, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1030, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 12, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1031, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 13, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1032, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 14, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1033, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 15, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1034, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 16, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1035, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 17, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1036, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 18, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1037, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 19, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1038, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 20, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1039, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 21, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1040, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 22, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1041, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 23, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1042, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 24, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1043, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 25, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1044, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 26, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1045, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 27, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1046, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 28, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1047, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 29, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1048, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 503, \"ms\": 30, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": true,
+      "role": "keep"
+    },
+    {
+      "text": "{\"id\": 1049, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 31, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1050, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 32, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1051, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 33, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1052, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 34, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1053, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 35, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1054, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 36, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1055, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 37, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1056, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 38, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1057, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 39, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1058, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 40, \"path\": \"/api/v2/resource/13\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1059, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 41, \"path\": \"/api/v2/resource/14\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1060, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 12, \"path\": \"/api/v2/resource/0\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1061, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 13, \"path\": \"/api/v2/resource/1\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1062, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 14, \"path\": \"/api/v2/resource/2\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1063, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 15, \"path\": \"/api/v2/resource/3\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1064, \"user\": \"user_1\", \"action\": \"page_view\", \"status\": 200, \"ms\": 16, \"path\": \"/api/v2/resource/4\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1065, \"user\": \"user_2\", \"action\": \"page_view\", \"status\": 200, \"ms\": 17, \"path\": \"/api/v2/resource/5\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1066, \"user\": \"user_3\", \"action\": \"page_view\", \"status\": 200, \"ms\": 18, \"path\": \"/api/v2/resource/6\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1067, \"user\": \"user_4\", \"action\": \"page_view\", \"status\": 200, \"ms\": 19, \"path\": \"/api/v2/resource/7\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1068, \"user\": \"user_5\", \"action\": \"page_view\", \"status\": 200, \"ms\": 20, \"path\": \"/api/v2/resource/8\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1069, \"user\": \"user_6\", \"action\": \"page_view\", \"status\": 200, \"ms\": 21, \"path\": \"/api/v2/resource/9\", \"region\": \"us-east\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1070, \"user\": \"user_7\", \"action\": \"page_view\", \"status\": 200, \"ms\": 22, \"path\": \"/api/v2/resource/10\", \"region\": \"eu-west\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1071, \"user\": \"user_8\", \"action\": \"page_view\", \"status\": 200, \"ms\": 23, \"path\": \"/api/v2/resource/11\", \"region\": \"ap-south\"},",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "{\"id\": 1072, \"user\": \"user_0\", \"action\": \"page_view\", \"status\": 200, \"ms\": 24, \"path\": \"/api/v2/resource/12\", \"region\": \"us-east\"}",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "]",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    }
+  ],
+  "after_lines": [
+    {
+      "text": "\"[7]{action:string=page_view,id:int,ms:int,path:string^,region:string,status:int,user:string^}\\n__dict:region=eu-west,ap-south,us-east\\n__affix:path=/api/v2/resource/,\\n__affix:user=user_,\\n1001,13,1,0,200,1\\n1002,14,2,1,=,2\\n1003,15,3,2,=,3\\n1019,31,4,0,=,1\\n1048,30,3,2,503,3\\n1071,23,11,1,200,8\\n1072,24,12,2,=,0\\n{\\\"_ccr_dropped\\\":\\\"<<ccr:80684132edf9 65_rows_offloaded>>\\\",\\\"_ccr_rows\\\":\\\"<<ccr:80684132edf9#rows 65_chunks>>\\\"}\"",
+      "marker": true
+    }
+  ],
+  "after_display": [
+    {
+      "text": "[7]{action:string=page_view,id:int,ms:int,path:string^,region:string,status:int,user:string^}",
+      "marker": false
+    },
+    {
+      "text": "__dict:region=eu-west,ap-south,us-east",
+      "marker": false
+    },
+    {
+      "text": "__affix:path=/api/v2/resource/,",
+      "marker": false
+    },
+    {
+      "text": "__affix:user=user_,",
+      "marker": false
+    },
+    {
+      "text": "1001,13,1,0,200,1",
+      "marker": false
+    },
+    {
+      "text": "1002,14,2,1,=,2",
+      "marker": false
+    },
+    {
+      "text": "1003,15,3,2,=,3",
+      "marker": false
+    },
+    {
+      "text": "1019,31,4,0,=,1",
+      "marker": false
+    },
+    {
+      "text": "1048,30,3,2,503,3",
+      "marker": false
+    },
+    {
+      "text": "1071,23,11,1,200,8",
+      "marker": false
+    },
+    {
+      "text": "1072,24,12,2,=,0",
+      "marker": false
+    },
+    {
+      "text": "{\"_ccr_dropped\":\"<<ccr:80684132edf9 65_rows_offloaded>>\",\"_ccr_rows\":\"<<ccr:80684132edf9#rows 65_chunks>>\"}",
+      "marker": true
+    }
+  ],
+  "retrieval": {
+    "kind": "select",
+    "control_label": "Retrieve the 503 row",
+    "caption": "Select the row where status equals 503. The exact original object comes back.",
+    "call": "retrieve(\"80684132edf9\", select_field=\"status\", select_equals=503)",
+    "result": "[\n  {\n    \"id\": 1048,\n    \"user\": \"user_3\",\n    \"action\": \"page_view\",\n    \"status\": 503,\n    \"ms\": 30,\n    \"path\": \"/api/v2/resource/3\",\n    \"region\": \"us-east\"\n  }\n]",
+    "full_byte_exact": false
+  }
+}

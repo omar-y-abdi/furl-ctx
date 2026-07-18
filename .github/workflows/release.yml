@@ -77,7 +77,7 @@ jobs:
       bump: ${{ steps.ver.outputs.bump }}
       previous_tag: ${{ steps.ver.outputs.previous_tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
@@ -164,17 +164,17 @@ jobs:
         include: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"}]') || fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","manylinux":"2_28"},{"os":"macos-14","target":"aarch64-apple-darwin","manylinux":""},{"os":"macos-15-intel","target":"x86_64-apple-darwin","manylinux":""}]') }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
 
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --interpreter python3.10 python3.11 python3.12 python3.13
@@ -203,7 +203,7 @@ jobs:
       # build from any future `os` rename.
       - name: Build sdist (linux x86_64 only — sdist is platform-independent)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: sdist
           args: --out dist
@@ -267,7 +267,7 @@ jobs:
           PY
 
       - name: Upload wheels artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: dist/*
@@ -281,7 +281,7 @@ jobs:
       contents: read
     steps:
       - name: Download all wheel artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: wheels-*
           path: wheels-tmp/
@@ -330,13 +330,13 @@ jobs:
           PY
 
       - name: Upload merged dist artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist
           path: dist/
 
       - name: Upload merged release-assets artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets-merged
           path: release-assets/
@@ -380,7 +380,7 @@ jobs:
 
     steps:
       - name: Download wheels artifact for this target
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ matrix.wheel_artifact }}
           path: dist/
@@ -409,6 +409,91 @@ jobs:
           import furl_ctx
           from furl_ctx._core import hello as _rust_hello
           print(f"smoke-import OK: python={sys.version_info[:3]} hello={_rust_hello()}")
+
+          # CAVEAT-02 hardening: `import furl_ctx` alone (the check above) does not
+          # prove the wheel shipped a working CLI. The 0.27.0 wheel imported cleanly
+          # and STILL had no console script and no furl_ctx.cli module (RECORD had
+          # no furl_ctx/cli.py, dist-info had no entry_points.txt). Everything below
+          # proves the full CLI + library surface a `pip install furl-ctx` user gets
+          # is actually present and runnable, in this same clean venv with ONLY the
+          # wheel installed.
+
+          # (1) Public library exports (furl_ctx/__init__.py) a pip-only user relies on.
+          from furl_ctx import compress, retrieve, purge, resolve_markers  # noqa: F401
+          print("smoke-exports OK: compress, retrieve, purge, resolve_markers all importable")
+
+          # (2) Wheel metadata: the `furl` console script must be a registered entry
+          # point of the `furl-ctx` distribution (pyproject.toml declares
+          # `furl = "furl_ctx.cli:main"` under [project.scripts]). Belt-and-braces
+          # with the executable check below: this proves the *metadata* is correct
+          # even if PATH/shim resolution were ever flaky.
+          from importlib import metadata
+
+          dist = metadata.distribution("furl-ctx")
+          console_scripts = {
+              ep.name: ep.value for ep in dist.entry_points if ep.group == "console_scripts"
+          }
+          if console_scripts.get("furl") != "furl_ctx.cli:main":
+              sys.exit(
+                  "smoke-FAIL: furl-ctx wheel has no console_scripts entry point "
+                  f"'furl = furl_ctx.cli:main' (found: {console_scripts})"
+              )
+          print(f"smoke-entrypoint OK: console_scripts={console_scripts}")
+
+          # (3) The `furl` executable itself. pip installs console scripts into the
+          # same bin/ directory as the interpreter that ran pip, so this is the
+          # venv-relative path regardless of OS or venv location (no PATH needed).
+          import pathlib
+          import subprocess
+
+          furl_bin = str(pathlib.Path(sys.executable).parent / "furl")
+
+          help_proc = subprocess.run([furl_bin, "--help"], capture_output=True, text=True, timeout=30)
+          if help_proc.returncode != 0:
+              sys.exit(
+                  f"smoke-FAIL: '{furl_bin} --help' exited {help_proc.returncode}\n"
+                  f"stdout={help_proc.stdout}\nstderr={help_proc.stderr}"
+              )
+          print("smoke-cli-help OK: furl --help exited 0")
+
+          # (4) Minimal end-to-end: pipe a small JSON blob through `furl compress` and
+          # assert exit 0 + non-empty output. --model is deliberately an unrecognized
+          # name: MODEL_PATTERNS (furl_ctx/tokenizers/registry.py) only routes
+          # gpt-*/o1/o3/text-embedding*/text-davinci/code-*/davinci/curie/babbage/ada/
+          # claude-*/gemini/palm/command to a real tokenizer backend (tiktoken, which
+          # downloads its BPE vocab file from openaipublic.blob.core.windows.net on a
+          # cold cache -- empirically confirmed: a cold-cache fetch of the DEFAULT
+          # model's encoding either fails or stalls well past furl's own 10s internal
+          # timeout before falling back). Any other model name resolves to the local
+          # EstimatingTokenCounter (regex/length heuristics, zero I/O), keeping this
+          # gate offline and fast on every runner regardless of network conditions.
+          import json
+
+          sample_input = json.dumps({"role": "tool", "content": "furl release smoke-test payload"})
+          compress_proc = subprocess.run(
+              [furl_bin, "compress", "--model", "furl-ci-smoke-estimator", "--json"],
+              input=sample_input,
+              capture_output=True,
+              text=True,
+              timeout=30,
+          )
+          if compress_proc.returncode != 0:
+              sys.exit(
+                  f"smoke-FAIL: '{furl_bin} compress' exited {compress_proc.returncode}\n"
+                  f"stdout={compress_proc.stdout}\nstderr={compress_proc.stderr}"
+              )
+          if not compress_proc.stdout.strip():
+              sys.exit("smoke-FAIL: 'furl compress' produced empty stdout")
+          compress_payload = json.loads(compress_proc.stdout)
+          if not compress_payload.get("compressed"):
+              sys.exit(f"smoke-FAIL: 'furl compress' JSON missing non-empty 'compressed': {compress_payload}")
+          if compress_payload.get("error") is not None:
+              sys.exit(f"smoke-FAIL: 'furl compress' reported a fail-open error: {compress_payload.get('error')}")
+          print(
+              "smoke-cli-compress OK: "
+              f"tokens_before={compress_payload.get('tokens_before')} "
+              f"tokens_after={compress_payload.get('tokens_after')}"
+          )
           PY
 
       - name: Smoke-import wheel inside container (Linux)
@@ -575,14 +660,14 @@ jobs:
       id-token: write  # Required for OIDC trusted publishing
     steps:
       - name: Download merged dist artifact (sdist + cross-platform wheels)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dist
           path: dist/
 
       - name: Publish ${{ env.PYPI_PACKAGE }} to PyPI
         id: pypi-publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           # Idempotent re-runs: when a wheel filename for the computed
           # version is already on PyPI (e.g. a previous push to main
@@ -610,12 +695,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
       - name: Download merged release assets (wheels + sdist)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-assets-merged
           path: release-assets

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
 
 from .base import BaseTokenizer
 
@@ -192,58 +191,7 @@ class EstimatingTokenCounter(BaseTokenizer):
 
         return overhead
 
-    def count_messages(self, messages: list[dict[str, Any]]) -> int:
-        """Estimate tokens in chat messages.
-
-        Uses the base class implementation with estimation-based
-        text counting.
-
-        Args:
-            messages: List of chat messages.
-
-        Returns:
-            Estimated total token count.
-        """
-        # Use base class implementation
-        return super().count_messages(messages)
-
     def __repr__(self) -> str:
         if self._fixed_ratio:
             return f"EstimatingTokenCounter(chars_per_token={self._fixed_ratio})"
         return "EstimatingTokenCounter(auto)"
-
-
-class CharacterCounter(BaseTokenizer):
-    """Simple character-based counter.
-
-    Uses a fixed character-to-token ratio. Useful for:
-    - Quick approximations
-    - Testing
-    - Models with unknown tokenization
-
-    This is less accurate than EstimatingTokenCounter but faster.
-    """
-
-    def __init__(self, chars_per_token: float = 4.0):
-        """Initialize character counter.
-
-        Args:
-            chars_per_token: Characters per token ratio.
-        """
-        self.chars_per_token = chars_per_token
-
-    def count_text(self, text: str) -> int:
-        """Count tokens based on character count.
-
-        Args:
-            text: Text to count.
-
-        Returns:
-            Estimated token count.
-        """
-        if not text:
-            return 0
-        return max(1, int(len(text) / self.chars_per_token + 0.5))
-
-    def __repr__(self) -> str:
-        return f"CharacterCounter(chars_per_token={self.chars_per_token})"

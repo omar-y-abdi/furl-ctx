@@ -11,8 +11,7 @@ level. The year-upper bound (:156) is unreachable from a parsed string at all
 arithmetic that overflows the calendar.
 
 So the boundaries are asserted directly against ``_parse_iso`` / ``_render_iso``
-(consistent with the suite already testing private helpers, e.g.
-``test_parser_none_text.py`` importing ``_extract_tool_result_text``), plus one
+(consistent with the suite already testing private helpers elsewhere), plus one
 ``decode_csv_schema_rows`` smoke test confirming the public path decodes.
 
 Every edge below was REPL-verified before assertion:

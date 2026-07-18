@@ -1,0 +1,1027 @@
+{
+  "id": "logs",
+  "label": "Application logs",
+  "kind_label": "verbose service logs",
+  "tagline": "One error, buried in a wall of heartbeats.",
+  "story": "furl keeps the anomaly and a few representatives, then folds the repeats into a marker. The dropped lines stay retrievable byte-exact.",
+  "transform": "router:search:0.04",
+  "transforms_applied": [
+    "router:protected:user_message",
+    "router:search:0.04"
+  ],
+  "fold_mode": "lines",
+  "tokens_before": 6213,
+  "tokens_after": 263,
+  "tokens_saved": 5950,
+  "compression_ratio": 0.9576694028649606,
+  "percent_saved": 95.8,
+  "original": "2026-07-13T09:00:01.037Z INFO  api-gw-1 200 GET /v2/accounts/1 9ms cache=HIT\n2026-07-13T09:00:02.074Z INFO  api-gw-2 200 GET /v2/accounts/2 10ms cache=HIT\n2026-07-13T09:00:03.111Z INFO  api-gw-3 200 GET /v2/accounts/3 11ms cache=MISS\n2026-07-13T09:00:04.148Z INFO  api-gw-4 200 GET /v2/accounts/4 12ms cache=HIT\n2026-07-13T09:00:05.185Z INFO  api-gw-5 200 GET /v2/accounts/5 13ms cache=HIT\n2026-07-13T09:00:06.222Z INFO  api-gw-0 200 GET /v2/accounts/6 14ms cache=MISS\n2026-07-13T09:00:07.259Z INFO  api-gw-1 200 GET /v2/accounts/7 15ms cache=HIT\n2026-07-13T09:00:08.296Z INFO  api-gw-2 200 GET /v2/accounts/8 16ms cache=HIT\n2026-07-13T09:00:09.333Z INFO  api-gw-3 200 GET /v2/accounts/9 17ms cache=MISS\n2026-07-13T09:00:10.370Z INFO  api-gw-4 200 GET /v2/accounts/10 18ms cache=HIT\n2026-07-13T09:00:11.407Z INFO  api-gw-5 200 GET /v2/accounts/11 19ms cache=HIT\n2026-07-13T09:00:12.444Z INFO  api-gw-0 200 GET /v2/accounts/12 20ms cache=MISS\n2026-07-13T09:00:13.481Z INFO  api-gw-1 200 GET /v2/accounts/13 21ms cache=HIT\n2026-07-13T09:00:14.518Z INFO  api-gw-2 200 GET /v2/accounts/14 22ms cache=HIT\n2026-07-13T09:00:15.555Z INFO  api-gw-3 200 GET /v2/accounts/15 23ms cache=MISS\n2026-07-13T09:00:16.592Z INFO  api-gw-4 200 GET /v2/accounts/16 24ms cache=HIT\n2026-07-13T09:00:17.629Z INFO  api-gw-5 200 GET /v2/accounts/17 25ms cache=HIT\n2026-07-13T09:00:18.666Z INFO  api-gw-0 200 GET /v2/accounts/18 26ms cache=MISS\n2026-07-13T09:00:19.703Z INFO  api-gw-1 200 GET /v2/accounts/19 27ms cache=HIT\n2026-07-13T09:00:20.740Z INFO  api-gw-2 200 GET /v2/accounts/20 28ms cache=HIT\n2026-07-13T09:00:21.777Z INFO  api-gw-3 200 GET /v2/accounts/21 29ms cache=MISS\n2026-07-13T09:00:22.814Z INFO  api-gw-4 200 GET /v2/accounts/22 30ms cache=HIT\n2026-07-13T09:00:23.851Z INFO  api-gw-5 200 GET /v2/accounts/23 31ms cache=HIT\n2026-07-13T09:00:24.888Z INFO  api-gw-0 200 GET /v2/accounts/24 32ms cache=MISS\n2026-07-13T09:00:25.925Z INFO  api-gw-1 200 GET /v2/accounts/25 33ms cache=HIT\n2026-07-13T09:00:26.962Z INFO  api-gw-2 200 GET /v2/accounts/26 34ms cache=HIT\n2026-07-13T09:00:27.999Z INFO  api-gw-3 200 GET /v2/accounts/27 35ms cache=MISS\n2026-07-13T09:00:28.036Z INFO  api-gw-4 200 GET /v2/accounts/28 36ms cache=HIT\n2026-07-13T09:00:29.073Z INFO  api-gw-5 200 GET /v2/accounts/29 37ms cache=HIT\n2026-07-13T09:00:30.110Z INFO  api-gw-0 200 GET /v2/accounts/30 38ms cache=MISS\n2026-07-13T09:00:31.147Z INFO  api-gw-1 200 GET /v2/accounts/31 39ms cache=HIT\n2026-07-13T09:00:32.184Z INFO  api-gw-2 200 GET /v2/accounts/32 40ms cache=HIT\n2026-07-13T09:00:33.221Z INFO  api-gw-3 200 GET /v2/accounts/33 41ms cache=MISS\n2026-07-13T09:00:34.258Z INFO  api-gw-4 200 GET /v2/accounts/34 42ms cache=HIT\n2026-07-13T09:00:35.295Z INFO  api-gw-5 200 GET /v2/accounts/35 43ms cache=HIT\n2026-07-13T09:00:36.332Z INFO  api-gw-0 200 GET /v2/accounts/36 44ms cache=MISS\n2026-07-13T09:00:37.369Z INFO  api-gw-1 200 GET /v2/accounts/37 45ms cache=HIT\n2026-07-13T09:00:38.406Z INFO  api-gw-2 200 GET /v2/accounts/38 46ms cache=HIT\n2026-07-13T09:00:39.443Z INFO  api-gw-3 200 GET /v2/accounts/39 47ms cache=MISS\n2026-07-13T09:00:40.480Z INFO  api-gw-4 200 GET /v2/accounts/40 8ms cache=HIT\n2026-07-13T09:00:41.517Z INFO  api-gw-5 200 GET /v2/accounts/41 9ms cache=HIT\n2026-07-13T09:00:42.554Z INFO  api-gw-0 200 GET /v2/accounts/42 10ms cache=MISS\n2026-07-13T09:00:43.591Z INFO  api-gw-1 200 GET /v2/accounts/43 11ms cache=HIT\n2026-07-13T09:00:44.628Z INFO  api-gw-2 200 GET /v2/accounts/44 12ms cache=HIT\n2026-07-13T09:00:45.665Z INFO  api-gw-3 200 GET /v2/accounts/45 13ms cache=MISS\n2026-07-13T09:00:46.702Z INFO  api-gw-4 200 GET /v2/accounts/46 14ms cache=HIT\n2026-07-13T09:00:47.739Z INFO  api-gw-5 200 GET /v2/accounts/47 15ms cache=HIT\n2026-07-13T09:00:48.776Z INFO  api-gw-0 200 GET /v2/accounts/48 16ms cache=MISS\n2026-07-13T09:00:49.813Z INFO  api-gw-1 200 GET /v2/accounts/49 17ms cache=HIT\n2026-07-13T09:00:50.850Z INFO  api-gw-2 200 GET /v2/accounts/0 18ms cache=HIT\n2026-07-13T09:00:51.887Z INFO  api-gw-3 200 GET /v2/accounts/1 19ms cache=MISS\n2026-07-13T09:00:52.924Z INFO  api-gw-4 200 GET /v2/accounts/2 20ms cache=HIT\n2026-07-13T09:00:53.961Z INFO  api-gw-5 200 GET /v2/accounts/3 21ms cache=HIT\n2026-07-13T09:00:54.998Z INFO  api-gw-0 200 GET /v2/accounts/4 22ms cache=MISS\n2026-07-13T09:00:55.035Z INFO  api-gw-1 200 GET /v2/accounts/5 23ms cache=HIT\n2026-07-13T09:00:56.072Z INFO  api-gw-2 200 GET /v2/accounts/6 24ms cache=HIT\n2026-07-13T09:00:57.109Z INFO  api-gw-3 200 GET /v2/accounts/7 25ms cache=MISS\n2026-07-13T09:00:58.146Z INFO  api-gw-4 200 GET /v2/accounts/8 26ms cache=HIT\n2026-07-13T09:00:59.183Z INFO  api-gw-5 200 GET /v2/accounts/9 27ms cache=HIT\n2026-07-13T09:01:00.220Z INFO  api-gw-0 200 GET /v2/accounts/10 28ms cache=MISS\n2026-07-13T09:01:01.257Z INFO  api-gw-1 200 GET /v2/accounts/11 29ms cache=HIT\n2026-07-13T09:01:02.294Z INFO  api-gw-2 200 GET /v2/accounts/12 30ms cache=HIT\n2026-07-13T09:01:03.331Z INFO  api-gw-3 200 GET /v2/accounts/13 31ms cache=MISS\n2026-07-13T09:01:04.368Z INFO  api-gw-4 200 GET /v2/accounts/14 32ms cache=HIT\n2026-07-13T09:01:05.405Z INFO  api-gw-5 200 GET /v2/accounts/15 33ms cache=HIT\n2026-07-13T09:01:06.442Z INFO  api-gw-0 200 GET /v2/accounts/16 34ms cache=MISS\n2026-07-13T09:01:07.479Z INFO  api-gw-1 200 GET /v2/accounts/17 35ms cache=HIT\n2026-07-13T09:01:08.516Z INFO  api-gw-2 200 GET /v2/accounts/18 36ms cache=HIT\n2026-07-13T09:01:09.553Z INFO  api-gw-3 200 GET /v2/accounts/19 37ms cache=MISS\n2026-07-13T09:01:10.590Z INFO  api-gw-4 200 GET /v2/accounts/20 38ms cache=HIT\n2026-07-13T09:01:11.627Z INFO  api-gw-5 200 GET /v2/accounts/21 39ms cache=HIT\n2026-07-13T09:01:12.664Z INFO  api-gw-0 200 GET /v2/accounts/22 40ms cache=MISS\n2026-07-13T09:01:13.701Z INFO  api-gw-1 200 GET /v2/accounts/23 41ms cache=HIT\n2026-07-13T09:01:14.738Z INFO  api-gw-2 200 GET /v2/accounts/24 42ms cache=HIT\n2026-07-13T09:01:15.775Z INFO  api-gw-3 200 GET /v2/accounts/25 43ms cache=MISS\n2026-07-13T09:01:16.812Z INFO  api-gw-4 200 GET /v2/accounts/26 44ms cache=HIT\n2026-07-13T09:01:17.849Z INFO  api-gw-5 200 GET /v2/accounts/27 45ms cache=HIT\n2026-07-13T09:01:18.886Z INFO  api-gw-0 200 GET /v2/accounts/28 46ms cache=MISS\n2026-07-13T09:01:19.923Z INFO  api-gw-1 200 GET /v2/accounts/29 47ms cache=HIT\n2026-07-13T09:01:20.960Z INFO  api-gw-2 200 GET /v2/accounts/30 8ms cache=HIT\n2026-07-13T09:01:21.997Z INFO  api-gw-3 200 GET /v2/accounts/31 9ms cache=MISS\n2026-07-13T09:01:22.034Z INFO  api-gw-4 200 GET /v2/accounts/32 10ms cache=HIT\n2026-07-13T09:01:23.071Z INFO  api-gw-5 200 GET /v2/accounts/33 11ms cache=HIT\n2026-07-13T09:01:24.108Z INFO  api-gw-0 200 GET /v2/accounts/34 12ms cache=MISS\n2026-07-13T09:01:25.145Z INFO  api-gw-1 200 GET /v2/accounts/35 13ms cache=HIT\n2026-07-13T09:01:26.182Z INFO  api-gw-2 200 GET /v2/accounts/36 14ms cache=HIT\n2026-07-13T09:01:27.219Z INFO  api-gw-3 200 GET /v2/accounts/37 15ms cache=MISS\n2026-07-13T09:01:28.256Z INFO  api-gw-4 200 GET /v2/accounts/38 16ms cache=HIT\n2026-07-13T09:01:29.293Z INFO  api-gw-5 200 GET /v2/accounts/39 17ms cache=HIT\n2026-07-13T09:01:30.330Z INFO  api-gw-0 200 GET /v2/accounts/40 18ms cache=MISS\n2026-07-13T09:01:31.367Z INFO  api-gw-1 200 GET /v2/accounts/41 19ms cache=HIT\n2026-07-13T09:01:32.404Z INFO  api-gw-2 200 GET /v2/accounts/42 20ms cache=HIT\n2026-07-13T09:01:33.441Z INFO  api-gw-3 200 GET /v2/accounts/43 21ms cache=MISS\n2026-07-13T09:01:34.478Z INFO  api-gw-4 200 GET /v2/accounts/44 22ms cache=HIT\n2026-07-13T09:01:35.515Z INFO  api-gw-5 200 GET /v2/accounts/45 23ms cache=HIT\n2026-07-13T09:01:36.552Z INFO  api-gw-0 200 GET /v2/accounts/46 24ms cache=MISS\n2026-07-13T09:01:37.589Z INFO  api-gw-1 200 GET /v2/accounts/47 25ms cache=HIT\n2026-07-13T09:01:38.626Z INFO  api-gw-2 200 GET /v2/accounts/48 26ms cache=HIT\n2026-07-13T09:01:39.663Z INFO  api-gw-3 200 GET /v2/accounts/49 27ms cache=MISS\n2026-07-13T09:01:40.700Z INFO  api-gw-4 200 GET /v2/accounts/0 28ms cache=HIT\n2026-07-13T09:01:41.737Z INFO  api-gw-5 200 GET /v2/accounts/1 29ms cache=HIT\n2026-07-13T09:01:42.774Z INFO  api-gw-0 200 GET /v2/accounts/2 30ms cache=MISS\n2026-07-13T09:01:43.811Z INFO  api-gw-1 200 GET /v2/accounts/3 31ms cache=HIT\n2026-07-13T09:01:44.848Z INFO  api-gw-2 200 GET /v2/accounts/4 32ms cache=HIT\n2026-07-13T09:01:45.885Z ERROR api-gw-3 upstream 502 from billing-svc after 3 retries corr_id=7f3a9c21\n2026-07-13T09:01:46.922Z INFO  api-gw-4 200 GET /v2/accounts/6 34ms cache=HIT\n2026-07-13T09:01:47.959Z INFO  api-gw-5 200 GET /v2/accounts/7 35ms cache=HIT\n2026-07-13T09:01:48.996Z INFO  api-gw-0 200 GET /v2/accounts/8 36ms cache=MISS\n2026-07-13T09:01:49.033Z INFO  api-gw-1 200 GET /v2/accounts/9 37ms cache=HIT\n2026-07-13T09:01:50.070Z INFO  api-gw-2 200 GET /v2/accounts/10 38ms cache=HIT\n2026-07-13T09:01:51.107Z INFO  api-gw-3 200 GET /v2/accounts/11 39ms cache=MISS\n2026-07-13T09:01:52.144Z INFO  api-gw-4 200 GET /v2/accounts/12 40ms cache=HIT\n2026-07-13T09:01:53.181Z INFO  api-gw-5 200 GET /v2/accounts/13 41ms cache=HIT\n2026-07-13T09:01:54.218Z INFO  api-gw-0 200 GET /v2/accounts/14 42ms cache=MISS\n2026-07-13T09:01:55.255Z INFO  api-gw-1 200 GET /v2/accounts/15 43ms cache=HIT\n2026-07-13T09:01:56.292Z INFO  api-gw-2 200 GET /v2/accounts/16 44ms cache=HIT\n2026-07-13T09:01:57.329Z INFO  api-gw-3 200 GET /v2/accounts/17 45ms cache=MISS\n2026-07-13T09:01:58.366Z INFO  api-gw-4 200 GET /v2/accounts/18 46ms cache=HIT\n2026-07-13T09:01:59.403Z INFO  api-gw-5 200 GET /v2/accounts/19 47ms cache=HIT\n2026-07-13T09:02:00.440Z INFO  api-gw-0 200 GET /v2/accounts/20 8ms cache=MISS\n2026-07-13T09:02:01.477Z INFO  api-gw-1 200 GET /v2/accounts/21 9ms cache=HIT\n2026-07-13T09:02:02.514Z INFO  api-gw-2 200 GET /v2/accounts/22 10ms cache=HIT\n2026-07-13T09:02:03.551Z INFO  api-gw-3 200 GET /v2/accounts/23 11ms cache=MISS\n2026-07-13T09:02:04.588Z INFO  api-gw-4 200 GET /v2/accounts/24 12ms cache=HIT\n2026-07-13T09:02:05.625Z INFO  api-gw-5 200 GET /v2/accounts/25 13ms cache=HIT\n2026-07-13T09:02:06.662Z INFO  api-gw-0 200 GET /v2/accounts/26 14ms cache=MISS\n2026-07-13T09:02:07.699Z INFO  api-gw-1 200 GET /v2/accounts/27 15ms cache=HIT\n2026-07-13T09:02:08.736Z INFO  api-gw-2 200 GET /v2/accounts/28 16ms cache=HIT\n2026-07-13T09:02:09.773Z INFO  api-gw-3 200 GET /v2/accounts/29 17ms cache=MISS\n2026-07-13T09:02:10.810Z INFO  api-gw-4 200 GET /v2/accounts/30 18ms cache=HIT\n2026-07-13T09:02:11.847Z INFO  api-gw-5 200 GET /v2/accounts/31 19ms cache=HIT\n2026-07-13T09:02:12.884Z INFO  api-gw-0 200 GET /v2/accounts/32 20ms cache=MISS\n2026-07-13T09:02:13.921Z INFO  api-gw-1 200 GET /v2/accounts/33 21ms cache=HIT\n2026-07-13T09:02:14.958Z INFO  api-gw-2 200 GET /v2/accounts/34 22ms cache=HIT\n2026-07-13T09:02:15.995Z INFO  api-gw-3 200 GET /v2/accounts/35 23ms cache=MISS\n2026-07-13T09:02:16.032Z INFO  api-gw-4 200 GET /v2/accounts/36 24ms cache=HIT\n2026-07-13T09:02:17.069Z INFO  api-gw-5 200 GET /v2/accounts/37 25ms cache=HIT\n2026-07-13T09:02:18.106Z INFO  api-gw-0 200 GET /v2/accounts/38 26ms cache=MISS\n2026-07-13T09:02:19.143Z INFO  api-gw-1 200 GET /v2/accounts/39 27ms cache=HIT\n2026-07-13T09:02:20.180Z INFO  api-gw-2 200 GET /v2/accounts/40 28ms cache=HIT\n2026-07-13T09:02:21.217Z INFO  api-gw-3 200 GET /v2/accounts/41 29ms cache=MISS\n2026-07-13T09:02:22.254Z INFO  api-gw-4 200 GET /v2/accounts/42 30ms cache=HIT\n2026-07-13T09:02:23.291Z INFO  api-gw-5 200 GET /v2/accounts/43 31ms cache=HIT\n2026-07-13T09:02:24.328Z INFO  api-gw-0 200 GET /v2/accounts/44 32ms cache=MISS\n2026-07-13T09:02:25.365Z INFO  api-gw-1 200 GET /v2/accounts/45 33ms cache=HIT\n2026-07-13T09:02:26.402Z INFO  api-gw-2 200 GET /v2/accounts/46 34ms cache=HIT\n2026-07-13T09:02:27.439Z INFO  api-gw-3 200 GET /v2/accounts/47 35ms cache=MISS\n2026-07-13T09:02:28.476Z INFO  api-gw-4 200 GET /v2/accounts/48 36ms cache=HIT\n2026-07-13T09:02:29.513Z INFO  api-gw-5 200 GET /v2/accounts/49 37ms cache=HIT\n2026-07-13T09:02:30.550Z INFO  api-gw-0 200 GET /v2/accounts/0 38ms cache=MISS\n2026-07-13T09:02:31.587Z INFO  api-gw-1 200 GET /v2/accounts/1 39ms cache=HIT\n2026-07-13T09:02:32.624Z INFO  api-gw-2 200 GET /v2/accounts/2 40ms cache=HIT\n2026-07-13T09:02:33.661Z INFO  api-gw-3 200 GET /v2/accounts/3 41ms cache=MISS\n2026-07-13T09:02:34.698Z INFO  api-gw-4 200 GET /v2/accounts/4 42ms cache=HIT\n2026-07-13T09:02:35.735Z INFO  api-gw-5 200 GET /v2/accounts/5 43ms cache=HIT\n2026-07-13T09:02:36.772Z INFO  api-gw-0 200 GET /v2/accounts/6 44ms cache=MISS\n2026-07-13T09:02:37.809Z INFO  api-gw-1 200 GET /v2/accounts/7 45ms cache=HIT\n2026-07-13T09:02:38.846Z INFO  api-gw-2 200 GET /v2/accounts/8 46ms cache=HIT\n2026-07-13T09:02:39.883Z INFO  api-gw-3 200 GET /v2/accounts/9 47ms cache=MISS\n2026-07-13T09:02:40.920Z INFO  api-gw-4 200 GET /v2/accounts/10 8ms cache=HIT\n",
+  "original_line_count": 160,
+  "original_bytes": 12670,
+  "compressed": "2026-07-13T09:00:01.037Z INFO  api-gw-1 200 GET /v2/accounts/1 9ms cache=HIT\n2026-07-13T09:00:02.074Z INFO  api-gw-2 200 GET /v2/accounts/2 10ms cache=HIT\n2026-07-13T09:00:03.111Z INFO  api-gw-3 200 GET /v2/accounts/3 11ms cache=MISS\n2026-07-13T09:01:45.885Z ERROR api-gw-3 upstream 502 from billing-svc after 3 retries corr_id=7f3a9c21\n2026-07-13T09:02:40.920Z INFO  api-gw-4 200 GET /v2/accounts/10 8ms cache=HIT\n[... and 155 more matches in 2026-07-13T09]\n[160 matches compressed to 5. Retrieve more: hash=bcdfa6f82652310f880444a2]",
+  "compressed_bytes": 534,
+  "hash": "bcdfa6f82652310f880444a2",
+  "marker_text": "160 matching lines folded, 5 kept as samples",
+  "keep_count": 5,
+  "before_lines": [
+    {
+      "text": "2026-07-13T09:00:01.037Z INFO  api-gw-1 200 GET /v2/accounts/1 9ms cache=HIT",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "2026-07-13T09:00:02.074Z INFO  api-gw-2 200 GET /v2/accounts/2 10ms cache=HIT",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "2026-07-13T09:00:03.111Z INFO  api-gw-3 200 GET /v2/accounts/3 11ms cache=MISS",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    },
+    {
+      "text": "2026-07-13T09:00:04.148Z INFO  api-gw-4 200 GET /v2/accounts/4 12ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:05.185Z INFO  api-gw-5 200 GET /v2/accounts/5 13ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:06.222Z INFO  api-gw-0 200 GET /v2/accounts/6 14ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:07.259Z INFO  api-gw-1 200 GET /v2/accounts/7 15ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:08.296Z INFO  api-gw-2 200 GET /v2/accounts/8 16ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:09.333Z INFO  api-gw-3 200 GET /v2/accounts/9 17ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:10.370Z INFO  api-gw-4 200 GET /v2/accounts/10 18ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:11.407Z INFO  api-gw-5 200 GET /v2/accounts/11 19ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:12.444Z INFO  api-gw-0 200 GET /v2/accounts/12 20ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:13.481Z INFO  api-gw-1 200 GET /v2/accounts/13 21ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:14.518Z INFO  api-gw-2 200 GET /v2/accounts/14 22ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:15.555Z INFO  api-gw-3 200 GET /v2/accounts/15 23ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:16.592Z INFO  api-gw-4 200 GET /v2/accounts/16 24ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:17.629Z INFO  api-gw-5 200 GET /v2/accounts/17 25ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:18.666Z INFO  api-gw-0 200 GET /v2/accounts/18 26ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:19.703Z INFO  api-gw-1 200 GET /v2/accounts/19 27ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:20.740Z INFO  api-gw-2 200 GET /v2/accounts/20 28ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:21.777Z INFO  api-gw-3 200 GET /v2/accounts/21 29ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:22.814Z INFO  api-gw-4 200 GET /v2/accounts/22 30ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:23.851Z INFO  api-gw-5 200 GET /v2/accounts/23 31ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:24.888Z INFO  api-gw-0 200 GET /v2/accounts/24 32ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:25.925Z INFO  api-gw-1 200 GET /v2/accounts/25 33ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:26.962Z INFO  api-gw-2 200 GET /v2/accounts/26 34ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:27.999Z INFO  api-gw-3 200 GET /v2/accounts/27 35ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:28.036Z INFO  api-gw-4 200 GET /v2/accounts/28 36ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:29.073Z INFO  api-gw-5 200 GET /v2/accounts/29 37ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:30.110Z INFO  api-gw-0 200 GET /v2/accounts/30 38ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:31.147Z INFO  api-gw-1 200 GET /v2/accounts/31 39ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:32.184Z INFO  api-gw-2 200 GET /v2/accounts/32 40ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:33.221Z INFO  api-gw-3 200 GET /v2/accounts/33 41ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:34.258Z INFO  api-gw-4 200 GET /v2/accounts/34 42ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:35.295Z INFO  api-gw-5 200 GET /v2/accounts/35 43ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:36.332Z INFO  api-gw-0 200 GET /v2/accounts/36 44ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:37.369Z INFO  api-gw-1 200 GET /v2/accounts/37 45ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:38.406Z INFO  api-gw-2 200 GET /v2/accounts/38 46ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:39.443Z INFO  api-gw-3 200 GET /v2/accounts/39 47ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:40.480Z INFO  api-gw-4 200 GET /v2/accounts/40 8ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:41.517Z INFO  api-gw-5 200 GET /v2/accounts/41 9ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:42.554Z INFO  api-gw-0 200 GET /v2/accounts/42 10ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:43.591Z INFO  api-gw-1 200 GET /v2/accounts/43 11ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:44.628Z INFO  api-gw-2 200 GET /v2/accounts/44 12ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:45.665Z INFO  api-gw-3 200 GET /v2/accounts/45 13ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:46.702Z INFO  api-gw-4 200 GET /v2/accounts/46 14ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:47.739Z INFO  api-gw-5 200 GET /v2/accounts/47 15ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:48.776Z INFO  api-gw-0 200 GET /v2/accounts/48 16ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:49.813Z INFO  api-gw-1 200 GET /v2/accounts/49 17ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:50.850Z INFO  api-gw-2 200 GET /v2/accounts/0 18ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:51.887Z INFO  api-gw-3 200 GET /v2/accounts/1 19ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:52.924Z INFO  api-gw-4 200 GET /v2/accounts/2 20ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:53.961Z INFO  api-gw-5 200 GET /v2/accounts/3 21ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:54.998Z INFO  api-gw-0 200 GET /v2/accounts/4 22ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:55.035Z INFO  api-gw-1 200 GET /v2/accounts/5 23ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:56.072Z INFO  api-gw-2 200 GET /v2/accounts/6 24ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:57.109Z INFO  api-gw-3 200 GET /v2/accounts/7 25ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:58.146Z INFO  api-gw-4 200 GET /v2/accounts/8 26ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:00:59.183Z INFO  api-gw-5 200 GET /v2/accounts/9 27ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:00.220Z INFO  api-gw-0 200 GET /v2/accounts/10 28ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:01.257Z INFO  api-gw-1 200 GET /v2/accounts/11 29ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:02.294Z INFO  api-gw-2 200 GET /v2/accounts/12 30ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:03.331Z INFO  api-gw-3 200 GET /v2/accounts/13 31ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:04.368Z INFO  api-gw-4 200 GET /v2/accounts/14 32ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:05.405Z INFO  api-gw-5 200 GET /v2/accounts/15 33ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:06.442Z INFO  api-gw-0 200 GET /v2/accounts/16 34ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:07.479Z INFO  api-gw-1 200 GET /v2/accounts/17 35ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:08.516Z INFO  api-gw-2 200 GET /v2/accounts/18 36ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:09.553Z INFO  api-gw-3 200 GET /v2/accounts/19 37ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:10.590Z INFO  api-gw-4 200 GET /v2/accounts/20 38ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:11.627Z INFO  api-gw-5 200 GET /v2/accounts/21 39ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:12.664Z INFO  api-gw-0 200 GET /v2/accounts/22 40ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:13.701Z INFO  api-gw-1 200 GET /v2/accounts/23 41ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:14.738Z INFO  api-gw-2 200 GET /v2/accounts/24 42ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:15.775Z INFO  api-gw-3 200 GET /v2/accounts/25 43ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:16.812Z INFO  api-gw-4 200 GET /v2/accounts/26 44ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:17.849Z INFO  api-gw-5 200 GET /v2/accounts/27 45ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:18.886Z INFO  api-gw-0 200 GET /v2/accounts/28 46ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:19.923Z INFO  api-gw-1 200 GET /v2/accounts/29 47ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:20.960Z INFO  api-gw-2 200 GET /v2/accounts/30 8ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:21.997Z INFO  api-gw-3 200 GET /v2/accounts/31 9ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:22.034Z INFO  api-gw-4 200 GET /v2/accounts/32 10ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:23.071Z INFO  api-gw-5 200 GET /v2/accounts/33 11ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:24.108Z INFO  api-gw-0 200 GET /v2/accounts/34 12ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:25.145Z INFO  api-gw-1 200 GET /v2/accounts/35 13ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:26.182Z INFO  api-gw-2 200 GET /v2/accounts/36 14ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:27.219Z INFO  api-gw-3 200 GET /v2/accounts/37 15ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:28.256Z INFO  api-gw-4 200 GET /v2/accounts/38 16ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:29.293Z INFO  api-gw-5 200 GET /v2/accounts/39 17ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:30.330Z INFO  api-gw-0 200 GET /v2/accounts/40 18ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:31.367Z INFO  api-gw-1 200 GET /v2/accounts/41 19ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:32.404Z INFO  api-gw-2 200 GET /v2/accounts/42 20ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:33.441Z INFO  api-gw-3 200 GET /v2/accounts/43 21ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:34.478Z INFO  api-gw-4 200 GET /v2/accounts/44 22ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:35.515Z INFO  api-gw-5 200 GET /v2/accounts/45 23ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:36.552Z INFO  api-gw-0 200 GET /v2/accounts/46 24ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:37.589Z INFO  api-gw-1 200 GET /v2/accounts/47 25ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:38.626Z INFO  api-gw-2 200 GET /v2/accounts/48 26ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:39.663Z INFO  api-gw-3 200 GET /v2/accounts/49 27ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:40.700Z INFO  api-gw-4 200 GET /v2/accounts/0 28ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:41.737Z INFO  api-gw-5 200 GET /v2/accounts/1 29ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:42.774Z INFO  api-gw-0 200 GET /v2/accounts/2 30ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:43.811Z INFO  api-gw-1 200 GET /v2/accounts/3 31ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:44.848Z INFO  api-gw-2 200 GET /v2/accounts/4 32ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:45.885Z ERROR api-gw-3 upstream 502 from billing-svc after 3 retries corr_id=7f3a9c21",
+      "kept": true,
+      "anomaly": true,
+      "role": "keep"
+    },
+    {
+      "text": "2026-07-13T09:01:46.922Z INFO  api-gw-4 200 GET /v2/accounts/6 34ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:47.959Z INFO  api-gw-5 200 GET /v2/accounts/7 35ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:48.996Z INFO  api-gw-0 200 GET /v2/accounts/8 36ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:49.033Z INFO  api-gw-1 200 GET /v2/accounts/9 37ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:50.070Z INFO  api-gw-2 200 GET /v2/accounts/10 38ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:51.107Z INFO  api-gw-3 200 GET /v2/accounts/11 39ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:52.144Z INFO  api-gw-4 200 GET /v2/accounts/12 40ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:53.181Z INFO  api-gw-5 200 GET /v2/accounts/13 41ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:54.218Z INFO  api-gw-0 200 GET /v2/accounts/14 42ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:55.255Z INFO  api-gw-1 200 GET /v2/accounts/15 43ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:56.292Z INFO  api-gw-2 200 GET /v2/accounts/16 44ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:57.329Z INFO  api-gw-3 200 GET /v2/accounts/17 45ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:58.366Z INFO  api-gw-4 200 GET /v2/accounts/18 46ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:01:59.403Z INFO  api-gw-5 200 GET /v2/accounts/19 47ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:00.440Z INFO  api-gw-0 200 GET /v2/accounts/20 8ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:01.477Z INFO  api-gw-1 200 GET /v2/accounts/21 9ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:02.514Z INFO  api-gw-2 200 GET /v2/accounts/22 10ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:03.551Z INFO  api-gw-3 200 GET /v2/accounts/23 11ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:04.588Z INFO  api-gw-4 200 GET /v2/accounts/24 12ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:05.625Z INFO  api-gw-5 200 GET /v2/accounts/25 13ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:06.662Z INFO  api-gw-0 200 GET /v2/accounts/26 14ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:07.699Z INFO  api-gw-1 200 GET /v2/accounts/27 15ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:08.736Z INFO  api-gw-2 200 GET /v2/accounts/28 16ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:09.773Z INFO  api-gw-3 200 GET /v2/accounts/29 17ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:10.810Z INFO  api-gw-4 200 GET /v2/accounts/30 18ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:11.847Z INFO  api-gw-5 200 GET /v2/accounts/31 19ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:12.884Z INFO  api-gw-0 200 GET /v2/accounts/32 20ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:13.921Z INFO  api-gw-1 200 GET /v2/accounts/33 21ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:14.958Z INFO  api-gw-2 200 GET /v2/accounts/34 22ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:15.995Z INFO  api-gw-3 200 GET /v2/accounts/35 23ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:16.032Z INFO  api-gw-4 200 GET /v2/accounts/36 24ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:17.069Z INFO  api-gw-5 200 GET /v2/accounts/37 25ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:18.106Z INFO  api-gw-0 200 GET /v2/accounts/38 26ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:19.143Z INFO  api-gw-1 200 GET /v2/accounts/39 27ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:20.180Z INFO  api-gw-2 200 GET /v2/accounts/40 28ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:21.217Z INFO  api-gw-3 200 GET /v2/accounts/41 29ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:22.254Z INFO  api-gw-4 200 GET /v2/accounts/42 30ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:23.291Z INFO  api-gw-5 200 GET /v2/accounts/43 31ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:24.328Z INFO  api-gw-0 200 GET /v2/accounts/44 32ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:25.365Z INFO  api-gw-1 200 GET /v2/accounts/45 33ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:26.402Z INFO  api-gw-2 200 GET /v2/accounts/46 34ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:27.439Z INFO  api-gw-3 200 GET /v2/accounts/47 35ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:28.476Z INFO  api-gw-4 200 GET /v2/accounts/48 36ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:29.513Z INFO  api-gw-5 200 GET /v2/accounts/49 37ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:30.550Z INFO  api-gw-0 200 GET /v2/accounts/0 38ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:31.587Z INFO  api-gw-1 200 GET /v2/accounts/1 39ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:32.624Z INFO  api-gw-2 200 GET /v2/accounts/2 40ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:33.661Z INFO  api-gw-3 200 GET /v2/accounts/3 41ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:34.698Z INFO  api-gw-4 200 GET /v2/accounts/4 42ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:35.735Z INFO  api-gw-5 200 GET /v2/accounts/5 43ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:36.772Z INFO  api-gw-0 200 GET /v2/accounts/6 44ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:37.809Z INFO  api-gw-1 200 GET /v2/accounts/7 45ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:38.846Z INFO  api-gw-2 200 GET /v2/accounts/8 46ms cache=HIT",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:39.883Z INFO  api-gw-3 200 GET /v2/accounts/9 47ms cache=MISS",
+      "kept": false,
+      "anomaly": false,
+      "role": "fold"
+    },
+    {
+      "text": "2026-07-13T09:02:40.920Z INFO  api-gw-4 200 GET /v2/accounts/10 8ms cache=HIT",
+      "kept": true,
+      "anomaly": false,
+      "role": "keep"
+    }
+  ],
+  "after_lines": [
+    {
+      "text": "2026-07-13T09:00:01.037Z INFO  api-gw-1 200 GET /v2/accounts/1 9ms cache=HIT",
+      "marker": false
+    },
+    {
+      "text": "2026-07-13T09:00:02.074Z INFO  api-gw-2 200 GET /v2/accounts/2 10ms cache=HIT",
+      "marker": false
+    },
+    {
+      "text": "2026-07-13T09:00:03.111Z INFO  api-gw-3 200 GET /v2/accounts/3 11ms cache=MISS",
+      "marker": false
+    },
+    {
+      "text": "2026-07-13T09:01:45.885Z ERROR api-gw-3 upstream 502 from billing-svc after 3 retries corr_id=7f3a9c21",
+      "marker": false
+    },
+    {
+      "text": "2026-07-13T09:02:40.920Z INFO  api-gw-4 200 GET /v2/accounts/10 8ms cache=HIT",
+      "marker": false
+    },
+    {
+      "text": "[... and 155 more matches in 2026-07-13T09]",
+      "marker": false
+    },
+    {
+      "text": "[160 matches compressed to 5. Retrieve more: hash=bcdfa6f82652310f880444a2]",
+      "marker": true
+    }
+  ],
+  "after_display": null,
+  "retrieval": {
+    "kind": "pattern",
+    "control_label": "Find the anomaly",
+    "caption": "Ask the marker for the ERROR line. It comes back byte-exact, with its original line number.",
+    "call": "retrieve(\"bcdfa6f82652310f880444a2\", pattern=\"ERROR\")",
+    "result": "105:2026-07-13T09:01:45.885Z ERROR api-gw-3 upstream 502 from billing-svc after 3 retries corr_id=7f3a9c21",
+    "full_byte_exact": true
+  }
+}

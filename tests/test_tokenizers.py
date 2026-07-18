@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from furl_ctx.tokenizers import (
     BaseTokenizer,
-    CharacterCounter,
     EstimatingTokenCounter,
     TiktokenCounter,
     TokenCounter,
@@ -389,32 +388,6 @@ class TestEstimatorPrefixSampling:
         assert elapsed < 1.0, f"20 estimator counts on {len(huge)} chars took {elapsed:.2f}s"
 
 
-class TestCharacterCounter:
-    """Tests for CharacterCounter."""
-
-    def test_init_default(self):
-        """Test initialization with default ratio."""
-        counter = CharacterCounter()
-        assert counter.chars_per_token == 4.0
-
-    def test_init_custom_ratio(self):
-        """Test initialization with custom ratio."""
-        counter = CharacterCounter(chars_per_token=3.5)
-        assert counter.chars_per_token == 3.5
-
-    def test_count_text(self):
-        """Test counting text."""
-        counter = CharacterCounter(chars_per_token=4.0)
-        text = "x" * 40  # 40 chars
-        count = counter.count_text(text)
-        assert count == 10  # 40 / 4 = 10
-
-    def test_count_text_empty(self):
-        """Test counting empty text."""
-        counter = CharacterCounter()
-        assert counter.count_text("") == 0
-
-
 class TestTokenizerRegistry:
     """Tests for TokenizerRegistry."""
 
@@ -554,11 +527,6 @@ class TestTokenCounterProtocol:
     def test_estimating_implements_protocol(self):
         """Test EstimatingTokenCounter implements protocol."""
         counter = EstimatingTokenCounter()
-        assert isinstance(counter, TokenCounter)
-
-    def test_character_implements_protocol(self):
-        """Test CharacterCounter implements protocol."""
-        counter = CharacterCounter()
         assert isinstance(counter, TokenCounter)
 
 

@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -65,9 +66,12 @@ from typing import TYPE_CHECKING, Any
 from .ccr.marker_grammar import hashes_in_text
 from .config import DEFAULT_MIN_TOKENS_TO_COMPRESS
 from .pipeline import PipelineExtensionManager, PipelineStage, summarize_routing_markers
+from .redaction import build_store_redactor, compose_redactors
 from .utils import extract_user_query as _extract_user_query
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .hooks import CompressionHooks
 
 logger = logging.getLogger(__name__)
@@ -136,6 +140,23 @@ class CompressConfig:
     Messages shorter than this are left unchanged. Default 250.
     Set lower for voice agents where turns are short."""
 
+    redactor: Callable[[str], str] | None = None
+    """Opt-in content redactor (B3 SECURITY): a PURE function
+    ``raw content -> redacted content`` applied to every string message
+    ``content`` BEFORE compression. Default ``None`` disables it — behavior is
+    then byte-identical to today.
+
+    FAIL-CLOSED — this is the security invariant. Redaction runs OUTSIDE
+    ``compress()``'s fail-open boundary: if the redactor RAISES, the exception
+    propagates and ``compress()`` raises, so unredacted content is never
+    compressed, offloaded to the CCR store, returned, or swallowed by the
+    fail-open path. On a redactor error you get no output rather than a leak.
+
+    Because downstream compression/offload/store only ever see redacted
+    content, a later ``retrieve()`` returns the REDACTED original — the secret
+    is gone from the store BY DESIGN. Non-string content passes through
+    untouched; the caller's input list/dicts are never mutated."""
+
 
 @dataclass
 class CompressResult:
@@ -175,11 +196,28 @@ class CompressResult:
 
         Derived from ``messages`` so it can never drift from what shipped. Pass
         each to ``furl_ctx.retrieve`` / ``resolve_markers`` to recover the content.
+
+        Total over every message shape: string content is scanned directly;
+        non-string content (block lists, or the raw ``bytes`` ``compress()``
+        passes through untouched) is serialized via
+        ``json.dumps(..., default=str)`` and the RENDERING scanned — so a
+        marker embedded in a text block still surfaces, and bytes whose repr
+        carries literal marker text surface those hashes too (consistent with
+        foreign marker text appearing in string content). Only content that
+        fails to serialize even with ``default=str`` (circular references,
+        tuple dict keys) contributes nothing — skipped rather than raising,
+        mirroring the sibling scanner ``_surfaced_ccr_hashes``.
         """
         parts: list[str] = []
         for message in self.messages:
             content = message.get("content")
-            parts.append(content if isinstance(content, str) else json.dumps(content))
+            if isinstance(content, str):
+                parts.append(content)
+                continue
+            try:
+                parts.append(json.dumps(content, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                continue
         return hashes_in_text("\n".join(parts))
 
 
@@ -408,6 +446,50 @@ def _event_ccr_hashes(
     return sorted(h for h in surfaced if is_valid_ccr_hash(h))
 
 
+def _redact_messages(
+    messages: list[dict[str, Any]], redactor: Callable[[str], str]
+) -> list[dict[str, Any]]:
+    """Return NEW messages with every string ``content`` passed through *redactor*.
+
+    FAIL-CLOSED helper for the B3 redaction step. Called BEFORE compress()'s
+    fail-open boundary, so a ``redactor`` that RAISES propagates out of
+    ``compress()`` and no unredacted content is ever compressed, stored, or
+    returned. Immutable: builds new message dicts; non-string content (and the
+    caller's original list/dicts) are left untouched.
+    """
+    redacted: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            redacted.append({**message, "content": redactor(content)})
+        else:
+            redacted.append(message)
+    return redacted
+
+
+def _unknown_model_warning(model: str) -> str | None:
+    """A warning when *model* matches no known tokenizer family (F-alpha4).
+
+    ``get_tokenizer`` silently falls back to generic character-estimation for an
+    unrecognized model name, so token counts can be off with no signal. This
+    surfaces that fallback through ``result.warnings``. Returns None for a
+    recognized model, using the public ``list_supported_models`` pattern set as
+    the single source of truth (the same patterns ``_detect_backend`` matches on),
+    so a real model family is never flagged.
+    """
+    from furl_ctx.tokenizers import list_supported_models
+
+    model_lower = model.lower()
+    if any(re.match(pattern, model_lower) for pattern in list_supported_models()):
+        return None
+    return (
+        f"model '{model}' is not a recognized tokenizer family, so token counts use "
+        "the generic character-estimation fallback and can be off for this model. "
+        "Pass a known model name, for example a gpt, claude, gemini, or command "
+        "family name, or register a tokenizer for it."
+    )
+
+
 def compress(
     messages: list[dict[str, Any]],
     model: str = "claude-sonnet-4-5-20250929",
@@ -418,6 +500,7 @@ def compress(
     pipeline: Any | None = None,
     session_id: str | None = None,
     agent_id: str | None = None,
+    tool_name: str | None = None,
     **kwargs: Any,
 ) -> CompressResult:
     """Compress messages using Furl's full compression pipeline.
@@ -448,6 +531,13 @@ def compress(
         agent_id: Optional sub-agent identifier, combined with ``session_id``
             and ``FURL_CCR_NAMESPACE`` to form the CCR isolation boundary. Same
             zero-change default as ``session_id``.
+        tool_name: Originating tool for this content (e.g. "Bash",
+            "mcp:furl_compress"). Bound request-scoped for the call so CCR
+            entries this compression writes — including the router's offload and
+            SmartCrusher, which have no per-message tool attribution for a single
+            wrapped tool output — record it as their ``content_kind`` (surfaced
+            by furl_list / furl_retrieve). Default ``None`` leaves entries
+            unlabeled exactly as before.
         **kwargs: Shorthand for CompressConfig fields. These override config:
             compress_user_messages, compress_system_messages, protect_recent,
             protect_analysis_context, min_tokens_to_compress.
@@ -487,6 +577,19 @@ def compress(
             protect_recent=0,
         )
     """
+    # A6: validate the message-list shape at the boundary so a programmer error
+    # (a bare string / dict instead of a list of message dicts) is ONE concise,
+    # actionable TypeError — not a bare ``str.get`` AttributeError raised from the
+    # redaction step, nor the doubled fail-open + token-count-fallback tracebacks
+    # the hook and MCP paths otherwise spilled on every such call. Mirrors the
+    # unexpected-kwarg TypeError raised at this same boundary below.
+    if not isinstance(messages, list):
+        raise TypeError(
+            "compress() expects a list of message dicts "
+            "(e.g. [{'role': 'tool', 'content': '...'}]), got "
+            f"{type(messages).__name__}"
+        )
+
     if not messages or not optimize:
         return CompressResult(messages=messages)
 
@@ -511,6 +614,28 @@ def compress(
     if overrides:
         cfg = replace(cfg, **overrides)
 
+    # B3 SECURITY — fail-closed content redaction. This runs BEFORE and OUTSIDE
+    # the fail-open ``try/except BaseException`` boundary below ON PURPOSE: if a
+    # configured redactor RAISES, the exception must propagate (compress()
+    # raises) so unredacted content is NEVER compressed, offloaded to the CCR
+    # store, returned, or swallowed by the fail-open path. That is the security
+    # invariant: on redactor error, no output rather than a leak. When redaction
+    # succeeds, every downstream step (pipeline, offload, store) only ever sees
+    # redacted content — so a later retrieve() returns the REDACTED original.
+    #
+    # Three redactors compose here (all apply, defense in depth): the ON-by-default
+    # built-in credential patterns (audit Crit-4 / B3) run FIRST, then the
+    # env-expressible ``FURL_REDACT_PATTERNS`` redactor — the ONLY redaction
+    # channels the env-configured Claude Code plugin (hook + MCP server) can reach
+    # — then the library ``CompressConfig.redactor`` callback. ``build_store_redactor()``
+    # is ``None`` only when the built-ins are opted out (``FURL_REDACT_BUILTINS=0``)
+    # AND no env patterns are set, so a caller who disables both plus passes no
+    # callback keeps byte-identical behavior; otherwise credentials are scrubbed
+    # before anything is compressed, offloaded, or stored.
+    _active_redactor = compose_redactors(build_store_redactor(), cfg.redactor)
+    if _active_redactor is not None:
+        messages = _redact_messages(messages, _active_redactor)
+
     # Per-tenant CCR isolation (B2). When a namespace is active
     # (``session_id`` / ``agent_id`` / ``FURL_CCR_NAMESPACE``) bind that
     # tenant's isolated store to the request ContextVar for the duration of
@@ -522,11 +647,19 @@ def compress(
     # restored, and reset-always keeps the fail-open path clean.
     from .cache.compression_store import (
         _request_ccr_store,
+        _request_tool_name,
         resolve_ccr_namespace_store,
     )
 
     _ccr_token = None
+    _tool_name_token = None
     try:
+        # content_kind threading: bind the originating tool for the whole call
+        # so every store.store() this compression triggers (router offload,
+        # SmartCrusher, dedup) inherits it as its default tool_name. RESET (not
+        # cleared) in finally so a nested/outer compress() binding is restored.
+        if tool_name is not None:
+            _tool_name_token = _request_tool_name.set(tool_name)
         # Namespace resolution + the ContextVar bind sit INSIDE the fail-open
         # boundary too: this is the first place compress() constructs a store,
         # and a store-construction failure (e.g. a bad workspace path) must
@@ -603,6 +736,12 @@ def compress(
         frozen_content_warning = _frozen_transformed_content_warning(messages, frozen)
         if frozen_content_warning is not None:
             compress_warnings.append(frozen_content_warning)
+        # F-alpha4: an unrecognized model silently falls back to generic
+        # character-estimation for token counting. Surface that fallback so a
+        # caller is not misled by counts computed for a model Furl does not know.
+        unknown_model_warning = _unknown_model_warning(model)
+        if unknown_model_warning is not None:
+            compress_warnings.append(unknown_model_warning)
         for warning in compress_warnings:
             logger.warning("%s", warning)
 
@@ -790,6 +929,9 @@ def compress(
         # past this call and an outer middleware store is preserved.
         if _ccr_token is not None:
             _request_ccr_store.reset(_ccr_token)
+        # Same discipline for the request-scoped originating tool name.
+        if _tool_name_token is not None:
+            _request_tool_name.reset(_tool_name_token)
 
 
 def _get_pipeline() -> Any:

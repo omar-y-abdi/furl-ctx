@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "furl-ctx"
-version = "0.27.0"
-description = "The context compression layer for AI agents - 60-95% fewer tokens on redundant workloads, reversible via CCR"
+version = "1.3.0"
+description = "Prompt and context compression for AI agents to reduce LLM token costs - typically 0-54% fewer tokens on real high-entropy content, up to 95% on repetitive logs/fixtures (best-case ceiling), reversible via CCR. Note: furl-ctx is not furl, the unrelated URL-manipulation library."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
@@ -28,6 +28,18 @@ keywords = [
     "caching",
     "ai",
     "machine-learning",
+    "context-compression",
+    "claude-code",
+    "claude-code-plugin",
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "token-optimization",
+    "context-window",
+    "prompt-compression",
+    "llm-token-costs",
+    "context-pruning",
+    "llm-context-memory",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -58,19 +70,30 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/omar-y-abdi/furl"
-Repository = "https://github.com/omar-y-abdi/furl"
-Issues = "https://github.com/omar-y-abdi/furl/issues"
+Homepage = "https://github.com/omar-y-abdi/furl-ctx"
+Repository = "https://github.com/omar-y-abdi/furl-ctx"
+Issues = "https://github.com/omar-y-abdi/furl-ctx/issues"
 
 [project.scripts]
 furl = "furl_ctx.cli:main"
 
 [project.optional-dependencies]
+# Linear-time regex engine for AGENT-SUPPLIED filter patterns (RG1).
+# RE2 matches with an automaton, so the catastrophic-backtracking class simply
+# does not exist for it. Optional, with a graceful fallback: absent, matching
+# falls back to stdlib `re` under a SIGALRM budget (see ccr/regex_budget.py).
+# That fallback only works on the MAIN thread, which is why the `mcp` extra
+# pulls this in — the MCP server runs filter matching in worker threads
+# (asyncio.to_thread), where no stdlib watchdog can interrupt a wedged match.
+re2 = [
+    "google-re2>=1.1",
+]
 # MCP server for Claude Code integration (furl_ctx.ccr.mcp_server).
 # (httpx was dropped from this extra — nothing in the package imports it;
 # it was proxy-era residue. The mcp SDK declares its own transport deps.)
 mcp = [
     "mcp>=1.0.0",
+    "furl-ctx[re2]",
 ]
 # Opt-in AST-verified code compression (transforms.code_aware_compressor,
 # Engine P2-12; enable via ContentRouterConfig.enable_code_aware=True).
@@ -90,7 +113,6 @@ dev = [
     "ruff>=0.15.19",
     "mypy>=1.14.1",
     "pre-commit>=3.0.0",
-    "numpy>=1.24.0",
 ]
 # All optional dependencies (everything the compression library can use)
 all = [

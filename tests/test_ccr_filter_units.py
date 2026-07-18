@@ -198,6 +198,73 @@ def test_apply_pattern_numbers_matched_lines() -> None:
     assert out.total_count == 3
 
 
+def test_apply_pattern_matches_substring_in_single_giant_line_review_f3() -> None:
+    # Review F3: a minified / single-line JSON blob stores as ONE line far
+    # longer than the per-line regex cap. A backtracking-bounded pattern (a
+    # literal) must still find a substring that is unambiguously present — pre-
+    # fix the over-long line was silently skipped and matched_count came back 0.
+    blob = '{"exception":{"type":"EXC_BAD_ACCESS","signal":"SIGSEGV"},"frames":['
+    blob += ",".join(f'{{"sym":"frame_{i}","off":{i}}}' for i in range(2000))
+    blob += "]}"
+    assert "\n" not in blob and len(blob) > 10_000
+    for pat in ("EXC_BAD_ACCESS", "SIGSEGV", "exception"):
+        spec = RetrieveFilters.parse({"pattern": pat})
+        assert isinstance(spec, RetrieveFilters)
+        out = apply_filters(blob, spec)
+        assert isinstance(out, FilteredContent)
+        assert out.matched_count == 1, f"{pat!r} present in the single line but not matched"
+        assert out.total_count == 1
+
+
+def test_apply_regex_metachar_pattern_over_long_line_stays_capped_review_rf1() -> None:
+    # Review RF1: ONLY a pure LITERAL bypasses the per-line cap. A pattern
+    # carrying any regex metacharacter (here '.') is a regex, so on a line longer
+    # than the cap it is NOT searched and reports zero matches even though its
+    # target is present. The same regex on a SHORT line DOES match, proving the
+    # zero is the long-line cap at work, not a malformed pattern. Pre-fix the
+    # quantifier heuristic cleared '.' (it carries no '* + {') and ran it on the
+    # giant line, returning a match — the behavior RF1 removes; this asserts 0.
+    needle = "EXC_BAD_ACCESS"
+    blob = '{"exception":{"type":"' + needle + '"},"frames":['
+    blob += ",".join(f'{{"sym":"frame_{i}","off":{i}}}' for i in range(2000))
+    blob += "]}"
+    assert "\n" not in blob and len(blob) > 10_000
+    regex = "EXC.BAD.ACCESS"  # the '.' metacharacters match the underscores
+
+    spec = RetrieveFilters.parse({"pattern": regex})
+    assert isinstance(spec, RetrieveFilters)
+    out = apply_filters(blob, spec)
+    assert isinstance(out, FilteredContent)
+    assert out.matched_count == 0, "a regex must not search a line beyond the cap"
+
+    # Control: the very same regex matches on a short line, so the zero above is
+    # purely the long-line cap, not the pattern failing to match.
+    short = RetrieveFilters.parse({"pattern": regex})
+    assert isinstance(short, RetrieveFilters)
+    out_short = apply_filters(needle, short)
+    assert isinstance(out_short, FilteredContent)
+    assert out_short.matched_count == 1
+
+
+def test_apply_optional_heavy_pattern_over_long_line_returns_fast_review_rf1() -> None:
+    # Review RF1 + A12: a '?'-heavy pattern backtracks exponentially yet carries
+    # no '* + {', so the retired quantifier heuristic cleared it and ran it on a
+    # giant line, hanging for tens of seconds. RF1 first confined it to the
+    # per-line cap; A12 now rejects the optional-chain shape one step earlier, at
+    # PARSE, so it never reaches the matcher on a short OR a long line (the cap
+    # bounds line length, not backtracking width, so it never protected short
+    # lines). Either way the security property — no hang — holds; this pins the
+    # stronger parse-time rejection. The long-line input cap itself is pinned
+    # independently by test_regex_line_char_cap_boundary.
+    pattern = ".?" * 21 + "." * 21 + "END"  # 21 optional quantifiers > the bound of 12
+    start = time.monotonic()
+    spec = RetrieveFilters.parse({"pattern": pattern})
+    elapsed = time.monotonic() - start
+    assert elapsed < 2.0, f"pattern hung at parse ({elapsed:.1f}s)"
+    assert isinstance(spec, FilterError)
+    assert "variable-length quantifier" in spec.reason
+
+
 # ─── CompressionMode.parse ──────────────────────────────────────────────────
 
 
@@ -435,3 +502,58 @@ def test_regex_line_char_cap_boundary() -> None:
     # Exactly at the cap the line is still matched; one char over, it is skipped.
     assert _pattern_matches("a+", "a" * 10_000) is True
     assert _pattern_matches("a+", "a" * 10_001) is False
+
+
+# ─── A12: optional-chain ReDoS on SHORT (within-cap) lines ──────────────────
+# The long-line literal-only path (F3) already protects lines OVER the cap. A12
+# is the short-line gap: an optional-chain like '.?' repeated dozens of times is
+# under _MAX_PATTERN_CHARS and carries no nested quantifier, yet backtracks
+# exponentially on a line WITHIN the 10k cap (empirically '.?'×22 + a failing
+# tail ≈ 1.5s, doubling per added pair — '.?'×40 hangs for hours). The input cap
+# bounds line LENGTH, not backtracking WIDTH, so it does not save short lines.
+# The fix rejects the shape at parse; these pin that it stays fast.
+
+# '.?' × 40 followed by a literal that forces the exponential search to fail.
+# 81 chars (< 200 cap), no nested quantifier — invisible to the other two
+# screens; only the variable-quantifier count (40 > 12) catches it.
+_OPTIONAL_CHAIN = ".?" * 40 + "b"
+
+
+def test_retrieve_parse_rejects_optional_chain_pattern() -> None:
+    out = RetrieveFilters.parse({"pattern": _OPTIONAL_CHAIN})
+    assert isinstance(out, FilterError)
+    assert "variable-length quantifier" in out.reason
+
+
+def test_compress_parse_rejects_optional_chain_pattern() -> None:
+    out = SectionPatterns.parse({"include_patterns": [_OPTIONAL_CHAIN]})
+    assert isinstance(out, str)  # the parse-error channel (not a hang, not a crash)
+    assert "variable-length quantifier" in out
+
+
+def test_retrieve_optional_chain_within_cap_is_guarded_and_fast() -> None:
+    # The end-to-end wall-clock pin. On a SHORT within-cap line the guard must
+    # keep the public parse→apply path fast. With the guard, parse returns a
+    # FilterError at once. If a future change drops the guard, parse yields a
+    # spec, apply_filters runs '.?'×40 over the line, and this backtracks for
+    # far longer than the deadline — a loud regression signal.
+    line = "a" * 40  # within the 10k cap; forces the exponential blow-up
+    start = time.monotonic()
+    spec = RetrieveFilters.parse({"pattern": _OPTIONAL_CHAIN})
+    if isinstance(spec, RetrieveFilters):  # only reachable if the guard regresses
+        apply_filters(line, spec)
+    elapsed = time.monotonic() - start
+    assert elapsed < _REDOS_DEADLINE_S, f"optional-chain not guarded: {elapsed:.2f}s"
+    assert isinstance(spec, FilterError)
+
+
+def test_variable_quantifier_guard_preserves_normal_patterns() -> None:
+    # A handful of quantifiers (the realistic case) must still pass both surfaces.
+    for ok in ("ERROR.*", r"^\d+$", "a?b?c?", r"\d{1,3}-\d{1,3}", "(?:foo)?(?:bar)?"):
+        assert isinstance(RetrieveFilters.parse({"pattern": ok}), RetrieveFilters), ok
+    # The boundary: exactly _MAX_VARIABLE_QUANTIFIERS (12) passes; 13 is rejected.
+    # Distinct atoms so each '?' is a valid quantifier (stacked '???' is a regex
+    # error, a different rejection channel).
+    twelve = "".join(f"{c}?" for c in "abcdefghijkl")  # 12 optional quantifiers
+    assert isinstance(RetrieveFilters.parse({"pattern": twelve}), RetrieveFilters)
+    assert isinstance(RetrieveFilters.parse({"pattern": twelve + "m?"}), FilterError)

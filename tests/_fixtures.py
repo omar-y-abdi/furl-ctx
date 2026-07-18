@@ -177,6 +177,30 @@ class FailingStore:
         return getattr(self._inner, name)
 
 
+# ── fail-open sqlite backend (durable-write-veto suites) ────────────────────
+
+
+def make_fail_open_sqlite_backend(db_path: Any) -> Any:
+    """A real ``SqliteBackend`` whose *set* op always loses the lock race —
+    every write fails open to the volatile in-process fallback (audit #3's
+    scenario). Reads/counts still hit the file, so same-process retrieval
+    still round-trips; only durability is lost. Canonical home (TEST-19) for
+    the helper the durable-veto suites (store / read_lifecycle / MCP) share.
+    """
+    from furl_ctx.cache.backends.sqlite import SqliteBackend, _SqliteOpFailed
+
+    backend = SqliteBackend(db_path=db_path)
+    real_run = backend._run
+
+    def failing_run(op_name: str, fn: Any) -> Any:
+        if op_name == "set":
+            raise _SqliteOpFailed()  # simulate busy_timeout x retries exhausted
+        return real_run(op_name, fn)
+
+    backend._run = failing_run  # type: ignore[method-assign]
+    return backend
+
+
 # ── CCR-triggering synthetic git diff (previously duplicated) ───────────────
 
 

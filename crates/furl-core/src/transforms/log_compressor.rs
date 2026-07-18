@@ -1143,27 +1143,50 @@ impl LogCompressor {
 
         let mut output: Vec<String> = selected.iter().map(|l| l.content.clone()).collect();
 
-        let omitted = all_lines.len().saturating_sub(selected.len());
+        // Omission banner. The per-level breakdown is tallied over the lines
+        // that were actually OMITTED — all_lines minus the selected set, keyed
+        // by line_number (a LogLine's identity) — NOT over all lines, so the
+        // counts always sum to the omitted total. Pre-fix the breakdown used
+        // whole-log counts (`stats[...]`) that could exceed the omitted total
+        // and even report a level whose only lines were all kept (review F5).
+        // ERROR and FAIL fold into one ERROR bucket: FAIL is cosmetic-
+        // equivalent to ERROR (see the module header) and an internal
+        // classification detail, so surfacing it as its own category names a
+        // "FAIL" bucket the source never wrote (review F4). A catch-all OTHER
+        // bucket collects omitted DEBUG/TRACE/UNKNOWN lines so the breakdown is
+        // exhaustive: ERROR + WARN + INFO + OTHER == omitted, always.
+        let selected_line_numbers: BTreeSet<usize> =
+            selected.iter().map(|l| l.line_number).collect();
+        let (mut n_error, mut n_warn, mut n_info, mut n_other) = (0u64, 0u64, 0u64, 0u64);
+        for line in all_lines {
+            if selected_line_numbers.contains(&line.line_number) {
+                continue;
+            }
+            match line.level {
+                LogLevel::Error | LogLevel::Fail => n_error += 1,
+                LogLevel::Warn => n_warn += 1,
+                LogLevel::Info => n_info += 1,
+                _ => n_other += 1,
+            }
+        }
+        let omitted = n_error + n_warn + n_info + n_other;
         if omitted > 0 {
-            let mut summary_parts: Vec<String> = Vec::new();
-            for (label, key) in [
-                ("ERROR", "errors"),
-                ("FAIL", "fails"),
-                ("WARN", "warnings"),
-                ("INFO", "info"),
-            ] {
-                let n = stats.get(key).copied().unwrap_or(0);
-                if n > 0 {
-                    summary_parts.push(format!("{} {}", n, label));
-                }
-            }
-            if !summary_parts.is_empty() {
-                output.push(format!(
-                    "[{} lines omitted: {}]",
-                    omitted,
-                    summary_parts.join(", ")
-                ));
-            }
+            let summary_parts: Vec<String> = [
+                ("ERROR", n_error),
+                ("WARN", n_warn),
+                ("INFO", n_info),
+                ("OTHER", n_other),
+            ]
+            .into_iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(label, n)| format!("{} {}", n, label))
+            .collect();
+            // omitted > 0 guarantees at least one bucket is non-empty.
+            output.push(format!(
+                "[{} lines omitted: {}]",
+                omitted,
+                summary_parts.join(", ")
+            ));
         }
         (output.join("\n"), stats)
     }
@@ -1746,9 +1769,90 @@ mod tests {
         .collect::<Vec<_>>();
         let selected = vec![all_lines[0].clone()];
         let (output, stats) = c.format_output(&selected, &all_lines);
-        assert!(output.contains("[3 lines omitted: 1 ERROR, 1 WARN, 2 INFO]"));
+        // The breakdown is over the OMITTED lines only. The sole ERROR line
+        // (idx 0) was kept, so it must NOT appear in the omitted breakdown;
+        // the omitted set is 1 WARN + 2 INFO = 3, which sums to the omitted
+        // count (review F4/F5 — pre-fix this wrongly read "1 ERROR, 1 WARN,
+        // 2 INFO" summing to 4 against an omitted count of 3).
+        assert!(
+            output.contains("[3 lines omitted: 1 WARN, 2 INFO]"),
+            "banner over-counts or names a kept level: {output}"
+        );
+        // stats stay whole-log tallies (used by the Python shim), unchanged.
         assert_eq!(stats["errors"], 1);
         assert_eq!(stats["info"], 2);
+    }
+
+    #[test]
+    fn omission_banner_breakdown_sums_to_omitted_count() {
+        // Review F5: the per-level breakdown must sum to the omitted total.
+        // Pre-fix the breakdown was tallied over ALL lines, so an INFO-heavy
+        // log reported far more than were omitted (e.g. "90 lines omitted:
+        // 3 ERROR, 2 WARN, 120 INFO" — 125 != 90).
+        let c = cmp();
+        let all_lines: Vec<LogLine> = (0..40)
+            .map(|i| {
+                let mut l = LogLine::new(i, format!("INFO heartbeat {i}"));
+                l.level = LogLevel::Info;
+                l
+            })
+            .collect();
+        // Keep only the first 5 lines; 35 INFO lines are omitted.
+        let selected: Vec<LogLine> = all_lines[..5].to_vec();
+        let (output, _stats) = c.format_output(&selected, &all_lines);
+        let banner = output
+            .lines()
+            .find(|l| l.contains("lines omitted"))
+            .expect("banner present when lines are omitted");
+        // Parse "[N lines omitted: a X, b Y, ...]" and assert sum == N.
+        let inner = banner.trim_start_matches('[').trim_end_matches(']');
+        let (count_part, breakdown) = inner.split_once(" lines omitted: ").unwrap();
+        let omitted: u64 = count_part.parse().unwrap();
+        let subtotal: u64 = breakdown
+            .split(", ")
+            .map(|p| p.split_whitespace().next().unwrap().parse::<u64>().unwrap())
+            .sum();
+        assert_eq!(omitted, 35, "omitted count wrong: {banner}");
+        assert_eq!(
+            subtotal, omitted,
+            "breakdown does not sum to omitted: {banner}"
+        );
+    }
+
+    #[test]
+    fn omission_banner_folds_fail_into_error_no_phantom_category() {
+        // Review F4: a line containing "failed" (no "error"/"warn") classifies
+        // as LogLevel::Fail. FAIL is cosmetic-equivalent to ERROR, so the
+        // banner must fold it into ERROR and never name a "FAIL" category the
+        // source did not write.
+        let c = cmp();
+        let mut all_lines: Vec<LogLine> = (0..30)
+            .map(|i| {
+                let mut l = LogLine::new(i, format!("access line {i}"));
+                l.level = LogLevel::Info;
+                l
+            })
+            .collect();
+        // Two omitted FAIL-classified lines (indices 10, 20).
+        for idx in [10usize, 20] {
+            all_lines[idx].content = format!("upstream health check failed at {idx}");
+            all_lines[idx].level = LogLevel::Fail;
+        }
+        // Keep only the first 3 lines so the FAIL lines are omitted.
+        let selected: Vec<LogLine> = all_lines[..3].to_vec();
+        let (output, _stats) = c.format_output(&selected, &all_lines);
+        let banner = output
+            .lines()
+            .find(|l| l.contains("lines omitted"))
+            .expect("banner present");
+        assert!(
+            !banner.contains("FAIL"),
+            "banner must not name a FAIL category: {banner}"
+        );
+        assert!(
+            banner.contains("2 ERROR"),
+            "two FAIL lines fold into ERROR: {banner}"
+        );
     }
 
     #[test]

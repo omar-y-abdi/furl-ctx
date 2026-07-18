@@ -188,6 +188,7 @@ temp/
 .benchmarks/
 benchmark_results.json
 benchmark_results/
+verify/raw_results.json
 
 # DeepEval cache
 .deepeval/
@@ -202,7 +203,6 @@ docker/differential-network-capture/captures/
 
 # Documentation build
 docs/_build/
-site/
 
 # mypy
 .mypy_cache/
@@ -261,9 +261,15 @@ uv.lock
 # Local working docs — untracked from GitHub, kept on disk only
 /.claude/
 /archive/
-/docs/
+# docs/ holds local scratch by default, BUT docs/audits/ is git-versioned
+# (committed design/audit docs). A blanket "/docs/" ignore silently dropped new
+# committed docs from `git add` and forced -f adds (Bug-16); ignore only the
+# scratch and un-ignore the tracked audits subtree.
+/docs/*
+!/docs/audits/
 /PLAN.md
 /FABLE-RECON-PLAN.md
+/VALIDATION-REPORT.md
 /NAME-IDEAS.md
 /ENGINE-COMPARISON.md
 /finished-fable-work.md

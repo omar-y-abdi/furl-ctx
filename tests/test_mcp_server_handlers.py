@@ -56,6 +56,11 @@ def _isolate_store(tmp_path, monkeypatch):
     # shared_stats_file() re-reads FURL_WORKSPACE_DIR), so this single setenv
     # also keeps record_compression() from ever writing to ~/.furl.
     monkeypatch.setenv("FURL_WORKSPACE_DIR", str(tmp_path))
+    # The session TTL is env-aware now (_mcp_session_ttl): the COR-51 tests
+    # below pin the env-UNSET contract (MCP_SESSION_TTL), so the premise must
+    # be established — earlier suite files (e.g. in-process cli.main() runs)
+    # legitimately leave their own FURL_CCR_TTL_SECONDS setdefault behind.
+    monkeypatch.delenv("FURL_CCR_TTL_SECONDS", raising=False)
     reset_compression_store()
     yield
     reset_compression_store()
@@ -323,8 +328,9 @@ async def test_retrieve_case_variant_hash_hits_lowercase_store_key(server, case_
 
 def test_local_store_singleton_carries_session_ttl(server) -> None:
     """COR-51: the MCP process's store singleton is configured with the
-    session TTL on first init, and it IS the process singleton the pipeline's
-    own no-arg ``get_compression_store()`` call resolves to."""
+    session TTL on first init (absent FURL_CCR_TTL_SECONDS — when set, the
+    env wins, see tests/test_mcp_ttl_env.py), and it IS the process singleton
+    the pipeline's own no-arg ``get_compression_store()`` call resolves to."""
     store = server._get_local_store()
     assert store.default_ttl_seconds == mcp_server.MCP_SESSION_TTL
     assert get_compression_store() is store

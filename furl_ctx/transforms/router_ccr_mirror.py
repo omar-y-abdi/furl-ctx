@@ -9,7 +9,10 @@ the normal Rust->Python CCR mirror never runs:
   verifies each one resolves; returns ``False`` (-> caller recomputes) if any
   sentinel is unbackable.
 * :meth:`CcrMirror.extract_ccr_hashes` — parses the distinct hashes out of the
-  cached output, delegating the marker grammar to ``SmartCrusher``.
+  cached output via the owned marker grammar
+  (``marker_grammar.hashes_in_text``), the SAME scanner the public
+  ``CompressResult.ccr_hashes`` surface uses, so this guard recognises every
+  pointer form the API advertises (double-angle AND bracket).
 
 This is a TRUE leaf module: it imports nothing from ``content_router`` (so there
 is no import cycle) and never receives the router. Dependencies are injected
@@ -25,16 +28,16 @@ explicitly:
   underlying registry) still bites — a construction-time capture would have
   been stale.
 
-The two heavy imports stay DEFERRED inside their methods exactly as they were on
-the router: ``from .smart_crusher import SmartCrusher`` and
-``from ..cache.compression_store import get_compression_store``. content_router
-now imports this module at top level; hoisting either import here would risk a
-load-time cycle (content_router -> router_ccr_mirror -> smart_crusher -> ...).
+``ensure_ccr_backed`` keeps its ``from ..cache.compression_store import
+get_compression_store`` DEFERRED inside the method: content_router imports this
+module at top level, so hoisting it would risk a load-time cycle
+(content_router -> router_ccr_mirror -> ... -> content_router).
+``extract_ccr_hashes`` imports only the leaf ``marker_grammar`` (no cycle) and
+no longer touches smart_crusher at all.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -129,6 +132,10 @@ class CcrMirror:
             # Backing verification is an ENGINE-INTERNAL read — it must not
             # feed the retrieval-feedback loop as if the model asked for this
             # content back (Engine P2-13).
+            # NOTE (review O2): this retrieve also resolves a VOLATILE in-process
+            # copy, so it verifies in-process resolvability, not durability —
+            # acceptable only while the Tier-2 result cache is itself in-process
+            # (they co-terminate); revisit if that cache ever becomes durable.
             if store.retrieve(h, record_feedback_signal=False) is None:
                 logger.debug(
                     "_ensure_ccr_backed: hash %s unbackable after re-mirror "
@@ -140,20 +147,20 @@ class CcrMirror:
 
     @staticmethod
     def extract_ccr_hashes(text: str) -> set[str]:
-        """Collect every distinct ``<<ccr:HASH...>>`` hash in *text*.
+        """Collect every distinct CCR recovery-pointer hash in *text*, across
+        EVERY marker shape the public surface advertises.
 
-        Reuses SmartCrusher's marker scanner so the parse grammar stays in one
-        place (no regex; tolerates the row-drop, opaque-blob, and bare marker
-        forms).
+        Delegates to the owned marker grammar
+        (:func:`marker_grammar.hashes_in_text`) — the SAME scanner
+        ``CompressResult.ccr_hashes`` exposes to callers — so this re-backing
+        guard can never protect a strict subset of what the API surfaces. The
+        previous scanner short-circuited on ``"<<ccr:" not in text`` and only
+        walked the double-angle family, so a surfaced BRACKET pointer
+        (``[N ... compressed to M. Retrieve more: hash=H]``) yielded an empty
+        set; ``ensure_ccr_backed`` then took the "no sentinels" fast-path and
+        served a pointer whose store entry had been evicted — a silent
+        data-loss drop (MATRIX-01).
         """
-        if "<<ccr:" not in text:
-            return set()
-        from .smart_crusher import SmartCrusher
+        from ..ccr.marker_grammar import hashes_in_text
 
-        hashes: set[str] = set()
-        try:
-            parsed = json.loads(text)
-            SmartCrusher._collect_ccr_hashes(parsed, hashes)
-        except (json.JSONDecodeError, ValueError):
-            SmartCrusher._collect_ccr_hashes_from_string(text, hashes)
-        return hashes
+        return set(hashes_in_text(text))

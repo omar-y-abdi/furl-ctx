@@ -107,6 +107,26 @@ class CompressionStoreBackend(Protocol):
         """
         ...
 
+    def purge_expired(self, now: float) -> int:
+        """Delete entries whose per-row TTL elapsed by ``now`` and return the
+        count purged.
+
+        Lets ``CompressionStore`` GC expired entries without materializing every
+        row into Python just to find the expired keys (audit #2 — the durable
+        backend can push this to an indexed range delete). ``now`` is the
+        STORE's clock (injectable for tests), NOT the backend's own wall clock,
+        so expiry stays consistent with the store's TTL checks.
+        """
+        ...
+
+    def created_at_index(self) -> list[tuple[float, str]]:
+        """Return ``(created_at, hash_key)`` for every entry WITHOUT the content
+        BLOBs — the projection ``CompressionStore`` uses to rebuild its eviction
+        heap cheaply (audit #2), instead of decoding every full entry via
+        ``items()``.
+        """
+        ...
+
     def get_stats(self) -> dict[str, Any]:
         """Get backend-specific statistics.
 

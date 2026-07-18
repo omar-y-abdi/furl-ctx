@@ -19,7 +19,7 @@ Usage:
 """
 
 from .base import BaseTokenizer, TokenCounter
-from .estimator import CharacterCounter, EstimatingTokenCounter
+from .estimator import EstimatingTokenCounter
 from .registry import (
     TokenizerRegistry,
     get_tokenizer,
@@ -40,5 +40,4 @@ __all__ = [
     # Implementations
     "TiktokenCounter",
     "EstimatingTokenCounter",
-    "CharacterCounter",
 ]

@@ -25,9 +25,15 @@ from pathlib import Path
 
 from benchmarks import datasets as ds_mod
 from benchmarks.imp2_ab import Imp2AB, measure_imp2_ab
-from benchmarks.metrics import BENCH_MODEL, CaseMetrics, measure_case, measure_conversation_case
+from benchmarks.metrics import BENCH_MODEL, CaseMetrics
 from benchmarks.needle_recall import NeedleResult, run_needle_recall
-from benchmarks.run_bench import _arm_summary, git_commit, print_table, snapshot_provenance
+from benchmarks.run_bench import (
+    _arm_summary,
+    git_commit,
+    print_table,
+    run_datasets,
+    snapshot_provenance,
+)
 
 HERE = Path(__file__).resolve().parent
 FINAL_JSON = HERE / "final_results.json"
@@ -44,20 +50,6 @@ _REQUIRED_SNAPSHOTS = (
     "diff_raw",
     "markdown_doc",
 )
-
-
-def run_datasets() -> list[CaseMetrics]:
-    """Measure every real dataset (incl. repeated_logs) at default cardinality.
-
-    Single-tool datasets use ``measure_case``; multi-turn conversation datasets
-    use ``measure_conversation_case`` (mirrors run_bench.run_datasets).
-    """
-    results: list[CaseMetrics] = []
-    for dataset in ds_mod.all_datasets():
-        name = f"{dataset.name}@{len(dataset.items)}"
-        measure = measure_conversation_case if dataset.conversation else measure_case
-        results.append(measure(name, dataset.query, dataset.items, dataset.messages))
-    return results
 
 
 def run_imp2_ab() -> Imp2AB:

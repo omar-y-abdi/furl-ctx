@@ -56,6 +56,7 @@ Pipeline Usage:
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import time
@@ -202,10 +203,17 @@ def _result_cache_key(content: str, bias: float) -> CacheKey:
 
     Identity is (content, per-request options), not content alone (COR-18):
 
-    * ``hash(content)`` + ``len(content)`` approximate content identity. The
-      length rides IN the key, so dict key equality turns a 64-bit SipHash
-      collision from silent byte-substitution (serving another message's
-      compressed bytes) into a plain cache miss.
+    * ``hash(content)`` + ``len(content)`` approximate content identity — this is
+      a probabilistic mitigation, NOT a collision GUARANTEE (Bug-7). The key does
+      not compare content bytes, so a false hit is possible; adding ``len(content)``
+      only NARROWS it, because a wrong hit now requires two DIFFERENT contents that
+      share both a 64-bit ``hash`` and an exact length. That is astronomically
+      unlikely (a 64-bit SipHash collision, further constrained to equal length),
+      but if it ever occurred the cache would serve the other content's compressed
+      bytes. It is not the byte-for-byte "collision -> cache miss" guarantee this
+      comment previously claimed. (The compressed bytes served are always a valid,
+      recoverable compression of SOME content, and the CCR backing is re-verified
+      against the current context on a Tier-2 hit.)
     * The rounded ``bias`` changes what ``compress()`` would produce, so a
       hit computed under one bias is never served under another.
 
@@ -688,11 +696,20 @@ class ContentRouter(Transform):
         else:
             # Parallel compression via thread pool. Each compress() call
             # is independent; per-task inputs are passed by argument.
+            # Submissions run under contextvars.copy_context() so the
+            # request-scoped ContextVars compress() binds — the originating
+            # tool name (content_kind) AND the per-tenant CCR store — reach
+            # the worker threads; a bare submit dropped both (multi-message
+            # calls stored content_kind=None and wrote the GLOBAL store even
+            # under an active namespace, while the inline path above kept
+            # them). Each submission copies its own Context: a single Context
+            # object cannot be entered by two threads concurrently.
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for _, task_content, task_ctx, task_bias, _, task_detection in pending_tasks:
                     futures.append(
                         executor.submit(
+                            contextvars.copy_context().run,
                             self._timed_compress,
                             task_content,
                             task_ctx,

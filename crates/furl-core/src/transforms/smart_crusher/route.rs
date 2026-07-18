@@ -10,7 +10,7 @@
 
 use serde_json::Value;
 
-use super::compaction::Compaction;
+use super::compaction::{ColumnEncoding, Compaction};
 use super::config::RoutingPolicy;
 use super::crusher::{CrushArrayResult, SmartCrusher};
 use super::field_role::compute_exclude_set;
@@ -806,7 +806,22 @@ impl SmartCrusher {
         //   vs the exact bytes the JSON form would ship.
         if !dropped_summary.is_empty() {
             if let Some(stage) = &self.compaction {
-                let (c, rendered) = stage.run(&result);
+                let (mut c, mut rendered) = stage.run(&result);
+                // review F1b: the survivor render's per-column constant folds
+                // and dictionary encodings are computed over the SURVIVOR subset
+                // only. Left alone they would assert, over the whole array, a
+                // fact that only holds for the shown rows — a false-universal
+                // `col:type=value` constant (e.g. every event is a
+                // `payout_request` when only the payout_request rows survived)
+                // or a `__dict:` that enumerates only the categories present in
+                // the survivors while others live solely in the offloaded rows.
+                // Demote any such encoding that does NOT hold over ALL rows
+                // (checked against the full `items`), then re-render. Lossless:
+                // the IR rows keep every survivor cell, so a demoted column just
+                // renders per-row. Byte-identical when nothing is demoted.
+                if demote_subset_only_encodings(&mut c, items) {
+                    rendered = stage.formatter.format(&c);
+                }
                 if c.is_decoder_verifiable() && !c.contains_opaque_ref() {
                     let sentinel = ccr_sentinel_map(&dropped_summary, row_index_marker.as_deref());
                     let sentinel_line = crate::util::pyjson::python_safe_json_dumps(
@@ -1079,6 +1094,138 @@ fn compaction_kind_str(c: &Compaction) -> &'static str {
     }
 }
 
+/// Demote survivor-render column encodings that hold ONLY over the shown
+/// rows, checked against the FULL `all_rows` array (review F1b / RF2 / RF3).
+///
+/// The survivor compaction stamps its constant folds and category encodings
+/// from the kept subset alone, so on the offload path they can present a subset
+/// fact as universal. For every column of a flat [`Compaction::Table`] this
+/// clears any such claim that does not hold over EVERY row in `all_rows`:
+/// - a `const_value` unless every row holds that exact value;
+/// - a `DictString` unless its value list already covers every string the
+///   column takes;
+/// - an `Affix` unless every string cell carries the declared prefix and suffix
+///   (review RF3);
+/// - a `HeadDict` unless every string cell's last-delimiter head is in the
+///   declared head set (review RF3).
+///
+/// The positional encodings (`ArithInt` / `IsoDeltaSeconds` / `DecimalScaled`)
+/// describe the shown rows by index and make no category claim, so they are
+/// left untouched. Column values are resolved with [`resolve_flattened`] so a
+/// flattened nested (dotted) column is checked against the real nested value,
+/// not a literal-key miss (review RF2).
+///
+/// Demotion is lossless: the IR rows keep every survivor cell, so a cleared
+/// column simply renders per-row. Returns whether anything changed, so the
+/// caller re-renders only then and the offload output stays byte-identical
+/// whenever every survivor encoding was already universal.
+fn demote_subset_only_encodings(c: &mut Compaction, all_rows: &[Value]) -> bool {
+    use super::compaction::encodings::{encode_affix_cell, split_head};
+    use std::collections::HashSet;
+
+    let Compaction::Table { schema, .. } = c else {
+        return false;
+    };
+    let mut changed = false;
+    for spec in schema.fields.iter_mut() {
+        // review RF2: a flattened nested column carries a DOTTED name
+        // (`meta.region`) whose value lives at `row["meta"]["region"]`, not under
+        // a literal `"meta.region"` key — a plain `row.get(name)` was always
+        // None there, OVER-demoting genuinely-universal nested consts and
+        // UNDER-demoting subset-only nested dicts. `resolve_flattened` resolves
+        // the name the same way the compactor flattened it.
+        let demote_const = match &spec.const_value {
+            Some(v) => !all_rows
+                .iter()
+                .all(|row| resolve_flattened(row, &spec.name) == Some(v)),
+            None => false,
+        };
+        if demote_const {
+            spec.const_value = None;
+            changed = true;
+        }
+
+        // Category-claim encodings each assert the WHOLE column ranges over a
+        // fixed set stamped from the SURVIVOR subset, so on the offload path any
+        // of them can present a subset fact as universal (review F1b/RF3): a
+        // `__dict:` missing categories, a `__affix:` whose prefix/suffix is false
+        // for offloaded rows, a `__head:` whose heads do not cover them. Each is
+        // cleared unless it holds over ALL rows. The positional encodings
+        // (ArithInt / IsoDeltaSeconds / DecimalScaled) describe the shown rows by
+        // index, make no category claim, and are left untouched. A non-string /
+        // absent / null cell cannot be represented by any of these string
+        // encodings, so it never makes one incomplete (mirrors the dict arm).
+        let demote_encoding = match &spec.encoding {
+            Some(ColumnEncoding::DictString { values }) => {
+                let known: HashSet<&str> = values.iter().map(String::as_str).collect();
+                !all_rows
+                    .iter()
+                    .all(|row| match resolve_flattened(row, &spec.name) {
+                        Some(Value::String(s)) => known.contains(s.as_str()),
+                        _ => true,
+                    })
+            }
+            Some(ColumnEncoding::Affix { prefix, suffix }) => {
+                // `encode_affix_cell` is the exact strip-and-check the compactor
+                // proved the round-trip with: it returns `Some` iff the cell
+                // carries both affixes without overlap, so an affix-free or
+                // overlap-length string fails here just as it failed to stamp.
+                !all_rows
+                    .iter()
+                    .all(|row| match resolve_flattened(row, &spec.name) {
+                        Some(Value::String(s)) => encode_affix_cell(s, prefix, suffix).is_some(),
+                        _ => true,
+                    })
+            }
+            Some(ColumnEncoding::HeadDict { delim, heads }) => {
+                let known: HashSet<&str> = heads.iter().map(String::as_str).collect();
+                !all_rows
+                    .iter()
+                    .all(|row| match resolve_flattened(row, &spec.name) {
+                        // `split_head` is the compactor's own last-delimiter
+                        // split; a cell without the delimiter, or whose head is
+                        // not in the declared set, is not covered by the fold.
+                        Some(Value::String(s)) => match split_head(s, *delim) {
+                            Some((head, _tail)) => known.contains(head),
+                            None => false,
+                        },
+                        _ => true,
+                    })
+            }
+            _ => false,
+        };
+        if demote_encoding {
+            spec.encoding = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Resolve a (possibly dotted, flattened) column name against an ORIGINAL
+/// un-flattened row, mirroring the compactor's `flatten_uniform_nested`.
+///
+/// A literal top-level key wins first — this covers every non-dotted column and
+/// any key that literally contains a dot. Otherwise the name is a flattening
+/// path (`parent.inner`) traversed segment by segment through nested objects,
+/// exactly the structure the compactor folded into the dotted column. Returns
+/// `None` when any segment is absent or a non-object (the compactor's `Missing`
+/// cell), which the demote check reads as "not this value" (a constant) or "not
+/// represented" (a string encoding).
+fn resolve_flattened<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
+    if let Some(v) = row.get(name) {
+        return Some(v);
+    }
+    if !name.contains('.') {
+        return None;
+    }
+    let mut cur = row;
+    for seg in name.split('.') {
+        cur = cur.get(seg)?;
+    }
+    Some(cur)
+}
+
 /// Approximate byte size of `[v0, v1, ...]` JSON serialization, given
 /// each item's already-serialized form. Adds 2 for outer brackets and
 /// 1 per inter-item comma. Used by the lossless savings-ratio check.
@@ -1141,6 +1288,280 @@ mod tests {
         assert!(compacted.starts_with("[8]{"), "got: {compacted}");
         assert!(result.ccr_hash.is_none());
         assert!(result.dropped_summary.is_empty());
+    }
+
+    #[test]
+    fn demote_clears_subset_only_constant_and_dict_keeps_universal_review_f1b() {
+        use super::super::compaction::{CellValue, FieldSpec, Row, Schema};
+
+        // A survivor render (kept rows all `payout_request`, status all `ok`)
+        // whose header would assert those as universal + a genuinely-constant
+        // `region`.
+        let mut c = Compaction::Table {
+            schema: Schema {
+                fields: vec![
+                    FieldSpec {
+                        name: "event_type".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: Some(json!("payout_request")),
+                        encoding: None,
+                    },
+                    FieldSpec {
+                        name: "status".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: None,
+                        encoding: Some(ColumnEncoding::DictString {
+                            values: vec!["ok".into()],
+                        }),
+                    },
+                    FieldSpec {
+                        name: "region".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: Some(json!("us")),
+                        encoding: None,
+                    },
+                ],
+            },
+            rows: vec![Row(vec![
+                CellValue::Scalar(json!("payout_request")),
+                CellValue::Scalar(json!("ok")),
+                CellValue::Scalar(json!("us")),
+            ])],
+            original_count: 2,
+        };
+
+        // The FULL array disagrees: event_type also has `purchase`, status also
+        // has `fail`; region is genuinely constant `us`.
+        let all_rows = vec![
+            json!({"event_type": "purchase", "status": "fail", "region": "us"}),
+            json!({"event_type": "payout_request", "status": "ok", "region": "us"}),
+        ];
+
+        assert!(demote_subset_only_encodings(&mut c, &all_rows));
+        let Compaction::Table { schema, .. } = &c else {
+            panic!("still a table");
+        };
+        let field = |n: &str| schema.fields.iter().find(|f| f.name == n).unwrap();
+        assert!(
+            field("event_type").const_value.is_none(),
+            "false-universal constant must be demoted",
+        );
+        assert!(
+            field("status").encoding.is_none(),
+            "category-incomplete dict must be demoted",
+        );
+        assert_eq!(
+            field("region").const_value,
+            Some(json!("us")),
+            "a genuinely universal constant must be kept",
+        );
+    }
+
+    #[test]
+    fn demote_is_noop_when_encodings_hold_over_all_rows_review_f1b() {
+        use super::super::compaction::{CellValue, FieldSpec, Row, Schema};
+
+        let mut c = Compaction::Table {
+            schema: Schema {
+                fields: vec![
+                    FieldSpec {
+                        name: "kind".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: Some(json!("tick")),
+                        encoding: None,
+                    },
+                    FieldSpec {
+                        name: "lvl".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: None,
+                        encoding: Some(ColumnEncoding::DictString {
+                            values: vec!["a".into(), "b".into()],
+                        }),
+                    },
+                ],
+            },
+            rows: vec![Row(vec![
+                CellValue::Scalar(json!("tick")),
+                CellValue::Scalar(json!("a")),
+            ])],
+            original_count: 3,
+        };
+        // Every row agrees with the survivor encodings — nothing to demote, so
+        // the offload output stays byte-identical.
+        let all_rows = vec![
+            json!({"kind": "tick", "lvl": "a"}),
+            json!({"kind": "tick", "lvl": "b"}),
+            json!({"kind": "tick", "lvl": "a"}),
+        ];
+        assert!(!demote_subset_only_encodings(&mut c, &all_rows));
+        let Compaction::Table { schema, .. } = &c else {
+            panic!("still a table");
+        };
+        assert_eq!(schema.fields[0].const_value, Some(json!("tick")));
+        assert!(matches!(
+            schema.fields[1].encoding,
+            Some(ColumnEncoding::DictString { .. })
+        ));
+    }
+
+    #[test]
+    fn demote_resolves_flattened_nested_columns_review_rf2() {
+        use super::super::compaction::{CellValue, FieldSpec, Row, Schema};
+
+        // A survivor render of a FLATTENED nested object: the compactor split
+        // `meta` into dotted columns `meta.region` (const "us") and
+        // `meta.status` (dict ["ok"]) because the kept rows all shared them.
+        let mut c = Compaction::Table {
+            schema: Schema {
+                fields: vec![
+                    FieldSpec {
+                        name: "meta.region".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: Some(json!("us")),
+                        encoding: None,
+                    },
+                    FieldSpec {
+                        name: "meta.status".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: None,
+                        encoding: Some(ColumnEncoding::DictString {
+                            values: vec!["ok".into()],
+                        }),
+                    },
+                ],
+            },
+            rows: vec![Row(vec![
+                CellValue::Scalar(json!("us")),
+                CellValue::Scalar(json!("ok")),
+            ])],
+            original_count: 2,
+        };
+
+        // The FULL array is UN-flattened: values live under a nested `meta`.
+        // region is genuinely universal ("us"); status also takes "fail" in an
+        // offloaded row.
+        let all_rows = vec![
+            json!({"meta": {"region": "us", "status": "ok"}}),
+            json!({"meta": {"region": "us", "status": "fail"}}),
+        ];
+
+        assert!(demote_subset_only_encodings(&mut c, &all_rows));
+        let Compaction::Table { schema, .. } = &c else {
+            panic!("still a table");
+        };
+        let field = |n: &str| schema.fields.iter().find(|f| f.name == n).unwrap();
+        // Pre-fix a dotted-name lookup was always None, so a universal nested
+        // const was OVER-demoted and a subset-only nested dict UNDER-demoted;
+        // resolve_flattened fixes BOTH directions.
+        assert_eq!(
+            field("meta.region").const_value,
+            Some(json!("us")),
+            "a genuinely-universal NESTED constant must be kept",
+        );
+        assert!(
+            field("meta.status").encoding.is_none(),
+            "a subset-only NESTED dict must be demoted",
+        );
+    }
+
+    #[test]
+    fn demote_clears_subset_only_affix_and_head_review_rf3() {
+        use super::super::compaction::{CellValue, FieldSpec, Row, Schema};
+
+        // Survivor render whose header would claim, from the kept rows alone: a
+        // shared endpoint prefix, a shared token affix, an `/api/` route head,
+        // and a `logs/` dir head.
+        let mut c = Compaction::Table {
+            schema: Schema {
+                fields: vec![
+                    FieldSpec {
+                        name: "endpoint".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: None,
+                        encoding: Some(ColumnEncoding::Affix {
+                            prefix: "/api/payout/".into(),
+                            suffix: String::new(),
+                        }),
+                    },
+                    FieldSpec {
+                        name: "token".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: None,
+                        encoding: Some(ColumnEncoding::Affix {
+                            prefix: "req-".into(),
+                            suffix: "-v1".into(),
+                        }),
+                    },
+                    FieldSpec {
+                        name: "route".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: None,
+                        encoding: Some(ColumnEncoding::HeadDict {
+                            delim: '/',
+                            heads: vec!["/api/".into()],
+                        }),
+                    },
+                    FieldSpec {
+                        name: "dir".into(),
+                        type_tag: "string".into(),
+                        nullable: false,
+                        const_value: None,
+                        encoding: Some(ColumnEncoding::HeadDict {
+                            delim: '/',
+                            heads: vec!["logs/".into()],
+                        }),
+                    },
+                ],
+            },
+            rows: vec![Row(vec![
+                CellValue::Scalar(json!("/api/payout/1")),
+                CellValue::Scalar(json!("req-a-v1")),
+                CellValue::Scalar(json!("/api/one")),
+                CellValue::Scalar(json!("logs/a")),
+            ])],
+            original_count: 3,
+        };
+
+        // The FULL array: an offloaded `/api/purchase/9` breaks the endpoint
+        // prefix and a `/web/health` breaks the `/api/` route head; the token
+        // affix and the `logs/` dir head hold over every row.
+        let all_rows = vec![
+            json!({"endpoint": "/api/payout/1", "token": "req-a-v1", "route": "/api/one", "dir": "logs/a"}),
+            json!({"endpoint": "/api/payout/2", "token": "req-b-v1", "route": "/api/two", "dir": "logs/b"}),
+            json!({"endpoint": "/api/purchase/9", "token": "req-c-v1", "route": "/web/health", "dir": "logs/c"}),
+        ];
+
+        assert!(demote_subset_only_encodings(&mut c, &all_rows));
+        let Compaction::Table { schema, .. } = &c else {
+            panic!("still a table");
+        };
+        let field = |n: &str| schema.fields.iter().find(|f| f.name == n).unwrap();
+        assert!(
+            field("endpoint").encoding.is_none(),
+            "a false-universal affix prefix must be demoted",
+        );
+        assert!(
+            field("route").encoding.is_none(),
+            "a head set missing an offloaded row's head must be demoted",
+        );
+        assert!(
+            matches!(field("token").encoding, Some(ColumnEncoding::Affix { .. })),
+            "an affix that holds over ALL rows must be kept",
+        );
+        assert!(
+            matches!(field("dir").encoding, Some(ColumnEncoding::HeadDict { .. })),
+            "a head set covering ALL rows must be kept",
+        );
     }
 
     #[test]

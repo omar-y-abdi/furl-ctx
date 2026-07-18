@@ -484,7 +484,7 @@ def test_corpus_covers_every_routing_arm() -> None:
     # verbatim; assert the CCR-marked message is returned byte-identical and no
     # compression transform was emitted for it.
     ac = live["already_compressed"]
-    assert ac["transforms_applied"] == ["router:noop"], (
+    assert ac["transforms_applied"] == ["router:noop:already_compressed"], (
         "already_compressed case did not pin — the CCR marker no longer matches "
         "_looks_like_ccr_output; update _ccr_marker()"
     )

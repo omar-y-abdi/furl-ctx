@@ -49,21 +49,27 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-# ── ReDoS guards (SEC-1) ────────────────────────────────────────────────────
+from .regex_budget import Boundability, classify_boundability, matches_within_budget
+
+# ── ReDoS guards (SEC-1, A12, RG1) ──────────────────────────────────────────
 # The include/exclude patterns are caller-supplied and run over caller-supplied
 # content, line by line. A catastrophically-backtracking pattern (e.g.
-# ``(a+)+$``) over a long line can wedge the single-threaded MCP process. This
-# is a single-principal stdio server, so the proportionate defense is a pair of
-# cheap, dependency-free caps rather than a wall-clock timeout (which would need
-# the third-party ``regex`` module):
+# ``(a+)+$``) over a long line can wedge the MCP process. Three layers defend it:
 #
 # * ``_MAX_PATTERN_CHARS`` / the nested-quantifier heuristic reject pathological
 #   *patterns* at parse time (see ``_validate_pattern``);
-# * ``_MAX_REGEX_LINE_CHARS`` bounds the *input* any single match ever sees, so
-#   worst-case backtracking is finite and small.
+# * ``_MAX_REGEX_LINE_CHARS`` bounds the *input* any single match ever sees;
+# * the per-match wall-clock budget in ``regex_budget`` bounds the match itself.
 #
-# Both bounds sit far past realistic filter usage, so normal patterns and normal
-# content are matched byte-identically to before.
+# The budget is what actually makes this safe. The first two layers are
+# SYNTACTIC, and syntax cannot bound backtracking: ``(a|b|ab)+Z`` has no nested
+# quantifier, no optional chain, and is 10 characters long, yet it backtracks for
+# minutes against an 80-character line -- well inside the input cap. An earlier
+# revision of this comment claimed the input cap made "worst-case backtracking
+# finite and small"; that was wrong, and RG1 replaced the claim with the budget.
+#
+# All three bounds sit far past realistic filter usage, so normal patterns and
+# normal content are matched byte-identically to before.
 _MAX_REGEX_LINE_CHARS = 10_000
 _MAX_PATTERN_CHARS = 200
 
@@ -74,6 +80,77 @@ _MAX_PATTERN_CHARS = 200
 # construction. The input cap above is the real backstop; this just fails the
 # obvious cases loudly at parse time instead of at match time.
 _NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
+
+# Bound on the number of variable-length quantifiers a single pattern may apply
+# (review A12, widened to ``+`` by RG1). An "optional chain" such as ``.?``
+# repeated dozens of times carries NO nested quantifier and stays under
+# ``_MAX_PATTERN_CHARS``, yet backtracks exponentially on any line WITHIN the
+# input cap — the cap bounds input length, not backtracking width, so a short
+# adversarial line (``.?`` x22 measured ~7 s, worse beyond) still wedges the
+# match. The nested-quantifier screen above misses this shape entirely. Real
+# retrieve/compress filters carry at most a handful of quantifiers (the shipped
+# test corpus tops out at 4), so a bound of 12 rejects the exponential chains
+# with wide margin while passing every realistic pattern untouched.
+#
+# This screen is DEFENSE-IN-DEPTH, not the guarantee: it is syntactic, and no
+# syntactic screen can bound backtracking (``(a|b|ab)+Z`` scores 1 and still
+# hangs). The per-match budget in ``regex_budget`` is the actual bound (RG1).
+_MAX_VARIABLE_QUANTIFIERS = 12
+
+
+def count_variable_quantifiers(pattern: str) -> int:
+    """Count the variable-length quantifiers a pattern applies.
+
+    Counts ``?``, ``*``, ``+`` and any braced range (``{0,3}``, ``{1,}``, ``{,5}``
+    — a ``{`` body containing a comma), skipping escaped metacharacters, character
+    classes, and the ``?`` that opens a group extension (``(?:``, ``(?=``,
+    ``(?<name>``). A high count is the optional-chain exponential-backtracking
+    shape the nested-quantifier screen misses (A12); a fixed ``{3}`` repeat is
+    NOT ambiguous and is not counted. Pure, linear in the pattern length.
+
+    ``+`` counts as of RG1: a flat ``a+`` chain (``"a+" * 30``) backtracks
+    exponentially with no ``?``/``*`` anywhere, so omitting ``+`` let that shape
+    score 0 and sail through. This is defense-in-depth only — the screen still
+    cannot catch ``(a|b|ab)+Z`` (one quantifier, still exponential), which is why
+    the real bound is the per-match budget in :mod:`furl_ctx.ccr.regex_budget`.
+    """
+    count = 0
+    i = 0
+    n = len(pattern)
+    in_class = False
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\":
+            i += 2  # an escaped char is a literal, never a quantifier
+            continue
+        if in_class:
+            if ch == "]":
+                in_class = False
+            i += 1
+            continue
+        if ch == "[":
+            in_class = True
+            i += 1
+            continue
+        if ch in "?*+":
+            # A ``?`` right after ``(`` opens a group extension ((?:, (?=,
+            # (?<name>…) — group syntax, not a quantifier over an atom.
+            if ch == "?" and i > 0 and pattern[i - 1] == "(":
+                i += 1
+                continue
+            count += 1
+            i += 1
+            continue
+        if ch == "{":
+            close = pattern.find("}", i)
+            if close != -1 and "," in pattern[i + 1 : close]:
+                # A braced RANGE ({m,n}/{m,}/{,n}) is variable-length and can
+                # backtrack; a fixed {m} count cannot, so only ranges count.
+                count += 1
+                i = close + 1
+                continue
+        i += 1
+    return count
 
 
 class CompressionMode(Enum):
@@ -226,8 +303,12 @@ class SectionPatterns:
         is never matched (the pattern would backtrack over unbounded input), so
         it is treated as PROTECTED — the conservative choice that ships it
         verbatim rather than silently compressing an unfilterable line or
-        dropping a user's intended exclude-protection. Realistic content lines
-        are far under the cap, so this never fires in normal use.
+        dropping a user's intended exclude-protection. Within the cap the match
+        runs under a wall-clock budget (RG1, see ``_resolve_matcher``); a line
+        that exhausts the budget reads as "no match" for both the exclude and
+        include tests, so an include-filtered run treats it as ineligible
+        (protected) rather than hanging. Realistic content lines are far under
+        the cap, so neither bound fires in normal use.
         """
         if len(line) > _MAX_REGEX_LINE_CHARS:
             return False
@@ -261,19 +342,45 @@ def _parse_pattern_list(raw: Any, name: str) -> tuple[tuple[str, ...], str | Non
 def _validate_pattern(pattern: str, name: str) -> str | None:
     """Reject a pathological pattern at parse time; ``None`` when acceptable.
 
-    Two cheap, dependency-free screens (SEC-1): an over-long pattern and the
-    nested-unbounded-quantifier shape that drives exponential backtracking. This
-    is a heuristic — it does not catch every catastrophic construction — but it
-    turns the obvious wedges into a clear typed error, and the per-line input cap
-    bounds whatever slips through. Normal filters (``ERROR.*``, ``*.py``,
-    ``^\\d+$``) have neither shape and pass untouched.
+    Three cheap, dependency-free screens (SEC-1, A12): an over-long pattern, the
+    nested-unbounded-quantifier shape, and a long optional-chain (many
+    variable-length quantifiers) — all three drive exponential backtracking. This
+    is a heuristic — it does not catch every catastrophic construction — so it is
+    NOT the safety bound; it only turns the obvious wedges into a clear typed
+    error at parse time. What bounds the rest is the per-match wall-clock budget
+    applied by ``_resolve_matcher`` (RG1): the per-line input cap does NOT bound
+    backtracking, only input length. Normal filters (``ERROR.*``, ``*.py``,
+    ``^\\d+$``) have none of these shapes and pass untouched.
+
+    The fourth screen IS a bound (B1): a pattern RE2 refuses (lookaround, a
+    backreference, or a bounded repetition above 1000) cannot be time-bounded off
+    the main thread, and a wedged match on the MCP worker thread freezes the whole
+    event loop, so it is rejected here instead of run unbounded. Only a pattern
+    that is a valid Python regex RE2 declines is rejected — a glob like ``*.py``
+    is not a regex at all and is classified ``UNKNOWN``, so it still reaches the
+    ``fnmatch`` path in ``_resolve_matcher``. With RE2 absent nothing is rejected
+    on this basis.
     """
     if len(pattern) > _MAX_PATTERN_CHARS:
         return f"{name} pattern too long (>{_MAX_PATTERN_CHARS} chars): {pattern[:40]!r}…"
+    if classify_boundability(pattern) is Boundability.UNBOUNDABLE:
+        return (
+            f"{name} pattern rejected: lookaround, a backreference, or a bounded "
+            f"repetition larger than RE2 allows (max 1000, e.g. a{{0,2000}}) "
+            f"cannot be time-bounded off the main thread; remove the "
+            f"lookaround/backreference or lower the repetition to 1000 or less: "
+            f"{pattern!r}"
+        )
     if _NESTED_QUANTIFIER_RE.search(pattern):
         return (
             f"{name} pattern rejected: nested unbounded quantifier "
             f"(catastrophic-backtracking risk): {pattern!r}"
+        )
+    if count_variable_quantifiers(pattern) > _MAX_VARIABLE_QUANTIFIERS:
+        return (
+            f"{name} pattern rejected: too many variable-length quantifiers "
+            f"(>{_MAX_VARIABLE_QUANTIFIERS}); an optional-chain like '.?' repeated "
+            f"many times backtracks exponentially: {pattern!r}"
         )
     return None
 
@@ -287,20 +394,24 @@ def _resolve_matcher(pattern: str) -> Callable[[str], bool]:
     regex) is matched with ``fnmatch`` glob semantics. Deterministic: the same
     pattern always resolves to the same matcher.
 
-    ReDoS input bound (SEC-1): a line longer than ``_MAX_REGEX_LINE_CHARS`` is
-    NOT fed to the matcher at all — it resolves to ``False`` (no match). The cap
-    is applied before BOTH branches because ``fnmatch`` also translates to a
-    regex under the hood, so an adversarial 10 000-char line cannot trigger
-    unbounded backtracking. This is a raw match verdict only; how an over-long
-    line is *treated* for eligibility (protected, not compressed) is decided by
-    ``line_is_eligible``, which caps the line independently. Realistic filter
-    content is far shorter, so this never fires in normal use.
+    ReDoS bounds: a line longer than ``_MAX_REGEX_LINE_CHARS`` is NOT fed to the
+    matcher at all — it resolves to ``False`` (no match). The cap is applied
+    before BOTH branches because ``fnmatch`` also translates to a regex under the
+    hood. The cap bounds the line LENGTH but NOT backtracking WIDTH, so within
+    the cap the match additionally runs under a wall-clock budget (RG1) — a
+    pattern like ``(a|b|ab)+Z`` passes every parse-time screen and still
+    backtracks exponentially on an 80-character line. A match that exceeds the
+    budget resolves to ``False``; see :mod:`furl_ctx.ccr.regex_budget`. This is a
+    raw match verdict only; how an over-long line is *treated* for eligibility
+    (protected, not compressed) is decided by ``line_is_eligible``, which caps the
+    line independently. Realistic filter content is far shorter, so neither bound
+    fires in normal use.
     """
     try:
         compiled = re.compile(pattern)
     except re.error:
         return lambda text: len(text) <= _MAX_REGEX_LINE_CHARS and fnmatch.fnmatch(text, pattern)
-    return lambda text: len(text) <= _MAX_REGEX_LINE_CHARS and compiled.search(text) is not None
+    return lambda text: len(text) <= _MAX_REGEX_LINE_CHARS and matches_within_budget(compiled, text)
 
 
 def _pattern_matches(pattern: str, text: str) -> bool:

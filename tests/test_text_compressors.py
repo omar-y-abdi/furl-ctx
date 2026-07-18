@@ -428,8 +428,9 @@ class TestSmartCrusherTextIntegration:
         tool_content = result.messages[1]["content"]
         assert len(tool_content) < len(json_content), "output must actually shrink"
 
-        # Extract JSON part (may have a digest marker appended)
-        base_content = re.split(r"\n<headroom:", tool_content)[0]
+        # Extract JSON part (may have a digest marker appended). A11: the marker
+        # namespace was renamed <headroom:...> -> <furl:...>.
+        base_content = re.split(r"\n<furl:", tool_content)[0]
         parsed = json.loads(base_content)
         assert isinstance(parsed, list)
         assert 0 < len(parsed) < len(items), (

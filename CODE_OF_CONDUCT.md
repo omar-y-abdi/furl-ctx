@@ -60,7 +60,7 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement by opening an
-issue at [github.com/omar-y-abdi/furl/issues](https://github.com/omar-y-abdi/furl/issues)
+issue at [github.com/omar-y-abdi/furl-ctx/issues](https://github.com/omar-y-abdi/furl-ctx/issues)
 (for sensitive reports, contact the repository owner directly via their
 GitHub profile instead of a public issue).
 

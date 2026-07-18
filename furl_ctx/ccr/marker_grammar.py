@@ -56,6 +56,8 @@ That non-match is load-bearing; do not broaden the fallback to cover it.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from typing import Any, Final
 
 # --------------------------------------------------------------------------- #
 # Widths.
@@ -181,14 +183,123 @@ def hash_of_match(match: re.Match[str]) -> str:
     return hash_value
 
 
+# --------------------------------------------------------------------------- #
+# Bounded marker scanning (marker-scan DoS).
+#
+# ``GENERIC_BRACKET_PATTERN`` carries two lazy ``.*?`` wildcards and runs over
+# agent/tool-produced text up to the MCP server's 10 MiB read cap. Under
+# CPython's backtracking ``re`` engine that scan is quadratic-or-worse on
+# adversarial input: many ``[`` starts, each forcing a long forward scan for
+# ``compressed`` then ``hash=``. On the MCP worker thread no SIGALRM watchdog
+# can fire, so a wedged scan is a process-wide freeze, the same DoS class
+# ``regex_budget`` closed for agent-supplied filters.
+#
+# The bound is RE2 (``google-re2``, shipped by the ``mcp`` extra): it matches
+# with an automaton in LINEAR time, so the pathological class does not exist for
+# it, and it is the one engine that holds on a worker thread. RE2 has no flags
+# argument, so an ``re.IGNORECASE`` pattern is compiled from an inline ``(?i)``
+# form. Extraction parity with the ``re`` engine, the same hashes in the same
+# order, is pinned by ``tests/test_marker_scan_budget.py`` over the
+# characterization corpus.
+#
+# Only ``GENERIC_BRACKET_PATTERN`` needs the automaton. ``BRACKET_RETRIEVE_PATTERN``
+# and ``DOUBLE_ANGLE_PATTERN`` are literal-anchored and linear under ``re``, so
+# they keep the exact ``re`` engine and are intentionally NOT twinned. When RE2
+# is absent, a base install without the ``re2``/``mcp`` extra, the scan falls back
+# to the residual ``re`` engine: Ctrl-C-interruptible on the main thread, the same
+# residual tier ``regex_budget`` documents. A supported MCP deployment always
+# ships RE2, closing the worker-thread freeze in production.
+# --------------------------------------------------------------------------- #
+
+
+def _load_re2() -> Any | None:
+    """Import ``re2`` once, or ``None`` when the optional extra is absent."""
+    try:
+        import re2
+    except Exception:  # noqa: BLE001 - absent/broken extra is a normal fallback
+        return None
+    return re2
+
+
+_RE2: Final = _load_re2()
+
+
+def _re2_twin(pattern: re.Pattern[str]) -> Any | None:
+    """A linear-time RE2 twin of ``pattern``, or ``None`` when RE2 is absent or
+    refuses the source. RE2 honors only inline flags, so an ``re.IGNORECASE``
+    pattern is compiled from an inline ``(?i)`` form; the marker patterns carry
+    no other flag.
+    """
+    if _RE2 is None:
+        return None
+    source = pattern.pattern
+    if pattern.flags & re.IGNORECASE:
+        source = "(?i)" + source
+    try:
+        return _RE2.compile(source)
+    except Exception:  # noqa: BLE001 - an uncompilable twin falls back to re
+        return None
+
+
+# RE2 twin for the one backtracking-prone consumer pattern. The other two are
+# literal-anchored and stay on the exact ``re`` engine, so no behavior changes.
+_GENERIC_BRACKET_RE2: Final = _re2_twin(GENERIC_BRACKET_PATTERN)
+_RE2_TWINS: Final[dict[re.Pattern[str], Any]] = (
+    {GENERIC_BRACKET_PATTERN: _GENERIC_BRACKET_RE2} if _GENERIC_BRACKET_RE2 is not None else {}
+)
+
+
+def finditer_within_budget(pattern: re.Pattern[str], text: str) -> list[Any]:
+    """Every non-overlapping match of ``pattern`` in ``text``, scanned in linear
+    time via the pattern's RE2 twin when one exists, else the residual ``re``
+    engine.
+
+    Returns ``re`` or ``re2`` match objects; both expose
+    ``group``/``start``/``end``/``lastindex``, which :func:`hash_of_match` and
+    :func:`sub_within_budget` rely on. Total: never raises for the caller. RE2
+    refuses a few inputs the ``re`` engine accepts, most notably a lone surrogate
+    that has no UTF-8 encoding; those fall back to ``re`` so the scan stays total
+    and the compressor's fail-open contract holds.
+    """
+    twin = _RE2_TWINS.get(pattern)
+    if twin is not None:
+        try:
+            return list(twin.finditer(text))
+        except Exception:  # noqa: BLE001 - RE2 refuses inputs re accepts (a lone
+            # surrogate has no UTF-8 encoding); fall back to the total re engine.
+            pass
+    return list(pattern.finditer(text))
+
+
+def sub_within_budget(pattern: re.Pattern[str], repl: Callable[[Any], str], text: str) -> str:
+    """``pattern.sub(repl, text)`` computed over the bounded scan.
+
+    Splices ``repl(match)`` in for each non-overlapping match, left to right,
+    identical to :meth:`re.Pattern.sub` for the marker patterns, which never
+    match zero width. Routing through :func:`finditer_within_budget` gives the
+    substitution the same linear-time bound the extraction scan has.
+    """
+    parts: list[str] = []
+    last = 0
+    for match in finditer_within_budget(pattern, text):
+        parts.append(text[last : match.start()])
+        parts.append(repl(match))
+        last = match.end()
+    parts.append(text[last:])
+    return "".join(parts)
+
+
 def hashes_in_text(text: str) -> list[str]:
     """Every CCR marker hash in *text*, in first-seen order (deduped).
 
     Runs each :func:`marker_patterns` pattern and unions the hashes (the last
     capture group of each match), exactly as the scan contract above describes.
+    The scan is bounded through :func:`finditer_within_budget`, so the generic
+    bracket fallback runs on RE2's linear-time automaton when available; this
+    stays total and quick even on adversarial marker-shaped input near the cap.
     """
     seen: dict[str, None] = {}
     for pattern in marker_patterns():
-        for match in pattern.finditer(text):
+        for match in finditer_within_budget(pattern, text):
             seen.setdefault(hash_of_match(match), None)
     return list(seen)

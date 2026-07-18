@@ -58,7 +58,7 @@
     "tokens_after": 783,
     "tokens_before": 783,
     "transforms_applied": [
-      "router:noop"
+      "router:noop:already_compressed"
     ],
     "warnings": []
   },
@@ -196,7 +196,7 @@
     "tokens_after": 778,
     "tokens_before": 778,
     "transforms_applied": [
-      "router:noop"
+      "router:noop:no_savings"
     ],
     "warnings": []
   },
@@ -455,7 +455,7 @@
     "tokens_after": 8,
     "tokens_before": 8,
     "transforms_applied": [
-      "router:noop"
+      "router:noop:non_string"
     ],
     "warnings": []
   },
@@ -642,7 +642,7 @@
     "tokens_after": 11,
     "tokens_before": 11,
     "transforms_applied": [
-      "router:noop"
+      "router:noop:below_min_tokens"
     ],
     "warnings": []
   }

@@ -331,6 +331,31 @@ def test_split_into_sections_keeps_json_array_with_bracket_in_string() -> None:
     assert parsed == [{"path": "a]b"}, {"path": "c"}]
 
 
+def test_markdown_checklist_not_misrouted_as_json_bug10() -> None:
+    """Bug-10: a markdown task-list ("[x] done", "- [ ] todo") starts with "["
+    but is NOT JSON. The JSON block detector only balances brackets, so an
+    unguarded checkbox was extracted as a JSON_ARRAY section. It must stay text,
+    while a real JSON array in the same content is still detected."""
+    content = "\n".join(
+        [
+            "Release checklist for the sprint review meeting:",
+            "- [x] cut the release branch",
+            "- [ ] update the changelog file",
+            "[X] tag the version",
+            "",
+            '[{"id": 1, "status": "ok"}, {"id": 2, "status": "ok"}]',
+        ]
+    )
+    sections = split_into_sections(content)
+    # No checklist line landed in a JSON section.
+    json_text = "\n".join(s.content for s in sections if s.content_type == ContentType.JSON_ARRAY)
+    assert "[x]" not in json_text and "[ ]" not in json_text and "[X]" not in json_text
+    # The genuine JSON array is still detected.
+    assert any(
+        s.content_type == ContentType.JSON_ARRAY and '"status": "ok"' in s.content for s in sections
+    )
+
+
 def test_content_router_strategy_and_compress_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     router = ContentRouter(ContentRouterConfig())
 

@@ -50,8 +50,8 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
         id: filter
         with:
           filters: |
@@ -64,79 +64,170 @@ jobs:
               - 'Cargo.lock'
               - 'tests/**'
               - 'scripts/**'
-              # ALL workflow files, not just ci.yml: the main ruleset
-              # requires lint/build-wheel/test to CONCLUDE on every PR,
-              # and a skipped required check does NOT satisfy a ruleset
-              # — a workflow-only PR (e.g. release.yml) would otherwise
-              # sit BLOCKED forever with everything green-or-skipped
-              # (first hit: PR #15).
+              # Conclusion of the required checks (lint/build-wheel/test) no
+              # longer depends on this filter: those jobs ALWAYS run and short-
+              # circuit their heavy steps when code=='false' (step-level `if`
+              # in each job), so every PR — regardless of diff shape —
+              # CONCLUDES on all six required contexts. This filter now only
+              # decides whether the EXPENSIVE work runs: it keeps the full
+              # suite exercised for CI/plugin/docs changes, while config-only
+              # PRs not listed here (e.g. .release-please-config.json, PR #56)
+              # still CONCLUDE in seconds via the short-circuit.
+              # Deadlock history — do NOT re-add job-level gating: #15, #32, #56.
               - '.github/workflows/**'
-              # Same ruleset logic for plugin + docs PRs: the plugin ships
-              # executable code (the PostToolUse hook) plus the marketplace
-              # and manifest JSON, and any PR that only edits docs must still
-              # let the required checks CONCLUDE rather than sit skipped and
-              # BLOCKED forever (first hit: PR #32, plugin-readiness).
               - 'plugins/**'
               - '.claude-plugin/**'
               - '**/*.md'
 
   lint:
+    # Required check — always runs so it CONCLUDES on every PR (ruleset
+    # 18484290); the heavy steps below short-circuit when code=='false',
+    # so a docs/config-only PR still concludes SUCCESS in seconds.
     needs: changes
-    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PY_VERSION }}
+      # Runs unconditionally (not gated behind needs.changes.outputs.code): llms.txt
+      # is agent-orientation content, not `.md`, so a PR that edits only llms.txt
+      # never trips the `code` path filter above — gating this step the same way
+      # would let a broken doc anchor land silently. Pure stdlib, no repo import,
+      # sub-second. Fails when llms.txt carries NO anchored doc links at all, so a
+      # bad edit that strips or malforms the last reference cannot pass vacuously.
+      # Keep in sync with tests/test_llms_txt_anchors.py, which runs the same check
+      # locally as part of the full gated suite — divergence between the two
+      # implementations is itself a bug.
+      - name: llms.txt anchor guard
+        shell: python
+        run: |
+          import re
+          import sys
+          from pathlib import Path
+
+          llms_txt = Path("llms.txt").read_text(encoding="utf-8")
+          # The files llms.txt links into by #anchor. Extend this tuple (and the
+          # mirrored tests/test_llms_txt_anchors.py) if llms.txt ever gains anchored
+          # links into another document — anchor_ref_re is derived from it, so refs
+          # to a new doc cannot be silently skipped by a forgotten regex edit.
+          doc_names = ("README.md", "LIBRARY.md")
+
+          heading_re = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+          slug_strip_re = re.compile(r"[^\w\- ]")
+          anchor_ref_re = re.compile(
+              "(" + "|".join(re.escape(name) for name in doc_names) + ")#([A-Za-z0-9_-]+)"
+          )
+
+
+          def github_slug(heading_text):
+              """Reproduce GitHub's heading-to-anchor slug algorithm."""
+              slug = heading_text.strip().lower()
+              slug = slug_strip_re.sub("", slug)
+              return slug.replace(" ", "-")
+
+
+          def anchor_slugs(markdown):
+              """Every anchor GitHub would generate for a document's headings."""
+              slugs = set()
+              seen = {}
+              in_fence = False
+              for line in markdown.splitlines():
+                  stripped = line.strip()
+                  if stripped.startswith("```") or stripped.startswith("~~~"):
+                      in_fence = not in_fence
+                      continue
+                  if in_fence:
+                      continue
+                  heading = heading_re.match(line)
+                  if heading is None:
+                      continue
+                  base = github_slug(heading.group(1))
+                  count = seen.get(base, 0)
+                  seen[base] = count + 1
+                  slugs.add(base if count == 0 else f"{base}-{count}")
+              return slugs
+
+
+          slugs_by_doc = {
+              name: anchor_slugs(Path(name).read_text(encoding="utf-8")) for name in doc_names
+          }
+          refs = anchor_ref_re.findall(llms_txt)
+          if not refs:
+              print("llms.txt contains no README.md#.../LIBRARY.md#... anchor references at")
+              print("all — this guard would pass vacuously. If removing the last anchored doc")
+              print("link is deliberate, update this step and tests/test_llms_txt_anchors.py")
+              print("together.")
+              sys.exit(1)
+          missing = sorted({f"{doc}#{anchor}" for doc, anchor in refs if anchor not in slugs_by_doc[doc]})
+          if missing:
+              print("llms.txt references anchors that do not exist in their target file:")
+              for ref in missing:
+                  print(f"  - {ref}")
+              for doc in doc_names:
+                  print(f"Valid {doc} anchors: {sorted(slugs_by_doc[doc])}")
+              sys.exit(1)
+          print(f"OK: {len(refs)} anchor reference(s) in llms.txt all resolve.")
       - name: Cache pip
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-lint-${{ hashFiles('pyproject.toml') }}
           restore-keys: ${{ runner.os }}-pip-lint-
-      - run: python -m pip install --upgrade pip ruff==0.15.19 mypy==1.14.1
+      - if: needs.changes.outputs.code == 'true'
+        run: python -m pip install --upgrade pip ruff==0.15.19 mypy==1.14.1
       - name: ruff check
+        if: needs.changes.outputs.code == 'true'
         run: ruff check .
       - name: ruff format --check
+        if: needs.changes.outputs.code == 'true'
         run: ruff format --check .
       - name: mypy
+        if: needs.changes.outputs.code == 'true'
         run: mypy furl_ctx --ignore-missing-imports
 
   build-wheel:
+    # Required check — always runs so it CONCLUDES on every PR (ruleset
+    # 18484290); the heavy steps below short-circuit when code=='false',
+    # so a docs/config-only PR still concludes SUCCESS in seconds.
     needs: changes
-    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PY_VERSION }}
       # toolchain pinned to rust-toolchain.toml's version (TEST-30): the
       # action exports RUSTUP_TOOLCHAIN, which overrides the file — an
       # unpinned @stable would build with a different compiler than
       # rust.yml/local. Action ref stays @stable (see rust.yml note).
-      - uses: dtolnay/rust-toolchain@stable
+      - if: needs.changes.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.95.0  # keep in sync with rust-toolchain.toml
-      - uses: Swatinem/rust-cache@v2
+      - if: needs.changes.outputs.code == 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ". -> target"
       - name: Build wheel once (fast CI cargo profile)
+        if: needs.changes.outputs.code == 'true'
         run: |
           python -m pip install --upgrade pip maturin
           maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
-      - uses: actions/upload-artifact@v7
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: furl-wheel
           path: dist/*.whl
           retention-days: 1
 
   test:
+    # Required checks test (1..4) — always run so each shard CONCLUDES on
+    # every PR (ruleset 18484290); the heavy steps below short-circuit when
+    # code=='false', so a docs/config-only PR concludes SUCCESS in seconds.
     needs: [changes, build-wheel]
-    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -144,25 +235,27 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PY_VERSION }}
 
       - name: Cache pip
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ env.PY_VERSION }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: ${{ runner.os }}-pip-${{ env.PY_VERSION }}-
 
       - name: Download prebuilt wheel
-        uses: actions/download-artifact@v8
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: furl-wheel
           path: dist
 
       - name: Install (prebuilt wheel + dev deps, no cargo rebuild)
+        if: needs.changes.outputs.code == 'true'
         run: |
           python -m pip install --upgrade pip
           WHEEL="$(ls dist/*.whl)"
@@ -174,6 +267,7 @@ jobs:
           python -c "from furl_ctx._core import DiffCompressor; print('furl_ctx._core OK')"
 
       - name: Run test shard ${{ matrix.shard }}/4
+        if: needs.changes.outputs.code == 'true'
         run: |
           pytest tests \
             --splits 4 --group ${{ matrix.shard }} \
@@ -184,10 +278,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
-      - uses: wagoid/commitlint-github-action@v6
+      - uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6
         with:
           configFile: .commitlintrc.json
 
@@ -197,20 +291,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-build-${{ hashFiles('pyproject.toml') }}
           restore-keys: ${{ runner.os }}-pip-build-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.95.0  # keep in sync with rust-toolchain.toml (TEST-30)
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ". -> target"
       # Smoke check that the SHIPPED build (release profile) + sdist are wired

@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 
 @dataclass
@@ -19,18 +19,6 @@ class CacheAlignerConfig:
     """
 
     enabled: bool = False  # Disabled by default — prefix stability gains are marginal in practice
-
-
-# NOTE (API-14): the second, incompatible ``SmartCrusherConfig`` that used to
-# live in this module — together with its ``RelevanceScorerConfig`` (whose
-# ``relevance_threshold=0.25`` was never forwarded anywhere; the value the
-# engine actually receives is the reconciled 0.3 passed explicitly at the
-# bridge, see ``transforms/smart_crusher.py``) and the 80-line ``AnchorConfig``
-# (the live anchor defaults are Rust-side, ``anchor_selector.rs``) — was
-# deleted. The LIVE class is ``furl_ctx.transforms.smart_crusher.
-# SmartCrusherConfig``, which the package root re-exports; constructing the
-# old schema's kwargs against it now fails loud with ``TypeError`` instead of
-# crashing the engine later.
 
 
 # Default tools to exclude from compression (local file/code tools)
@@ -213,58 +201,6 @@ class FurlConfig:
     # touches index 0, frozen prefixes, or cache_control blocks).
     cross_message_dedup_enabled: bool = True
 
-    # Debugging - opt-in diff artifact generation
-    generate_diff_artifact: bool = False  # Enable to get detailed transform diffs
-
-
-@dataclass
-class Block:
-    """Atomic unit of context analysis."""
-
-    kind: Literal["system", "user", "assistant", "tool_call", "tool_result", "rag", "unknown"]
-    text: str
-    tokens_est: int
-    content_hash: str
-    source_index: int  # Position in original messages
-    flags: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class WasteSignals:
-    """Detected waste signals in a request."""
-
-    json_bloat_tokens: int = 0  # JSON blocks > 500 tokens
-    html_noise_tokens: int = 0  # HTML tags/comments
-    base64_tokens: int = 0  # Base64 encoded blobs
-    whitespace_tokens: int = 0  # Repeated whitespace
-    dynamic_date_tokens: int = 0  # Dynamic dates in system prompt
-    repetition_tokens: int = 0  # Repeated content
-    reread_tokens: int = 0  # Tool results re-served after already appearing earlier
-
-    def total(self) -> int:
-        """Total waste tokens detected."""
-        return (
-            self.json_bloat_tokens
-            + self.html_noise_tokens
-            + self.base64_tokens
-            + self.whitespace_tokens
-            + self.dynamic_date_tokens
-            + self.repetition_tokens
-            + self.reread_tokens
-        )
-
-    def to_dict(self) -> dict[str, int]:
-        """Convert to dictionary for storage."""
-        return {
-            "json_bloat": self.json_bloat_tokens,
-            "html_noise": self.html_noise_tokens,
-            "base64": self.base64_tokens,
-            "whitespace": self.whitespace_tokens,
-            "dynamic_date": self.dynamic_date_tokens,
-            "repetition": self.repetition_tokens,
-            "reread": self.reread_tokens,
-        }
-
 
 @dataclass
 class CachePrefixMetrics:
@@ -342,43 +278,5 @@ class TransformResult:
     transforms_applied: list[str]
     markers_inserted: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    diff_artifact: DiffArtifact | None = None  # Populated if generate_diff_artifact=True
     cache_metrics: CachePrefixMetrics | None = None  # Populated by CacheAligner
     timing: dict[str, float] = field(default_factory=dict)  # transform_name → ms
-    waste_signals: WasteSignals | None = None  # Detected waste in original messages
-
-    @property
-    def transforms_summary(self) -> dict[str, int]:
-        """Counted summary of transforms_applied (e.g. {'router:tool_result:text': 4})."""
-        from collections import Counter
-
-        return dict(Counter(self.transforms_applied))
-
-
-@dataclass
-class TransformDiff:
-    """Diff info for a single transform (for debugging/perf)."""
-
-    transform_name: str
-    tokens_before: int
-    tokens_after: int
-    tokens_saved: int
-    items_removed: int = 0
-    items_kept: int = 0
-    details: str = ""  # Human-readable description of what changed
-    duration_ms: float = 0.0  # Wall-clock time for this transform
-
-
-@dataclass
-class DiffArtifact:
-    """Complete diff artifact for debugging transform pipeline.
-
-    Opt-in via FurlConfig.generate_diff_artifact = True.
-    Useful for understanding what each transform did to your messages.
-    """
-
-    request_id: str
-    original_tokens: int
-    optimized_tokens: int
-    total_tokens_saved: int
-    transforms: list[TransformDiff] = field(default_factory=list)

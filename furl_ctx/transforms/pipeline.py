@@ -11,11 +11,8 @@ from typing import Any, Protocol, TypeVar
 
 from ..config import (
     CompressRequest,
-    DiffArtifact,
     FurlConfig,
-    TransformDiff,
     TransformResult,
-    WasteSignals,
 )
 from ..tokenizer import Tokenizer
 from ..utils import deep_copy_messages
@@ -200,7 +197,7 @@ class TransformPipeline:
             model: Model name for token counting.
             **kwargs: Additional arguments passed to transforms.
                 - model_limit: Context limit override.
-                - request_id: Optional request ID for diff artifact.
+                - request_id: Optional request ID for log prefixing.
                 - previous_prefix_hash: The prior turn's
                   ``cache_metrics.stable_prefix_hash`` for CacheAligner's
                   turn-to-turn prefix tracking.
@@ -265,10 +262,6 @@ class TransformPipeline:
         all_markers: list[str] = []
         all_warnings: list[str] = []
         all_timing: dict[str, float] = {}  # transform_name → ms
-
-        # Track transform diffs if enabled
-        transform_diffs: list[TransformDiff] = []
-        generate_diff = self.config.generate_diff_artifact
 
         t_copy = time.perf_counter()
         current_messages = deep_copy_messages(messages)
@@ -336,21 +329,6 @@ class TransformPipeline:
             else:
                 logger.debug("Transform %s: no changes [%.1fms]", transform.name, duration_ms)
 
-            # Record diff if enabled
-            if generate_diff:
-                transform_diffs.append(
-                    TransformDiff(
-                        transform_name=transform.name,
-                        tokens_before=tokens_before_transform,
-                        tokens_after=tokens_after_transform,
-                        tokens_saved=tokens_before_transform - tokens_after_transform,
-                        details=", ".join(result.transforms_applied)
-                        if result.transforms_applied
-                        else "",
-                        duration_ms=duration_ms,
-                    )
-                )
-
         # All transforms ran without raising — reset the breaker.
         self._breaker_record_success()
 
@@ -379,31 +357,6 @@ class TransformPipeline:
         else:
             logger.debug("%sPipeline complete: no token savings [%s]", log_prefix, timing_parts)
 
-        # Build diff artifact if enabled
-        diff_artifact = None
-        if generate_diff:
-            diff_artifact = DiffArtifact(
-                request_id=kwargs.get("request_id", ""),
-                original_tokens=tokens_before,
-                optimized_tokens=tokens_after,
-                total_tokens_saved=tokens_before - tokens_after,
-                transforms=transform_diffs,
-            )
-
-        # Detect waste signals in original messages (only when significant compression)
-        waste_signals: WasteSignals | None = None
-        if tokens_before > tokens_after and (tokens_before - tokens_after) > 100:
-            try:
-                from ..parser import parse_messages
-
-                _, _, waste_signals = parse_messages(messages, tokenizer)
-                if waste_signals.total() == 0:
-                    waste_signals = None
-            except Exception:
-                # Best-effort diagnostics only — never block the pipeline,
-                # but never swallow silently either.
-                logger.debug("Waste-signal detection failed (non-fatal)", exc_info=True)
-
         return TransformResult(
             messages=current_messages,
             tokens_before=tokens_before,
@@ -411,9 +364,7 @@ class TransformPipeline:
             transforms_applied=all_transforms,
             markers_inserted=all_markers,
             warnings=all_warnings,
-            diff_artifact=diff_artifact,
             timing=all_timing,
-            waste_signals=waste_signals,
         )
 
     def simulate(
@@ -422,18 +373,26 @@ class TransformPipeline:
         model: str,
         **kwargs: Any,
     ) -> TransformResult:
-        """
-        Simulate transforms without modifying messages.
+        """Run the pipeline WITHOUT mutating the caller's ``messages`` list.
 
-        Same as apply() but returns what WOULD happen.
+        This is NOT a dry run (Bug-9): it is exactly ``apply(record_metrics=False)``
+        over a deep copy of ``messages``, so it runs the real transforms and
+        therefore has the SAME side effects as :meth:`apply` — it durably persists
+        CCR store entries for any offloaded content and updates the router's
+        result cache. The two guarantees it does make are (1) the caller's
+        ``messages`` objects are never mutated (apply deep-copies), and (2)
+        ``record_metrics=False`` so no metrics are recorded. Its output is
+        byte-identical to the equivalent ``apply`` call. If you need a genuinely
+        effect-free preview, do not use this method — it will write to the store.
 
         Args:
-            messages: List of messages.
+            messages: List of messages (never mutated).
             model: Model name.
-            **kwargs: Additional arguments.
+            **kwargs: Additional arguments forwarded to :meth:`apply`.
 
         Returns:
-            TransformResult with simulated changes.
+            TransformResult identical to the equivalent ``apply`` call.
         """
-        # apply() already works on a copy, so this is safe
+        # apply() deep-copies the messages, so the caller's list is never mutated;
+        # the CCR store writes and cache updates are REAL, not simulated (Bug-9).
         return self.apply(messages, model, record_metrics=False, **kwargs)

@@ -3,8 +3,8 @@
     "furl": {
       "command": "sh",
       "args": [
-        "-lc",
-        "exec uv run --no-project --with 'furl-ctx[mcp]' python -m furl_ctx.ccr.mcp_server"
+        "-c",
+        "PATH=\"$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\" exec uv run --no-project --with 'furl-ctx[mcp]==1.3.0' python -m furl_ctx.ccr.mcp_server"
       ],
       "env": {
         "FURL_CCR_BACKEND": "sqlite",

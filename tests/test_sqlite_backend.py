@@ -96,9 +96,19 @@ def _clean_env(monkeypatch, tmp_path):
 @pytest.fixture(params=["memory", "sqlite"])
 def backend(request, tmp_path):
     """Both concrete backends, driven through the identical Protocol suite."""
-    if request.param == "memory":
-        return InMemoryBackend()
-    return SqliteBackend(db_path=tmp_path / "conformance.sqlite3")
+    b = (
+        InMemoryBackend()
+        if request.param == "memory"
+        else SqliteBackend(db_path=tmp_path / "conformance.sqlite3")
+    )
+    try:
+        yield b
+    finally:
+        # Release sqlite fds so no unclosed-connection ResourceWarning leaks at
+        # GC (P5); the in-memory backend has no close(), so guard for it.
+        close = getattr(b, "close", None)
+        if close is not None:
+            close()
 
 
 # --------------------------------------------------------------------------- #

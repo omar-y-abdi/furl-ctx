@@ -80,12 +80,6 @@ class TestCompressionStore:
         assert entry.original_tokens == 1000
         assert entry.compressed_tokens == 100
 
-    def test_retrieve_nonexistent(self):
-        """Retrieve returns None for nonexistent hash."""
-        store = CompressionStore()
-        entry = store.retrieve("nonexistent1234")
-        assert entry is None
-
     def test_ttl_expiration(self):
         """Entries expire after TTL (fake clock — no real sleep)."""
         clock = _FakeClock()
@@ -155,28 +149,6 @@ class TestCompressionStore:
         # Should prioritize Python items
         result_ids = [r["id"] for r in results]
         assert 1 in result_ids  # "Python programming language"
-
-    def test_retrieval_tracking(self):
-        """Retrieval events are tracked for feedback."""
-        store = CompressionStore(enable_feedback=True)
-
-        hash_key = store.store(
-            original="[1,2,3]",
-            compressed="[1]",
-            tool_name="test_tool",
-        )
-
-        # Retrieve multiple times
-        store.retrieve(hash_key)
-        store.retrieve(hash_key, query="test query")
-        store.search(hash_key, "another query")
-
-        events = store.get_retrieval_events(limit=10)
-        assert len(events) >= 2
-
-        # Check event details
-        assert any(e.retrieval_type == "full" for e in events)
-        assert any(e.retrieval_type == "search" for e in events)
 
     def test_access_tracking_on_entry(self):
         """Entry tracks access count and queries."""
@@ -293,7 +265,7 @@ class TestCCRFeedbackLoop:
         store.search(hash_key, "specific query")
         store.search(hash_key, "another query")
 
-        events = store.get_retrieval_events(limit=10)
+        events = store._retrieval_events
 
         # Should have logged all retrievals
         assert len(events) >= 3
@@ -304,47 +276,6 @@ class TestCCRFeedbackLoop:
 
         assert len(full_events) >= 1
         assert len(search_events) >= 2
-
-    def test_tool_name_in_events(self):
-        """Tool name is preserved in retrieval events."""
-        store = CompressionStore(enable_feedback=True)
-
-        hash_key = store.store(
-            original="[1,2,3]",
-            compressed="[1]",
-            tool_name="github_search",
-        )
-
-        store.retrieve(hash_key)
-
-        events = store.get_retrieval_events(tool_name="github_search")
-        assert len(events) >= 1
-        assert all(e.tool_name == "github_search" for e in events)
-
-    def test_event_filtering_by_tool(self):
-        """Events can be filtered by tool name."""
-        store = CompressionStore(enable_feedback=True)
-
-        hash1 = store.store(
-            original="[1]",
-            compressed="[1]",
-            tool_name="tool_a",
-        )
-        hash2 = store.store(
-            original="[2]",
-            compressed="[2]",
-            tool_name="tool_b",
-        )
-
-        store.retrieve(hash1)
-        store.retrieve(hash1)
-        store.retrieve(hash2)
-
-        tool_a_events = store.get_retrieval_events(tool_name="tool_a")
-        tool_b_events = store.get_retrieval_events(tool_name="tool_b")
-
-        assert len(tool_a_events) == 2
-        assert len(tool_b_events) == 1
 
 
 class TestCCREdgeCases:

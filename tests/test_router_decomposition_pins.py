@@ -312,13 +312,21 @@ def test_route_counts_whole_dict_matrix() -> None:
     assert result.messages[0] == messages[0]
 
 
-def test_route_counts_matrix_second_apply_recomputes_stale_sentinels() -> None:
+def test_route_counts_matrix_second_apply_serves_reverifiable_sentinels() -> None:
     """Re-applying the SAME conversation on the SAME router resolves both
-    compressible lanes through the Tier-2 cache — and in this fixture the
-    cached outputs carry ``<<ccr:HASH>>`` sentinels whose backing cannot be
-    re-verified, so BOTH entries are evicted and recomputed
-    (``cache_stale_recompute`` + ``cache_miss``), never served stale.
-    Whole-dict pinned; the recomputed bytes are identical to the first pass."""
+    compressible lanes through the Tier-2 cache. Each cached output carries a
+    ``<<ccr:HASH>>`` row-drop sentinel whose WHOLE-BLOB backing is still live in
+    the store, so ``ensure_ccr_backed`` re-verifies it and serves the cached
+    output (``cache_hit``), never stale.
+
+    Before MATRIX-01 unified the re-backing gate on the public marker grammar,
+    the gate ALSO scanned the internal ``HASH#rows`` granular-index hint — not a
+    valid retrievable CCR key (``is_valid_ccr_hash`` rejects it) and never
+    resolvable through ``retrieve`` — so a present, recoverable blob spuriously
+    recomputed on every hit. The gate now checks exactly the retrievable blob
+    hashes the public ``CompressResult.ccr_hashes`` surface advertises, so a live
+    blob serves cached. Whole-dict pinned; served bytes byte-identical to the
+    first pass (no silent loss — the blob resolves)."""
     messages = [
         {
             "role": "assistant",
@@ -340,8 +348,7 @@ def test_route_counts_matrix_second_apply_recomputes_stale_sentinels() -> None:
 
     assert spy.route_counts == {
         "analysis_ctx": 0,
-        "cache_miss": 2,
-        "cache_stale_recompute": 2,
+        "cache_hit": 2,
         "content_blocks": 1,
         "excluded_tool": 0,
         "non_string": 0,

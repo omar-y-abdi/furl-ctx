@@ -10,6 +10,31 @@
 > honest, tier-aware, sourced summary; treat it as authoritative and read
 > every dev figure below as a ceiling, not a typical.
 
+## The three public headline numbers
+
+Three token-reduction figures appear across Furl's docs and site. They do not
+conflict. Each is the same engine and the same no-loss recovery guarantee,
+measured on a different entropy tier of content. This section is the canonical
+reconciliation; the site and the `llms.txt` files point back here.
+
+- **95% is the corpus-wide best-case ceiling.** It is the rounded headline figure
+  for the low-entropy, highly repetitive case. Treat it as a headline ceiling, not
+  a typical result. It is a lossless-reduction number: individual repetitive
+  datasets in the tables below read a few points higher, and a CCR-offload
+  visibility figure like code@7 at 98.9% is a different metric, not lossless
+  in-place compression.
+- **91.5% is the six-capture site subset.** It is the aggregate of the six real
+  captures published on the site, which total 22,630 tokens in and 1,922 out.
+  All six are repetitive machine output, so this figure sits near the ceiling
+  rather than the typical case. The per-capture numbers live in `site/llms.txt`.
+- **0-54% is the honest high-entropy band.** On genuinely near-unique real data
+  the lossless token reduction is code 0%, search 40%, repeated_logs 54%. See
+  the tier-aware table below and the "Honest read" at the end.
+
+Match the tier to your content. Repetitive machine output lands high, in the 90s
+on lossless reduction. Genuinely unique text lands in the 0-54% band. The lossless
+recovery guarantee holds at every tier.
+
 ## Honest, tier-aware results (STRICT lossless + REAL granular-retrieval cost)
 
 **Sources (re-runnable, default params, real gpt-4o tiktoken, 6 fixed seeds/case, cold CCR per case):**
@@ -114,6 +139,12 @@ reduction at every fraction. (`verify/measure.py::effective_savings`
   violations. Independent `strict_recheck.py` reconstructs purely from
   visible rows + `decode_csv_schema_rows` + CCR retrieve and confirms
   `strict_byte_exact=true, n_missing=0` on every spot case.
+- **What "byte-exact" scopes to here.** These numbers are row-value recovery
+  measured by decode-and-compare: a recovered row's values equal the original's.
+  Raw-text offloads recover byte-identical to the original bytes. JSON-array
+  offloads recover as a semantically-complete re-serialization of the same rows
+  through `decode_csv_schema_rows` or a CCR retrieve, not the original input
+  bytes. LIBRARY.md carries the library-facing statement of this scope.
 - **No fake structural gain on genuine entropy.** The anti-cheat control
   (pure-random sha1 rows) fires NO affix/head/dict fold (0/6 seeds); the
   folds fire on structured tiers and decline on genuine — confirmed in both

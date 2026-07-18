@@ -338,3 +338,50 @@ def test_arith_fold_negative_step_round_trips() -> None:
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
     assert not missing, f"{len(missing)} rows unrecoverable; first: {sorted(missing)[:2]}"
+
+
+def test_offload_survivor_render_demotes_subset_only_constant_review_f1b() -> None:
+    """Review F1b: on the OFFLOAD path (min-tokens routing, survivors only) the
+    survivor render must not present a per-column constant/dict that holds only
+    for the SHOWN rows as if it were universal.
+
+    Rows 170-199 are all ``event_type="payout_request"`` while 0-169 span three
+    other categories. When the crusher keeps only the payout_request tail, the
+    header must NOT claim ``event_type:string=payout_request`` (false for the 170
+    offloaded rows) — event_type must render as an ordinary per-row column so the
+    offloaded categories are not silently erased from the view.
+    """
+    from furl_ctx.cache.compression_store import reset_compression_store
+    from furl_ctx.compress import compress
+
+    rows = [
+        {
+            "event_id": f"evt_{i:05d}",
+            "ts": f"2026-07-13T10:00:{i % 60:02d}Z",
+            "user_id": f"u{i % 40}",
+            "amount": round(10 + i * 1.5, 2),
+            "event_type": (
+                "payout_request" if i >= 170 else ["purchase", "refund", "login"][i % 3]
+            ),
+            "velocity_1h": i % 15,
+        }
+        for i in range(200)
+    ]
+
+    reset_compression_store()
+    try:
+        result = compress(
+            [{"role": "tool", "content": json.dumps(rows)}],
+            model="claude-sonnet-4-5-20250929",
+        )
+        view = result.messages[0]["content"]
+        view = view if isinstance(view, str) else json.dumps(view)
+
+        # It really did take the offload/survivor path (not the full lossless one).
+        assert "router:smart_crusher" in ", ".join(result.transforms_applied)
+        assert "_rows_offloaded" in view or "_ccr_dropped" in view
+        # The false-universal constant claim is gone; event_type is per-row.
+        assert "event_type:string=payout_request" not in view
+        assert "event_type:string," in view or "event_type:string}" in view
+    finally:
+        reset_compression_store()

@@ -48,6 +48,7 @@ Two injection planes keep every existing monkeypatch biting:
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -81,7 +82,7 @@ from .router_message_policy import (
     Small,
     classify_message,
 )
-from .router_policy import CompressionStrategy
+from .router_policy import CompressionStrategy, noop_transform
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -105,6 +106,20 @@ _OFFLOAD_PREVIEW_MAX_ROWS = 20
 _OFFLOAD_PREVIEW_FIELD_CHARS = 120
 _OFFLOAD_PREVIEW_HEAD_LINES = 12
 _OFFLOAD_PREVIEW_TAIL_LINES = 4
+# Error-line preservation for the plain-text head/tail preview (Bug-4 / Med-10):
+# a head+tail preview drops the MIDDLE, so an ERROR/Traceback buried between the
+# first and last lines vanished from the model-visible view (only recoverable if
+# the agent already knew to retrieve). Surface up to _OFFLOAD_ERROR_LINES_MAX
+# severity-matched lines FROM THE OMITTED MIDDLE, each capped at
+# _OFFLOAD_ERROR_LINE_MAX_CHARS so one giant line can't bloat the preview. The
+# pattern is a flat, anchored alternation of severity WORDS — no nested
+# quantifiers, so it is linear (ReDoS-safe) on any line.
+_OFFLOAD_ERROR_LINES_MAX = 15
+_OFFLOAD_ERROR_LINE_MAX_CHARS = 240
+_OFFLOAD_SEVERITY_RE = re.compile(
+    r"\b(?:ERROR|FATAL|CRITICAL|SEVERE|PANIC|EXCEPTION|TRACEBACK)\b",
+    re.IGNORECASE,
+)
 # Object-with-dominant-array preview (e.g. a Chrome trace: {"metadata": {...},
 # "traceEvents": [...]}). Sample the leading/trailing elements of the inner
 # array so the preview reflects the events, not the object's header boilerplate.
@@ -130,6 +145,43 @@ _SUMMARY_MAX_CATEGORICAL_DISTINCT = 50
 _SUMMARY_CATEGORICAL_RATIO = 0.02
 _SUMMARY_TOP_VALUES = 20
 _SUMMARY_SAMPLE_ROWS = 6
+
+# Sibling-field preview bounds (review F2). A dominant-array object's OTHER keys
+# (everything besides the array) keep their VALUES, not just their names — a
+# crash report's ``exception``/``termination`` blocks carry the single most
+# important fact (the exception type/signal), and dropping them to bare key
+# names made that fact invisible in the compressed view. Scalars pass through
+# (tiny); small nested objects recurse to _SIBLING_MAX_DEPTH so their scalar
+# leaves survive; a long list (the kind that SHOULD be offloaded) or a deeper
+# structure is elided to a ``[… in CCR]`` note. The whole sibling blob is hard-
+# capped at _SIBLING_FIELDS_MAX_CHARS so the preview stays a few KB.
+_SIBLING_MAX_DEPTH = 4
+_SIBLING_MAX_KEYS = 40
+_SIBLING_MAX_LIST = 10
+_SIBLING_FIELDS_MAX_CHARS = 4000
+# Bytes held back from the char budget while accumulating (review RF4) so the
+# trailing ``_more_keys`` note fits under _SIBLING_FIELDS_MAX_CHARS even in the
+# worst case (a large omitted-count integer). Comfortably above the note's
+# longest serialized form.
+_SIBLING_MORE_KEYS_RESERVE = 64
+
+# Slice guidance carried inside the ``_ccr_summary`` preview: tells the agent how
+# to fetch a NARROW slice of the offloaded rows instead of the whole array back
+# (the ``furl_retrieve`` row-select filters). Domain-agnostic on purpose — it
+# names no field or value, pointing the agent at the fields it can already see in
+# this same summary (``schema``/``value_counts`` for a category, ``ranges`` for a
+# numeric window). The hash is NOT known here (it is minted later in
+# ``_ccr_offload``), so the hint references "the hash in the marker below" rather
+# than threading a value that does not yet exist.
+_CCR_SUMMARY_RETRIEVE_HINT = (
+    "To drill into these rows without pulling the whole array back, call "
+    "furl_retrieve with the hash in the marker below plus a row-select: "
+    "select_field=<a categorical field from 'schema'/'value_counts'>, "
+    "select_equals=<one of its values> for just those rows; OR "
+    "select_field=<a numeric field from 'ranges'>, select_min=…, select_max=… "
+    "for a range window; add fields=[…] to project only some columns. Omit all "
+    "of these to retrieve the full original."
+)
 
 # Byte ceiling above which a content block is offloaded immediately instead of
 # run through the exact mixed/crush path — that path is super-linear (a real
@@ -435,7 +487,19 @@ class ContentCompressionEngine:
                 )
 
             cfg = self.config
-            if len(content) >= _huge_content_bytes() and (
+            # Byte ceiling (Bug-8): the threshold is in BYTES, so compare the
+            # encoded byte length, not the character count — on multibyte content
+            # a char count is up to ~4x short and lets an over-ceiling payload slip
+            # past the guard. Cheap bounds avoid the encode for the common case:
+            # chars are a lower bound on UTF-8 bytes and 4*chars an upper bound, so
+            # only content in the ambiguous middle band is actually encoded.
+            _byte_ceiling = _huge_content_bytes()
+            _char_len = len(content)
+            _is_huge = _char_len >= _byte_ceiling or (
+                _char_len * 4 >= _byte_ceiling
+                and len(content.encode("utf-8", errors="replace")) >= _byte_ceiling
+            )
+            if _is_huge and (
                 cfg.ccr_offload_fallback
                 and cfg.ccr_enabled
                 and cfg.ccr_inject_marker
@@ -609,6 +673,13 @@ class ContentCompressionEngine:
         cr = _cr()
         rows, n_items = self._build_offload_preview(content)
         preview = json.dumps(rows, ensure_ascii=False) if isinstance(rows, list) else rows
+        # Bug-11: record REAL token counts on the stored entry, using the same
+        # tokenizer the routing_log and the rest of the engine use. Storing
+        # ``len(content.split())`` (a whitespace WORD count) as ``original_tokens``
+        # silently mixed word counts with tokenizer counts in furl_stats
+        # aggregation. ``token_counter`` is the model tokenizer on the normal
+        # compress() path; ``cr._word_count`` is the same fallback used elsewhere.
+        count = token_counter or cr._word_count
         try:
             from ..cache.compression_store import get_compression_store
 
@@ -616,11 +687,16 @@ class ContentCompressionEngine:
             ccr_hash = store.store(
                 original=content,
                 compressed=preview,
-                original_tokens=len(content.split()),
-                compressed_tokens=len(preview.split()),
+                original_tokens=count(content),
+                compressed_tokens=count(preview),
                 original_item_count=n_items,
                 query_context=context or None,
                 compression_strategy=CompressionStrategy.CCR_OFFLOAD.value,
+                # A durable write that fell open to volatile storage raises
+                # DurableWriteError → caught below, keeping the original (audit
+                # #3). The round-trip verify alone cannot catch this: a volatile
+                # write still resolves in-process.
+                require_durable=True,
             )
             # Round-trip verification is an ENGINE-INTERNAL read — it must not
             # feed the retrieval-feedback loop as if the model asked for this
@@ -652,7 +728,6 @@ class ContentCompressionEngine:
         cr.logger.info(
             "ccr_offload: %d chars (%d items) stored as %s", len(content), n_items, ccr_hash
         )
-        count = token_counter or cr._word_count
         return RouterCompressionResult(
             compressed=compressed,
             original=content,
@@ -683,13 +758,84 @@ class ContentCompressionEngine:
                 row[k] = f"[{type(v).__name__} omitted, in CCR]"
         return row
 
+    @classmethod
+    def _compact_sibling(cls, value: Any, depth: int) -> Any:
+        """One sibling value, compacted for the offload preview (review F2).
+
+        Scalars pass through (long strings truncated to the shared field-char
+        budget); a nested object recurses to ``depth`` levels then notes its
+        remaining size; a short list is kept inline, a long one (the kind that
+        SHOULD be offloaded) is elided. Never raises; anything large or deep
+        becomes a ``[… in CCR]`` string (recovery is the byte-exact original)."""
+        if value is None or isinstance(value, bool) or isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            if len(value) > _OFFLOAD_PREVIEW_FIELD_CHARS:
+                return value[:_OFFLOAD_PREVIEW_FIELD_CHARS] + f"… [{len(value)} chars, in CCR]"
+            return value
+        if isinstance(value, dict):
+            if depth <= 0:
+                return f"[dict of {len(value)} keys, in CCR]"
+            out: dict[str, Any] = {}
+            for i, (k, v) in enumerate(value.items()):
+                if i >= _SIBLING_MAX_KEYS:
+                    out["_more_keys"] = f"[{len(value) - _SIBLING_MAX_KEYS} more, in CCR]"
+                    break
+                out[str(k)] = cls._compact_sibling(v, depth - 1)
+            return out
+        if isinstance(value, list):
+            if depth <= 0 or len(value) > _SIBLING_MAX_LIST:
+                return f"[list of {len(value)} items, in CCR]"
+            return [cls._compact_sibling(v, depth - 1) for v in value]
+        return f"[{type(value).__name__} omitted, in CCR]"
+
+    @classmethod
+    def _compact_sibling_fields(cls, fields: dict[str, Any]) -> dict[str, Any]:
+        """Bounded ``{key: value}`` preview of a dominant-array object's sibling
+        fields (review F2 / RF4). Keeps scalar values verbatim — they are tiny
+        and usually the most important fact — and small nested objects to a
+        bounded depth so their scalar leaves survive; large arrays / deep objects
+        are elided.
+
+        Bounded BY CONSTRUCTION, not by a soft after-check: the top-level key
+        count is capped at _SIBLING_MAX_KEYS (the per-dict cap never applied to
+        the sibling keys themselves) AND the running serialized length is
+        accumulated as each key is added, eliding the remainder under a
+        ``_more_keys`` note the moment another key would exceed
+        _SIBLING_FIELDS_MAX_CHARS. The serialized result therefore never exceeds
+        that cap however many or however large the siblings are — the previous
+        scalar-only fallback still returned every scalar verbatim and could run
+        to tens of KB. Recovery is the byte-exact stored original."""
+        import json
+
+        out: dict[str, Any] = {}
+        kept = 0
+        total = len(fields)
+        for key, value in fields.items():
+            if kept >= _SIBLING_MAX_KEYS:
+                break
+            candidate = {**out, str(key): cls._compact_sibling(value, _SIBLING_MAX_DEPTH)}
+            serialized = json.dumps(candidate, ensure_ascii=False, default=str)
+            # Stop before the blob would exceed the cap; the reserve leaves room
+            # for the trailing _more_keys note so the FINAL result stays under it.
+            if len(serialized) > _SIBLING_FIELDS_MAX_CHARS - _SIBLING_MORE_KEYS_RESERVE:
+                break
+            out = candidate
+            kept += 1
+        if kept < total:
+            out["_more_keys"] = f"[{total - kept} more, in CCR]"
+        return out
+
     @staticmethod
-    def _dominant_array(parsed: Any) -> tuple[str, list[dict[str, Any]], list[str]] | None:
+    def _dominant_array(parsed: Any) -> tuple[str, list[dict[str, Any]], dict[str, Any]] | None:
         """A JSON object with EXACTLY one dominant inner array — a non-empty
         list of dicts (e.g. a Chrome trace's ``traceEvents``). Mirrors
         ``sniff_envelope``'s fail-open "exactly one, else None" rule without its
-        wrapper-key allowlist. Returns ``(key, inner, other_key_names)`` or
-        ``None`` when zero or more than one key qualifies (ambiguous)."""
+        wrapper-key allowlist. Returns ``(key, inner, other_fields)`` — where
+        ``other_fields`` maps each sibling key to its VALUE (not just its name),
+        so tiny scalar siblings (a crash report's exception type/signal, a
+        trace's metadata) survive into the preview (review F2) — or ``None``
+        when zero or more than one key qualifies (ambiguous)."""
         if not isinstance(parsed, dict):
             return None
         matches = [
@@ -700,7 +846,7 @@ class ContentCompressionEngine:
         if len(matches) != 1:
             return None
         key = matches[0]
-        other = [k for k in parsed if k != key]
+        other = {k: v for k, v in parsed.items() if k != key}
         return key, parsed[key], other
 
     @staticmethod
@@ -744,7 +890,7 @@ class ContentCompressionEngine:
         rows: list[dict[str, Any]],
         *,
         key: str | None,
-        other_keys: list[str],
+        other_fields: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], int]:
         """O(n) signal-aware summary of a list of dict rows.
 
@@ -800,12 +946,13 @@ class ContentCompressionEngine:
         summary: dict[str, Any] = {
             "array": key,
             "count": n,
-            "other_keys": other_keys,
+            "other_fields": self._compact_sibling_fields(other_fields),
             "schema": schema,
             "value_counts": summary_value_counts,
             "ranges": ranges,
             "examples": self._build_examples(rows, categorical, coverage),
             "sample_rows": [self._truncate_row(rows[i]) for i in self._sample_indices(n)],
+            "retrieve": _CCR_SUMMARY_RETRIEVE_HINT,
         }
         return [{"_ccr_summary": summary}], n
 
@@ -931,6 +1078,29 @@ class ContentCompressionEngine:
                 seen.append(index)
         return seen
 
+    @staticmethod
+    def _extract_error_lines(omitted: list[str]) -> list[str]:
+        """Severity-matched lines pulled from the OMITTED middle of a plain-text
+        head/tail preview (Bug-4 / Med-10), bounded in count and per-line width.
+
+        Total + linear: a flat, anchored severity alternation
+        (``_OFFLOAD_SEVERITY_RE`` — no nested quantifiers) scanned line by line,
+        so no single line can trigger catastrophic backtracking. Each surfaced
+        line is clipped to ``_OFFLOAD_ERROR_LINE_MAX_CHARS`` and at most
+        ``_OFFLOAD_ERROR_LINES_MAX`` are kept, so an error-dense middle can never
+        blow the preview back up to the size the offload just avoided. Operates
+        on already-redacted content (compress() redacts BEFORE offload), so a
+        surfaced line can carry a masked ``[REDACTED:...]`` token but never a
+        live secret.
+        """
+        surfaced: list[str] = []
+        for line in omitted:
+            if _OFFLOAD_SEVERITY_RE.search(line):
+                surfaced.append(line[:_OFFLOAD_ERROR_LINE_MAX_CHARS])
+                if len(surfaced) >= _OFFLOAD_ERROR_LINES_MAX:
+                    break
+        return surfaced
+
     def _build_offload_preview(self, content: str) -> tuple[list[Any] | str, int]:
         """Identity preview of *content*: for a JSON array of objects, and for a
         JSON object with one dominant inner array, a signal-aware ``_ccr_summary``
@@ -948,7 +1118,7 @@ class ContentCompressionEngine:
             parsed = None
         if isinstance(parsed, list) and parsed and all(isinstance(item, dict) for item in parsed):
             try:
-                return self._summarize_rows(parsed, key=None, other_keys=[])
+                return self._summarize_rows(parsed, key=None, other_fields={})
             except Exception:  # noqa: BLE001 - fail-open to the head/tail preview
                 _cr().logger.warning(
                     "ccr_offload: row summary failed; head/tail preview", exc_info=True
@@ -962,9 +1132,9 @@ class ContentCompressionEngine:
 
         dominant = self._dominant_array(parsed)
         if dominant is not None:
-            key, inner, other_keys = dominant
+            key, inner, other_fields = dominant
             try:
-                return self._summarize_rows(inner, key=key, other_keys=other_keys)
+                return self._summarize_rows(inner, key=key, other_fields=other_fields)
             except Exception:  # noqa: BLE001 - fail-open to the head/tail preview
                 _cr().logger.warning(
                     "ccr_offload: array summary failed; head/tail preview", exc_info=True
@@ -980,7 +1150,7 @@ class ContentCompressionEngine:
                 sample.extend(self._truncate_row(item) for item in inner[-tail:])
             summary = {
                 "_preview": f"'{key}': {len(inner)} items",
-                "_other_keys": other_keys,
+                "_other_fields": self._compact_sibling_fields(other_fields),
             }
             return [summary, *sample], len(inner)
 
@@ -988,12 +1158,26 @@ class ContentCompressionEngine:
         head, tail = _OFFLOAD_PREVIEW_HEAD_LINES, _OFFLOAD_PREVIEW_TAIL_LINES
         if len(lines) <= head + tail:
             return content, 1
-        return (
-            "\n".join(lines[:head])
-            + f"\n… [{len(lines) - head - tail} lines omitted, in CCR] …\n"
-            + "\n".join(lines[-tail:]),
-            1,
-        )
+        omitted_count = len(lines) - head - tail
+        # Bug-4 / Med-10: surface ERROR/Traceback/severity lines from the omitted
+        # MIDDLE so a buried error is not invisible in the model-facing preview
+        # (previously only recoverable if the agent already knew to retrieve).
+        error_lines = self._extract_error_lines(lines[head:-tail])
+        if error_lines:
+            capped = (
+                " (first shown; retrieve for the rest)"
+                if (len(error_lines) >= _OFFLOAD_ERROR_LINES_MAX)
+                else ""
+            )
+            middle = (
+                f"\n… [{omitted_count} lines omitted, in CCR; "
+                f"{len(error_lines)} error/severity line(s) surfaced{capped}] …\n"
+                + "\n".join(error_lines)
+                + "\n… [end surfaced error lines; full log in CCR] …\n"
+            )
+        else:
+            middle = f"\n… [{omitted_count} lines omitted, in CCR] …\n"
+        return "\n".join(lines[:head]) + middle + "\n".join(lines[-tail:]), 1
 
     def _determine_strategy(
         self,
@@ -1626,7 +1810,7 @@ def run_router_passes(
         messages=transformed_messages,
         tokens_before=tokens_before,
         tokens_after=tokens_after,
-        transforms_applied=all_transforms if all_transforms else ["router:noop"],
+        transforms_applied=all_transforms if all_transforms else [noop_transform(route_counts)],
         markers_inserted=lifecycle_ccr_hashes,
         warnings=warnings,
         timing=compressor_timing,

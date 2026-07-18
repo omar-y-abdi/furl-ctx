@@ -1,8 +1,8 @@
 # Furl
 
-> Context compression layer for AI agents. Compress tool outputs, logs, files, and RAG chunks before they reach the model. Same answers, 60–95% fewer tokens on redundant workloads. Python library and MCP server. Apache 2.0, local-first.
+> Context compression for AI agents, plus prompt compression and token optimization. Compress tool outputs, logs, and RAG chunks before they reach the model to reduce Claude Code token usage. Same answers, typically 0-54% fewer tokens on real high-entropy content, and up to 95% on repetitive logs and fixtures as a best-case ceiling. Python library and MCP server. Apache 2.0, local-first.
 
-Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compress`, `furl_retrieve`, `furl_stats` tools). Both use the same compression pipeline: per-content-type compressors (JSON, search results, logs, diffs) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original on demand, within the configured retention window (default TTL 1800 s; entries are also capacity-evicted oldest-first, and an expired/evicted retrieval is a loud miss, never silent).
+Furl is shipped as a Python package (`furl-ctx`) with an MCP server exposing six tools: `furl_compress`, `furl_retrieve`, `furl_search`, `furl_list`, `furl_stats`, and `furl_purge`, plus a seventh tool `furl_read` that is off by default. Both use the same compression pipeline: per-content-type compressors (JSON, search results, logs, diffs) feed into a Compress-Cache-Retrieve (CCR) store so compression stays reversible — the LLM can ask for the original on demand, within the configured retention window (default TTL 1800 s; entries are also capacity-evicted oldest-first, and an expired/evicted retrieval is a loud miss, never silent).
 
 ## Packages
 
@@ -16,12 +16,11 @@ Furl is shipped as a Python package (`furl-ctx`) with an MCP server (`furl_compr
 
 ## Docs
 
-- [Get started](README.md#get-started-60-seconds): install → compress → run the MCP server, in 60 seconds.
-- [How it works](README.md#how-it-works-30-seconds): pipeline diagram + per-content-type compressors.
-- [Proof / benchmark table](README.md#proof): measured reductions on committed real captures (50–99% per dataset, redundancy-dependent; lossy rows are CCR-recoverable).
-- [Configuration (environment variables)](README.md#configuration-environment-variables): every live `FURL_*` knob with defaults.
-- [When to use / when to skip](README.md#when-to-use--when-to-skip): fit guidance.
-- [Full benchmark methodology](BENCHMARKS.md): adversarial multi-seed sweep + honest-metrics definitions.
+- [Get started](README.md#quick-install): two-command Claude Code plugin install — auto-compression hook, MCP tools, and skill; no `pip install` needed.
+- [How it works](LIBRARY.md#how-it-works): pipeline diagram + per-content-type compressors.
+- [Proof / benchmark table](README.md#proof): measured reductions on committed real captures (60–99% per dataset, redundancy-dependent; lossy rows are CCR-recoverable).
+- [Configuration (environment variables)](LIBRARY.md#configuration-environment-variables): every live `FURL_*` knob with defaults.
+- [Full benchmark methodology](BENCHMARKS.md): adversarial multi-seed sweep and honest-metrics definitions. See [the three public headline numbers](BENCHMARKS.md#the-three-public-headline-numbers) for how the 95% ceiling, the 91.5% six-capture subset, and the 0-54% high-entropy band relate.
 - [Current baseline numbers](benchmarks/BASELINE.md): the deterministic per-dataset capture at HEAD.
 - [CCR retention contract](CCR-RETENTION.md): exactly how long "reversible" lasts and what evicts.
 - [Rust core developer guide](RUST_DEV.md): building the extension, workspace layout, store internals.

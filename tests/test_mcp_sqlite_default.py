@@ -38,6 +38,11 @@ def _isolate_store(tmp_path, monkeypatch):
     monkeypatch.delenv("FURL_CCR_BACKEND", raising=False)
     monkeypatch.delenv("FURL_CCR_SQLITE_PATH", raising=False)
     monkeypatch.delenv("FURL_CCR_SQLITE_MAX_ROWS", raising=False)
+    # The session TTL is env-aware now (_mcp_session_ttl): the 3600-second
+    # assertions below pin the env-UNSET contract, so the premise must be
+    # established — earlier suite files (e.g. in-process cli.main() runs)
+    # legitimately leave their own FURL_CCR_TTL_SECONDS setdefault behind.
+    monkeypatch.delenv("FURL_CCR_TTL_SECONDS", raising=False)
     reset_compression_store()
     yield
     reset_compression_store()
@@ -72,8 +77,10 @@ def test_mcp_env_sqlite_still_resolves_sqlite(server, monkeypatch, tmp_path) -> 
 
 def test_mcp_session_ttl_relationship_preserved(server) -> None:
     """The singleton still pins default_ttl=MCP_SESSION_TTL (3600) on top of
-    the library's 1800 s DEFAULT_CCR_TTL_SECONDS, and remains THE process
-    singleton the pipeline's own no-arg get_compression_store() resolves."""
+    the library's 1800 s DEFAULT_CCR_TTL_SECONDS — absent FURL_CCR_TTL_SECONDS
+    (cleared by the autouse fixture; when set, the env wins, see
+    tests/test_mcp_ttl_env.py) — and remains THE process singleton the
+    pipeline's own no-arg get_compression_store() resolves."""
     store = server._get_local_store()
     assert store.default_ttl_seconds == MCP_SESSION_TTL == 3600
     assert get_compression_store() is store

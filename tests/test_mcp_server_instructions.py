@@ -109,6 +109,56 @@ def test_legend_names_every_shipped_encoding() -> None:
         assert needle in CSV_DECODE_LEGEND, f"legend lost its {needle!r} claim"
 
 
+def test_legend_is_agent_first_structured() -> None:
+    # The restructure (agent-first): a plain-English summary and ONE worked
+    # example come BEFORE the compact grammar reference, so a fresh agent can
+    # decode a table without reverse-engineering the grammar first.
+    legend = CSV_DECODE_LEGEND
+    assert "GRAMMAR:" in legend, "grammar reference section is missing"
+    grammar_at = legend.index("GRAMMAR:")
+    # Plain-English summary + worked example precede the grammar block.
+    assert legend.index("read one before you reason") < grammar_at
+    assert legend.index("Example:") < grammar_at
+    # Marker meaning + retrieve-before-reasoning rule are stated up front.
+    assert legend.index("furl_retrieve") < grammar_at
+    assert "offloaded, not lost" in legend
+    # The critical %k read-back is in the worked example, before the grammar.
+    assert legend.index("0.053, not 53") < grammar_at
+
+
+def test_legend_stays_within_token_budget() -> None:
+    # Server-level instructions cost tokens on every conversation — a guard
+    # against future bloat. The cap was 255 for the agent-first grammar legend
+    # (which actually measured ~248, not the "~190" an older comment claimed).
+    # Naming the INPUT SHAPE each output comes from (JSON array -> table;
+    # line-oriented text -> head+tail + marker) — the grammar-truth fix that
+    # stops an agent assuming a log was tabled when it was offloaded — costs
+    # ~25 tokens, so the cap is 280. Still a tight bloat guard.
+    tiktoken = pytest.importorskip("tiktoken")
+    enc = tiktoken.get_encoding("o200k_base")
+    assert len(enc.encode(CSV_DECODE_LEGEND)) <= 280
+
+
+def test_legend_names_input_shape_for_each_output() -> None:
+    # Grammar-truth pin (docs-to-reality): the legend must tie each output form
+    # to the INPUT that produces it, or an agent reasons wrongly about what is
+    # safe to skip retrieving. Verified live: a JSON array routes to
+    # SmartCrusher's `[N]{col:type,...}` table, while line-oriented text
+    # (a ping log) routes to router:ccr_offload — head+tail + a <<ccr:HASH>>
+    # marker, NOT a table, in BOTH normal and aggressive modes.
+    legend = CSV_DECODE_LEGEND
+    # The table is attributed to a structured JSON array, not "tool outputs".
+    assert "structured JSON array" in legend
+    # Line-oriented text is explicitly called out as NOT tabled + offloaded.
+    assert "NOT tabled" in legend
+    assert "head+tail" in legend
+    # The worked example is labelled a JSON-array ROW, not a raw log line, so
+    # `[1]{lvl:string=INFO,ms:float%3}` is not mistaken for a log-line grammar.
+    assert "array row" in legend
+    # The old, over-general claim that Furl tables long tool outputs is gone.
+    assert "packs long tool outputs into small tables" not in legend
+
+
 # ─── Grammar pins: every legend claim decoded by the reference decoder ──────
 #
 # The legend is prose; these decode fixtures make each claim executable.

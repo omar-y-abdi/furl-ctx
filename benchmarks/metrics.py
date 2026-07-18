@@ -61,6 +61,34 @@ from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 # JSON-array crush path; gpt-4o is chosen purely to get exact BPE counts.
 BENCH_MODEL = "gpt-4o"
 
+
+class BenchmarkAbortedError(RuntimeError):
+    """A benchmark case saw ``compress()`` FAIL OPEN (A2).
+
+    ``compress()`` never raises — on any internal failure (a missing/shadowed
+    ``furl_ctx._core`` native extension is the classic one when running from the
+    repo root) it returns the ORIGINAL messages with ``error`` set and
+    ``tokens_after == 0``. The metric math then reads that as 0.0% reduction,
+    100% retention, and "lossless" — a plausible-looking but entirely fictional
+    baseline. A benchmark must FAIL CLOSED: any per-item fail-open aborts the run
+    so nothing is measured or written from a broken engine.
+    """
+
+
+def _abort_if_fail_open(name: str, result: Any) -> None:
+    """Raise :class:`BenchmarkAbortedError` when ``result`` is a compress()
+    fail-open (``result.error`` set). Fail-closed guard shared by every measure
+    entry point (A2)."""
+    if getattr(result, "error", None):
+        raise BenchmarkAbortedError(
+            f"compress() fail-opened on benchmark case {name!r}: {result.error}. "
+            "The engine is not working (most often a missing or shadowed "
+            "furl_ctx._core native extension when run from the repo root — "
+            "install/import the built wheel, or run outside the source tree). "
+            "Refusing to compute or write a misleading baseline."
+        )
+
+
 # The marker prefix is owned by ``marker_grammar`` (single source of truth);
 # the substring walker below scans for it then a hex run from the same spec's
 # alphabet. Behavior (width-free hex run, like the engine's own walker) is
@@ -365,6 +393,7 @@ def measure_case(
     _reset_engine_state()  # cold per case (TEST-16c) — matches verify
     tok = _make_tokenizer(model)
     result = compress(messages, model=model)
+    _abort_if_fail_open(name, result)  # A2: fail closed, never measure a broken engine
 
     output_text = _stringify(result.messages[-1].get("content"))
 
@@ -441,6 +470,7 @@ def measure_conversation_case(
     _reset_engine_state()  # cold per case (TEST-16c) — matches verify
     tok = _make_tokenizer(model)
     result = compress(messages, model=model)
+    _abort_if_fail_open(name, result)  # A2: fail closed, never measure a broken engine
 
     texts = [_stringify(m.get("content")) for m in result.messages]
 

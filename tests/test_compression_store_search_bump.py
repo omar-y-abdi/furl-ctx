@@ -10,7 +10,7 @@ metrics reflect ACTUAL retrievals).
 Fix: the bump moves to after scoring and fires only when the search returned
 items. The retrieval-EVENT log keeps recording zero-result probes
 (items_retrieved=0) — that plane records honest observations, not retrievals
-(pinned by test_ccr.py::test_retrieval_tracking and guarded again here).
+(pinned here and by test_ccr.py::test_retrieval_events_logged).
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def test_zero_result_search_still_logs_probe_event() -> None:
 
     store.search(hash_key, "xylophone zeppelin quasar")
 
-    events = store.get_retrieval_events(limit=10)
+    events = store._retrieval_events
     assert any(e.retrieval_type == "search" and e.items_retrieved == 0 for e in events)
 
 
