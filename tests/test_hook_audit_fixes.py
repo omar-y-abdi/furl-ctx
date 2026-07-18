@@ -263,5 +263,5 @@ def test_faA4_statusline_systemmessage_is_ai_tell_free() -> None:
     out = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, env=env).stdout
     message = json.loads(out)["systemMessage"]
     assert _no_ai_tells(message), f"statusline has an AI tell: {message!r}"
-    assert message.startswith("furl 1.3.1 · engine furl-ctx 1.2.0"), "version string must survive"
+    assert message.startswith("furl 1.3.1 · engine furl-ctx 1.3.0"), "version string must survive"
     assert "FURL_PRETOOL_PIPE=0" in message and "furl_stats" in message
