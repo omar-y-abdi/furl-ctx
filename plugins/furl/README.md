@@ -167,21 +167,27 @@ through `uv`, which fetches Furl on first use — no prior install:
 ```json
 { "mcpServers": { "furl": {
   "command": "sh",
-  "args": ["-lc", "exec uv run --no-project --with 'furl-ctx[mcp]==1.2.0' python -m furl_ctx.ccr.mcp_server"],
+  "args": ["-c", "PATH=\"$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\" exec uv run --no-project --with 'furl-ctx[mcp]==1.3.0' python -m furl_ctx.ccr.mcp_server"],
   "env": { "FURL_CCR_BACKEND": "sqlite", "FURL_CCR_TTL_SECONDS": "86400" }
 }}}
 ```
 
-The `sh -lc` wrapper runs a login shell so `uv` is found on PATH even when Claude
-Code launches with a minimal environment (a login shell that lacks `uv` is the one
-failure mode — install [`uv`](https://docs.astral.sh/uv/) and it resolves). `exec`
-hands stdio and signals straight to the server. `FURL_CCR_BACKEND=sqlite` makes the
+The `sh -c` wrapper finds `uv` by appending the usual install dirs to `PATH`:
+`$HOME/.local/bin`, `$HOME/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`,
+so it resolves even when Claude Code launches with a minimal environment. Install
+[`uv`](https://docs.astral.sh/uv/) if it is missing and the launch resolves. It is a
+non-login shell on purpose: the server speaks JSON-RPC over stdio, so a login shell
+that sourced your profiles could print a banner to stdout and corrupt that stream
+before the initialize handshake, whereas `sh -c` sources no profiles and stdout stays
+clean. One consequence: a `FURL_*` variable set only in a login profile will not reach
+the server, so export it in the environment Claude Code launches from, or set it in the
+`.mcp.json` `env` block. `exec` hands stdio and signals straight to the server. `FURL_CCR_BACKEND=sqlite` makes the
 CCR store durable on disk under `~/.furl/` (a per-project `ccr-ns-<hash>.sqlite3`),
 so originals survive across processes. `FURL_CCR_TTL_SECONDS=86400` keeps each
 offloaded original retrievable for 24 hours (the plugin default) — governing the
 hook's offloads and the MCP tools' stores alike; raise or lower it to widen or
 shrink the retention window. The
-`furl-ctx[mcp]==1.2.0` pin is deterministic — every launch resolves the same wheel instead
+`furl-ctx[mcp]==1.3.0` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 
 **Plugin version vs. engine version.** This plugin (`plugin.json`) and the pinned engine

@@ -34,6 +34,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _HOOKS = _ROOT / "plugins" / "furl" / "hooks"
 _HOOKS_JSON = _HOOKS / "hooks.json"
 _PRETOOL = _HOOKS / "pretool_pipe.py"
+_MCP_JSON = _ROOT / "plugins" / "furl" / ".mcp.json"
 
 # Hermetic scope for every hook subprocess: the pretool deny/ask guard reads
 # permission rules from the payload cwd and HOME, and these pins target the
@@ -263,5 +264,29 @@ def test_faA4_statusline_systemmessage_is_ai_tell_free() -> None:
     out = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, env=env).stdout
     message = json.loads(out)["systemMessage"]
     assert _no_ai_tells(message), f"statusline has an AI tell: {message!r}"
-    assert message.startswith("furl 1.3.1 · engine furl-ctx 1.2.0"), "version string must survive"
+    assert message.startswith("furl 1.3.2 · engine furl-ctx 1.3.0"), "version string must survive"
     assert "FURL_PRETOOL_PIPE=0" in message and "furl_stats" in message
+
+
+# --- MCP server launch: the F-A1 profile-safe fix, applied to .mcp.json -----------
+
+
+def _mcp_launch_args() -> list[str]:
+    return list(json.loads(_MCP_JSON.read_text(encoding="utf-8"))["mcpServers"]["furl"]["args"])
+
+
+def test_mcp_launch_uses_non_login_shell_and_path_append() -> None:
+    """PIN: the stdio MCP server launches under ``sh -c`` (never ``sh -lc``) and
+    resolves ``uv`` by APPENDING the same install dirs the hooks use to PATH. The
+    server speaks JSON-RPC on stdout, so a login shell that sourced a profile
+    printing to stdout would corrupt the stream before the initialize handshake:
+    the SAME class of bug the functional hooks fixed. This fails against the
+    pre-fix ``.mcp.json`` shape, which is ``-lc`` with no PATH append."""
+    args = _mcp_launch_args()
+    assert "-lc" not in args, f"MCP launch still uses a login shell: {args!r}"
+    assert "-c" in args, f"MCP launch must use sh -c: {args!r}"
+    command = " ".join(args)
+    assert 'PATH="$PATH:' in command, "MCP launch must append, not replace, PATH"
+    for uv_dir in ("$HOME/.local/bin", "$HOME/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin"):
+        assert uv_dir in command, f"MCP launch missing uv dir {uv_dir}"
+    assert "exec " in command, "MCP launch must exec so the server is the foreground stdio process"

@@ -82,7 +82,7 @@ from pathlib import Path
 # bypasses any lockfile so transitive deps float (audit High-6). The honest
 # posture and the hardening path (pre-install a hash-verified engine on PATH) are
 # documented in SECURITY.md → "Supply chain".
-_FURL_CTX_PIN = "furl-ctx[mcp]==1.2.0"
+_FURL_CTX_PIN = "furl-ctx[mcp]==1.3.0"
 
 # Transparency marker: prepended to the rewritten command (visible in the
 # transcript). Names the OPT-OUT since the pipe is on by default.

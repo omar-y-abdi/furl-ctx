@@ -5,6 +5,27 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0](https://github.com/omar-y-abdi/furl-ctx/compare/v1.2.0...v1.3.0) (2026-07-18)
+
+
+### Features
+
+* add Dockerfile for the MCP server ([#90](https://github.com/omar-y-abdi/furl-ctx/issues/90)) ([0ef7ec8](https://github.com/omar-y-abdi/furl-ctx/commit/0ef7ec85060a32c96fbe3ccda45e079d2f03e810))
+* **plugin:** PreToolUse pipe default-on with provably-safe permission-rule guard, v1.3.0 ([#84](https://github.com/omar-y-abdi/furl-ctx/issues/84)) ([3508b32](https://github.com/omar-y-abdi/furl-ctx/commit/3508b320532fcf215e16367fc9fce1b66534b542))
+* **site:** showcase site with real demo data + full crawler surface ([#88](https://github.com/omar-y-abdi/furl-ctx/issues/88)) ([0b28f42](https://github.com/omar-y-abdi/furl-ctx/commit/0b28f4277d1cd97e1cba37cdb27d651094868061))
+
+
+### Bug Fixes
+
+* **ccr:** bound marker-scan regex, stream search_all decode, correct miss message ([#115](https://github.com/omar-y-abdi/furl-ctx/issues/115)) ([9c291ce](https://github.com/omar-y-abdi/furl-ctx/commit/9c291ce1093dc62910f3fc2989c8f6af6694faee))
+* correct compressed-view honesty and retrieval bugs from P5 usage trial ([#106](https://github.com/omar-y-abdi/furl-ctx/issues/106)) ([8f935e5](https://github.com/omar-y-abdi/furl-ctx/commit/8f935e5d6a1b2c83c52ec6317ffdb797ba0a6ebc))
+* mirror PostToolUse updatedToolOutput to the tool's shape ([#108](https://github.com/omar-y-abdi/furl-ctx/issues/108)) ([be4a5d8](https://github.com/omar-y-abdi/furl-ctx/commit/be4a5d86fa32f1a3b66f719e666de5fbb84484d3))
+* point llms get-started link to existing README anchor ([cbfa3b9](https://github.com/omar-y-abdi/furl-ctx/commit/cbfa3b9f0fe25c3a4050ff2e997b1aa7698286e7))
+* profile-safe hooks, kill-safe pipe, mktemp-only tempfile, accurate note ([#114](https://github.com/omar-y-abdi/furl-ctx/issues/114)) ([c098f62](https://github.com/omar-y-abdi/furl-ctx/commit/c098f627cc59bd8826c25801973b27e7079e4fd3))
+* resolve external adoption + evaluation audit findings ([#107](https://github.com/omar-y-abdi/furl-ctx/issues/107)) ([0534b8d](https://github.com/omar-y-abdi/furl-ctx/commit/0534b8de40affab84e0b588adc4b6f2a75850572))
+* retrieve and compress honesty gaps, workstream alpha ([#113](https://github.com/omar-y-abdi/furl-ctx/issues/113)) ([422ad00](https://github.com/omar-y-abdi/furl-ctx/commit/422ad00e344dc33105ee0051991b38ac1206adfd))
+* **site:** drop cleanUrls so the GSC verification file serves 200, not 308 ([#92](https://github.com/omar-y-abdi/furl-ctx/issues/92)) ([d297a04](https://github.com/omar-y-abdi/furl-ctx/commit/d297a046ac5b672494ccbb7a35ad5cd27ccce00b))
+
 ## [1.2.0](https://github.com/omar-y-abdi/furl/compare/v1.1.0...v1.2.0) (2026-07-12)
 
 
