@@ -63,7 +63,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from .ccr.marker_grammar import hash_of_match, hashes_in_text, marker_patterns
+from .ccr.marker_grammar import hashes_in_text
 from .config import DEFAULT_MIN_TOKENS_TO_COMPRESS
 from .pipeline import PipelineExtensionManager, PipelineStage, summarize_routing_markers
 from .redaction import build_store_redactor, compose_redactors
@@ -467,64 +467,6 @@ def _redact_messages(
     return redacted
 
 
-# A single non-hex, non-delimiter sentinel inserted into an INBOUND marker's hash
-# so no marker pattern in ``marker_grammar`` can recognize it (F-alpha5). Chosen
-# so the defanged hash can never re-form a 12/24-hex run adjacent to a ``<<ccr:``
-# prefix or a ``hash=`` token: '~' is not a hex digit and not a double-angle
-# marker delimiter, so the exact-width hex run every shape needs is broken.
-_INBOUND_MARKER_DEFANG = "~"
-
-
-def _neutralize_inbound_markers_text(text: str) -> str:
-    """Defang every CCR marker the grammar recognizes in *text* (F-alpha5).
-
-    Marker-shaped bytes in ATTACKER- or TOOL-controlled source content are an
-    indirect prompt-injection amplifier: a literal ``<<ccr:HASH>>`` (or a bracket
-    ``... compressed ... hash=HASH]`` form) that survives into compressed output
-    is later dereferenced by ``resolve_markers`` / ``furl_retrieve``, resurfacing
-    an unrelated same-project store entry into view. This inserts
-    :data:`_INBOUND_MARKER_DEFANG` before each marker hash's final hex character,
-    breaking the exact-width hex run every marker shape requires, so the marker
-    can no longer be dereferenced. The surrounding text is otherwise
-    byte-identical, and the marker shapes are read READ-ONLY from
-    ``marker_grammar`` so this stays in lock-step with the recognizer.
-
-    Runs BEFORE the pipeline (see :func:`compress`), so it only ever touches
-    markers already present in the SOURCE. Markers Furl's own pipeline emits for
-    content it offloads are added afterwards and are never neutralized.
-    """
-    # Fast path: every recognized shape needs one of these literal tokens (the
-    # double-angle family needs ``<<ccr:`` -> "ccr:"; both bracket forms need
-    # "hash="), so content carrying neither has no marker and is returned as-is.
-    if "ccr:" not in text and "hash=" not in text:
-        return text
-
-    def _defang(match: re.Match[str]) -> str:
-        whole = match.group(0)
-        hash_value = hash_of_match(match)
-        broken = hash_value[:-1] + _INBOUND_MARKER_DEFANG + hash_value[-1]
-        return whole.replace(hash_value, broken, 1)
-
-    for pattern in marker_patterns():
-        text = pattern.sub(_defang, text)
-    return text
-
-
-def _neutralize_inbound_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return NEW messages with inbound CCR markers in every string ``content``
-    defanged (F-alpha5). Immutable and total: non-string content passes through
-    untouched (mirroring :func:`_redact_messages` scope) and the caller's
-    original list/dicts are never mutated."""
-    out: list[dict[str, Any]] = []
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str):
-            out.append({**message, "content": _neutralize_inbound_markers_text(content)})
-        else:
-            out.append(message)
-    return out
-
-
 def _unknown_model_warning(model: str) -> str | None:
     """A warning when *model* matches no known tokenizer family (F-alpha4).
 
@@ -693,16 +635,6 @@ def compress(
     _active_redactor = compose_redactors(build_store_redactor(), cfg.redactor)
     if _active_redactor is not None:
         messages = _redact_messages(messages, _active_redactor)
-
-    # F-alpha5 confused-deputy guard. Defang inbound CCR markers in the SOURCE
-    # before ANY compression, in the same pre-compression sanitization phase as
-    # redaction: an attacker-or-tool-planted ``<<ccr:HASH>>`` (or bracket form)
-    # must not survive into the emitted output where resolve_markers/furl_retrieve
-    # would later dereference it against an unrelated same-project store entry.
-    # The pipeline emits its OWN offload markers afterwards, on the neutralized
-    # content, so Furl's own markers are never touched. Immutable: builds new
-    # message dicts, leaving the caller's list untouched.
-    messages = _neutralize_inbound_markers(messages)
 
     # Per-tenant CCR isolation (B2). When a namespace is active
     # (``session_id`` / ``agent_id`` / ``FURL_CCR_NAMESPACE``) bind that
