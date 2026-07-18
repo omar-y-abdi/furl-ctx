@@ -195,10 +195,37 @@ What bounds the risk today:
 - **Per-project isolation.** Stores are scoped per project by default, so a planted marker
   cannot reach another project's originals.
 
-Intended mitigation, not yet landed: neutralize inbound `<<ccr:HASH>>` marker text at
-compression time on the retrieve-facing surface, so marker text arriving inside newly
-compressed third-party content can never be treated as a furl-ctx-issued pointer. Until
-that ships, treat markers found inside untrusted content as data, not as retrieval
-instructions, and rely on the per-project store boundary above.
+### Text-defang mitigation: evaluated and not shipped
+
+A pre-compression text defang for inbound markers was implemented, then
+reverted after an adversarial review found it unsound on three counts:
+
+- **Bypassable.** A duplicate decoy bracket marker that repeats the target
+  hash defeats a first-occurrence replace, so the real marker survives and
+  `resolve_markers` still leaks the unrelated stored content. A hash that is
+  not yet stored at defang time defeats a resolve-time check the same way,
+  then becomes exploitable once that entry is stored later in the same
+  session.
+- **Data-lossy.** The same defang mangled Furl's own emitted markers when
+  compressed output was re-fed through `compress`, breaking retrieval of that
+  offloaded original.
+- **Byte-corrupting.** Innocent marker-shaped content built around a hash
+  that was never stored still had a sentinel injected, breaking byte-exact
+  passthrough.
+
+The root cause is structural: a text-only defang cannot carry provenance to
+tell Furl's own markers from a foreign one, so no replace-and-scrub pass over
+plain text closes it. The intended fix is a `marker_grammar` provenance
+change, where Furl tags or tracks the markers it emits and neutralizes only
+markers it did not emit. That fix is scheduled as its own workstream and has
+not shipped.
+
+Exploiting the residual above still needs a valid 24 hex digit
+content-addressed hash, 96 bits of entropy, that the attacker must already
+know or predict, so this is an indirect injection amplifier, not a primary
+exfiltration vector. Until the provenance-based fix ships, treat markers
+found inside untrusted content as data, not as retrieval instructions, and
+rely on the store-lookup gating, hash validation, and per-project isolation
+above.
 
 Thank you for helping keep Furl and its users safe!

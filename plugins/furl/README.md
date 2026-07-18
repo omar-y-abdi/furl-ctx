@@ -201,8 +201,9 @@ default, so a later `Edit` still sees exact file bytes. For each result it:
 3. Compresses the rest via `furl_ctx.compress(...)` and replaces the tool output
    **only if the result is genuinely smaller**.
 
-Like the server, the hook launches through the same `uv` wrapper
-(`sh -lc 'uv run … python3 … || true'`), so it needs no prior `pip install`. It
+The hook launches through its own `sh -c` wrapper, which appends common
+install directories such as `$HOME/.local/bin` and `/opt/homebrew/bin` to the
+inherited PATH before calling `uv run`, so it needs no prior `pip install`. It
 pins the **same** `FURL_CCR_BACKEND=sqlite` as the server, so markers it creates
 are retrievable through `furl_retrieve`. It is **fail-open**: any error — including
 `uv` being unavailable — passes the original output through unchanged (exit 0, no
@@ -223,7 +224,7 @@ output that actually enters context.
 | `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tools never to compress — exact or `mcp__db__*` globs. |
 | `FURL_HOOK_MODE` | `normal` | `aggressive` compresses more (code + smaller outputs). |
 | `FURL_HOOK_VERBOSE` | off | `1` prints a one-line per-compression savings summary to stderr. |
-| `FURL_PRETOOL_PIPE` | **on** | The PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status") runs **by default**. Only an explicitly falsy value — `0`/`false`/`off`/`no`/`disabled`, case-insensitive, whitespace ignored — disables it; unset/empty/any other value leaves it on. It rewrites Bash only when there are zero readable Bash permission rules; if any deny/ask/allow `Bash` rule exists (enterprise/project/local/user settings), it leaves Bash untouched (see Known limitations). The gate runs via `sh -lc` (a login shell), so an export in your login profile or in the environment Claude Code launches from takes effect. |
+| `FURL_PRETOOL_PIPE` | **on** | The PreToolUse pipe runs **by default** on Bash only, with real savings on today's harness, see "Current harness status". Only an explicitly falsy value, `0`/`false`/`off`/`no`/`disabled`, case-insensitive, whitespace ignored, disables it; unset, empty, or any other value leaves it on. It rewrites Bash only when there are zero readable Bash permission rules; if any deny, ask, or allow `Bash` rule exists in enterprise, project, local, or user settings, it leaves Bash untouched, see Known limitations. The gate runs via `sh -c`, a non-login shell that does not source a login profile; `uv` is resolved by appending common install directories to the inherited PATH, never by replacing it. Set `FURL_PRETOOL_PIPE=0` in the launch environment that starts Claude Code, not in a login profile, for the opt-out to take effect. |
 | `FURL_STATUS_LINE` | on | `0` silences the one-line SessionStart status signal. Export it in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 
 The full `FURL_*` reference is in [`LIBRARY.md`](../../LIBRARY.md) → "Configuration".

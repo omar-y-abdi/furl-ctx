@@ -84,15 +84,15 @@ def test_redaction_claim_is_qualified() -> None:
 
 def test_pretool_pipe_env_row_has_where_to_set_guidance() -> None:
     """D2: the FURL_PRETOOL_PIPE env-table row tells the user WHERE the flag must
-    be set — the gate runs via ``sh -lc`` (a login shell), so an export in the
-    login profile or in the environment Claude Code launches from takes effect
-    (mirroring the FURL_STATUS_LINE row's where-to-set pattern)."""
+    be set. The gate runs via ``sh -c``, a non-login shell, so an export belongs
+    in the environment Claude Code launches from, not in a login profile. This
+    mirrors the FURL_STATUS_LINE row's where-to-set pattern."""
     text = _read(_README)
     rows = [line for line in text.splitlines() if line.startswith("| `FURL_PRETOOL_PIPE`")]
     assert rows, "README env table lost its FURL_PRETOOL_PIPE row"
     row = rows[0]
-    assert "sh -lc" in row, "row lacks the login-shell (`sh -lc`) gate detail"
-    assert "login" in row, "row lacks where-to-set (login profile / launch env) guidance"
+    assert "sh -c" in row, "row lacks the non-login-shell `sh -c` gate detail"
+    assert "launch environment" in row, "row lacks launch-environment where-to-set guidance"
 
 
 def test_pipe_counters_named_in_observability_section() -> None:

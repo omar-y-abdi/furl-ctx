@@ -80,7 +80,7 @@ End-to-end flow: `compress(messages,model)` (`furl_ctx/compress.py:397`) → `Tr
 **routing / tokenizer / relevance**
 - `tokenizer/registry.rs:76` — `get_tokenizer` — Tiktoken → Estimation dispatch (the HF tokenizer backend was excised; the estimator's chars-per-token density is calibrated per model family). Python mirror (`furl_ctx/tokenizers/registry.py:169`) dispatches tiktoken plus anthropic/google/cohere backends — all three are family-calibrated estimators (`registry.py:84/94/104`).
 - `tokenizer/tiktoken_impl.rs:109` — `encoding_for` — o200k/cl100k/p50k/r50k by model prefix.
-- `furl_ctx/compress.py:172` — `_compute_frozen_message_count` (Python) — only messages[].content `cache_control` blocks bump the floor; system/tools never. Pure-Python owner of frozen-prefix counting (the orphaned Rust `cache_control.rs::compute_frozen_count` was deleted).
+- `furl_ctx/compress.py:224`: `_compute_frozen_message_count`, Python, only messages[].content `cache_control` blocks bump the floor, never system or tools. Pure-Python owner of frozen-prefix counting; the orphaned Rust `cache_control.rs::compute_frozen_count` was deleted.
 - `relevance/bm25.rs:87` — `bm25_score` / `hybrid.rs:53` — `HybridScorer::score` — BM25 keyword scoring + the BM25-only boost (`boost_bm25_only`, `hybrid.rs:36`); the ML embedding tier was excised, so BM25 is the only scorer.
 - `transforms/smart_crusher/config.rs:33` — `RoutingPolicy` — MinTokens (default, ties→lossless) vs LosslessFirst (legacy). `lossless_min_savings_ratio` default 0.30 at `config.rs:211`.
 - `route.rs:982/1010` — `SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES` (256) / `LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES` (64) — lossless/survivor byte-floor constants (was crusher.rs).
@@ -108,8 +108,8 @@ End-to-end flow: `compress(messages,model)` (`furl_ctx/compress.py:397`) → `Tr
 - `furl_ctx/cache/retrieval_feedback.py:182` — `RetrievalFeedback` — tracks CCR retrieval patterns; `FeedbackHints` at `:164`, `ShapeKey` at `:135`.
 
 **public API**
-- `furl_ctx/compress.py:397` — `compress` — one-liner entry; inflation guard reverts if tokens grow (`compress.py:500`).
-- `furl_ctx/compress.py:93/140` — `CompressConfig`/`CompressResult` — config + metrics.
+- `furl_ctx/compress.py:493`: `compress`, one-liner entry; inflation guard reverts if tokens grow at `compress.py:770`.
+- `furl_ctx/compress.py:98/162`: `CompressConfig`/`CompressResult`, config + metrics.
 - `crates/furl-py/src/lib.rs:905/963/1069` — `PySmartCrusher` / `crush` / `crush_array_json` — PyO3 bridge (GIL-released, validates at boundary).
 
 ## 3. CHANGE INDEX
@@ -124,7 +124,7 @@ End-to-end flow: `compress(messages,model)` (`furl_ctx/compress.py:397`) → `Tr
 - Change a CCR marker shape → `ccr/markers.rs:37/44/54/61/98` (the `marker_for_*` family — single Rust producer) + `furl_ctx/ccr/marker_grammar.py:143/149/155` (the consumer patterns) — keep the two in lockstep, pinned by `markers.rs:88-163` equivalence tests.
 - Change a CCR hash → at the producer call site: `persist.rs::hash_canonical` (sha256[:6] → 12 hex, row + array keys) OR `md5_hex_24` (md5[:24] → 24 hex) in `diff_compressor.rs`/`log_compressor.rs`/`search_compressor.rs`. Python mirror key: `compression_store.py:387` (`store(..., explicit_hash=...)`). Accepted consumer widths {12,24}: `marker_grammar.py:72` (`HASH_WIDTHS`). (No central `compute_key` anymore — it was deleted with `blake3`.)
 - Change content routing / per-type dispatch → `content_router.py:747` (ContentRouter.compress orchestrator), `content_router.py:860` (`_apply_strategy_to_content`), `content_router.py:224` (detect), `transforms/detection.rs` (Rust `detect` chain + `ContentType`; the regex `content_detector.rs` parity mirror was deleted).
-- Change frozen-count / cache contract → `furl_ctx/compress.py:172` (`_compute_frozen_message_count` — the pure-Python owner; walks `messages[].content` for `cache_control` blocks and returns the exclusive floor).
+- Change frozen-count / cache contract → `furl_ctx/compress.py:224`: `_compute_frozen_message_count`, the pure-Python owner; walks `messages[].content` for `cache_control` blocks and returns the exclusive floor.
 - Add a test (Rust) → `crates/furl-core/tests/ccr_roundtrip.rs:36` (`default_crusher_stores_dropped_rows`) / `tokenizer_proptest.rs:19` (`deterministic_per_instance`).
 - Add a test (Python) → `tests/test_ccr_recovery_invariant.py:119` (`_recover_from_output` harness) / `tests/test_ccr_proportional_retrieval.py:190` (`test_granular_retrieval_stays_positive`).
 - Run a benchmark → `benchmarks/run_bench.py` (baseline) / `verify/run.py` (adversarial 6-seed sweep) / `verify/measure.py` (strict byte-exact cost model).
