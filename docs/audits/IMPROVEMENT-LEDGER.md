@@ -20,6 +20,10 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 
 ## Open candidates, fair game for future sessions
 
+- Capture the committed benchmark baseline on Linux CI instead of macOS so the
+  perf gate compares same-OS numbers. Review finding F3 on PR 120: recall has
+  a knife-edge regime at 0.2222 where a single cross-OS trial flip would false
+  fail. Empirically green today; structural fix is a CI-captured baseline.
 - faA2 SIGINT timing test in tests/test_hook_audit_fixes.py flakes under heavy
   parallel load, hardcoded 20s timeout. Harden per the test-quality contract.
 - Test-quality iteration over live modules per the phase-4 hardening plan:
