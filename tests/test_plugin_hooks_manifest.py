@@ -15,11 +15,13 @@ context (per the Claude Code hooks docs, ``systemMessage`` is shown to the user 
 not added to Claude's context, unlike raw stdout / ``additionalContext``). It is
 fail-open (always exits 0) and honors the ``FURL_STATUS_LINE=0`` opt-out.
 
-Env contract: the manifest sets NO environment variables — neither a per-hook
-``env`` object (the loader ignores the field) nor inline ``VAR=value`` assignments
-in the command (``VAR=x cmd`` sets the child env unconditionally, which would
-override a user's exported values such as ``FURL_CCR_BACKEND=memory``). The CCR
-defaults (FURL_CCR_BACKEND=sqlite, FURL_CCR_TTL_SECONDS=86400) are owned by
+Env contract: the manifest sets no FURL_* environment variables, neither a
+per-hook ``env`` object (the loader ignores the field) nor an inline
+``FURL_...=value`` assignment that would clobber a user's exported override such
+as ``FURL_CCR_BACKEND=memory``. The two functional hooks APPEND common uv install
+dirs to ``PATH`` (``PATH="$PATH:..."``) so ``uv`` resolves under ``sh -c`` without
+a login shell; appending never overrides an existing entry. The CCR defaults
+(FURL_CCR_BACKEND=sqlite, FURL_CCR_TTL_SECONDS=86400) are owned by
 compress_tool_output.py via ``os.environ.setdefault``, which honors user overrides.
 
 Pure JSON/text checks plus a stdlib subprocess round-trip of the status line — no
@@ -55,27 +57,39 @@ _LIB_VERSION = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"][
 _EVENT = "PostToolUse"
 _EVENTS = {"PostToolUse", "PreToolUse", "SessionStart"}
 
-# The exact PostToolUse command the plugin ships — byte-identical to the pre-pin
-# command except for the deterministic ``==<version>`` pin that stops ``uv`` from
-# serving a stale cached resolution. Any other edit here must be deliberate.
+# uv install dirs appended to PATH (F-A1) so ``uv`` resolves under ``sh -c``
+# without a login shell; appending never overrides an existing PATH entry.
+_PATH_AUG = 'PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"'
+
+# The exact PostToolUse command the plugin ships (F-A1). It runs via ``sh -c`` so
+# NO login profile is sourced (a profile that prints to stdout would corrupt the
+# JSON envelope); it appends common uv dirs to PATH so uv resolves without a
+# login shell; and it captures the hook's stdout and strips any non-JSON prefix
+# so a stray line never breaks the envelope. The ``==<version>`` pin stops ``uv``
+# from serving a stale cached resolution. Any other edit here must be deliberate.
 _EXPECTED_COMMAND = (
-    "sh -lc 'uv run --no-project --with "
+    "sh -c 'o=$(" + _PATH_AUG + " uv run --no-project --with "
     f'"furl-ctx[mcp]=={_LIB_VERSION}" '
-    'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py" || true\''
+    'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/compress_tool_output.py"); '
+    'pre=${o%%"{"*}; case $o in *"{"*) printf %s "${o#"$pre"}" ;; '
+    '*) printf %s "$o" ;; esac; true\''
 )
 
-# The PreToolUse pipe hook — ON BY DEFAULT (S1 smart default, user-approved).
+# The PreToolUse pipe hook, ON BY DEFAULT (S1 smart default, user-approved).
 # The shell gate is an OPT-OUT: an explicitly falsy FURL_PRETOOL_PIPE
 # (0/false/off/no/disabled, normalized via ``tr`` lowercase + strip, review F3)
-# skips the body cheaply (no ``uv`` resolve); unset, empty, and ANY other value
-# — including unknown junk like "garbage" — launch the rewrite ("on unless
-# explicitly disabled"). Bash-only. Any edit here must be deliberate.
+# skips the body cheaply (no ``uv`` resolve); unset, empty, and ANY other value,
+# including unknown junk like "garbage", launch the rewrite ("on unless
+# explicitly disabled"). Runs via ``sh -c`` (F-A1) with the same PATH-resolved uv
+# and non-JSON-prefix strip. Bash-only. Any other edit here must be deliberate.
 _EXPECTED_PRETOOL_COMMAND = (
-    'sh -lc \'case "$(printf %s "$FURL_PRETOOL_PIPE" | '
-    'tr "[:upper:]" "[:lower:]" | tr -d "[:space:]")" in 0|false|off|no|disabled) ;; *) '
-    "uv run --no-project --with "
+    'sh -c \'case "$(printf %s "$FURL_PRETOOL_PIPE" | '
+    'tr "[:upper:]" "[:lower:]" | tr -d "[:space:]")" in 0|false|off|no|disabled) ;; '
+    "*) o=$(" + _PATH_AUG + " uv run --no-project --with "
     f'"furl-ctx[mcp]=={_LIB_VERSION}" '
-    'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/pretool_pipe.py" ;; esac; true\''
+    'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/pretool_pipe.py"); '
+    'pre=${o%%"{"*}; case $o in *"{"*) printf %s "${o#"$pre"}" ;; '
+    '*) printf %s "$o" ;; esac ;; esac; true\''
 )
 
 # Fields the schema does not honor where the old manifest wrongly placed them:
