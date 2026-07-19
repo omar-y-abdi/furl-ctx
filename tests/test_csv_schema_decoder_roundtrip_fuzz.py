@@ -1064,3 +1064,121 @@ def test_fuzz_embedded_newline_rows_never_split() -> None:
         f"This indicates the naive text.split('\\n') is still in place.\n"
         f"First missing: {sorted(missing)[:1]}"
     )
+
+
+# ══════════ Test #3 — lossless-fidelity fuzz families (T1 / T2 / T12) ══════════
+#
+# Three generator families for the lossless-fidelity audit defects, driven
+# through the SAME "decode byte-exact OR decline" contract helper as the
+# COR-13 shapes above (``_assert_decoded_exact_or_declined``):
+#
+#   * mixed-type columns (T1): a column mixing bare scalar-looking strings
+#     ("200"/"true"/"null"/"1.5") with real int/bool/null/float scalars. The
+#     unfixed engine renders every such string bare, so the decoder's
+#     ``json.loads`` coerces "200"->200, "true"->True, "null"->None. The fix
+#     quotes them; the column stays lossless AND exact.
+#   * container-strings (T2): values that ORIGINATED as strings but parse as
+#     JSON containers. A uniform column of them stays a lossless string
+#     column; one mixed with a real scalar becomes a ``json`` column that
+#     cannot disambiguate a quoted container-string from a real container, so
+#     it DECLINES to the recoverable tier (fail-closed).
+#   * literal dotted keys (T12): a literal top-level ``"m.k"`` column beside a
+#     nested ``{"m": {"k": ...}}`` object. The flatten must not synthesize a
+#     second ``m.k`` column; both distinct values must survive.
+
+_SVC_CONST = "auth-service-primary-eu-central-1.internal.example.com"
+
+
+def _make_mixed_scalar_type_rows(rng: random.Random, n_rows: int) -> list[dict]:
+    """A ``code`` column mixing bare scalar-looking strings with real scalars."""
+    scalar_strings = ["200", "true", "false", "null", "1.5", "-7", "3e2", "0"]
+    rows: list[dict] = []
+    for i in range(n_rows):
+        r = i % 6
+        code: object
+        if r == 0 or r == 5:
+            code = rng.choice(scalar_strings)  # bare-looking STRING (T1 trigger)
+        elif r == 1:
+            code = i  # real int
+        elif r == 2:
+            code = i % 2 == 0  # real bool
+        elif r == 3:
+            code = None  # real JSON null
+        else:
+            code = float(i) + 0.5  # real float
+        rows.append({"id": i, "service": _SVC_CONST, "code": code})
+    return rows
+
+
+def _make_container_string_rows(rng: random.Random, n_rows: int, *, mix: bool) -> list[dict]:
+    """A ``cfg`` column of string values that PARSE as JSON containers.
+
+    ``mix=False`` keeps every cell a string (uniform -> lossless string
+    column). ``mix=True`` interleaves a real int so the column is ``json``-
+    tagged and the container-strings force a fail-closed decline.
+    """
+    container_strings = ['{"a": 1}', "[1, 2, 3]", '{"nested": {"x": 9}}', "[]", "{}", '[{"k": 1}]']
+    rows: list[dict] = []
+    for i in range(n_rows):
+        s = rng.choice(container_strings)
+        cfg: object = s if (not mix or i % 2 == 0) else i * 7
+        rows.append({"id": i, "service": _SVC_CONST, "cfg": cfg})
+    return rows
+
+
+def _make_literal_dotted_key_rows(rng: random.Random, n_rows: int) -> list[dict]:
+    """A literal top-level ``"m.k"`` column alongside a nested ``{"m":{"k":..}}``.
+
+    The nested object flattens to a synthesized ``m.k`` column that collides
+    with the literal one (T12). Both distinct values must survive.
+    """
+    rows: list[dict] = []
+    for i in range(n_rows):
+        rows.append(
+            {
+                "id": i,
+                "service": _SVC_CONST,
+                "m.k": f"lit-{i}",
+                "m": {"k": 1000 + i},
+            }
+        )
+    return rows
+
+
+def test_fuzz_mixed_scalar_columns_stay_lossless_and_exact() -> None:
+    """T1: bare scalar-string / real-scalar mixes must stay lossless & exact."""
+    rng = random.Random(_FUZZ_SEED + 5)
+    for n in (60, 21, 9):
+        items = _make_mixed_scalar_type_rows(rng, n)
+        route = _assert_decoded_exact_or_declined(items)
+        assert route == "lossless", (
+            f"a mixed scalar column must stay in the lossless tier (fidelity via "
+            f"cell-quoting, not decline), got {route!r} for n={n}"
+        )
+
+
+def test_fuzz_container_strings_decode_exact_or_decline() -> None:
+    """T2: container-strings stay exact when uniform, decline when mixed."""
+    rng = random.Random(_FUZZ_SEED + 6)
+    for n in (60, 20, 9):
+        # Uniform: every cell a string -> lossless string column, byte-exact.
+        route = _assert_decoded_exact_or_declined(_make_container_string_rows(rng, n, mix=False))
+        assert route == "lossless", (
+            f"a uniform container-string column must stay a lossless string "
+            f"column, got {route!r} for n={n}"
+        )
+        # Mixed with a real scalar -> json column that cannot disambiguate a
+        # quoted container-string from a real container -> fail-closed decline.
+        _assert_decoded_exact_or_declined(_make_container_string_rows(rng, n, mix=True))
+
+
+def test_fuzz_literal_dotted_keys_preserve_both_values() -> None:
+    """T12: a literal dotted key beside a nested object must round-trip exact."""
+    rng = random.Random(_FUZZ_SEED + 7)
+    for n in (60, 15, 9):
+        items = _make_literal_dotted_key_rows(rng, n)
+        route = _assert_decoded_exact_or_declined(items)
+        assert route == "lossless", (
+            f"a literal dotted-key table (no synthesized collision) must stay "
+            f"lossless & exact, got {route!r} for n={n}"
+        )
