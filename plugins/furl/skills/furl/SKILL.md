@@ -98,10 +98,13 @@ LIBRARY.md carries the full CCR marker grammar.
 When you need the full content behind a marker, **call `furl_retrieve` with that
 hash** — it returns the stored original, byte-exact for raw text and a
 semantically-complete re-serialization for a structured JSON array, as long as the
-entry is still within its retention window. **The plugin keeps offloaded originals for 24 hours by
-default (`FURL_CCR_TTL_SECONDS=86400`); lower it to expire them sooner or raise it
-for a longer window.** After that the entry expires and a retrieve is a loud miss,
-never a silent wrong answer. The hook and the `furl` MCP server share one durable
+entry is still within its retention window. **The plugin's 24-hour default
+(`FURL_CCR_TTL_SECONDS=86400`) is a ceiling, not a guarantee: the store also caps
+at 1000 live entries per project, and a single moderately-sized tool output can
+consume dozens of those, so a handful of large outputs typically evict well
+before 24 hours.** Past either limit the entry is gone and a retrieve is a loud
+miss, never a silent wrong answer; check `furl_stats` for live entry counts
+against the cap. The hook and the `furl` MCP server share one durable
 per-project SQLite store, `~/.furl/ccr-ns-<hash>.sqlite3`, keyed by
 `FURL_CCR_PROJECT_DIR` so one project never sees another's entries. The global
 `~/.furl/ccr.sqlite3` is used only when project scoping is turned off, and it is the
