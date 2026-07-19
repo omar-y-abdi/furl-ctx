@@ -44,6 +44,16 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   references versus 6-7 for comparably-sized siblings.
 - Benchmark corpus growth: add a new real-world dataset family to
   benchmarks/datasets.py with provenance notes.
+- `furl_ctx/transforms/cross_message_dedup.py`'s `_DedupState.seen` (the
+  exact-duplicate dict) is still unbounded: it retains a full copy of the
+  original content string per distinct content-hash for the conversation's
+  lifetime, with no cap analogous to the `array_sources` deque added
+  2026-07-19. Unlike `array_sources`, `seen` lookups are already O(1)
+  (a dict, not a linear scan), so this is a pure memory-retention concern,
+  not a quadratic-cost one, and bounding it would change exact-dup
+  matching semantics for very long conversations (an evicted hash's later
+  exact duplicate would stop deduping) — worth a dedicated look rather than
+  copying the array_sources fix verbatim.
 - CI timing telemetry on main pushes, warn-only trend line, design sketched in
   the perf gate PR discussion.
 - mypy strictness: furl_ctx.ccr.mcp_server still carries a blanket
