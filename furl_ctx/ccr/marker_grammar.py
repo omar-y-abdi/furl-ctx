@@ -156,6 +156,32 @@ GENERIC_BRACKET_PATTERN: re.Pattern = re.compile(
 # One capturing group (the hash); the trailing delimiter is non-capturing.
 DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{DOUBLE_ANGLE_DELIM}")
 
+# T4 fix: a SEPARATE full-span variant of the double-angle family, for callers
+# that excise-and-replace the WHOLE marker (resolve_markers's substitution)
+# rather than merely extract the hash. DOUBLE_ANGLE_PATTERN above is an
+# EXTRACTION pattern: its trailing delimiter only needs to consume ONE
+# boundary byte to confirm the hash capture is complete, so match.group(0)
+# stops right there — correct for hashes_in_text (which only reads the
+# capture group), WRONG as a substitution span for any shape with a
+# descriptive tail (A/B/C/E/F: match.group(0) ends mid-marker, e.g.
+# ``"<<ccr:HASH "`` for shape A, leaving ``"N_rows_offloaded>>"`` glued onto
+# whatever replaces it) and even for the bare shape (D: DOUBLE_ANGLE_DELIM's
+# character class matches a single ``">"`` before its own ``">>"``
+# alternative ever gets a chance to fire — alternation takes the first
+# successful branch — so match.group(0) stops one byte short of the real
+# close and a lone ``">"`` is left dangling).
+#
+# ``[^>]*`` up to a literal ``">>"`` instead: greedy through every byte the
+# double-angle grammar never emits inside a marker body, so it always halts
+# at the FIRST ``">>"`` — the marker's real close for every shape (verified
+# against A-F; none of their tails contain ``">"``). Zero-width for the bare
+# shape (D), where the delimiter IS the terminator. Hash-width disambiguation
+# (24 tried before 12) still holds: the byte immediately after a real hash is
+# always non-hex (space / comma / hash-sign / ``">"``), so the 24-hex branch
+# still fails to find 24 consecutive hex characters for a true 12-hex hash
+# and correctly backs off, exactly as it does for DOUBLE_ANGLE_PATTERN.
+DOUBLE_ANGLE_FULL_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}[^>]*>>")
+
 
 def marker_patterns() -> list[re.Pattern]:
     """The ordered consumer pattern list for marker scanning.
@@ -166,11 +192,36 @@ def marker_patterns() -> list[re.Pattern]:
     per match, deduped first-seen), so order does not affect the result
     set — but it is kept stable for clarity and to match the original
     behavior exactly.
+
+    EXTRACTION only — a match's span is NOT guaranteed to cover a whole
+    marker (see :data:`DOUBLE_ANGLE_PATTERN`). A caller that needs to excise
+    and replace the complete marker text wants :func:`substitution_patterns`
+    instead.
     """
     return [
         BRACKET_RETRIEVE_PATTERN,
         GENERIC_BRACKET_PATTERN,
         DOUBLE_ANGLE_PATTERN,
+    ]
+
+
+def substitution_patterns() -> list[re.Pattern]:
+    """The ordered pattern list for marker SUBSTITUTION (``resolve_markers``):
+    every entry's ``match.group(0)`` spans the marker's COMPLETE text, so
+    splicing the resolved content in for that exact span never leaves a
+    fragment of the marker behind (T4).
+
+    :data:`BRACKET_RETRIEVE_PATTERN` and :data:`GENERIC_BRACKET_PATTERN`
+    already span their whole marker (opening ``"["`` to closing ``"]"``) and
+    are reused as-is. The double-angle family uses
+    :data:`DOUBLE_ANGLE_FULL_PATTERN` instead of :data:`DOUBLE_ANGLE_PATTERN`
+    — see its docstring for why the extraction-oriented pattern is unsafe
+    here.
+    """
+    return [
+        BRACKET_RETRIEVE_PATTERN,
+        GENERIC_BRACKET_PATTERN,
+        DOUBLE_ANGLE_FULL_PATTERN,
     ]
 
 
