@@ -1007,14 +1007,17 @@ mod tests {
 
     #[test]
     fn csv_formatter_nested_cell_inline_json() {
+        // A GENUINE array-of-objects value (not a string) recurses into a
+        // Nested cell, JSON-rendered then CSV-quoted, so a `_compaction`
+        // substring appears inside quotes. String-origin arrays are kept
+        // verbatim instead (T2 — see
+        // `compactor::tests::stringified_json_array_stays_verbatim_string`).
         let items = vec![
-            json!({"event": "batch", "payload": r#"[{"x":1},{"x":2},{"x":3}]"#}),
-            json!({"event": "batch", "payload": r#"[{"x":4},{"x":5}]"#}),
+            json!({"event": "batch", "payload": [{"x":1},{"x":2},{"x":3}]}),
+            json!({"event": "batch", "payload": [{"x":4},{"x":5}]}),
         ];
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
-        // Nested compaction is JSON-rendered then CSV-quoted, so a
-        // `_compaction":"table"` substring should appear inside quotes.
         assert!(out.contains("_compaction"), "got: {out}");
     }
 
@@ -2025,9 +2028,11 @@ mod tests {
 
     #[test]
     fn markdown_kv_nested_cell_inline_json() {
+        // As above: a GENUINE array-of-objects recurses into a Nested cell.
+        // String-origin arrays are kept verbatim (T2).
         let items = vec![
-            json!({"event": "batch", "payload": r#"[{"x":1},{"x":2},{"x":3}]"#}),
-            json!({"event": "batch", "payload": r#"[{"x":4},{"x":5}]"#}),
+            json!({"event": "batch", "payload": [{"x":1},{"x":2},{"x":3}]}),
+            json!({"event": "batch", "payload": [{"x":4},{"x":5}]}),
         ];
         let c = compact(&items, &cfg());
         let out = MarkdownKvFormatter::new().format(&c);

@@ -291,20 +291,22 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
             }
             CellValue::Scalar(v.clone())
         }
-        CellClass::StringifiedJson(parsed) => {
-            // If the parsed JSON is an array of objects, recurse; else
-            // store the parsed value as a Scalar (un-escapes for free).
-            if let Value::Array(items) = &parsed {
-                if items.iter().all(|i| matches!(i, Value::Object(_))) && items.len() >= 2 {
-                    let sub = compact(items, cfg);
-                    if sub.was_compacted() {
-                        return CellValue::Nested(Box::new(sub));
-                    }
-                    // See the JsonArray arm above (PERF-5).
-                    return CellValue::DeclinedJson(parsed);
-                }
-            }
-            CellValue::Scalar(parsed)
+        CellClass::StringifiedJson(_) => {
+            // T2 fidelity: a value that ORIGINATED as a string is kept as the
+            // EXACT original string bytes — never deserialized. Parsing it
+            // (the old behaviour) let `flatten_uniform_nested` promote
+            // object-strings into dotted columns so the original string field
+            // vanished, and re-serialized array-strings dropped their interior
+            // whitespace — both silent, markerless corruption on the lossless
+            // path. `classify_string` still parses to gate CCR/opaque routing,
+            // but the cell it yields here is the verbatim source string.
+            //
+            // A container-string that lands in a type-mixed (`json`-tagged)
+            // column is then declined from the lossless tier by
+            // `Compaction::is_decoder_verifiable`: a quoted container-string
+            // is indistinguishable from a real container cell to the reference
+            // decoder, so the array routes to the recoverable tier instead.
+            CellValue::Scalar(v.clone())
         }
         CellClass::Opaque(kind) => {
             // Strict lossless-or-passthrough callers disable substitution
@@ -1340,23 +1342,36 @@ mod tests {
     }
 
     #[test]
-    fn stringified_json_array_recurses() {
+    fn stringified_json_array_stays_verbatim_string() {
+        // T2: a value that ORIGINATED as a stringified-JSON array is kept as
+        // the EXACT original string, never parsed into a recursive sub-table.
+        // The old recurse-into-Nested behaviour dropped the string's interior
+        // bytes and hid the original behind an un-decodable Nested cell on the
+        // lossless path. Genuine (non-string) arrays still recurse — see
+        // `formatter::tests::csv_formatter_nested_cell_inline_json`.
         let items = vec![
             json!({"event": "batch", "payload": r#"[{"x":1},{"x":2},{"x":3}]"#}),
             json!({"event": "batch", "payload": r#"[{"x":4},{"x":5}]"#}),
         ];
         match compact(&items, &cfg()) {
-            Compaction::Table { rows, .. } => {
-                // payload column should be Nested(Compaction::Table).
-                let payload_idx = 1; // depends on order; check both
-                let cell0 = &rows[0].0[0];
-                let cell1 = &rows[0].0[1];
-                let nested_count = [cell0, cell1]
+            Compaction::Table { schema, rows, .. } => {
+                for row in &rows {
+                    assert!(
+                        row.0.iter().all(|c| !matches!(c, CellValue::Nested(_))),
+                        "stringified array must not recurse into a Nested cell"
+                    );
+                }
+                let col = schema
+                    .fields
                     .iter()
-                    .filter(|c| matches!(***c, CellValue::Nested(_)))
-                    .count();
-                let _ = payload_idx;
-                assert_eq!(nested_count, 1, "expected exactly one Nested cell");
+                    .position(|f| f.name == "payload")
+                    .unwrap();
+                match &rows[0].0[col] {
+                    CellValue::Scalar(Value::String(s)) => {
+                        assert_eq!(s, r#"[{"x":1},{"x":2},{"x":3}]"#)
+                    }
+                    other => panic!("expected verbatim Scalar(String), got {other:?}"),
+                }
             }
             other => panic!("expected Table, got {other:?}"),
         }
