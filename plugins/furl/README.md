@@ -183,10 +183,15 @@ clean. One consequence: a `FURL_*` variable set only in a login profile will not
 the server, so export it in the environment Claude Code launches from, or set it in the
 `.mcp.json` `env` block. `exec` hands stdio and signals straight to the server. `FURL_CCR_BACKEND=sqlite` makes the
 CCR store durable on disk under `~/.furl/` (a per-project `ccr-ns-<hash>.sqlite3`),
-so originals survive across processes. `FURL_CCR_TTL_SECONDS=86400` keeps each
-offloaded original retrievable for 24 hours (the plugin default) — governing the
-hook's offloads and the MCP tools' stores alike; raise or lower it to widen or
-shrink the retention window. The
+so originals survive across processes. `FURL_CCR_TTL_SECONDS=86400` sets a
+24-hour retention CEILING, not a guarantee — governing the hook's offloads and
+the MCP tools' stores alike — because the store also caps at 1000 live entries
+per project and a single moderately-sized tool output can consume dozens of
+those (one row per chunk), so a handful of large outputs typically evict well
+before 24 hours; the engine's opt-in spill tier (`FURL_CCR_SPILL`) does not yet
+apply to this per-project store, so raising `FURL_CCR_TTL_SECONDS` alone will
+not fix early eviction under heavy use — check `furl_stats` for live entry
+counts against the cap. The
 `furl-ctx[mcp]==1.3.0` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 
