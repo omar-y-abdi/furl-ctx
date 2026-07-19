@@ -19,6 +19,7 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-18 | CI automation | autofix.yml, perf.yml, benchmarks/compare_baseline.py | autofix with PAT push, perf and rust regression gate, baseline refreshed | #120 |
 | 2026-07-18 | test rigor, faA2 timing race | tests/test_hook_audit_fixes.py | replaced the fixed pre-kill sleep with a /proc readiness poll, eliminating a proven load-dependent flake and cutting the two faA2 tests from 4.65s to 0.14s | #126 |
 | 2026-07-19 | type strength, mypy overrides | pyproject.toml, furl_ctx/tokenizers/{base,tiktoken_counter}.py | removed the dead mlx.* override and the furl_ctx.tokenizers.* blanket override; fixed the 7 real Any-leaks (PIL dimension unpack, tiktoken encoding load) they were hiding with concrete types instead of suppression | #127 |
+| 2026-07-19 | type strength, mypy override, ccr/mcp_server | pyproject.toml, furl_ctx/ccr/mcp_server.py | removed the last remaining disallow_untyped_defs override, proven dead (`mypy furl_ctx` passes with 0 errors without it); fixed the 7 real Any-leaks it was hiding (store/backend/entry/result signatures) with the concrete domain types (CompressionStore, CompressionStoreBackend, CompressionEntry, TextContent) already defined elsewhere in the codebase | #129 |
 
 ## Open candidates, fair game for future sessions
 
@@ -38,11 +39,6 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   equals identity.
 - CI timing telemetry on main pushes, warn-only trend line, design sketched in
   the perf gate PR discussion.
-- mypy strictness: furl_ctx.ccr.mcp_server still carries a blanket
-  disallow_untyped_defs override (2773 lines, the module the tokenizers.*
-  override's sibling covered). Tightening it is real value but is its own
-  session: much larger surface than tokenizers/ was, expect a real annotation
-  effort, not a quick pass.
 
 ## Notes for the maintainer
 
