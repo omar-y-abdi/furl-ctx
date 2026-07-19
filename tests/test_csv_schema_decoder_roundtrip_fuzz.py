@@ -1126,6 +1126,41 @@ def _make_container_string_rows(rng: random.Random, n_rows: int, *, mix: bool) -
     return rows
 
 
+# Container-shaped strings where Python ``json.loads`` and ``serde_json``
+# DIVERGE: json.loads accepts NaN / Infinity / -Infinity and deep nesting;
+# serde_json rejects NaN / Infinity and caps nesting at 128. A serde-based
+# decline predicate mispredicts the decoder and ships these quoted on the
+# lossless tier, where the reference decoder json.loads them into a CONTAINER
+# (silent, markerless loss). The structural decline gate keys on cell SHAPE,
+# not a re-parse, so it declines them regardless. The leading-whitespace
+# variants exercise the JSON-whitespace trim in that gate.
+_JSON_LOADS_DIVERGENCE = [
+    "[NaN]",
+    "[Infinity]",
+    "[-Infinity]",
+    '{"loss": Infinity}',
+    '{"x": NaN}',
+    " [NaN]",  # leading JSON whitespace before a serde-rejected container
+    "\t[Infinity]",  # leading tab
+    "[" * 128 + "]" * 128,  # 128-deep, past serde's 128 nesting cap, 256 bytes
+]
+
+
+def _make_json_loads_divergence_rows(n_rows: int) -> list[dict]:
+    """A ``cfg`` column mixing json.loads-vs-serde divergence strings with real
+    ints so the column is ``json``-tagged. Deterministic so every divergence
+    shape appears; each must decline, never decode as a container.
+    """
+    rows: list[dict] = []
+    for i in range(n_rows):
+        if i % 2 == 0:
+            cfg: object = _JSON_LOADS_DIVERGENCE[(i // 2) % len(_JSON_LOADS_DIVERGENCE)]
+        else:
+            cfg = i * 7
+        rows.append({"id": i, "service": _SVC_CONST, "cfg": cfg})
+    return rows
+
+
 def _make_literal_dotted_key_rows(rng: random.Random, n_rows: int) -> list[dict]:
     """A literal top-level ``"m.k"`` column alongside a nested ``{"m":{"k":..}}``.
 
@@ -1170,6 +1205,17 @@ def test_fuzz_container_strings_decode_exact_or_decline() -> None:
         # Mixed with a real scalar -> json column that cannot disambiguate a
         # quoted container-string from a real container -> fail-closed decline.
         _assert_decoded_exact_or_declined(_make_container_string_rows(rng, n, mix=True))
+
+
+def test_fuzz_json_loads_divergence_strings_never_decode_as_container() -> None:
+    """Container-shaped strings that ``serde_json`` rejects but Python
+    ``json.loads`` accepts, NaN / Infinity / >128-deep, in a type-mixed
+    ``json`` column must decline to the recoverable tier, never ship quoted and
+    decode as a container. The decline gate keys on cell shape, not a re-parse,
+    so the serde-vs-json.loads divergence cannot leak a silent corruption.
+    """
+    for n in (64, 16):
+        _assert_decoded_exact_or_declined(_make_json_loads_divergence_rows(n))
 
 
 def test_fuzz_literal_dotted_keys_preserve_both_values() -> None:

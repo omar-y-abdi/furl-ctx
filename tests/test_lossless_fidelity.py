@@ -196,3 +196,40 @@ def test_dotted_key_collision_does_not_lose_values() -> None:
     # Both distinct values must be present and unclobbered.
     assert rows[0]["m.k"] == "lit-0", rows[0].get("m.k")
     assert rows[0]["m"] == {"k": 1000}, rows[0].get("m")
+
+
+# ─────────────────────── T1 follow-up, parser divergence ───────────────────────
+
+
+def test_nan_container_string_never_decodes_as_container() -> None:
+    """T1 decline gate must key on cell SHAPE, not a serde re-parse.
+
+    Python ``json.loads`` accepts ``NaN`` / ``Infinity`` and deep nesting, which
+    ``serde_json`` rejects, so predicting the decoder's parser with serde shipped
+    ``"[NaN]"`` quoted on the lossless tier where the reference decoder parsed it
+    into the list ``[nan]`` -- silent, markerless, unrecoverable corruption on
+    the hook and MCP path. A container-shaped string in a type-mixed ``json``
+    column must decline to the recoverable tier or keep its exact bytes, and must
+    NEVER decode as a container.
+    """
+    items: list[dict] = []
+    for i in range(60):
+        cfg: object = "[NaN]" if i % 2 == 0 else i * 7
+        items.append({"id": i, "service": _SERVICE, "cfg": cfg})
+
+    text = _compress_to_text(items)
+    rows = decode_csv_schema_rows(text)
+    if rows is not None:
+        # Shipped on the lossless tier: every "[NaN]" cell must be the exact
+        # string, never the parsed container [nan].
+        for orig, dec in zip(items, rows):
+            if orig["cfg"] == "[NaN]":
+                assert dec.get("cfg") == "[NaN]", (
+                    f"'[NaN]' decoded as {dec.get('cfg')!r}: serde-vs-json.loads divergence"
+                )
+    else:
+        # Declined from the lossless tier: the value must still be recoverable,
+        # shipped verbatim or behind a CCR marker, never silently dropped.
+        assert "[NaN]" in text or "<<ccr:" in text, (
+            f"declined but '[NaN]' neither verbatim nor CCR-marked:\n{text[:300]}"
+        )

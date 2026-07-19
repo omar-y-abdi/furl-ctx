@@ -315,15 +315,28 @@ impl Compaction {
                 .any(|c| matches!(c, CellValue::Nested(_) | CellValue::DeclinedJson(_)))
         }
         // True if any `json`-tagged column holds a `Scalar(String)` whose
-        // bytes parse as a JSON container (object/array). Such a cell cannot
-        // ship on the lossless tier: the reference decoder reads a quoted
-        // container-looking cell in a `json` column back as the CONTAINER
-        // (via `json.loads`), not the original string — indistinguishable
-        // from a genuine container cell. The table is declined (fail-closed,
-        // T1/T2) and routed to the recoverable tier where the exact original
-        // bytes are preserved. Scalar-looking strings (`"200"`, `"true"`)
-        // are NOT declined — the formatter CSV-quotes them so they decode
-        // back verbatim (they never start a JSON container).
+        // content is CONTAINER-SHAPED: after skipping leading JSON whitespace
+        // it starts with `{` or `[`. Such a cell cannot ship on the lossless
+        // tier: the reference decoder feeds a quoted `json`-column cell to
+        // Python `json.loads`, which reads any container-shaped payload back as
+        // the CONTAINER, not the original string — indistinguishable from a
+        // genuine container cell. The table is declined (fail-closed, T1/T2)
+        // and routed to the recoverable tier where the exact bytes survive.
+        //
+        // The test is STRUCTURAL, not a re-parse: `serde_json::from_str` and
+        // Python `json.loads` DIVERGE — serde rejects `NaN` / `Infinity` and
+        // caps nesting at 128, Python accepts both — so predicting the parser
+        // with serde let `"[NaN]"` / deep-nested strings ship quoted and decode
+        // as containers (silent loss). Keying on shape closes that gap and is
+        // fail-closed: it also declines container-shaped strings that fail to
+        // parse, which the decoder would keep as strings anyway, so the only
+        // cost is compression on those, never fidelity. Leading JSON whitespace
+        // (space, tab, newline, carriage-return) is trimmed first, matching
+        // `json.loads`, so a whitespace-prefixed container string is caught too.
+        // Genuine container VALUES are `Scalar(Object)` / `Scalar(Array)`, not
+        // `Scalar(String)`, so real container compression is preserved; and
+        // scalar-looking strings (`"200"`, `"true"`) never start with a brace
+        // or bracket, so they stay lossless via the formatter's CSV-quoting.
         fn table_has_unquotable_json_string(schema: &Schema, rows: &[Row]) -> bool {
             for (col, field) in schema.fields.iter().enumerate() {
                 if field.type_tag != "json" {
@@ -331,10 +344,8 @@ impl Compaction {
                 }
                 for row in rows {
                     if let Some(CellValue::Scalar(Value::String(s))) = row.0.get(col) {
-                        if matches!(
-                            serde_json::from_str::<Value>(s),
-                            Ok(Value::Object(_)) | Ok(Value::Array(_))
-                        ) {
+                        let trimmed = s.trim_start_matches([' ', '\t', '\n', '\r']);
+                        if trimmed.starts_with('{') || trimmed.starts_with('[') {
                             return true;
                         }
                     }

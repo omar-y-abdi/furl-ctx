@@ -1444,6 +1444,40 @@ mod tests {
     }
 
     #[test]
+    fn json_column_serde_rejected_container_string_still_declines() {
+        // The decline gate keys on cell SHAPE, not a serde re-parse. Python
+        // `json.loads` accepts NaN / Infinity and deep nesting that
+        // `serde_json` rejects, and it also skips leading JSON whitespace, so a
+        // container-SHAPED string that serde would fail must still decline, else
+        // it ships quoted and the reference decoder parses it as a container
+        // (silent loss). Includes a leading-whitespace variant for the trim.
+        let deep = "[".repeat(128) + &"]".repeat(128);
+        for bad in [
+            "[NaN]",
+            "[Infinity]",
+            "{\"x\": NaN}",
+            " [NaN]",
+            "\t[1]",
+            deep.as_str(),
+        ] {
+            let items: Vec<Value> = (0..6)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        json!({ "id": i, "cfg": bad })
+                    } else {
+                        json!({ "id": i, "cfg": i })
+                    }
+                })
+                .collect();
+            let c = compact(&items, &cfg());
+            assert!(
+                !c.is_decoder_verifiable(),
+                "container-shaped string {bad:?} must decline the lossless tier"
+            );
+        }
+    }
+
+    #[test]
     fn grammar_breaking_key_declines_compaction() {
         // COR-15: column names ship RAW in the `[N]{...}` declaration and
         // the `__dict:`/`__affix:`/`__head:` preamble lines — nothing
