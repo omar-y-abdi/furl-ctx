@@ -212,18 +212,6 @@ module = [
 ]
 disallow_untyped_defs = false
 
-[[tool.mypy.overrides]]
-module = [
-    "furl_ctx.tokenizers.*",
-]
-disallow_untyped_defs = false
-warn_return_any = false
-
-# Ignore third-party stubs with syntax errors
-[[tool.mypy.overrides]]
-module = ["mlx.*"]
-ignore_errors = true
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

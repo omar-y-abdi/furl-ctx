@@ -160,6 +160,40 @@ class TestTiktokenCounter:
         # The image contributes exactly the base handler's fixed image cost.
         assert with_image - text_only == 1600
 
+    def test_estimate_image_tokens_uses_decoded_pil_dimensions(self, monkeypatch):
+        """The (w*h)/750 formula runs on real decoded dimensions, not bytes.
+
+        Pillow is an optional runtime dependency and is not installed here,
+        so ``_estimate_image_tokens`` normally falls through to the
+        byte-size heuristic and never executes its PIL branch. Inject a
+        fake ``PIL.Image`` module to exercise that branch directly. The
+        fake reports float dimensions (a decoder returning something
+        PIL's own docs promise are ints, but the type is not statically
+        guaranteed here) to prove the result is coerced to a real int, not
+        just formatted as one.
+        """
+        import sys
+        import types
+
+        from furl_ctx.tokenizers.base import BaseTokenizer
+
+        class FakeImage:
+            size = (1400.0, 1000.0)
+
+        fake_image_module = types.ModuleType("PIL.Image")
+        fake_image_module.open = lambda _buf: FakeImage()  # type: ignore[attr-defined]
+        fake_pil_module = types.ModuleType("PIL")
+        fake_pil_module.Image = fake_image_module  # type: ignore[attr-defined]
+
+        monkeypatch.setitem(sys.modules, "PIL", fake_pil_module)
+        monkeypatch.setitem(sys.modules, "PIL.Image", fake_image_module)
+
+        image_data = {"source": {"bytes": b"\x89PNG\r\n\x1a\n"}}
+        tokens = BaseTokenizer._estimate_image_tokens(image_data)
+
+        assert tokens == (1400 * 1000) // 750
+        assert isinstance(tokens, int)
+
     def test_tool_result_part_counts_content_not_repr(self):
         """A tool_result part counts its content, not the dict's repr."""
         counter = TiktokenCounter()

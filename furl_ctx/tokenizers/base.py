@@ -255,7 +255,16 @@ class BaseTokenizer(ABC):
                 from PIL import Image
 
                 img = Image.open(io.BytesIO(img_bytes))
+                # PIL ships no type stubs here (ignore_missing_imports), so
+                # img.size is inferred as Any; declare w/h ahead of the
+                # unpack (mypy does not narrow an already-Any name via a
+                # same-name `int(w)` reassignment for its no-any-return
+                # check) and coerce at runtime in case a real decoder
+                # ever returns non-int dimensions.
+                w: int
+                h: int
                 w, h = img.size
+                w, h = int(w), int(h)
                 # Anthropic resizes to fit 1568x1568 max
                 max_dim = 1568
                 if w > max_dim or h > max_dim:

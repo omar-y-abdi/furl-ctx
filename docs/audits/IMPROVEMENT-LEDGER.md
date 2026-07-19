@@ -18,6 +18,7 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-18 | CI hardening | .github/workflows, tests/test_ci_required_checks_guard.py | timeouts, permission floors, pins, required-check deadlock guard | #119 |
 | 2026-07-18 | CI automation | autofix.yml, perf.yml, benchmarks/compare_baseline.py | autofix with PAT push, perf and rust regression gate, baseline refreshed | #120 |
 | 2026-07-18 | test rigor, faA2 timing race | tests/test_hook_audit_fixes.py | replaced the fixed pre-kill sleep with a /proc readiness poll, eliminating a proven load-dependent flake and cutting the two faA2 tests from 4.65s to 0.14s | #126 |
+| 2026-07-19 | type strength, mypy overrides | pyproject.toml, furl_ctx/tokenizers/{base,tiktoken_counter}.py | removed the dead mlx.* override and the furl_ctx.tokenizers.* blanket override; fixed the 7 real Any-leaks (PIL dimension unpack, tiktoken encoding load) they were hiding with concrete types instead of suppression | #127 |
 
 ## Open candidates, fair game for future sessions
 
@@ -25,10 +26,6 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   perf gate compares same-OS numbers. Review finding F3 on PR 120: recall has
   a knife-edge regime at 0.2222 where a single cross-OS trial flip would false
   fail. Empirically green today; structural fix is a CI-captured baseline.
-- mypy strictness: furl_ctx.tokenizers.* carries a blanket
-  disallow_untyped_defs/warn_return_any override (1358 lines across 4 files).
-  Tightening it to strict is real value but is its own session: expect several
-  genuine annotation gaps, not a quick pass.
 - Correctness audit of bare `except Exception:` blocks (6 files: router_engine,
   pipeline, code_aware_compressor, tokenizers/base, cli, ccr/mcp_server) to
   confirm each is a deliberate fail-open boundary and not silent error
@@ -39,7 +36,22 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   benchmarks/datasets.py with provenance notes.
 - Property-based tests for the tabling grammar round-trip, encode then decode
   equals identity.
-- mypy strictness: pyproject notes an unused mlx.* override; audit and tighten
-  one module to strict.
 - CI timing telemetry on main pushes, warn-only trend line, design sketched in
   the perf gate PR discussion.
+- mypy strictness: furl_ctx.ccr.mcp_server still carries a blanket
+  disallow_untyped_defs override (2773 lines, the module the tokenizers.*
+  override's sibling covered). Tightening it is real value but is its own
+  session: much larger surface than tokenizers/ was, expect a real annotation
+  effort, not a quick pass.
+
+## Notes for the maintainer
+
+- PR #127's `github-advanced-security` check failed on every push
+  (73ddb4a, 7be8d4b, c3f6895) with the same cause, unrelated to the diff:
+  GitHub's own Copilot-based PR review backend threw
+  `SessionModelError: ... "model_not_supported" ... model: claude-opus-4.6`
+  before it read any code. This is not one of the three required checks
+  (`lint`, `build-wheel`, `test`, per ruleset 18484290 and
+  `tests/test_ci_required_checks_guard.py`) — it's a GitHub Advanced
+  Security / Copilot platform feature outside `ci.yml` entirely. Left as
+  red; nothing in this repo can fix a 400 from GitHub's model routing.
