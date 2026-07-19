@@ -84,6 +84,18 @@ def _counters_module() -> Any:
         return None
 
 
+def _host_version_module() -> Any:
+    """Lazily import furl_ctx.host_version (T7). Returns None when unavailable so
+    version detection degrades to "unknown" instead of ever raising into the
+    hook — the same fail-open posture as ``_counters_module``."""
+    try:
+        import furl_ctx.host_version as host_version
+
+        return host_version
+    except Exception:
+        return None
+
+
 def _record_noop(reason: str | None) -> None:
     """Tally a no-op outcome bucket for this run (fail-open, no-op if unset)."""
     ctx = _run_counter_ctx
@@ -533,6 +545,19 @@ def main() -> None:
         or os.getcwd(),
     )
 
+    # --- T7: cheap (no subprocess) version floor check ---
+    # Resolved once, early, and reused below both for the first-run note's
+    # wording and for the post-kill-switch short-circuit. ``_floor_met`` is
+    # False only when furl_ctx.host_version has POSITIVELY IDENTIFIED a host
+    # below MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT (from the native
+    # installer's env vars — no subprocess spawn, safe on this per-tool-call
+    # path); None means "cannot prove either way" (non-native install, or
+    # furl_ctx unavailable) and is intentionally treated as "assume today's
+    # behavior", never as "assume broken" — see host_version's module docstring.
+    _hv = _host_version_module()
+    _host_version = _hv.detect_host_version() if _hv is not None else None
+    _floor_met = _hv.meets_compression_floor(_host_version) if _hv is not None else None
+
     # --- observability: record THIS invocation (every run past payload parse) ---
     # Resolved once here (after the project dir is scoped, so it hits the SAME
     # per-project store the MCP server reads) and stashed for the terminal
@@ -545,11 +570,29 @@ def main() -> None:
     _cstore = _cmod.resolve_store() if _cmod is not None else None
     _run_counter_ctx = (_cmod, _cstore)
     if _cmod is not None and _cstore is not None:
-        _cmod.emit_first_run_note_if_first(_cstore, _cmod.bump(_cstore, _cmod.HOOK_INVOCATIONS))
+        _below_floor_note = (
+            _cmod.first_run_note_below_version_floor(_host_version) if _floor_met is False else None
+        )
+        _cmod.emit_first_run_note_if_first(
+            _cstore,
+            _cmod.bump(_cstore, _cmod.HOOK_INVOCATIONS),
+            below_version_floor_note=_below_floor_note,
+        )
 
     # --- kill switch ---
     if not _flag_enabled(os.environ.get(_ENABLED_ENV)):
         _passthrough("disabled")
+
+    # --- T7: below the compression floor, Claude Code is CONFIRMED to ignore
+    # updatedToolOutput (the anthropics/claude-code#68951 class), so whatever
+    # this hook produced would never reach the model — including the
+    # redaction-only emit further down, which is equally inert on these hosts.
+    # Short-circuit before any of that work (compression, redaction) and
+    # bucket the no-op distinctly so hook_compressions_applied never counts an
+    # undeliverable replacement as "applied". Unknown (_floor_met is None)
+    # intentionally falls through unchanged.
+    if _floor_met is False:
+        _passthrough("below-version-floor")
 
     # --- loop guard + operator exclusions (FURL_HOOK_EXCLUDE_TOOLS) ---
     tool_name = payload.get("tool_name")
