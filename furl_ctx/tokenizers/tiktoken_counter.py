@@ -11,13 +11,29 @@ It supports multiple encodings:
 from __future__ import annotations
 
 import threading
+from collections.abc import Collection
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import Any, Literal, Protocol, cast
 
 from .base import BaseTokenizer
 
-if TYPE_CHECKING:
-    import tiktoken
+
+class _Encoding(Protocol):
+    """Structural shape of ``tiktoken.Encoding`` actually used here.
+
+    Defined locally instead of importing ``tiktoken.Encoding`` as a type:
+    CI's lint job runs mypy without the project's runtime dependencies
+    installed, so an unresolved ``tiktoken`` import collapses the real
+    class to ``Any`` (even under ``TYPE_CHECKING``) and defeats every
+    annotation that would otherwise reference it.
+    """
+
+    def encode(
+        self, text: str, *, disallowed_special: Literal["all"] | Collection[str] = ...
+    ) -> list[int]: ...
+
+    def decode(self, tokens: list[int]) -> str: ...
+
 
 # Model to encoding mapping
 MODEL_TO_ENCODING = {
@@ -89,14 +105,18 @@ ENCODING_LOAD_TIMEOUT_SECONDS = 10.0
 
 
 @lru_cache(maxsize=8)
-def _get_encoding(encoding_name: str) -> tiktoken.Encoding:
+def _get_encoding(encoding_name: str) -> _Encoding:
     """Get tiktoken encoding, cached for performance."""
     import tiktoken
 
-    return tiktoken.get_encoding(encoding_name)
+    # tiktoken ships no stubs mypy can see in every environment this runs in
+    # (CI's lint job installs mypy but not the project's dependencies), so
+    # `tiktoken.get_encoding` is Any there; this is the one place that
+    # boundary is asserted, everything downstream is typed via _Encoding.
+    return cast(_Encoding, tiktoken.get_encoding(encoding_name))
 
 
-def _load_encoding_bounded(encoding_name: str, timeout: float | None = None) -> tiktoken.Encoding:
+def _load_encoding_bounded(encoding_name: str, timeout: float | None = None) -> _Encoding:
     """Load a tiktoken encoding with a hard deadline (thread + join).
 
     Thread-based rather than signal-based because compress() may run off
@@ -120,7 +140,7 @@ def _load_encoding_bounded(encoding_name: str, timeout: float | None = None) -> 
             from a tiktoken build older than the encoding).
     """
     deadline = ENCODING_LOAD_TIMEOUT_SECONDS if timeout is None else timeout
-    encoding: tiktoken.Encoding | None = None
+    encoding: _Encoding | None = None
     error: Exception | None = None
 
     def _worker() -> None:
@@ -295,7 +315,7 @@ class TiktokenCounter(BaseTokenizer):
         # Lowercase once: encoding lookup is case-sensitive, and callers pass
         # names like "GPT-4o" which must not fall through to the default.
         self.encoding_name = get_encoding_for_model(model.lower())
-        self._encoding: tiktoken.Encoding | None = _load_encoding_bounded(self.encoding_name)
+        self._encoding: _Encoding | None = _load_encoding_bounded(self.encoding_name)
         # Bounded memo, capped by total cached BYTES (oldest evicted first). A
         # plain clear-on-overflow thrashed at scale — the hottest string (a
         # 33 MB doc re-counted many times) got evicted and re-encoded. Bounding
@@ -304,7 +324,7 @@ class TiktokenCounter(BaseTokenizer):
         self._count_cache_bytes = 0
 
     @property
-    def encoding(self) -> tiktoken.Encoding:
+    def encoding(self) -> _Encoding:
         """The tiktoken encoding (loaded at construction).
 
         The bounded reload below only serves legacy paths that bypass
