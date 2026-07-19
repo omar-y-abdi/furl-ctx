@@ -26,6 +26,22 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 
 ## Open candidates, fair game for future sessions
 
+- Guard the double-angle marker tail (`DOUBLE_ANGLE_FULL_PATTERN` in
+  `furl_ctx/ccr/marker_grammar.py`) against a `">"` ever entering it. PR #131
+  review finding 3: the tail is bounded to `[^>]{0,64}` on the assumption
+  that no real double-angle producer ever emits a `">"` inside a marker's
+  tail, verified true today for every shape (A-F), but shape C's `kind`
+  field is `OpaqueKind::wire_str()`, and its `Other(String)` variant is
+  currently unreachable in production (only a `#[cfg(test)]` fixture
+  constructs it, `crates/furl-core/src/transforms/smart_crusher/compaction/
+  ir.rs:593`) — a future producer that starts emitting `Other` for a
+  classifier-detected format name is latent coupling debt: if that name
+  ever contained a `">"`, the tail pattern would stop early and the marker
+  would fail to resolve (fail-closed, not fail-open, so not a correctness
+  risk today, but worth a proactive guard, e.g. asserting at construction
+  time in the Rust producer that `Other`'s string never carries a `">"`).
+  Not fixed in #131: no producer emits one today, so there was nothing to
+  reproduce, and the PR's scope was the resolve_markers span/ReDoS bug.
 - Capture the committed benchmark baseline on Linux CI instead of macOS so the
   perf gate compares same-OS numbers. Review finding F3 on PR 120: recall has
   a knife-edge regime at 0.2222 where a single cross-OS trial flip would false

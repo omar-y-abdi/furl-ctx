@@ -32,12 +32,25 @@ bug — pinned below per-shape, seeded with the byte-identical literals
 ``crates/furl-core/src/ccr/markers.rs``, ``transforms/cross_message_dedup.py``,
 and ``transforms/smart_crusher.py`` are pinned/known to emit. The bracket
 family (G/H) was already full-span and is pinned unaffected.
+
+Follow-up (adversarial review of the first version of this fix): the initial
+``DOUBLE_ANGLE_FULL_PATTERN`` used an UNBOUNDED ``[^>]*`` for the tail, which
+reopened a ReDoS on ``resolve_markers`` itself — adversarial input with many
+``<<ccr:HASH`` starts and no closing ``">>"`` forces an O(remaining-length)
+backtrack at every match-start attempt, making the whole scan O(n^2)
+(measured: 562.5 KB of ``"<<ccr:aaaaaaaaaaaa" * 32000`` took 19.66s). The
+pattern now bounds the tail to ``[^>]{0,64}`` — see the constant's docstring
+in ``marker_grammar.py`` for the measured-real-shape-max justification for
+64 — which also shrinks the "forged marker" over-match window: a hash-shaped
+prefix can no longer swallow arbitrarily much unrelated intervening text on
+its way to a distant, unrelated ``">>"``.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 
 import pytest
 
@@ -76,7 +89,7 @@ def _crush_array_to_double_angle_marker() -> tuple[str, list]:
     assert result.ccr_hashes, "fixture must trigger a row-drop CCR offload"
     ccr_hash = result.ccr_hashes[0]
     marker_match = re.search(
-        r"<<ccr:" + re.escape(ccr_hash) + r"[^>]*>>", result.messages[0]["content"]
+        r"<<ccr:" + re.escape(ccr_hash) + r"[^>]{0,64}>>", result.messages[0]["content"]
     )
     assert marker_match is not None, "fixture must emit a <<ccr:...>> marker for its hash"
     marker_text = marker_match.group(0)
@@ -203,4 +216,107 @@ def test_bracket_family_resolves_to_exact_original_pin(ccr_hash, marker_text) ->
     assert resolved_content == original, (
         f"resolve_markers must restore the EXACT original for {marker_text!r}, "
         f"got {resolved_content!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ReDoS regression (review finding 1): the double-angle SUBSTITUTION pattern
+# must stay near-linear on adversarial input, not just correct on real
+# markers. DOUBLE_ANGLE_FULL_PATTERN has no RE2 twin (only
+# GENERIC_BRACKET_PATTERN does — see marker_grammar.finditer_within_budget),
+# so it runs on Python's backtracking `re` engine; an unbounded tail
+# quantifier is O(text_length) worst-case backtrack PER attempted match
+# start, i.e. O(n^2) overall on input shaped like many marker starts with no
+# closing ">>". Bounding the tail to a small constant caps that per-attempt
+# backtrack at O(bound), restoring O(n) overall.
+# --------------------------------------------------------------------------- #
+
+
+def test_double_angle_resolution_scan_stays_linear_under_adversarial_input() -> None:
+    """RED on an unbounded ``[^>]*`` tail: doubling the input roughly
+    QUADRUPLES the wall time (the O(n^2) signature). GREEN on the bounded
+    ``[^>]{0,64}`` tail: doubling the input roughly DOUBLES it.
+
+    Structural assertion, not a fixed wall-clock ceiling: compares the RATIO
+    of two measurements rather than an absolute threshold, so it stays valid
+    on a slower or more loaded machine (both measurements scale together —
+    a uniform 5x slowdown leaves the ratio unchanged). 3.0x is the cutoff:
+    linear scaling measures close to 2.0x in practice (see the docstring on
+    DOUBLE_ANGLE_FULL_PATTERN for the measured numbers this test's bound
+    was chosen against — 1.8x-2.1x observed for the bounded pattern across
+    four doublings), while the quadratic regression measured 2.8x-4.6x
+    per doubling on the same adversarial shape; 3.0 sits strictly between
+    the two with margin on both sides.
+
+    Adversarial input: many ``<<ccr:HASH`` starts, no closing ``">>"``
+    anywhere, so DOUBLE_ANGLE_FULL_PATTERN never matches and every attempt
+    is a full failed scan — the worst case for an unbounded backtrack. No
+    store hit is needed; the scan itself is what must stay bounded.
+    """
+
+    def _scan_seconds(reps: int) -> float:
+        adversarial = "<<ccr:aaaaaaaaaaaa" * reps
+        messages = [{"role": "tool", "content": adversarial}]
+        t0 = time.monotonic()
+        resolve_markers(messages)
+        return time.monotonic() - t0
+
+    _scan_seconds(1_000)  # warm-up: first-call overhead, caches
+
+    reps_small = 10_000
+    small = _scan_seconds(reps_small)
+    large = _scan_seconds(2 * reps_small)
+
+    # A too-fast small measurement makes the ratio noise-dominated rather
+    # than signal-dominated; this floor is far below the bounded pattern's
+    # observed ~0.003s at this size, so it should never legitimately fire.
+    assert small > 0.0005, (
+        f"warm-up measurement too fast to compare reliably ({small:.6f}s for "
+        f"{reps_small} reps) -- widen reps_small if this ever fires"
+    )
+    ratio = large / small
+    assert ratio < 3.0, (
+        f"input doubled ({reps_small} -> {2 * reps_small} reps) but wall "
+        f"time scaled {ratio:.2f}x (small={small:.4f}s large={large:.4f}s) "
+        f"-- quadratic-shaped regression in the double-angle substitution "
+        f"scan (DOUBLE_ANGLE_FULL_PATTERN's tail bound was likely widened "
+        f"or removed)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Forged-marker over-match window (review finding 2): bounding the tail also
+# bounds how much unrelated intervening text a hash-shaped prefix can
+# swallow on its way to a distant, unrelated ">>". Below the bound, a
+# marker-shaped span still resolves (correctness for any real marker, which
+# is always far under 64 chars of tail — see DOUBLE_ANGLE_FULL_PATTERN's
+# docstring); past it, the span must not match at all, so the surrounding
+# text is left untouched rather than silently collapsed into one
+# substitution.
+# --------------------------------------------------------------------------- #
+
+
+def test_forged_marker_cannot_swallow_more_than_bound_chars_of_filler() -> None:
+    ccr_hash = "abc123def456"
+    original = "SAFE-ORIGINAL"
+    get_compression_store().store(original, "compressed-placeholder", explicit_hash=ccr_hash)
+
+    # Exactly at the bound (64 filler chars): still resolves -- the window
+    # is inclusive up to the chosen bound, matching every real shape's
+    # tail (all far shorter than 64).
+    at_bound = f"<<ccr:{ccr_hash}" + ("x" * 64) + ">>"
+    resolved = resolve_markers([{"role": "tool", "content": at_bound}])
+    assert resolved[0]["content"] == original, (
+        "a marker with exactly 64 filler chars before '>>' must still resolve"
+    )
+
+    # One char past the bound: the hash-shaped prefix must not match at all,
+    # so it must not reach through the oversized filler to a distant later
+    # '>>' and swallow everything in between into a single substitution.
+    forged = f"<<ccr:{ccr_hash}" + ("x" * 65) + ">> unrelated trailing text >>"
+    resolved = resolve_markers([{"role": "tool", "content": forged}])
+    assert resolved[0]["content"] == forged, (
+        f"a hash-shaped prefix followed by more than 64 filler chars before "
+        f"the nearest '>>' must be left completely untouched, not partially "
+        f"substituted; got {resolved[0]['content']!r}"
     )

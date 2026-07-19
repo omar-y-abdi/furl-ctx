@@ -171,16 +171,53 @@ DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{D
 # successful branch — so match.group(0) stops one byte short of the real
 # close and a lone ``">"`` is left dangling).
 #
-# ``[^>]*`` up to a literal ``">>"`` instead: greedy through every byte the
-# double-angle grammar never emits inside a marker body, so it always halts
-# at the FIRST ``">>"`` — the marker's real close for every shape (verified
-# against A-F; none of their tails contain ``">"``). Zero-width for the bare
-# shape (D), where the delimiter IS the terminator. Hash-width disambiguation
-# (24 tried before 12) still holds: the byte immediately after a real hash is
-# always non-hex (space / comma / hash-sign / ``">"``), so the 24-hex branch
-# still fails to find 24 consecutive hex characters for a true 12-hex hash
-# and correctly backs off, exactly as it does for DOUBLE_ANGLE_PATTERN.
-DOUBLE_ANGLE_FULL_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}[^>]*>>")
+# ``[^>]{0,64}`` up to a literal ``">>"`` instead: through every byte the
+# double-angle grammar never emits inside a marker body, so it halts at the
+# FIRST ``">>"`` within that window — the marker's real close for every real
+# shape (verified against A-F; none of their tails contain ``">"``).
+# Zero-width for the bare shape (D), where the delimiter IS the terminator.
+# Hash-width disambiguation (24 tried before 12) still holds: the byte
+# immediately after a real hash is always non-hex (space / comma /
+# hash-sign / ``">"``), so the 24-hex branch still fails to find 24
+# consecutive hex characters for a true 12-hex hash and correctly backs
+# off, exactly as it does for DOUBLE_ANGLE_PATTERN.
+#
+# The ``{0,64}`` bound (not an unbounded ``*``) closes a ReDoS the
+# unbounded form reopened: on adversarial input with many ``<<ccr:HASH``
+# starts and no closing ``">>"`` anywhere (e.g. ``"<<ccr:aaaaaaaaaaaa" *
+# 32000``, 562.5 KB), an unbounded ``[^>]*`` must scan to the end of the
+# text, fail to find ``">>"``, then backtrack one byte at a time all the
+# way back — an O(remaining-length) cost repeated at every one of the many
+# match-start attempts, so the whole scan is O(text_length^2). Measured:
+# 562.5 KB took 19.66s unbounded versus 0.0095s bounded here, and bounded
+# scales linearly (roughly 2x time per 2x input) where unbounded scaled
+# roughly 4x. ``finditer_within_budget`` gives this pattern no RE2 twin
+# (only ``GENERIC_BRACKET_PATTERN`` has one, see below), so it stays on
+# Python's backtracking ``re`` engine — the bound is the only thing
+# keeping the worst-case backtrack cost at O(64) per position instead of
+# O(text_length) per position.
+#
+# 64 is chosen with wide headroom over the measured maximum real tail
+# across every shape (arithmetic, `` `` = one literal space):
+#   A ``<<ccr:HASH {n}_rows_offloaded>>``       16 literal chars + digits
+#   B ``<<ccr:HASH#rows {n}_chunks>>``          13 literal chars + digits,
+#     n hard-capped at store.capacity()/4 = 250 (3 digits) —
+#     crates/furl-core/src/ccr/mod.rs DEFAULT_CAPACITY=1000,
+#     .../smart_crusher/persist.rs GRANULAR_CHUNK_CAPACITY_DIVISOR=4
+#   C ``<<ccr:HASH,{kind},{size}>>``            2 literal commas + kind
+#     [4-6 chars, kind is one of "base64"/"string"/"html" in every
+#     production call site — OpaqueKind::Other's only construction site
+#     in the whole crate is a #[cfg(test)] fixture in compaction/ir.rs] +
+#     humanize_bytes() output [a handful of chars at any realistic size]
+#   D ``<<ccr:HASH>>`` bare                     0 chars, delimiter IS the close
+#   E ``<<ccr:HASH {n}_bytes_duplicate>>``      17 literal chars + digits
+#   F ``<<ccr:HASH {n}_bytes_near_duplicate>>`` 22 literal chars + digits
+# A/E/F have no in-repo hard cap on the digit run, but digit count grows
+# only as log10(n): even a wildly pessimistic 20-digit byte/row count (the
+# ~64-bit address-space ceiling, far past any real message size) keeps
+# every shape's total under 42 chars, comfortably inside the 64-char
+# window with room to spare.
+DOUBLE_ANGLE_FULL_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}[^>]{{0,64}}>>")
 
 
 def marker_patterns() -> list[re.Pattern]:
