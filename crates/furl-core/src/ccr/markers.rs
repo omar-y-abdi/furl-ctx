@@ -52,26 +52,27 @@ pub(crate) fn marker_for_row_index(hash: &str, n_chunks: usize) -> String {
 /// walker (live substitution) and the CSV/KV formatters (rendering an
 /// already-classified opaque cell).
 ///
-/// Fail-closed guard (docs/audits/IMPROVEMENT-LEDGER.md, "Guard the
-/// double-angle marker tail", PR #131 review finding 3): `kind` is
+/// Fail-closed guard, docs/audits/IMPROVEMENT-LEDGER.md's "Guard the
+/// double-angle marker tail", PR #131 review finding 3: `kind` is
 /// neutralized against `>` before it enters the wire text. The consumer's
-/// substitution scan for this marker family
-/// (`furl_ctx.ccr.marker_grammar.DOUBLE_ANGLE_FULL_PATTERN`) bounds the
+/// substitution scan for this marker family,
+/// `furl_ctx.ccr.marker_grammar.DOUBLE_ANGLE_FULL_PATTERN`, bounds the
 /// marker's tail with `[^>]{0,64}>>`, on the assumption that no producer
-/// ever emits a `>` inside it -- true today for every kind (the three
-/// built-in variants are fixed literals; `OpaqueKind::Other`'s
+/// ever emits a `>` inside it -- true today for every kind. The three
+/// built-in variants are fixed literals, and `OpaqueKind::Other`'s
 /// classifier-supplied string is unreachable outside a `#[cfg(test)]`
-/// fixture), but a future `Other` producer that fed it an untrusted format
+/// fixture, but a future `Other` producer that fed it an untrusted format
 /// name could break that assumption silently: a `>>` pair inside `kind`
 /// would align with the consumer's own tail terminator and truncate the
 /// substitution mid-marker, corrupting the caller's document. This is the
-/// single construction point for every opaque marker (module docs above),
-/// so guarding here covers the walker's live substitution and the CSV/KV
-/// formatters' rendering of an already-classified cell alike, for every
-/// kind, present or future -- not only the currently-unreachable `Other`
-/// path. `kind` is a display-only hint that resolve_markers never parses
-/// back out of the marker text (no capture group covers it), so replacing
-/// rather than rejecting a stray `>` costs no round-tripped information.
+/// single construction point for every opaque marker per the module docs
+/// above, so guarding here covers the walker's live substitution and the
+/// CSV/KV formatters' rendering of an already-classified cell alike, for
+/// every kind, present or future -- not only the currently-unreachable
+/// `Other` path. `kind` is a display-only hint that resolve_markers never
+/// parses back out of the marker text, no capture group covers it, so
+/// replacing rather than rejecting a stray `>` costs no round-tripped
+/// information.
 pub(crate) fn marker_for_opaque(hash: &str, kind: &str, byte_size: usize) -> String {
     let safe_kind = kind.replace('>', "_");
     format!(
@@ -238,21 +239,21 @@ mod tests {
         assert_eq!(humanize_bytes(5 * 1024 * 1024), "5.0MB"); // MB branch
     }
 
-    // ── Double-angle marker tail guard (docs/audits/IMPROVEMENT-LEDGER.md,
-    // "Guard the double-angle marker tail", PR #131 review finding 3) ──
+    // ── Double-angle marker tail guard, docs/audits/IMPROVEMENT-LEDGER.md's
+    // "Guard the double-angle marker tail", PR #131 review finding 3 ──
     //
-    // The three built-in OpaqueKind kinds (base64/string/html) are fixed
-    // literals and never carry a `>`. OpaqueKind::Other's kind is a
+    // The three built-in OpaqueKind kinds, base64, string, and html, are
+    // fixed literals and never carry a `>`. OpaqueKind::Other's kind is a
     // classifier-supplied String and today unreachable outside a
-    // #[cfg(test)] fixture (compaction/ir.rs) -- but if a future producer
+    // #[cfg(test)] fixture in compaction/ir.rs -- but if a future producer
     // ever fed it a name containing `>`, an unguarded marker could let the
-    // consumer's DOUBLE_ANGLE_FULL_PATTERN (furl_ctx/ccr/marker_grammar.py,
-    // `[^>]{0,64}>>`) terminate on a `>>` INSIDE the kind field instead of
+    // consumer's DOUBLE_ANGLE_FULL_PATTERN in furl_ctx/ccr/marker_grammar.py,
+    // `[^>]{0,64}>>`, terminate on a `>>` INSIDE the kind field instead of
     // the marker's real close, truncating the resolve_markers substitution
     // and leaving the rest of the marker as dangling raw text in the
     // caller's document. A lone unpaired `>` does not trigger that specific
-    // truncation (the bounded tail scan simply fails to match the marker at
-    // all, leaving it unresolved rather than corrupted) but is neutralized
+    // truncation, the bounded tail scan simply fails to match the marker at
+    // all and leaves it unresolved rather than corrupted, but is neutralized
     // here too, since the wire grammar's own invariant is "no `>` in a
     // marker body, ever" -- not "no `>>` pair".
     #[test]

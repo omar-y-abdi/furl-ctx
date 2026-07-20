@@ -323,13 +323,13 @@ def test_forged_marker_cannot_swallow_more_than_bound_chars_of_filler() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Double-angle marker tail guard (review finding 3, docs/audits/
-# IMPROVEMENT-LEDGER.md "Guard the double-angle marker tail"): shape C's
+# Double-angle marker tail guard, review finding 3, docs/audits/
+# IMPROVEMENT-LEDGER.md's "Guard the double-angle marker tail": shape C's
 # `kind` field is the one sub-shape whose text is not a producer-fixed
 # literal. `crates/furl-core/src/ccr/markers.rs::marker_for_opaque` now
-# neutralizes '>' in `kind` at construction (the producer-side half of this
+# neutralizes '>' in `kind` at construction, the producer-side half of this
 # guard, PR-pinned by `opaque_marker_neutralizes_angle_bracket_in_kind` in
-# `markers.rs`), so no real producer can hand this scan a raw '>' inside a
+# `markers.rs`, so no real producer can hand this scan a raw '>' inside a
 # tail. These two document the CONSUMER-side consequence directly -- via a
 # hand-built marker, bypassing the Rust producer entirely -- so the boundary
 # behavior a regression on EITHER side of the guard would fall back to is
@@ -338,8 +338,8 @@ def test_forged_marker_cannot_swallow_more_than_bound_chars_of_filler() -> None:
 
 
 def test_tail_with_lone_angle_bracket_is_left_unresolved_not_corrupted() -> None:
-    """A single stray '>' inside the tail (what an unguarded kind like
-    "weird>thing" would produce) can never pair up with
+    """A single stray '>' inside the tail, what an unguarded kind like
+    "weird>thing" would produce, can never pair up with
     DOUBLE_ANGLE_FULL_PATTERN's own '>>' terminator: `[^>]` cannot consume
     the stray '>' itself, and it is not immediately followed by a second
     '>', so the pattern fails to match this marker AT ALL. Fail-closed: the
@@ -357,9 +357,9 @@ def test_tail_with_lone_angle_bracket_is_left_unresolved_not_corrupted() -> None
 
 
 def test_tail_with_doubled_angle_bracket_truncates_the_substitution() -> None:
-    """The genuinely dangerous shape (PR #131 review finding 3): TWO
-    adjacent '>' inside the tail (what an unguarded kind like "weird>>hack"
-    would produce) accidentally satisfy DOUBLE_ANGLE_FULL_PATTERN's own
+    """The genuinely dangerous shape, PR #131 review finding 3: TWO
+    adjacent '>' inside the tail, what an unguarded kind like "weird>>hack"
+    would produce, accidentally satisfy DOUBLE_ANGLE_FULL_PATTERN's own
     '>>' terminator early, so match.group(0) ends right there instead of at
     the marker's real close -- resolve_markers substitutes only that
     truncated span and glues the unconsumed remainder of the original text

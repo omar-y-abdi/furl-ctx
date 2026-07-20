@@ -264,10 +264,10 @@ jobs:
           # skips here, so a regression in furl_ctx/ccr/mcp_server.py or the
           # RE2 regex-budget path could merge with green CI and zero signal.
           # google-re2 is listed explicitly even though the mcp extra already
-          # depends on furl-ctx[re2] (self-referential extras do resolve it
-          # transitively for this wheel-based install) so the requirement
+          # depends on furl-ctx[re2] and self-referential extras do resolve
+          # it transitively for this wheel-based install, so the requirement
           # reads directly off this line instead of through pyproject.toml's
-          # extras graph, and to match the local gate's install command
+          # extras graph, and it matches the local gate's install command
           # exactly. See docs/audits/IMPROVEMENT-LEDGER.md rows #119/#139 and
           # the "CI test job installs only the [dev] extra" open candidate
           # this closes.
