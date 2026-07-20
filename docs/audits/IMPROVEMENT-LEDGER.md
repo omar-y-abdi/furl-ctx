@@ -24,6 +24,7 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-19 | test rigor, faA2 hardening follow-up | tests/test_hook_audit_fixes.py | portable anchored pgrep poll restored macOS coverage and a returncode assert replaced the vacuous SIGINT pin | #130 |
 | 2026-07-19 | correctness, CCR recovery-key width and store collision guard, audit T3 | crates/furl-core ccr persist/mod/in_memory and smart_crusher persist/walker/compactor, furl_ctx/transforms/smart_crusher.py, furl_ctx/ccr/marker_grammar.py | widened the 48-bit 12-hex crusher recovery key to 96-bit 24-hex so a birthday collision no longer lets one dropped row silently recover as another row's content; InMemoryCcrStore now drops the binding loudly on same-key different-payload instead of silently overwriting; the Rust to Python mirror hash-verifies fetched bytes before storing; 12-hex legacy markers still resolve | #133 |
 | 2026-07-19 | correctness, ccr marker resolution (T4 pre-mortem audit) | furl_ctx/retrieve.py, furl_ctx/ccr/marker_grammar.py, tests/test_resolve_markers_roundtrip.py | resolve_markers substituted only the marker head for the double-angle `<<ccr:...>>` family, leaving a descriptive tail (e.g. `_rows_offloaded>>`) glued onto recovered content and breaking JSON round trips on all 6 double-angle sub-shapes; new DOUBLE_ANGLE_FULL_PATTERN + substitution_patterns fix the span, bracket family (G/H) confirmed unaffected and pinned; tail bounded to `[^>]{0,64}` after review found the unbounded pattern reintroduced O(n squared) ReDoS on the public resolve_markers API | #131 |
+| 2026-07-19 | compression correctness, lossless type and byte fidelity | crates/furl-core compaction (compactor, formatter, ir), furl_ctx/transforms/csv_schema_decoder.py | fixed three silent value-corruption defects the reference decoder reconstructed to the wrong value with no CCR marker (audit T1/T2/T12): T1 mixed-type columns rendered a string bare so "200"/"true"/"null" decoded as int/bool/None, now CSV-quoted in json columns or declined to CCR when a container-string can't be disambiguated; T2 stringified-JSON fields were deserialized and object-strings flattened into dotted columns so the original vanished, now kept as verbatim string bytes; T12 a literal dotted key colliding with a synthesized flatten name silently overwrote a value, now the flatten is skipped and the decoder fails loud on duplicate columns. verify.run counters (degradations=6, silent_loss=0) and the benchmark baseline unchanged | #132 |
 
 ## Open candidates, fair game for future sessions
 
@@ -82,6 +83,16 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   active wheel-size pressure (hit PyPI's 10GB/project ceiling at v0.21.36),
   so converging these transitive versions (a `dashmap` bump may pull its
   hashbrown pin to 0.15.x) is worth a dedicated bump-and-recheck pass.
+- Residual COR-14 dotted-key ambiguity on a pathological uniform-nested shape
+  such as `[{"a.b": {"c": i}, "a": {"b.c": i}}]`, surfaced by the PR #132
+  adversarial review. Both branches flatten toward the same `a.b.c` dotted
+  name; the T12 collision guard means no duplicate columns ship and both
+  values are retained in dotted form, so the T12 goal holds and it is no worse
+  than main (which drops one value). But the reconstruction is not value-exact
+  under `verify/independent_recheck._unflatten_dotted` because the dotted names
+  are ambiguous about the original nesting. A grammar-level record of the
+  flatten, or a decline for the collision-shaped input, would make it exact.
+  Deferred: its own session, not folded into the fidelity fix.
 
 Removed (already satisfied): "Property-based tests for the tabling grammar
 round-trip, encode then decode equals identity" — verified 2026-07-19 that
