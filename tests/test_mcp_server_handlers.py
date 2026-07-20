@@ -451,13 +451,33 @@ _NOT_FROZEN_CEILING_SECONDS = 5.0
 
 
 async def test_compress_refuses_catastrophic_include_pattern_without_re2(
-    server, without_re2
+    server, without_re2, monkeypatch
 ) -> None:
     """T11 RED/GREEN: RE2 forced absent, furl_compress's include_patterns must
     refuse a catastrophic-backtracking pattern instead of running it unbounded
     on the worker thread. Fails before the fix (the call completes normally in
     ~0.5s, having run the pattern to completion on real content); passes after
-    (refused in microseconds, never dispatched to run_in_executor)."""
+    (refused in microseconds, never dispatched to run_in_executor).
+
+    F4 hardening: spies on the running loop's ``run_in_executor``, the actual
+    compress dispatch primitive, and asserts it is never called on the
+    refusal path -- not just that a fast error came back. A response-shape
+    and timing assertion alone would still pass a future refactor that moved
+    the RE2 check to inside ``_compress_content`` (still fast, still an
+    error, but AFTER the pattern was already handed to a worker thread); this
+    assertion is what would catch that regression. See the PR description
+    for the empirical red-proof of this exact scenario.
+    """
+    loop = asyncio.get_running_loop()
+    original_run_in_executor = loop.run_in_executor
+    executor_calls: list[tuple[object, ...]] = []
+
+    def _spy_run_in_executor(*args: object, **kwargs: object) -> object:
+        executor_calls.append(args)
+        return original_run_in_executor(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "run_in_executor", _spy_run_in_executor)
+
     start = time.monotonic()
     result = await asyncio.wait_for(
         server._handle_compress(
@@ -470,14 +490,38 @@ async def test_compress_refuses_catastrophic_include_pattern_without_re2(
     assert elapsed < _NOT_FROZEN_CEILING_SECONDS, f"took {elapsed:.2f}s -- did it run unbounded?"
     assert "error" in env, f"expected a refusal envelope, got a result: {env}"
     assert "RE2" in env["error"]
+    assert executor_calls == [], (
+        "run_in_executor was called on the refusal path -- the pattern was "
+        "dispatched to a worker thread instead of being refused before it "
+        f"ever got there: {executor_calls!r}"
+    )
 
 
-async def test_retrieve_refuses_catastrophic_pattern_without_re2(server, without_re2) -> None:
+async def test_retrieve_refuses_catastrophic_pattern_without_re2(
+    server, without_re2, monkeypatch
+) -> None:
     """T11 RED/GREEN: same hazard, furl_retrieve's `pattern`. Before the fix the
     catastrophic match runs to completion inside asyncio.to_thread
-    (_retrieve_content); after, it is refused before that dispatch."""
+    (_retrieve_content); after, it is refused before that dispatch.
+
+    F4 hardening: spies on ``asyncio.to_thread``, the actual retrieve dispatch
+    primitive, and asserts it is never called on the refusal path -- the
+    retrieve-side counterpart of the compress spy above, for the same reason:
+    a refusal that fires only after dispatch would still look fast and
+    error-shaped from the outside.
+    """
     h = "aaaa1111aaaa"
     _seed(server, h, _CATASTROPHIC_TEXT)
+
+    original_to_thread = asyncio.to_thread
+    to_thread_calls: list[tuple[object, ...]] = []
+
+    async def _spy_to_thread(*args: object, **kwargs: object) -> object:
+        to_thread_calls.append(args)
+        return await original_to_thread(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _spy_to_thread)
+
     start = time.monotonic()
     result = await asyncio.wait_for(
         server._handle_retrieve({"hash": h, "pattern": _CATASTROPHIC_PATTERN}),
@@ -488,6 +532,11 @@ async def test_retrieve_refuses_catastrophic_pattern_without_re2(server, without
     assert elapsed < _NOT_FROZEN_CEILING_SECONDS, f"took {elapsed:.2f}s -- did it run unbounded?"
     assert "error" in env, f"expected a refusal envelope, got a result: {env}"
     assert "RE2" in env["error"]
+    assert to_thread_calls == [], (
+        "asyncio.to_thread was called on the refusal path -- the pattern was "
+        "dispatched to a worker thread instead of being refused before it "
+        f"ever got there: {to_thread_calls!r}"
+    )
 
 
 async def test_compress_refuses_benign_include_pattern_without_re2(server, without_re2) -> None:
