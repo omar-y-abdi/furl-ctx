@@ -31,25 +31,11 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-20 | retention, per-namespace CCR spill, audit T6 | furl_ctx/cache/compression_store.py, plugins/furl/.mcp.json, plugins/furl/hooks/{compress_tool_output,pipe_compress,pretool_pipe}.py, plugins/furl/{README.md,skills/furl/SKILL.md}, tests/test_ccr_spill_plugin_namespace_gap.py | `_build_namespace_store` now wires a per-namespace durable spill gated by `FURL_CCR_SPILL`, so a capacity-evicted entry is demoted to the namespace's own `ccr-ns-<digest>-spill.sqlite3` instead of dropped at the 1000-entry cap and stays retrievable past eviction; per-namespace and `-spill` suffixed so no tenant reads another's rows, deliberately skipping the global sqlite-primary guard that would otherwise leave the sqlite-backed plugin with no spill at all; the plugin now sets `FURL_CCR_SPILL` in `.mcp.json` and the hooks so retention is real, and the #134 gap pin flips to a spill HIT alongside an isolation test proving two namespaces spill to different 0600 files under a 0700 dir | #138 |
 | 2026-07-20 | security, MCP regex-filter ReDoS (T11 pre-mortem audit) | furl_ctx/ccr/mcp_server.py, furl_ctx/ccr/regex_budget.py, tests/test_mcp_server_handlers.py, tests/test_regex_budget.py | furl_retrieve's `pattern` and furl_compress's `include_patterns`/`exclude_patterns` are matched off the event loop (run_in_executor/asyncio.to_thread), where no SIGALRM watchdog can ever arm; without RE2 they fell back to unbounded stdlib `re`, so a crafted pattern could freeze every session on the process, with only a stderr startup warning (F-alpha2) as defense, a line a stdio host's operator may never see; both handlers now refuse the call with a caller-visible structured error before ever dispatching to a worker thread when RE2 is unimportable, closing the residual regex_budget.py already documented for this exact path; the mcp extra's existing `furl-ctx[re2]` hard dependency is now pinned by a regression test so it cannot silently regress back to the vulnerable default; the real RED/GREEN discriminator is the refusal envelope, not the small fast payload used in the repro and RED proofs, `(a|b|ab)+Z` measured 0.036s/0.126s/0.498s/2.006s/8.257s at 32/36/40/44/48 chars (roughly 3.5x-4.1x per 4 extra chars), so within the module's 10,000-char cap the unbounded cost is not minutes, it is longer than any operator would wait, a de facto permanent GIL-holding freeze | #139 |
 | 2026-07-20 | test rigor, relevance/bm25 | tests/test_bm25_scorer.py | added 15 direct unit tests (tokenization boundaries, IDF known-values, hand-derived exact-score pins, the long-match bonus threshold/order-of-operations, normalization clamp, matched_terms cap) for `BM25Scorer`, previously covered only by one loose integration assertion despite sitting on `CompressionStore`'s search/search_all hot path; red-proofed by mutating the bonus threshold 8->3 chars, which left the full 2481-test suite green and 3 of the new tests red, restored with no production diff | #135 |
+| 2026-07-21 | correctness, ccr marker tail guard, PR #131 review finding 3 | crates/furl-core/src/ccr/markers.rs, tests/test_resolve_markers_roundtrip.py | `marker_for_opaque` now replaces any `>` in the opaque KIND label with `_` before it enters the double-angle wire format; the single Rust construction point for shape C, so the guard covers the walker's live substitution and the CSV/KV formatter alike, for every kind present or future, not only the currently-unreachable `OpaqueKind::Other` path; empirically verified both failure modes first: a lone `>` in the tail leaves resolve_markers's `[^>]{0,64}>>` scan unmatched and the marker unresolved, but a `>>` pair aligns with its own terminator and truncates the substitution mid-marker, corrupting the recovered content; `kind` is a display-only hint resolve_markers never captures back out of the marker text, so replacing costs no round-tripped data and the function stays total; red proofed by temporarily reverting the guard and confirming the pinning test failed on the identical assertion before restoring it; two new consumer-side tests pin the exact boundary a regression on either side of the guard would fall back to | #140 |
+| 2026-07-21 | CI hardening, mcp extra gap | .github/workflows/ci.yml | test job's wheel install now adds the `mcp` extra and `google-re2` alongside `dev`, so every test gated by `pytest.importorskip("mcp")` or `skipif(not re2_available())` actually runs in CI instead of silently skipping; confirmed the gap against a real run first, CI run 29731339248 summed 2188 passed/136 skipped across its four shards before this fix, this PR's own CI run summed 2598 passed/17 skipped after, 0 failed either time, the 17 residual skips are the pre-existing `[code]` extra gate plus one machine-specific empirical pin unrelated to mcp/re2; `google-re2` is technically redundant for this specific wheel-based install, a `pip install --dry-run` against a real built wheel confirmed the mcp extra's self-referential `furl-ctx[re2]` resolves it transitively already, unlike `maturin develop --extras` which does not, but it is kept explicit to match the local gate's own install command exactly | #140 |
 
 ## Open candidates, fair game for future sessions
 
-- Guard the double-angle marker tail (`DOUBLE_ANGLE_FULL_PATTERN` in
-  `furl_ctx/ccr/marker_grammar.py`) against a `">"` ever entering it. PR #131
-  review finding 3: the tail is bounded to `[^>]{0,64}` on the assumption
-  that no real double-angle producer ever emits a `">"` inside a marker's
-  tail, verified true today for every shape (A-F), but shape C's `kind`
-  field is `OpaqueKind::wire_str()`, and its `Other(String)` variant is
-  currently unreachable in production (only a `#[cfg(test)]` fixture
-  constructs it, `crates/furl-core/src/transforms/smart_crusher/compaction/
-  ir.rs:593`) — a future producer that starts emitting `Other` for a
-  classifier-detected format name is latent coupling debt: if that name
-  ever contained a `">"`, the tail pattern would stop early and the marker
-  would fail to resolve (fail-closed, not fail-open, so not a correctness
-  risk today, but worth a proactive guard, e.g. asserting at construction
-  time in the Rust producer that `Other`'s string never carries a `">"`).
-  Not fixed in #131: no producer emits one today, so there was nothing to
-  reproduce, and the PR's scope was the resolve_markers span/ReDoS bug.
 - Audit `classify_field` / `compute_exclude_set` in
   `crates/furl-core/src/transforms/smart_crusher/field_role.rs` for
   over-exclusion: some high-cardinality or hex CONTENT columns are ruled
@@ -121,15 +107,6 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   are ambiguous about the original nesting. A grammar-level record of the
   flatten, or a decline for the collision-shaped input, would make it exact.
   Deferred: its own session, not folded into the fidelity fix.
-- CI test job installs only the `[dev]` extra, never `[mcp]`, so every test
-  file gated by `pytest.importorskip("mcp")` (e.g.
-  `tests/test_mcp_stats_version_gate.py`) is silently skipped in CI and gives
-  zero signal there, positive or negative. Surfaced reading the PR #134 CI
-  shard logs directly. The local armed gate installs `dev,mcp` so it covers
-  them, but CI's required `test` check does not. Fix: add the `[mcp]` extra to
-  the ci.yml test install, minding the required-check deadlock guard, so the
-  mcp-gated suites actually run in CI. Its own small session since it touches
-  ci.yml.
 
 Removed (already satisfied): "Property-based tests for the tabling grammar
 round-trip, encode then decode equals identity" — verified 2026-07-19 that
