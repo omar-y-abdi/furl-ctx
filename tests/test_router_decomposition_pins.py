@@ -131,7 +131,7 @@ def test_summary_log_line_shape_with_compressions(caplog) -> None:
     summaries = [r.getMessage() for r in caplog.records if "msgs — " in r.getMessage()]
     assert len(summaries) == 1
     assert re.fullmatch(
-        r"content_router: 2 msgs — 1 compressed \(smart_crusher:0\.05\), "
+        r"content_router: 2 msgs — 1 compressed \(smart_crusher:0\.06\), "
         r"1 skipped \(<50 words\), 1 cache misses, "
         r"cache\[1 results, 0 skips, \d+ns avg\]",
         summaries[0],
@@ -306,7 +306,7 @@ def test_route_counts_whole_dict_matrix() -> None:
         "router:excluded:tool",
         "router:protected:user_message",
         "router:tool_result:smart_crusher",
-        "router:smart_crusher:0.05",
+        "router:smart_crusher:0.06",
     ]
     # Frozen message shipped byte-identical.
     assert result.messages[0] == messages[0]
@@ -359,6 +359,6 @@ def test_route_counts_matrix_second_apply_serves_reverifiable_sentinels() -> Non
     }
     assert result.transforms_applied == [
         "router:tool_result:smart_crusher",
-        "router:smart_crusher:0.05",
+        "router:smart_crusher:0.06",
     ]
     assert result.messages == first.messages

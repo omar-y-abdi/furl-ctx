@@ -22,10 +22,28 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-19 | type strength, mypy override, ccr/mcp_server | pyproject.toml, furl_ctx/ccr/mcp_server.py | removed the last remaining disallow_untyped_defs override, proven dead (`mypy furl_ctx` passes with 0 errors without it); fixed the 7 real Any-leaks it was hiding (store/backend/entry/result signatures) with the concrete domain types (CompressionStore, CompressionStoreBackend, CompressionEntry, TextContent) already defined elsewhere in the codebase | #129 |
 | 2026-07-19 | performance, cross-message dedup | furl_ctx/transforms/cross_message_dedup.py, tests/test_cross_message_dedup.py | bounded the near-dup reference window (`array_sources`) to the most recent 64 kept-verbatim arrays, eliminating O(n^2) scan cost and unbounded memory growth on long conversations; 3200-message repro went 5444ms -> 1002ms with per-message cost flat instead of climbing | #128 |
 | 2026-07-19 | test rigor, faA2 hardening follow-up | tests/test_hook_audit_fixes.py | portable anchored pgrep poll restored macOS coverage and a returncode assert replaced the vacuous SIGINT pin | #130 |
+| 2026-07-19 | correctness, CCR recovery-key width and store collision guard, audit T3 | crates/furl-core ccr persist/mod/in_memory and smart_crusher persist/walker/compactor, furl_ctx/transforms/smart_crusher.py, furl_ctx/ccr/marker_grammar.py | widened the 48-bit 12-hex crusher recovery key to 96-bit 24-hex so a birthday collision no longer lets one dropped row silently recover as another row's content; InMemoryCcrStore now drops the binding loudly on same-key different-payload instead of silently overwriting; the Rust to Python mirror hash-verifies fetched bytes before storing; 12-hex legacy markers still resolve | #133 |
+| 2026-07-19 | correctness, ccr marker resolution (T4 pre-mortem audit) | furl_ctx/retrieve.py, furl_ctx/ccr/marker_grammar.py, tests/test_resolve_markers_roundtrip.py | resolve_markers substituted only the marker head for the double-angle `<<ccr:...>>` family, leaving a descriptive tail (e.g. `_rows_offloaded>>`) glued onto recovered content and breaking JSON round trips on all 6 double-angle sub-shapes; new DOUBLE_ANGLE_FULL_PATTERN + substitution_patterns fix the span, bracket family (G/H) confirmed unaffected and pinned; tail bounded to `[^>]{0,64}` after review found the unbounded pattern reintroduced O(n squared) ReDoS on the public resolve_markers API | #131 |
 | 2026-07-19 | compression correctness, lossless type and byte fidelity | crates/furl-core compaction (compactor, formatter, ir), furl_ctx/transforms/csv_schema_decoder.py | fixed three silent value-corruption defects the reference decoder reconstructed to the wrong value with no CCR marker (audit T1/T2/T12): T1 mixed-type columns rendered a string bare so "200"/"true"/"null" decoded as int/bool/None, now CSV-quoted in json columns or declined to CCR when a container-string can't be disambiguated; T2 stringified-JSON fields were deserialized and object-strings flattened into dotted columns so the original vanished, now kept as verbatim string bytes; T12 a literal dotted key colliding with a synthesized flatten name silently overwrote a value, now the flatten is skipped and the decoder fails loud on duplicate columns. verify.run counters (degradations=6, silent_loss=0) and the benchmark baseline unchanged | #132 |
 
 ## Open candidates, fair game for future sessions
 
+- Guard the double-angle marker tail (`DOUBLE_ANGLE_FULL_PATTERN` in
+  `furl_ctx/ccr/marker_grammar.py`) against a `">"` ever entering it. PR #131
+  review finding 3: the tail is bounded to `[^>]{0,64}` on the assumption
+  that no real double-angle producer ever emits a `">"` inside a marker's
+  tail, verified true today for every shape (A-F), but shape C's `kind`
+  field is `OpaqueKind::wire_str()`, and its `Other(String)` variant is
+  currently unreachable in production (only a `#[cfg(test)]` fixture
+  constructs it, `crates/furl-core/src/transforms/smart_crusher/compaction/
+  ir.rs:593`) — a future producer that starts emitting `Other` for a
+  classifier-detected format name is latent coupling debt: if that name
+  ever contained a `">"`, the tail pattern would stop early and the marker
+  would fail to resolve (fail-closed, not fail-open, so not a correctness
+  risk today, but worth a proactive guard, e.g. asserting at construction
+  time in the Rust producer that `Other`'s string never carries a `">"`).
+  Not fixed in #131: no producer emits one today, so there was nothing to
+  reproduce, and the PR's scope was the resolve_markers span/ReDoS bug.
 - Capture the committed benchmark baseline on Linux CI instead of macOS so the
   perf gate compares same-OS numbers. Review finding F3 on PR 120: recall has
   a knife-edge regime at 0.2222 where a single cross-OS trial flip would false

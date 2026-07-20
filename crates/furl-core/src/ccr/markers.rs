@@ -10,7 +10,7 @@
 //! change by editing this file.
 //!
 //! Hashing lives in the sibling `ccr::persist` module: producers compute
-//! their key there (`sha6_hex12` row/opaque hashes, `md5_hex_24`
+//! their key there (`sha256_recovery_key` row/opaque hashes, `md5_hex_24`
 //! diff/log/search/text keys) and hand the finished `hash` string in.
 //! This module owns the *grammar*, not the *hash algorithm* — the two
 //! are deliberately separate so producers keep their existing keys

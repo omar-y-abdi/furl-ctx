@@ -1109,11 +1109,11 @@ fn type_tag_for(v: &Value) -> &'static str {
 }
 
 fn hash_opaque(bytes: &[u8]) -> String {
-    // 12-char SHA-256 hex prefix — collision-resistant enough for a
-    // single payload in flight, short enough to keep the marker compact.
-    // Algorithm consolidated in `ccr::persist` (ARCH-5); this domain
+    // 24-hex (96-bit) SHA-256 prefix — collision-resistant well past this
+    // store's request-window population, short enough to keep the marker
+    // compact. Algorithm consolidated in `ccr::persist` (ARCH-5); this domain
     // alias stays so call sites and tests keep their vocabulary.
-    crate::ccr::persist::sha6_hex12(bytes)
+    crate::ccr::persist::sha256_recovery_key(bytes)
 }
 
 // ─────────────────────────── heterogeneous bucketing ───────────────────────────
@@ -2003,6 +2003,6 @@ mod tests {
         let h3 = hash_opaque(b"different");
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
-        assert_eq!(h1.len(), 12);
+        assert_eq!(h1.len(), 24);
     }
 }

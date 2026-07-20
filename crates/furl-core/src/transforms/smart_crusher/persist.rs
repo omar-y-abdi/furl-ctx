@@ -96,7 +96,7 @@ pub(super) enum PersistMode {
 /// [`PersistMode::Collect`] the writes ride in `pending_writes` for the
 /// caller to commit iff the render ships.
 pub(super) struct DroppedPersist {
-    /// 12-char SHA-256 hex prefix of the canonical full-original array.
+    /// 24-hex (96-bit) SHA-256 prefix of the canonical full-original array.
     /// Always returned when something was dropped — callers may mirror
     /// or retrieve it.
     pub(super) hash: String,
@@ -483,15 +483,15 @@ fn dropped_indices_by_multiset_diff(original: &[Value], kept: &[Value]) -> Vec<u
         .collect()
 }
 
-/// 12-char SHA-256 hex prefix of an already-serialized canonical JSON
+/// 24-hex (96-bit) SHA-256 prefix of an already-serialized canonical JSON
 /// string. Caller is responsible for producing the canonical form via
 /// [`canonical_array_json`] (or another byte-equal serializer) — the
 /// hash is over the bytes, so a stable serializer is the contract.
-/// Algorithm consolidated in `ccr::persist` (ARCH-5); this domain alias
-/// stays so the row-drop call sites and the parity pins keep their
+/// Algorithm + width consolidated in `ccr::persist` (ARCH-5); this domain
+/// alias stays so the row-drop call sites and the parity pins keep their
 /// vocabulary.
 fn hash_canonical(canonical: &str) -> String {
-    crate::ccr::persist::sha6_hex12(canonical.as_bytes())
+    crate::ccr::persist::sha256_recovery_key(canonical.as_bytes())
 }
 
 // `hash_array_for_ccr` (a test-only `canonical_array_json + hash_canonical`
@@ -521,7 +521,7 @@ mod tests {
             .expect("dropped_count>0 → Some");
         let expected = hash_canonical(&canonical_array_json(&items));
         assert_eq!(persisted.hash, expected, "hash scheme must be unchanged");
-        assert_eq!(persisted.hash.len(), 12);
+        assert_eq!(persisted.hash.len(), 24);
         assert!(persisted
             .marker
             .contains(&format!("<<ccr:{expected} 5_rows_offloaded>>")));
@@ -769,25 +769,27 @@ mod tests {
 
     #[test]
     fn hash_canonical_pinned_vectors() {
-        // Rule-2 pin (anti parallel-mutation blindness): fixed SHA-256[:12]
+        // Rule-2 pin (anti parallel-mutation blindness): fixed SHA-256[:24]
         // literals over the EXACT canonical bytes `serde_json::to_string`
-        // emits. A truncation (`take(6)`→`take(5)`), a hex-format change, or
+        // emits. A truncation (`take(12)`→`take(11)`), a hex-format change, or
         // a hasher swap FLIPS a literal here — unlike the sibling
         // `persist_dropped_hash_is_byte_identical_to_inline_dict_scheme`,
         // which RECOMPUTES `expected` and would survive every such mutation.
         // Literals produced once in Python and pinned identically on the
         // Python side (tests/test_ccr_hash_parity_vectors.py) — the two
-        // pins together are the Py↔Rust parity lock for the CCR recovery key:
-        //   python3 -c "import hashlib; print(hashlib.sha256(C.encode()).hexdigest()[:12])"
-        assert_eq!(hash_canonical("[]"), "4f53cda18c2b");
+        // pins together are the Py↔Rust parity lock for the CCR recovery key.
+        // The first 12 hex chars are the historical 48-bit key, extended to
+        // 24 hex / 96 bits (CCR_KEY_HEX_WIDTH):
+        //   python3 -c "import hashlib; print(hashlib.sha256(C.encode()).hexdigest()[:24])"
+        assert_eq!(hash_canonical("[]"), "4f53cda18c2baa0c0354bb5f");
         assert_eq!(
             hash_canonical(r#"["alpha","beta","gamma"]"#),
-            "a3e185260009"
+            "a3e185260009ab5be7bb16f3"
         );
-        assert_eq!(hash_canonical("[1,2,3,4,5]"), "f5baf0e4336f");
+        assert_eq!(hash_canonical("[1,2,3,4,5]"), "f5baf0e4336fd53b4c82b453");
         assert_eq!(
             hash_canonical(r#"[{"id":1},{"id":2},{"id":3}]"#),
-            "d99179347cb1"
+            "d99179347cb13877fc9057e0"
         );
         // The canonical serializer must emit EXACTLY those bytes, so each
         // literal above is the hash of what the array drop path actually
@@ -817,20 +819,20 @@ mod tests {
         // is valid for Python-normal-form inputs only. Pinned identically
         // (from the canonical TEXT, not parsed values) on the Python side
         // (tests/test_ccr_hash_parity_vectors.py::_WIRE_VECTORS):
-        //   python3 -c "import hashlib; print(hashlib.sha256(C.encode()).hexdigest()[:12])"
+        //   python3 -c "import hashlib; print(hashlib.sha256(C.encode()).hexdigest()[:24])"
         let wire_vectors: [(&str, &str, &str); 6] = [
-            // (wire input, serde canonical, pinned SHA-256[:12])
+            // (wire input, serde canonical, pinned SHA-256[:24])
             (
                 r#"[{"price":1.50}]"#,
                 r#"[{"price":1.50}]"#,
-                "86cf954ca9f3", // trailing zero preserved verbatim
+                "86cf954ca9f301c4cf6f9832", // trailing zero preserved verbatim
             ),
-            ("[1E5]", "[1e+5]", "5c20cc153829"), // exponent spelling normalized
-            ("[1e400]", "[1e+400]", "7e9854d86909"), // overflows f64; token kept
+            ("[1E5]", "[1e+5]", "5c20cc153829a59a47596031"), // exponent spelling normalized
+            ("[1e400]", "[1e+400]", "7e9854d86909950904d96294"), // overflows f64; token kept
             (
                 "[2.5000000000000000000000000001]",
                 "[2.5000000000000000000000000001]",
-                "44a8948fa037", // beyond f64 precision, preserved verbatim
+                "44a8948fa037883453d1adec", // beyond f64 precision, preserved verbatim
             ),
             // Non-ASCII and control-char forms — these AGREE with the
             // Python reference (same hashes pinned in its `_VECTORS`);
@@ -839,12 +841,12 @@ mod tests {
             (
                 r#"["café","日本語","naïve"]"#,
                 r#"["café","日本語","naïve"]"#,
-                "3a6991f2cdbf",
+                "3a6991f2cdbff9637f9d8ec2",
             ),
             (
                 r#"["line1\nline2","tab\there","bell\u0007"]"#,
                 r#"["line1\nline2","tab\there","bell\u0007"]"#,
-                "333b058285a5",
+                "333b058285a5aa142b93c6bd",
             ),
         ];
         for (input, canonical, expected) in wire_vectors {

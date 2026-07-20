@@ -2280,7 +2280,7 @@ mod tests {
         );
         // CCR hash populated for retrieval.
         let h = result.ccr_hash.expect("ccr_hash populated on drop");
-        assert_eq!(h.len(), 12);
+        assert_eq!(h.len(), 24);
         // Marker visible in dropped_summary.
         assert!(
             result.dropped_summary.contains(&format!("<<ccr:{h}")),

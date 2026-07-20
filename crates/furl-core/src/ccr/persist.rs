@@ -5,10 +5,10 @@
 //!
 //! * [`md5_hex_24`] — the diff/log/search/text CCR cache key
 //!   (previously duplicated in all four compressor modules);
-//! * [`sha6_hex12`] — the 12-char SHA-256 hex prefix behind the
-//!   crusher's `hash_canonical` (row-drop recovery keys) and the
-//!   compaction layer's `hash_opaque` / opaque-marker hashing
-//!   (previously duplicated across `crusher.rs`, `compactor.rs`, and
+//! * [`sha256_recovery_key`] — the SHA-256 hex prefix (24 hex / 96 bits,
+//!   [`CCR_KEY_HEX_WIDTH`]) behind the crusher's `hash_canonical` (row-drop
+//!   recovery keys) and the compaction layer's `hash_opaque` / opaque-marker
+//!   hashing (previously duplicated across `crusher.rs`, `compactor.rs`, and
 //!   `walker.rs`);
 //! * [`persist_and_mark`] / [`retrieve_more_marker_line`] — the
 //!   key→put→marker tail of the log/search (and, marker-only, text)
@@ -55,17 +55,30 @@ pub(crate) fn md5_hex_24(s: &str) -> String {
     hex
 }
 
-/// 12-char SHA-256 hex prefix (first 6 digest bytes) of `bytes`.
-/// Collision-resistant enough for a single payload in flight, short
-/// enough to keep markers compact. The single implementation behind the
-/// crusher's `hash_canonical` (row-drop recovery keys over canonical
-/// JSON) and the compaction layer's opaque-blob hashing.
-pub(crate) fn sha6_hex12(bytes: &[u8]) -> String {
+/// Number of hex characters in a CCR recovery key: 24 hex = 96 bits.
+///
+/// A 48-bit (12-hex) key collided by the birthday bound after ~2^24 distinct
+/// payloads, which let one dropped row silently recover as another row's
+/// content (T3). 96 bits pushes a 50% collision past ~2^48 payloads — far
+/// beyond this store's bounded, request-window-scoped population — and matches
+/// the width every OTHER CCR producer already emits (`md5_hex_24`, the Python
+/// store's own default `sha256(...)[:24]`, `cross_message_dedup`,
+/// `read_lifecycle`). Because `marker_grammar.HASH_WIDTHS` already accepts 24,
+/// widening needs NO grammar change; 12-hex keys stay accepted for backward
+/// compatibility with markers already in live transcripts (retrieval reads
+/// both widths).
+pub(crate) const CCR_KEY_HEX_WIDTH: usize = 24;
+
+/// `SHA-256(bytes)` truncated to [`CCR_KEY_HEX_WIDTH`] hex chars (the leading
+/// `CCR_KEY_HEX_WIDTH / 2` digest bytes). The single implementation behind the
+/// crusher's `hash_canonical` (row-drop recovery keys over canonical JSON) and
+/// the compaction layer's opaque-blob hashing.
+pub(crate) fn sha256_recovery_key(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize()
         .iter()
-        .take(6)
+        .take(CCR_KEY_HEX_WIDTH / 2)
         .map(|b| format!("{b:02x}"))
         .collect()
 }
@@ -174,10 +187,16 @@ mod tests {
     }
 
     #[test]
-    fn sha6_hex12_matches_python() {
-        // Verified against Python: hashlib.sha256(b"...").hexdigest()[:12].
-        assert_eq!(sha6_hex12(b""), "e3b0c44298fc");
-        assert_eq!(sha6_hex12(b"hello world"), "b94d27b9934d");
+    fn sha256_recovery_key_matches_python() {
+        // Verified against Python: hashlib.sha256(b"...").hexdigest()[:24].
+        // 24 hex = 96 bits (CCR_KEY_HEX_WIDTH). The first 12 hex chars are
+        // unchanged from the historical 48-bit key, so a truncating reader of
+        // a legacy 12-hex marker still resolves the same prefix.
+        assert_eq!(sha256_recovery_key(b""), "e3b0c44298fc1c149afbf4c8");
+        assert_eq!(
+            sha256_recovery_key(b"hello world"),
+            "b94d27b9934d3e08a52e52d7"
+        );
     }
 
     #[test]

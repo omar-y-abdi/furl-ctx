@@ -1,6 +1,6 @@
 """Py↔Rust parity lock for the CCR row-drop recovery key (``hash_canonical``).
 
-The recovery key that crosses the FFI is ``SHA-256(canonical)[:12]`` over
+The recovery key that crosses the FFI is ``SHA-256(canonical)[:24]`` over
 ``canonical_array_json(items)`` (``serde_json::to_string`` of the original
 rows). Both the Rust producer and this Python reference must agree on it byte
 for byte, or a dropped row is stored under one key and retrieved under another
@@ -57,20 +57,20 @@ from furl_ctx.transforms.smart_crusher import SmartCrusher
 # byte-identical to serde_json's, so the reference below reproduces the Rust
 # canonical. Wire-form numbers do NOT belong in this list — see _WIRE_VECTORS.
 _VECTORS: list[tuple[list[object], str]] = [
-    ([], "4f53cda18c2b"),
-    (["alpha", "beta", "gamma"], "a3e185260009"),
-    ([1, 2, 3, 4, 5], "f5baf0e4336f"),
-    ([{"id": 1}, {"id": 2}, {"id": 3}], "d99179347cb1"),
+    ([], "4f53cda18c2baa0c0354bb5f"),
+    (["alpha", "beta", "gamma"], "a3e185260009ab5be7bb16f3"),
+    ([1, 2, 3, 4, 5], "f5baf0e4336fd53b4c82b453"),
+    ([{"id": 1}, {"id": 2}, {"id": 3}], "d99179347cb13877fc9057e0"),
     # Non-ASCII: both serializers emit raw UTF-8 (Python via
     # ensure_ascii=False; serde_json always) — the agreeing subset
     # extends beyond ASCII scalars.
-    (["café", "日本語", "naïve"], "3a6991f2cdbf"),
+    (["café", "日本語", "naïve"], "3a6991f2cdbff9637f9d8ec2"),
     # Control characters: both serializers emit the short escapes \n / \t
     # and \\u00XX escapes for other unprintables — byte-identical text.
-    (["line1\nline2", "tab\there", "bell\x07"], "333b058285a5"),
+    (["line1\nline2", "tab\there", "bell\x07"], "333b058285a5aa142b93c6bd"),
 ]
 
-# Wire-form vectors (TEST-33): the pinned hash is SHA-256[:12] over the serde
+# Wire-form vectors (TEST-33): the pinned hash is SHA-256[:24] over the serde
 # CANONICAL text — decimal literals preserved verbatim, exponent spelling
 # normalized to ``e{sign}`` — NOT over parsed values. Each string here IS the
 # canonical (byte-for-byte what the Rust producer hashes); the Rust half pins
@@ -79,16 +79,16 @@ _VECTORS: list[tuple[list[object], str]] = [
 # the numeric ones (it would float-normalize them) — that is the scoping this
 # file's docstring documents.
 _WIRE_VECTORS: list[tuple[str, str]] = [
-    ('[{"price":1.50}]', "86cf954ca9f3"),  # trailing zero preserved verbatim
-    ("[1e+5]", "5c20cc153829"),  # canonical of wire `[1E5]` (serde respells)
-    ("[1e+400]", "7e9854d86909"),  # canonical of wire `[1e400]`; Python → inf
-    ("[2.5000000000000000000000000001]", "44a8948fa037"),  # beyond f64 precision
+    ('[{"price":1.50}]', "86cf954ca9f301c4cf6f9832"),  # trailing zero preserved verbatim
+    ("[1e+5]", "5c20cc153829a59a47596031"),  # canonical of wire `[1E5]` (serde respells)
+    ("[1e+400]", "7e9854d86909950904d96294"),  # canonical of wire `[1e400]`; Python → inf
+    ("[2.5000000000000000000000000001]", "44a8948fa037883453d1adec"),  # beyond f64 precision
     # Non-ASCII and control-char wire forms — these AGREE with the Python
     # reference (pinned identically in _VECTORS above); listed here too so
     # the canonical-text contract covers the full grammar, not just the
     # divergent numeric corner.
-    ('["café","日本語","naïve"]', "3a6991f2cdbf"),
-    ('["line1\\nline2","tab\\there","bell\\u0007"]', "333b058285a5"),
+    ('["café","日本語","naïve"]', "3a6991f2cdbff9637f9d8ec2"),
+    ('["line1\\nline2","tab\\there","bell\\u0007"]', "333b058285a5aa142b93c6bd"),
 ]
 
 
@@ -100,20 +100,20 @@ def _canonical(items: list[object]) -> str:
 
 
 def _hash_canonical(items: list[object]) -> str:
-    return hashlib.sha256(_canonical(items).encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(_canonical(items).encode("utf-8")).hexdigest()[:24]
 
 
 def _hash_raw(canonical_text: str) -> str:
-    """The canonical-text form of the recovery key: SHA-256[:12] over the
-    exact canonical BYTES. This is how a Python-side key recomputation must
-    be done — over serde's canonical text (== the raw wire text whenever the
-    input is already in canonical shape), never via ``json.loads`` →
-    ``json.dumps`` (which float-normalizes numeric literals)."""
-    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()[:12]
+    """The canonical-text form of the recovery key: SHA-256[:24] over the
+    exact canonical BYTES (24 hex / 96 bits, T3). This is how a Python-side
+    key recomputation must be done — over serde's canonical text (== the raw
+    wire text whenever the input is already in canonical shape), never via
+    ``json.loads`` → ``json.dumps`` (which float-normalizes numeric literals)."""
+    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()[:24]
 
 
 def test_pinned_vectors_match_the_rust_literals() -> None:
-    """Each literal is the SHA-256[:12] of the exact canonical bytes — pinned
+    """Each literal is the SHA-256[:24] of the exact canonical bytes — pinned
     identically in ``crusher.rs::tests::hash_canonical_pinned_vectors``. A typo
     in either side's literal, or a hashing/truncation change, fails here."""
     for items, expected in _VECTORS:
@@ -182,7 +182,7 @@ def test_rust_crush_emits_the_python_reference_hash() -> None:
     # (the 1a parity suite uses the same shape). Fixed seed → deterministic
     # canonical → a stable expected hash.
     items: list[object] = [f"ccr-parity-line-{i}" for i in range(600)]
-    expected = _hash_canonical(items)  # SHA-256[:12] over the full-array canonical
+    expected = _hash_canonical(items)  # SHA-256[:24] over the full-array canonical
 
     crusher = SmartCrusher()
     r = crusher._rust.crush(json.dumps(items, ensure_ascii=False), "", 1.0)
@@ -198,7 +198,7 @@ def test_rust_crush_emits_the_python_reference_hash() -> None:
 def test_rust_crush_emits_the_raw_text_hash_for_wire_form_numbers() -> None:
     """TEST-33 live-path lock: wire-form numeric input driven through the
     production Rust ``crush()`` emits the key of the LITERAL-PRESERVING
-    canonical (SHA-256[:12] over the raw text) — and does NOT emit the key
+    canonical (SHA-256[:24] over the raw text) — and does NOT emit the key
     the Python reference would compute from parsed-and-normalized values.
 
     This is the executable proof that a Python-side recomputation for
