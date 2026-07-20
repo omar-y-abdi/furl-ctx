@@ -18,7 +18,7 @@ compressed view unless someone knows to query for it.
 
 Automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `hookSpecificOutput.updatedToolOutput` mirrored to the originating tool's output shape, and because Claude Code 2.1.163 and newer validate that replacement against the tool's schema, the mirrored shape is honored, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. This shape-mirroring was built for upstream issue [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. The one shape still passing through uncompressed is `WebSearch`, whose whole-object result has no single text field to mirror onto.
 
-**Independent of the hook, on every version:** the MCP tools furl_compress, furl_retrieve, furl_search, furl_list, furl_stats, and furl_purge for manual compression and retrieval; durable `<<ccr:HASH>>` storage and retrieval; the SessionStart status line; the observability counters below; and the `FURL_PRETOOL_PIPE` pipe, on by default, which adds Bash savings today. LIBRARY.md carries the canonical harness status.
+**Independent of the hook, on every version:** the MCP tools furl_compress, furl_retrieve, furl_search, furl_list, furl_stats, and furl_purge for manual compression and retrieval; durable `<<ccr:HASH>>` storage and retrieval; the observability counters below; and the `FURL_PRETOOL_PIPE` pipe, on by default, which adds Bash savings today. Below 2.1.163 the SessionStart status line and the first-run stderr note say so directly instead of claiming PostToolUse compression is active, naming the detected version — everything else on this line, including the pipe, is unaffected either way. LIBRARY.md carries the canonical harness status.
 
 ### Observability counters
 
@@ -26,9 +26,9 @@ Every PostToolUse hook run tallies into the shared per-project CCR store (cross-
 cumulative), surfaced by `furl_stats` under `store.hook_activity`:
 
 - `hook_invocations_seen`: how many times the hook ran.
-- `hook_compressions_applied`: how many replacements it produced and, on 2.1.163 and newer, delivered to the model.
+- `hook_compressions_applied`: how many replacements it produced and, on 2.1.163 and newer, delivered to the model. Below 2.1.163 it stops incrementing (bucketed under `hook_noop:below-version-floor` instead), since Claude Code is confirmed to drop the replacement no matter what the hook produces.
 
-**How to read them:** a rising `hook_compressions_applied` alongside `hook_invocations_seen` confirms the hook is compressing matched tool outputs and the harness is honoring the shape-mirrored replacements. The first hook run per project also prints a one-line stderr heads-up. These counters are live as of this plugin release; the pinned engine, `furl-ctx` 1.2.0 and newer, ships the store counter API that populates them.
+**How to read them:** a rising `hook_compressions_applied` alongside `hook_invocations_seen` confirms the hook is compressing matched tool outputs and the harness is honoring the shape-mirrored replacements. The first hook run per project also prints a one-line stderr heads-up. These counters are live as of this plugin release; the pinned engine, `furl-ctx` 1.2.0 and newer, ships the store counter API that populates them. A separate `store.post_tool_use_compression` block reports the detected Claude Code version and whether it can receive a replacement at all, independent of the counters above.
 Once the pipe has run, `pipe_invocations_seen` / `pipe_compressions_applied` /
 `pipe_noop_reasons` appear in the same `store.hook_activity` block.
 
@@ -183,10 +183,18 @@ clean. One consequence: a `FURL_*` variable set only in a login profile will not
 the server, so export it in the environment Claude Code launches from, or set it in the
 `.mcp.json` `env` block. `exec` hands stdio and signals straight to the server. `FURL_CCR_BACKEND=sqlite` makes the
 CCR store durable on disk under `~/.furl/` (a per-project `ccr-ns-<hash>.sqlite3`),
-so originals survive across processes. `FURL_CCR_TTL_SECONDS=86400` keeps each
-offloaded original retrievable for 24 hours (the plugin default) — governing the
-hook's offloads and the MCP tools' stores alike; raise or lower it to widen or
-shrink the retention window. The
+so originals survive across processes. `FURL_CCR_TTL_SECONDS=86400` sets a
+24-hour retention CEILING, not a guarantee — governing the hook's offloads and
+the MCP tools' stores alike — because the store also caps at 1000 live entries
+per project and a single moderately-sized tool output can consume dozens of
+those (one row per chunk), so a handful of large outputs typically evict well
+before 24 hours. To keep an evicted entry recoverable, the plugin now also sets
+the engine's durable spill tier (`FURL_CCR_SPILL=1`) by default: a
+capacity-evicted entry is demoted to a per-project `ccr-ns-<hash>-spill.sqlite3`
+file instead of dropped, so its `<<ccr:HASH>>` marker stays retrievable past the
+1000-entry cap — the spill is bounded in turn by its own row cap and TTL. Raising
+`FURL_CCR_TTL_SECONDS` widens the time ceiling, not the live cap — check
+`furl_stats` for live entry counts against the cap. The
 `furl-ctx[mcp]==1.3.0` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 

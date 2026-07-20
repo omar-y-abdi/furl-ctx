@@ -51,9 +51,14 @@ So a pattern RE2 cannot compile is REJECTED at ingress by both validators
 than accepted and run unbounded. This removes lookaround/backreferences from
 agent-supplied filters; no production caller and no test used them. When RE2 is
 absent the boundability of a pattern cannot be pre-judged, so ingress does NOT
-reject and the SIGALRM/residual path above still applies -- an install without
-the ``re2`` extra (the ``mcp`` extra pulls it in) keeps the old behavior rather
-than rejecting every pattern it cannot classify.
+reject and the SIGALRM/residual path above still applies to a DIRECT caller of
+this module. T11: the shipped MCP server does not become such a caller on a
+re2-less install -- ``mcp_server.py`` refuses an agent-supplied
+pattern/include_patterns/exclude_patterns at the handler layer before ingress's
+result is ever dispatched to a worker thread (see
+``mcp_server._refuse_regex_filters``), so that surface loses filtering rather
+than reaching the residual. The CLI's main-thread SIGALRM path, and any other
+direct caller of this module, are unaffected.
 
 The reject is UNIFORM, and that is a deliberate choice, not an oversight. On the
 main thread (the CLI) the SIGALRM watchdog CAN bound a lookaround pattern, so a
@@ -334,8 +339,16 @@ def search_within_budget(
     # this pattern. No stdlib mechanism can interrupt a backtracking match here --
     # the GIL makes any in-process watchdog unobservable -- so this runs
     # unbudgeted. The syntactic screens and the input cap still apply, but they do
-    # not bound backtracking. Reached in practice only for lookaround/backref
-    # patterns on the MCP worker path, or on an install without the re2 extra.
+    # not bound backtracking. T11: the shipped MCP server no longer reaches this
+    # on a plain re2-less install -- it refuses an agent-supplied
+    # pattern/include_patterns/exclude_patterns outright before ever dispatching
+    # to a worker thread (see mcp_server._refuse_regex_filters), regardless of
+    # pattern shape. What remains reachable here is any OTHER off-main-thread
+    # caller of this module -- e.g. the library's own furl_ctx.retrieve(), called
+    # from a caller's own worker thread -- that sits outside the MCP server's
+    # guard, whether because RE2 is absent there too or because it passed a
+    # pattern RE2 refuses (lookaround, a backreference) that its own ingress
+    # did not screen out.
     try:
         return MatchVerdict.MATCH if compiled.search(text) else MatchVerdict.NO_MATCH
     except re.error:

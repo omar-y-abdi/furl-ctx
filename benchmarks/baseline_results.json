@@ -1,10 +1,10 @@
 {
   "schema": "furl_ctx.imp3.baseline.v1",
-  "captured_at_utc": "2026-07-18T21:25:46.470659+00:00",
-  "git_commit": "6c6f56f971be1f475f525ba86f1c7a2c59f829d2",
+  "captured_at_utc": "2026-07-19T22:08:35.942263+00:00",
+  "git_commit": "57148d7b64150395742b9923d4cd8afb2e4375dc",
   "engine_model": "gpt-4o",
-  "python": "3.12.13",
-  "platform": "macOS-15.7.8-x86_64-i386-64bit",
+  "python": "3.13.14",
+  "platform": "macOS-15.7.8-x86_64-i386-64bit-Mach-O",
   "provenance": [
     {
       "dataset": "code",
@@ -99,8 +99,8 @@
       "name": "logs@90",
       "n_input_items": 90,
       "tokens_before": 8556,
-      "tokens_after": 618,
-      "lossless_reduction": 0.9277699859747546,
+      "tokens_after": 632,
+      "lossless_reduction": 0.9261337073398784,
       "n_present": 8,
       "n_dropped": 82,
       "n_recoverable": 82,
@@ -116,8 +116,8 @@
       "name": "search@90",
       "n_input_items": 90,
       "tokens_before": 4102,
-      "tokens_after": 322,
-      "lossless_reduction": 0.9215017064846417,
+      "tokens_after": 336,
+      "lossless_reduction": 0.9180887372013652,
       "n_present": 13,
       "n_dropped": 77,
       "n_recoverable": 77,
@@ -126,15 +126,15 @@
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:smart_crusher:0.07"
+        "router:smart_crusher:0.08"
       ]
     },
     {
       "name": "repeated_logs@90",
       "n_input_items": 90,
       "tokens_before": 3621,
-      "tokens_after": 120,
-      "lossless_reduction": 0.9668599834299917,
+      "tokens_after": 134,
+      "lossless_reduction": 0.9629936481634908,
       "n_present": 4,
       "n_dropped": 86,
       "n_recoverable": 86,
@@ -150,8 +150,8 @@
       "name": "disk@9",
       "n_input_items": 9,
       "tokens_before": 694,
-      "tokens_after": 279,
-      "lossless_reduction": 0.5979827089337176,
+      "tokens_after": 291,
+      "lossless_reduction": 0.5806916426512968,
       "n_present": 5,
       "n_dropped": 4,
       "n_recoverable": 4,
@@ -160,15 +160,15 @@
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:smart_crusher:0.39"
+        "router:smart_crusher:0.40"
       ]
     },
     {
       "name": "multiturn@135",
       "n_input_items": 135,
       "tokens_before": 14686,
-      "tokens_after": 2061,
-      "lossless_reduction": 0.8596622633800899,
+      "tokens_after": 2141,
+      "lossless_reduction": 0.85421489854283,
       "n_present": 40,
       "n_dropped": 95,
       "n_recoverable": 95,
@@ -184,8 +184,8 @@
         "router:protected:user_message",
         "router:protected:user_message",
         "router:smart_crusher:0.14",
-        "router:smart_crusher:0.38",
-        "router:smart_crusher:0.39",
+        "router:smart_crusher:0.40",
+        "router:smart_crusher:0.41",
         "router:mixed:0.15",
         "router:mixed:0.15"
       ]

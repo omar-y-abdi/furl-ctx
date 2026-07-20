@@ -133,6 +133,7 @@ The plugin sets `FURL_CCR_TTL_SECONDS=86400`, which governs both the hook's offl
 
 Token reduction on real captured data — a dated snapshot (inputs committed under `benchmarks/data/` for auditability; a re-run measures the current engine, so absolute counts can drift from this table — the honest-read band below is the authoritative check). 
 Every number uses the engine's own tokenizer and measures `compress()` directly — independent of the PostToolUse hook-delivery issue noted above; needle recall is 100% (a known unique row is always recoverable, in the output or via CCR). 
+This table is measured with the `gpt-4o` model string (real tiktoken BPE, see [BENCHMARKS.md](BENCHMARKS.md)). `compress()`'s own default model is `claude-sonnet-4-5-20250929` — the shape Claude Code and the plugin actually call with — and claude-* routes through the exact same o200k_base encoding as gpt-4o, since Anthropic's own tokenizer is not publicly available. That makes this table's shape representative of what a real Claude Code run sees internally, but the counts themselves are a documented PROXY for Anthropic's tokenizer, not real Anthropic billing tokens: per Anthropic's own developer guidance, tiktoken undercounts Claude tokens by roughly 15-20% on typical text and by more on code or non-English text. Read every "token savings" percentage you see from a claude-* call, here or in your own agent, as an approximation on that basis — not an exact Anthropic token count.
 
 Read every figure below as a **best-case ceiling**, not a typical — the honest read follows.
 

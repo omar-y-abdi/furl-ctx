@@ -8,6 +8,7 @@
       ],
       "env": {
         "FURL_CCR_BACKEND": "sqlite",
+        "FURL_CCR_SPILL": "1",
         "FURL_CCR_TTL_SECONDS": "86400"
       }
     }

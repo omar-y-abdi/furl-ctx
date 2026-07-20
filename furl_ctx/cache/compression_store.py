@@ -581,7 +581,8 @@ class CompressionStore:
                 instead of computing SHA-256(original)[:24]. Required when
                 the marker that points at this entry was emitted by a
                 producer with its own hash function (e.g. SmartCrusher's
-                Rust row-drop path uses SHA-256[:12]). If not a hex
+                Rust row-drop path emits SHA-256[:24] for new content, and
+                SHA-256[:12] for legacy keys only). If not a hex
                 string, raises ``ValueError``. The marker hash and the
                 store key MUST match — otherwise a ``furl_retrieve`` of the
                 marker hash misses even though the data is present.
@@ -627,8 +628,9 @@ class CompressionStore:
         # original. When the caller provides `explicit_hash`, use it
         # verbatim — required when the hash that ends up in the prompt
         # marker is produced by another component (e.g. the Rust
-        # SmartCrusher row-drop path emits SHA-256[:12], which the
-        # Python store has to mirror so the MCP furl_retrieve tool resolves it).
+        # SmartCrusher row-drop path emits SHA-256[:24] for new content, and
+        # SHA-256[:12] for legacy keys only, which the Python store has to
+        # mirror so the MCP furl_retrieve tool resolves it).
         # 24 chars (96 bits) was chosen for collision resistance under the
         # birthday bound: 50% collision probability at ~280 trillion entries
         # (2^48), versus ~4 billion (2^32) for the previous 16-char default.
@@ -2170,6 +2172,20 @@ def _ccr_namespace_db_path(namespace_key: str) -> Path:
     return _paths.workspace_dir() / f"ccr-ns-{digest}.sqlite3"
 
 
+def _ccr_namespace_spill_db_path(namespace_key: str) -> Path:
+    """Per-namespace durable SPILL sqlite path (T6 retention), HASHED like the primary.
+
+    ``session_id`` / ``agent_id`` are untrusted request data, so — exactly as in
+    :func:`_ccr_namespace_db_path` — the key never interpolates into a path
+    verbatim. The filename is ``ccr-ns-<sha256(key)[:16]>-spill.sqlite3``: the
+    ``-spill`` marker keeps it ALWAYS distinct from this namespace's own primary
+    file, and the per-key digest keeps it distinct from every OTHER tenant's
+    spill, so a demoted entry never lands in a database another tenant can read.
+    """
+    digest = hashlib.sha256(namespace_key.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return _paths.workspace_dir() / f"ccr-ns-{digest}-spill.sqlite3"
+
+
 def _build_namespace_store(namespace_key: str) -> CompressionStore:
     """Construct a fresh, isolated store for ``namespace_key``.
 
@@ -2178,6 +2194,13 @@ def _build_namespace_store(namespace_key: str) -> CompressionStore:
     a database), every other selection — including the in-memory default — gets
     its OWN backend instance via the ``CompressionStore`` constructor. Never
     falls back to the global store: that would defeat isolation.
+
+    When ``FURL_CCR_SPILL`` is on, a PER-NAMESPACE durable spill tier is wired
+    too (T6): a capacity-evicted entry is demoted to this namespace's own
+    ``-spill`` file instead of being dropped at the 1000-entry cap, so a
+    ``<<ccr:HASH>>`` marker stays resolvable past eviction — without demoting any
+    tenant into a shared database. See :func:`_build_namespace_spill_backend`
+    for why this path does not copy the global builder's sqlite-primary guard.
     """
     backend_type = (os.environ.get("FURL_CCR_BACKEND") or "").strip().lower()
     backend: CompressionStoreBackend | None = None
@@ -2185,14 +2208,39 @@ def _build_namespace_store(namespace_key: str) -> CompressionStore:
         from .backends.sqlite import SqliteBackend
 
         backend = SqliteBackend(db_path=_ccr_namespace_db_path(namespace_key))
-    # Deliberately NO spill tier here: the env spill (FURL_CCR_SPILL) targets the
-    # shared global ``ccr.sqlite3``, so wiring one would demote every tenant into
-    # a single shared file — the exact cross-namespace leak this isolation
-    # forbids. Each namespace is self-contained in its own backend.
     return CompressionStore(
         default_ttl=_get_env_default_ttl_seconds(),
         backend=backend,
+        spill=_build_namespace_spill_backend(namespace_key),
     )
+
+
+def _build_namespace_spill_backend(
+    namespace_key: str,
+) -> CompressionStoreBackend | None:
+    """Per-namespace durable SPILL tier for a namespaced store (T6 retention).
+
+    Returns ``None`` (single-tier, byte-identical to before) unless
+    ``FURL_CCR_SPILL`` is truthy, so default behavior is unchanged. When on, the
+    spill is a ``SqliteBackend`` on this namespace's OWN
+    ``ccr-ns-<digest>-spill.sqlite3`` — its own row cap + TTL purge backstop it
+    exactly like the global tier, its 0600/0700 permissions match, but the file
+    is per-namespace so a demoted entry never enters a shared database.
+
+    Deliberately WITHOUT the global :func:`_create_spill_backend_from_env`'s
+    ``isinstance(primary, SqliteBackend) -> None`` guard. That guard exists only
+    because the global spill reuses the ONE shared ``ccr.sqlite3`` and so would
+    collide with a sqlite primary. Here the spill file is per-namespace and
+    ``-spill``-suffixed, so it can never alias the primary — and the shipped
+    plugin runs ``FURL_CCR_BACKEND=sqlite``, so applying that guard would leave
+    the plugin with NO spill at all, the exact no-op T6 exists to remove.
+    """
+    if not _ccr_spill_enabled():
+        return None
+
+    from .backends.sqlite import SqliteBackend
+
+    return SqliteBackend(db_path=_ccr_namespace_spill_db_path(namespace_key))
 
 
 def _resolve_namespace_store(namespace_key: str) -> CompressionStore:
@@ -2309,6 +2357,17 @@ CCR_SPILL_ENV = "FURL_CCR_SPILL"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
+def _ccr_spill_enabled() -> bool:
+    """True when ``FURL_CCR_SPILL`` opts into the durable spill tier (Q10/T6).
+
+    The single truthiness gate shared by BOTH spill builders — the global
+    :func:`_create_spill_backend_from_env` and the per-namespace
+    :func:`_build_namespace_spill_backend` — so the two paths can never drift on
+    what "spill on" means. Unset/blank/false keeps single-tier behavior.
+    """
+    return (os.environ.get(CCR_SPILL_ENV) or "").strip().lower() in _TRUTHY
+
+
 def _create_spill_backend_from_env(
     primary: CompressionStoreBackend | None,
 ) -> CompressionStoreBackend | None:
@@ -2324,8 +2383,7 @@ def _create_spill_backend_from_env(
     store stays single-tier durable. Spill mode is designed as fast in-memory
     primary + durable sqlite spill.
     """
-    flag = (os.environ.get(CCR_SPILL_ENV) or "").strip().lower()
-    if flag not in _TRUTHY:
+    if not _ccr_spill_enabled():
         return None
 
     from .backends.sqlite import SqliteBackend

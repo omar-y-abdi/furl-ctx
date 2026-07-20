@@ -35,9 +35,9 @@ Two DISTINCT width contracts — also kept separate
 
 Marker shapes A..I and which producer emits each
 ================================================
-  A  ``<<ccr:HASH N_rows_offloaded>>``        12-hex  markers.rs marker_for_rows_offloaded
-  B  ``<<ccr:HASH#rows N_chunks>>``           12-hex  markers.rs marker_for_row_index
-  C  ``<<ccr:HASH,KIND,SIZE>>``               12-hex  markers.rs marker_for_opaque
+  A  ``<<ccr:HASH N_rows_offloaded>>``        24-hex  markers.rs marker_for_rows_offloaded
+  B  ``<<ccr:HASH#rows N_chunks>>``           24-hex  markers.rs marker_for_row_index
+  C  ``<<ccr:HASH,KIND,SIZE>>``               24-hex  markers.rs marker_for_opaque
   D  ``<<ccr:HASH>>`` bare                    24-hex  smart_crusher.py (bare CCR helper)
   E  ``<<ccr:HASH N_bytes_duplicate>>``       24-hex  transforms/cross_message_dedup.py
   F  ``<<ccr:HASH N_bytes_near_duplicate>>``  24-hex  transforms/cross_message_dedup.py
@@ -64,12 +64,15 @@ from typing import Any, Final
 # --------------------------------------------------------------------------- #
 
 # Accepted CCR hash widths (number of hex characters) — the STRICT consumer set:
-# - 12: SmartCrusher path — sha256(payload)[:6] → 12 hex chars
-#        (crusher.rs `hash_canonical`, byte-pinned by its parity tests)
-# - 24: diff/log/search compressors — md5(payload)[:24] (md5_hex_24);
-#        cross_message_dedup, read_lifecycle, and the store
-#        default key — sha256(payload)[:24]. (No central key helper; each
-#        producer owns its algorithm and threads the hash via explicit_hash.)
+# - 24: the CURRENT width for EVERY producer. SmartCrusher row/opaque keys
+#        (sha256(payload)[:24] via `sha256_recovery_key`, byte-pinned by its
+#        parity tests); diff/log/search (md5_hex_24); cross_message_dedup,
+#        read_lifecycle, and the store default key (sha256(payload)[:24]).
+# - 12: LEGACY SmartCrusher keys (sha256(payload)[:12], 48 bits) emitted before
+#        the recovery key was widened to 96 bits (T3): a 48-bit key collided by
+#        the birthday bound and let one dropped row silently recover as
+#        another's content. Retained ONLY so `<<ccr:HASH>>` markers already in
+#        live transcripts still resolve — no producer emits 12-hex anymore.
 # Do NOT add arbitrary lengths — the exact-width check is the spoofing guard.
 HASH_WIDTHS: frozenset[int] = frozenset({12, 24})
 
@@ -156,6 +159,69 @@ GENERIC_BRACKET_PATTERN: re.Pattern = re.compile(
 # One capturing group (the hash); the trailing delimiter is non-capturing.
 DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{DOUBLE_ANGLE_DELIM}")
 
+# T4 fix: a SEPARATE full-span variant of the double-angle family, for callers
+# that excise-and-replace the WHOLE marker (resolve_markers's substitution)
+# rather than merely extract the hash. DOUBLE_ANGLE_PATTERN above is an
+# EXTRACTION pattern: its trailing delimiter only needs to consume ONE
+# boundary byte to confirm the hash capture is complete, so match.group(0)
+# stops right there — correct for hashes_in_text (which only reads the
+# capture group), WRONG as a substitution span for any shape with a
+# descriptive tail (A/B/C/E/F: match.group(0) ends mid-marker, e.g.
+# ``"<<ccr:HASH "`` for shape A, leaving ``"N_rows_offloaded>>"`` glued onto
+# whatever replaces it) and even for the bare shape (D: DOUBLE_ANGLE_DELIM's
+# character class matches a single ``">"`` before its own ``">>"``
+# alternative ever gets a chance to fire — alternation takes the first
+# successful branch — so match.group(0) stops one byte short of the real
+# close and a lone ``">"`` is left dangling).
+#
+# ``[^>]{0,64}`` up to a literal ``">>"`` instead: through every byte the
+# double-angle grammar never emits inside a marker body, so it halts at the
+# FIRST ``">>"`` within that window — the marker's real close for every real
+# shape (verified against A-F; none of their tails contain ``">"``).
+# Zero-width for the bare shape (D), where the delimiter IS the terminator.
+# Hash-width disambiguation (24 tried before 12) still holds: the byte
+# immediately after a real hash is always non-hex (space / comma /
+# hash-sign / ``">"``), so the 24-hex branch still fails to find 24
+# consecutive hex characters for a true 12-hex hash and correctly backs
+# off, exactly as it does for DOUBLE_ANGLE_PATTERN.
+#
+# The ``{0,64}`` bound (not an unbounded ``*``) closes a ReDoS the
+# unbounded form reopened: on adversarial input with many ``<<ccr:HASH``
+# starts and no closing ``">>"`` anywhere (e.g. ``"<<ccr:aaaaaaaaaaaa" *
+# 32000``, 562.5 KB), an unbounded ``[^>]*`` must scan to the end of the
+# text, fail to find ``">>"``, then backtrack one byte at a time all the
+# way back — an O(remaining-length) cost repeated at every one of the many
+# match-start attempts, so the whole scan is O(text_length^2). Measured:
+# 562.5 KB took 19.66s unbounded versus 0.0095s bounded here, and bounded
+# scales linearly (roughly 2x time per 2x input) where unbounded scaled
+# roughly 4x. ``finditer_within_budget`` gives this pattern no RE2 twin
+# (only ``GENERIC_BRACKET_PATTERN`` has one, see below), so it stays on
+# Python's backtracking ``re`` engine — the bound is the only thing
+# keeping the worst-case backtrack cost at O(64) per position instead of
+# O(text_length) per position.
+#
+# 64 is chosen with wide headroom over the measured maximum real tail
+# across every shape (arithmetic, `` `` = one literal space):
+#   A ``<<ccr:HASH {n}_rows_offloaded>>``       16 literal chars + digits
+#   B ``<<ccr:HASH#rows {n}_chunks>>``          13 literal chars + digits,
+#     n hard-capped at store.capacity()/4 = 250 (3 digits) —
+#     crates/furl-core/src/ccr/mod.rs DEFAULT_CAPACITY=1000,
+#     .../smart_crusher/persist.rs GRANULAR_CHUNK_CAPACITY_DIVISOR=4
+#   C ``<<ccr:HASH,{kind},{size}>>``            2 literal commas + kind
+#     [4-6 chars, kind is one of "base64"/"string"/"html" in every
+#     production call site — OpaqueKind::Other's only construction site
+#     in the whole crate is a #[cfg(test)] fixture in compaction/ir.rs] +
+#     humanize_bytes() output [a handful of chars at any realistic size]
+#   D ``<<ccr:HASH>>`` bare                     0 chars, delimiter IS the close
+#   E ``<<ccr:HASH {n}_bytes_duplicate>>``      17 literal chars + digits
+#   F ``<<ccr:HASH {n}_bytes_near_duplicate>>`` 22 literal chars + digits
+# A/E/F have no in-repo hard cap on the digit run, but digit count grows
+# only as log10(n): even a wildly pessimistic 20-digit byte/row count (the
+# ~64-bit address-space ceiling, far past any real message size) keeps
+# every shape's total under 42 chars, comfortably inside the 64-char
+# window with room to spare.
+DOUBLE_ANGLE_FULL_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}[^>]{{0,64}}>>")
+
 
 def marker_patterns() -> list[re.Pattern]:
     """The ordered consumer pattern list for marker scanning.
@@ -166,11 +232,36 @@ def marker_patterns() -> list[re.Pattern]:
     per match, deduped first-seen), so order does not affect the result
     set — but it is kept stable for clarity and to match the original
     behavior exactly.
+
+    EXTRACTION only — a match's span is NOT guaranteed to cover a whole
+    marker (see :data:`DOUBLE_ANGLE_PATTERN`). A caller that needs to excise
+    and replace the complete marker text wants :func:`substitution_patterns`
+    instead.
     """
     return [
         BRACKET_RETRIEVE_PATTERN,
         GENERIC_BRACKET_PATTERN,
         DOUBLE_ANGLE_PATTERN,
+    ]
+
+
+def substitution_patterns() -> list[re.Pattern]:
+    """The ordered pattern list for marker SUBSTITUTION (``resolve_markers``):
+    every entry's ``match.group(0)`` spans the marker's COMPLETE text, so
+    splicing the resolved content in for that exact span never leaves a
+    fragment of the marker behind (T4).
+
+    :data:`BRACKET_RETRIEVE_PATTERN` and :data:`GENERIC_BRACKET_PATTERN`
+    already span their whole marker (opening ``"["`` to closing ``"]"``) and
+    are reused as-is. The double-angle family uses
+    :data:`DOUBLE_ANGLE_FULL_PATTERN` instead of :data:`DOUBLE_ANGLE_PATTERN`
+    — see its docstring for why the extraction-oriented pattern is unsafe
+    here.
+    """
+    return [
+        BRACKET_RETRIEVE_PATTERN,
+        GENERIC_BRACKET_PATTERN,
+        DOUBLE_ANGLE_FULL_PATTERN,
     ]
 
 

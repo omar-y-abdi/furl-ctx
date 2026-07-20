@@ -42,10 +42,20 @@ from typing import Any
 import tomllib
 
 _ROOT = Path(__file__).resolve().parents[1]
-_PLUGIN_HOOKS_DIR = _ROOT / "plugins" / "furl" / "hooks"
+_PLUGIN_DIR = _ROOT / "plugins" / "furl"
+_PLUGIN_HOOKS_DIR = _PLUGIN_DIR / "hooks"
 _HOOKS_JSON = _PLUGIN_HOOKS_DIR / "hooks.json"
 _HOOK_SCRIPT = _PLUGIN_HOOKS_DIR / "compress_tool_output.py"
+_SESSION_START_SCRIPT = _PLUGIN_HOOKS_DIR / "session_start_banner.py"
 _PYPROJECT = _ROOT / "pyproject.toml"
+
+# T7: the two undocumented, native-installer-only env vars session_start_banner.py
+# and furl_ctx/host_version.py both read. Every SessionStart test below scrubs
+# them and sets an explicit value instead, so results are deterministic
+# regardless of what Claude Code version, if any, is actually running the suite.
+_VERSION_ENV_VARS = ("CLAUDE_CODE_EXECPATH", "AI_AGENT")
+_ABOVE_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-212_agent"}
+_BELOW_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-100_agent"}
 
 # The library version the PostToolUse `uv run --with` command pins to. Derived from
 # pyproject so the expected command below never rots, and so a pin that drifts from the
@@ -115,6 +125,28 @@ def _run(command: str, env_extra: dict[str, str] | None = None) -> subprocess.Co
         capture_output=True,
         text=True,
         env=env,
+    )
+
+
+def _run_session_start(env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Run the SessionStart command exactly as Claude Code does: as the shell
+    command line from hooks.json, with CLAUDE_PLUGIN_ROOT set (Claude Code sets
+    it for every hook subprocess) so ``${CLAUDE_PLUGIN_ROOT}/hooks/...`` resolves.
+    Scrubs the T7 version-detection env vars first so results never depend on
+    whatever Claude Code version, if any, is actually running the test suite."""
+    command = _load()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    env = {"CLAUDE_PLUGIN_ROOT": str(_PLUGIN_DIR)}
+    if env_extra:
+        env.update(env_extra)
+    full_env = dict(os.environ)
+    for var in _VERSION_ENV_VARS:
+        full_env.pop(var, None)
+    full_env.update(env)
+    return subprocess.run(
+        ["/bin/sh", "-c", command],
+        capture_output=True,
+        text=True,
+        env=full_env,
     )
 
 
@@ -339,23 +371,28 @@ def test_session_start_group_shape() -> None:
 
 def test_session_start_is_cheap_user_visible_and_fail_open() -> None:
     command = _load()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    # Cheap: no `uv` resolve on the session-start path (a static printed line).
+    # Cheap: no `uv` resolve on the session-start path — bare python3, no
+    # dependency resolution (T7 made the banner version-aware but it stayed
+    # dependency-free for exactly this reason; see session_start_banner.py's
+    # module docstring).
     assert "uv run" not in command
-    # User-visible without model-context cost: a systemMessage JSON field (shown to the
-    # user, not injected as context) rather than raw stdout or additionalContext.
-    assert "systemMessage" in command
+    assert "python3" in command
+    assert "session_start_banner.py" in command
     assert "additionalContext" not in command
-    # Honors the documented opt-out.
+    # Honors the documented opt-out, cheaply (before even spawning python3).
     assert "FURL_STATUS_LINE" in command
     # Fail-open: the command always ends by exiting 0 so it can never block a session.
     assert command.rstrip().endswith("true'")
+    # The systemMessage-emitting logic now lives in the script this command
+    # invokes, not the command string itself.
+    script = _SESSION_START_SCRIPT.read_text(encoding="utf-8")
+    assert "systemMessage" in script
 
 
 def test_session_start_emits_valid_system_message_json() -> None:
-    command = _load()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    proc = _run(command)
+    proc = _run_session_start(_ABOVE_FLOOR_ENV)
     assert proc.returncode == 0, proc.stderr
-    # Fails loudly if the JSON-in-shell escaping ever regresses.
+    # Fails loudly if the JSON-in-Python escaping ever regresses.
     payload = json.loads(proc.stdout)
     assert set(payload.keys()) == {"systemMessage"}
     message = payload["systemMessage"]
@@ -365,10 +402,34 @@ def test_session_start_emits_valid_system_message_json() -> None:
     # same pyproject-derived constant the PostToolUse pin check above uses.
     assert f"engine furl-ctx {_LIB_VERSION}" in message
     assert "furl_stats" in message
+    assert "PostToolUse compression armed" in message
 
 
 def test_session_start_opt_out_suppresses_line() -> None:
-    command = _load()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    proc = _run(command, {"FURL_STATUS_LINE": "0"})
+    proc = _run_session_start({"FURL_STATUS_LINE": "0"})
     assert proc.returncode == 0
     assert proc.stdout == ""
+
+
+# --- T7: version-aware PostToolUse clause ---------------------------------------
+
+
+def test_session_start_below_floor_replaces_armed_claim() -> None:
+    proc = _run_session_start(_BELOW_FLOOR_ENV)
+    assert proc.returncode == 0, proc.stderr
+    message = json.loads(proc.stdout)["systemMessage"]
+    assert "PostToolUse compression armed" not in message
+    assert "PostToolUse compression requires Claude Code 2.1.163 or newer" in message
+    assert "current version is 2.1.100" in message
+    # The pipe is unaffected by this gate and must still be claimed as active.
+    assert "PreToolUse pipe active" in message
+
+
+def test_session_start_unknown_version_preserves_armed_claim() -> None:
+    """Neither env var set (e.g. a non-native install): cannot prove the host is
+    broken, so this must behave exactly like today (claim armed), never like
+    "assume broken" — see furl_ctx/host_version.py's module docstring."""
+    proc = _run_session_start(env_extra=None)
+    assert proc.returncode == 0, proc.stderr
+    message = json.loads(proc.stdout)["systemMessage"]
+    assert "PostToolUse compression armed" in message

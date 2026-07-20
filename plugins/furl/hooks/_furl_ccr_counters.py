@@ -39,6 +39,9 @@ PIPE_NOOP_PREFIX = "pipe_noop:"
 # One-line heads-up written to stderr (user-visible; never reaches the model) on
 # the FIRST durably-recorded PostToolUse invocation per project store. Gated so
 # it fires once, not on every tool call — see ``emit_first_run_note_if_first``.
+# Printed when the running Claude Code MEETS the compression floor, or when its
+# version could not be determined (unknown is never treated as "assume
+# broken" — see furl_ctx.host_version's module docstring).
 FIRST_RUN_NOTE = (
     "furl: PostToolUse output compression is active and mirrors each tool's "
     "output shape, so Claude Code 2.1.163 and newer honor the replacement for "
@@ -48,6 +51,33 @@ FIRST_RUN_NOTE = (
     "compressions stay flat; the PreToolUse pipe also runs by default, set "
     "FURL_PRETOOL_PIPE=0 to disable"
 )
+
+
+def first_run_note_below_version_floor(host_version: tuple[int, int, int] | None) -> str:
+    """T7: the below-floor variant of ``FIRST_RUN_NOTE``, printed instead when
+    the caller has CONFIRMED the running Claude Code is below
+    ``furl_ctx.host_version.MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT``.
+
+    PostToolUse compression cannot reach the model on a host this old no matter
+    what furl produces — Claude Code silently keeps the original tool output
+    (the anthropics/claude-code#68951 class) — so this also explains why
+    ``hook_compressions_applied`` stops incrementing (``compress_tool_output.py``
+    buckets the no-op as ``hook_noop:below-version-floor`` instead of counting
+    an undeliverable replacement as "applied"). *host_version* renders as
+    "unknown" if ``None`` is passed, though callers should not reach this
+    function at all for the unknown case — see ``FIRST_RUN_NOTE``'s docstring."""
+    from furl_ctx.host_version import MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT, format_version
+
+    floor = format_version(MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT)
+    current = format_version(host_version) if host_version is not None else "unknown"
+    return (
+        f"furl: PostToolUse output compression requires Claude Code {floor} or "
+        f"newer to reach the model, current host version is {current}, so it "
+        "is disabled this session; hook_compressions_applied will not "
+        "increment below the floor, see hook_noop:below-version-floor in "
+        "furl_stats instead; the PreToolUse pipe is unaffected and still runs "
+        "by default, set FURL_PRETOOL_PIPE=0 to disable"
+    )
 
 
 def resolve_store() -> Any | None:
@@ -84,17 +114,29 @@ def bump(store: Any | None, name: str, amount: int = 1) -> int | None:
         return None
 
 
-def emit_first_run_note_if_first(store: Any | None, new_count: int | None) -> None:
-    """Write ``FIRST_RUN_NOTE`` to stderr exactly once per durable store.
+def emit_first_run_note_if_first(
+    store: Any | None,
+    new_count: int | None,
+    *,
+    below_version_floor_note: str | None = None,
+) -> None:
+    """Write the first-run note to stderr exactly once per durable store.
 
     Fires only when the invocation counter DURABLY became ``1`` — i.e. the store
     persists counters cross-process (``counters_durable``) and this run recorded
     the first invocation. The in-memory backend (library / unit tests) reports
     ``counters_durable`` False, so the note never fires there and the hook stays
     byte-silent on a no-op. Never raises.
+
+    *below_version_floor_note* (T7): when given, printed INSTEAD of
+    ``FIRST_RUN_NOTE`` — pass the caller's already-computed
+    ``first_run_note_below_version_floor(...)`` result once it has CONFIRMED the
+    running host is below the compression floor. ``None`` (the default)
+    preserves ``FIRST_RUN_NOTE``, used both when the floor is met AND when the
+    version could not be determined (see that constant's docstring).
     """
     try:
         if new_count == 1 and store is not None and getattr(store, "counters_durable", False):
-            sys.stderr.write(FIRST_RUN_NOTE + "\n")
+            sys.stderr.write((below_version_floor_note or FIRST_RUN_NOTE) + "\n")
     except Exception:
         pass

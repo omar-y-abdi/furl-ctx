@@ -320,16 +320,46 @@ def test_faA4_first_run_note_is_ai_tell_free_and_accurate() -> None:
     assert "FURL_PRETOOL_PIPE=0" in note
 
 
+def test_faA4_first_run_note_below_version_floor_is_ai_tell_free() -> None:
+    """T7: the below-floor variant (first_run_note_below_version_floor) must be
+    held to the same AI-tell-free bar as the default note above."""
+    counters = _load_counters_module()
+    note = str(counters.first_run_note_below_version_floor((2, 1, 100)))  # type: ignore[attr-defined]
+    assert _no_ai_tells(note), f"below-floor note has an em/en dash or round bracket: {note!r}"
+    assert "2.1.163" in note and "2.1.100" in note
+    assert "FURL_PRETOOL_PIPE=0" in note
+
+
 def test_faA4_statusline_systemmessage_is_ai_tell_free() -> None:
     """PIN: the SessionStart systemMessage carries no em/en dashes or round
-    brackets, keeps the version string the pin regex needs, and stays accurate."""
+    brackets, keeps the version string the pin regex needs, and stays accurate.
+    Runs with an EXPLICIT above-floor version signal (T7 made the PostToolUse
+    clause version-aware) so this pins the default wording deterministically,
+    regardless of what Claude Code version, if any, is running the suite."""
     command = _hook_command("SessionStart")
     env = {k: v for k, v in os.environ.items() if k != "FURL_STATUS_LINE"}
+    env["CLAUDE_PLUGIN_ROOT"] = str(_HOOKS.parent)
+    env.pop("CLAUDE_CODE_EXECPATH", None)
+    env["AI_AGENT"] = "claude-code_2-1-212_agent"
     out = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, env=env).stdout
     message = json.loads(out)["systemMessage"]
     assert _no_ai_tells(message), f"statusline has an AI tell: {message!r}"
     assert message.startswith("furl 1.3.2 · engine furl-ctx 1.3.0"), "version string must survive"
     assert "FURL_PRETOOL_PIPE=0" in message and "furl_stats" in message
+
+
+def test_faA4_statusline_below_floor_is_ai_tell_free() -> None:
+    """T7: the below-floor statusline wording must also carry no em/en dashes or
+    round brackets."""
+    command = _hook_command("SessionStart")
+    env = {k: v for k, v in os.environ.items() if k != "FURL_STATUS_LINE"}
+    env["CLAUDE_PLUGIN_ROOT"] = str(_HOOKS.parent)
+    env.pop("CLAUDE_CODE_EXECPATH", None)
+    env["AI_AGENT"] = "claude-code_2-1-100_agent"
+    out = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, env=env).stdout
+    message = json.loads(out)["systemMessage"]
+    assert _no_ai_tells(message), f"below-floor statusline has an AI tell: {message!r}"
+    assert "PostToolUse compression requires Claude Code 2.1.163 or newer" in message
 
 
 # --- MCP server launch: the F-A1 profile-safe fix, applied to .mcp.json -----------

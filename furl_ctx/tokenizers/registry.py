@@ -68,6 +68,65 @@ MODEL_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
+# ── Documented tokenizer-accuracy caveats (T10) ─────────────────────────────
+#
+# Two backends below stand in for a vendor tokenizer this project has no
+# access to. Neither error band is fabricated:
+#
+# - ANTHROPIC_O200K_PROXY_NOTE cites Anthropic's own published developer
+#   guidance on tiktoken vs. Claude token counts, not a live measurement —
+#   the `anthropic` package is not a project dependency, and even installed,
+#   real calibration needs a live `POST /v1/messages/count_tokens` API call
+#   (network + an API key) this project does not make from a tokenizer
+#   constructor. See tests/test_tokenizers.py for the calibration-limit note.
+# - FIXED_RATIO_ESTIMATOR_NOTE's "~2x" was reproduced directly against this
+#   project's own o200k_base tokenizer (see tests/test_tokenizers.py), not
+#   measured against a real Gemini/Cohere tokenizer, which this project has
+#   no access to either.
+#
+# If a real tokenizer for either vendor is ever wired in, `_create_anthropic`
+# / `_create_fixed_estimation` must stop tagging their result `proxy_for=...`
+# — the pinning tests in tests/test_tokenizers.py force that to be a
+# conscious change, not a silently stale label.
+#
+# Neither factory logs at construction time. `get_tokenizer` is a plain
+# library call, cached per process at module scope (`_cache`) — but Furl's
+# own plugin hooks (plugins/furl/hooks/pipe_compress.py,
+# compress_tool_output.py) invoke it from a FRESH subprocess per tool call,
+# so that cache starts empty on every single invocation. A construction-time
+# `logger.warning` here fired on every tool call, not once per session — an
+# earlier revision of this fix did exactly that, and an adversarial review
+# caught it: with no logging handler configured, Python's `lastResort`
+# handler prints straight to stderr, roughly 100 writes over a 50-call
+# default-config session. See tests/test_tokenizers.py's
+# `test_claude_proxy_construction_note_never_leaks_across_real_subprocesses`
+# for the reproduction. Surfacing this note at a sane cadence is a
+# caller-side concern: a caller that wants it shown reads `proxy_for` off
+# the returned counter and formats the NOTE constant itself, at whatever
+# cadence its own layer can dedupe correctly across process boundaries —
+# this module has no visibility into "session" once a process exits.
+
+ANTHROPIC_O200K_PROXY_NOTE: str = (
+    "claude-* token counts are computed with tiktoken's o200k_base encoding "
+    "(byte-identical to gpt-4o) as a PROXY for Anthropic's own tokenizer, "
+    "which is not publicly available. Per Anthropic's published developer "
+    "guidance, this undercounts real Claude billing tokens by roughly "
+    "15-20% on typical text, and by more on code or non-English text. "
+    "Reported counts and savings percentages for claude-* models are an "
+    "approximation, not an exact Anthropic token count."
+)
+
+FIXED_RATIO_ESTIMATOR_NOTE: str = (
+    "this model's token counts use a fixed 4.0 chars-per-token estimate "
+    "(neither Gemini's SentencePiece nor Cohere's tokenizer is accessible "
+    "here) instead of a real BPE tokenizer. This fixed ratio can be roughly "
+    "2x off — closer for plain English prose/code, worse for CJK, other "
+    "non-Latin scripts, or densely structured content such as JSON. "
+    "Reported counts and savings percentages for this model are a rough "
+    "approximation."
+)
+
+
 # ── Backend factories ───────────────────────────────────────────────────────
 
 
@@ -83,11 +142,17 @@ def _create_tiktoken(model: str) -> TokenCounter:
 
 
 def _create_anthropic(model: str) -> TokenCounter:
-    """Create Anthropic tokenizer using tiktoken o200k_base (Q1).
+    """Create Anthropic tokenizer using tiktoken o200k_base as a PROXY (T10).
 
-    Anthropic's tokenizer is not publicly available. o200k_base (the GPT-4o
-    encoding) is the closest public BPE and far more accurate than the old
-    3.5-chars/token flat estimate, especially for CJK and emoji content.
+    Anthropic's own tokenizer is not publicly available. o200k_base (the
+    GPT-4o encoding) is the closest public BPE and far more accurate than
+    the old 3.5-chars/token flat estimate, especially for CJK and emoji
+    content — but it is still a PROXY, not the real Anthropic tokenizer.
+    See ``ANTHROPIC_O200K_PROXY_NOTE`` for the documented error band; the
+    returned counter's ``proxy_for`` attribute and ``repr`` are the
+    caller-visible signal that this is not an exact Anthropic billing
+    count. Deliberately does NOT log at construction time (T10
+    remediation) — see the module comment above ``ANTHROPIC_O200K_PROXY_NOTE``.
 
     Falls back to EstimatingTokenCounter(3.5) only when tiktoken is absent
     (ImportError), preserving cold-path safety on minimal installs.
@@ -95,22 +160,27 @@ def _create_anthropic(model: str) -> TokenCounter:
     try:
         from .tiktoken_counter import TiktokenCounter
 
-        return TiktokenCounter(model)
+        return TiktokenCounter(model, proxy_for="anthropic")
     except ImportError:
         logger.warning(
             "tiktoken not installed — claude-* falling back to 3.5-cpt estimation. "
             "Install with: pip install tiktoken"
         )
-        return EstimatingTokenCounter(chars_per_token=3.5)
+        return EstimatingTokenCounter(chars_per_token=3.5, proxy_for="anthropic")
 
 
 def _create_fixed_estimation(model: str) -> TokenCounter:
-    """Create fixed-ratio estimation tokenizer (Google/Cohere).
+    """Create fixed-ratio estimation tokenizer (Google/Cohere) as a PROXY (T10).
 
     Gemini uses SentencePiece and Cohere has its own tokenizer, neither
-    easily accessible. Both estimate at ~4 chars per token.
+    easily accessible. Both estimate at ~4 chars per token — a much cruder
+    approximation than a real BPE tokenizer. See
+    ``FIXED_RATIO_ESTIMATOR_NOTE`` for the documented error band (reproduced
+    against this project's own tokenizer, not literature-only).
+    Deliberately does NOT log at construction time (T10 remediation) — see
+    the module comment above ``ANTHROPIC_O200K_PROXY_NOTE``.
     """
-    return EstimatingTokenCounter(chars_per_token=4.0)
+    return EstimatingTokenCounter(chars_per_token=4.0, proxy_for="fixed_ratio_estimate")
 
 
 def _create_estimation(model: str) -> TokenCounter:

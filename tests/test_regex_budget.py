@@ -18,8 +18,10 @@ import re
 import signal
 import threading
 import time
+from pathlib import Path
 
 import pytest
+import tomllib
 
 import furl_ctx.ccr.regex_budget as regex_budget
 from furl_ctx.ccr.compress_modes import (
@@ -532,3 +534,40 @@ def test_unarmed_caller_timer_stays_unarmed(without_re2: None) -> None:
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
+
+
+# ---------------------------------------------------------------------------
+# T11 -- the mcp extra must always pull in RE2 (the hard-dependency half of
+# the fix; the runtime-refusal half is pinned in
+# tests/test_mcp_server_handlers.py against the actual MCP handlers).
+# ---------------------------------------------------------------------------
+
+_PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
+
+
+def test_mcp_extra_declares_re2_as_a_hard_dependency() -> None:
+    """T11: a plain ``pip install furl-ctx[mcp]`` must always pull in RE2.
+
+    That install is the common path -- it is the exact pin the shipped plugin
+    uses (``tests/test_plugin_version_pins.py``). Without RE2 the MCP server's
+    agent-supplied regex filters have no linear-time engine at all, and the
+    worker-thread path this module documents (no SIGALRM watchdog available)
+    is what closes to a REFUSAL instead of an unbounded match -- see
+    ``furl_ctx.ccr.mcp_server._refuse_regex_filters``. If a future edit ever
+    dropped ``furl-ctx[re2]`` from the ``mcp`` extra, every default MCP
+    install would keep working (filters would just be refused, never freeze),
+    but would silently lose filtering it used to have. Pinning the
+    declaration here means that regression shows up as a failing test, not a
+    silent capability loss discovered in production.
+    """
+    project = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    optional_deps = project["project"]["optional-dependencies"]
+    mcp_extra = optional_deps["mcp"]
+    assert "furl-ctx[re2]" in mcp_extra, (
+        f"the mcp extra must declare furl-ctx[re2] so RE2 ships by default with "
+        f"every 'pip install furl-ctx[mcp]'; got {mcp_extra!r}"
+    )
+    re2_extra = optional_deps["re2"]
+    assert any(dep.startswith("google-re2") for dep in re2_extra), (
+        f"the re2 extra must declare google-re2; got {re2_extra!r}"
+    )

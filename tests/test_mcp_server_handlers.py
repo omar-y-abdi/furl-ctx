@@ -20,6 +20,7 @@ where ``mcp`` is installed.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import time
@@ -32,6 +33,7 @@ pytest.importorskip("mcp")
 
 import mcp.types as mt  # noqa: E402
 
+import furl_ctx.ccr.regex_budget as regex_budget  # noqa: E402
 from furl_ctx.cache.compression_store import (  # noqa: E402
     get_compression_store,
     reset_compression_store,
@@ -400,3 +402,206 @@ async def test_query_response_with_infinity_falls_back_to_byte_exact(server, mon
         parse_constant=lambda name: pytest.fail(f"bare {name} in MCP response"),
     )
     assert env["original_content"] == raw  # byte-exact no-query fallback
+
+
+# ─── T11: refuse agent-supplied regex filters when RE2 is unavailable ───────
+#
+# furl_retrieve's `pattern` and furl_compress's `include_patterns`/
+# `exclude_patterns` are matched inside run_in_executor / asyncio.to_thread
+# (_compress_content / _retrieve_content), off the event loop, where no
+# SIGALRM watchdog can ever arm (Python signal handlers are main-thread only).
+# Without RE2 a crafted pattern used to fall back to unbounded stdlib `re`
+# there, and CPython's `sre` holds the GIL for the whole match, so a wedged
+# worker thread freezes every session on the process -- not just the caller's
+# own request. These pin the fix (furl_ctx.ccr.mcp_server._refuse_regex_filters):
+# the handler refuses the call outright instead of ever reaching that path.
+
+
+@pytest.fixture
+def without_re2(monkeypatch):
+    """Force RE2 genuinely absent, not just the imported ``re2_available`` name.
+
+    Patches ``regex_budget._RE2`` (the module-level engine handle both
+    ``mcp_server.re2_available`` and the actual matcher read at call time), so
+    a reproduction that somehow bypassed the T11 guard would take the real
+    unbounded fallback path -- exactly as it did before the fix -- rather than
+    being trivially "safe" only because the mock made it so.
+    """
+    monkeypatch.setattr(regex_budget, "_RE2", None)
+    regex_budget._compile_re2.cache_clear()
+    yield
+    regex_budget._compile_re2.cache_clear()
+
+
+def _seed(server: FurlMCPServer, hash_key: str, content: str) -> None:
+    server._get_local_store().store(original=content, compressed="c", explicit_hash=hash_key)
+
+
+# Calibrated against this handler directly (see PR description for the run):
+# "ab" * 20 against "(a|b|ab)+Z" costs ~0.5s unbounded -- long enough to prove
+# the guard fires before dispatch (a refusal is microseconds), short enough
+# that even an orphaned worker thread, were the guard somehow bypassed, could
+# not stall the suite. The bounded wait_for below is a second, independent
+# backstop against an actual hang, matching the daemon-thread-join pattern
+# test_regex_budget.py uses for the same class of risk.
+_CATASTROPHIC_PATTERN = "(a|b|ab)+Z"
+_CATASTROPHIC_TEXT = "ab" * 20
+_REFUSAL_WAIT_FOR_SECONDS = 10.0
+_NOT_FROZEN_CEILING_SECONDS = 5.0
+
+
+async def test_compress_refuses_catastrophic_include_pattern_without_re2(
+    server, without_re2, monkeypatch
+) -> None:
+    """T11 RED/GREEN: RE2 forced absent, furl_compress's include_patterns must
+    refuse a catastrophic-backtracking pattern instead of running it unbounded
+    on the worker thread. Fails before the fix (the call completes normally in
+    ~0.5s, having run the pattern to completion on real content); passes after
+    (refused in microseconds, never dispatched to run_in_executor).
+
+    F4 hardening: spies on the running loop's ``run_in_executor``, the actual
+    compress dispatch primitive, and asserts it is never called on the
+    refusal path -- not just that a fast error came back. A response-shape
+    and timing assertion alone would still pass a future refactor that moved
+    the RE2 check to inside ``_compress_content`` (still fast, still an
+    error, but AFTER the pattern was already handed to a worker thread); this
+    assertion is what would catch that regression. See the PR description
+    for the empirical red-proof of this exact scenario.
+    """
+    loop = asyncio.get_running_loop()
+    original_run_in_executor = loop.run_in_executor
+    executor_calls: list[tuple[object, ...]] = []
+
+    def _spy_run_in_executor(*args: object, **kwargs: object) -> object:
+        executor_calls.append(args)
+        return original_run_in_executor(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "run_in_executor", _spy_run_in_executor)
+
+    start = time.monotonic()
+    result = await asyncio.wait_for(
+        server._handle_compress(
+            {"content": _CATASTROPHIC_TEXT, "include_patterns": [_CATASTROPHIC_PATTERN]}
+        ),
+        timeout=_REFUSAL_WAIT_FOR_SECONDS,
+    )
+    elapsed = time.monotonic() - start
+    env = _envelope(result)
+    assert elapsed < _NOT_FROZEN_CEILING_SECONDS, f"took {elapsed:.2f}s -- did it run unbounded?"
+    assert "error" in env, f"expected a refusal envelope, got a result: {env}"
+    assert "RE2" in env["error"]
+    assert executor_calls == [], (
+        "run_in_executor was called on the refusal path -- the pattern was "
+        "dispatched to a worker thread instead of being refused before it "
+        f"ever got there: {executor_calls!r}"
+    )
+
+
+async def test_retrieve_refuses_catastrophic_pattern_without_re2(
+    server, without_re2, monkeypatch
+) -> None:
+    """T11 RED/GREEN: same hazard, furl_retrieve's `pattern`. Before the fix the
+    catastrophic match runs to completion inside asyncio.to_thread
+    (_retrieve_content); after, it is refused before that dispatch.
+
+    F4 hardening: spies on ``asyncio.to_thread``, the actual retrieve dispatch
+    primitive, and asserts it is never called on the refusal path -- the
+    retrieve-side counterpart of the compress spy above, for the same reason:
+    a refusal that fires only after dispatch would still look fast and
+    error-shaped from the outside.
+    """
+    h = "aaaa1111aaaa"
+    _seed(server, h, _CATASTROPHIC_TEXT)
+
+    original_to_thread = asyncio.to_thread
+    to_thread_calls: list[tuple[object, ...]] = []
+
+    async def _spy_to_thread(*args: object, **kwargs: object) -> object:
+        to_thread_calls.append(args)
+        return await original_to_thread(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _spy_to_thread)
+
+    start = time.monotonic()
+    result = await asyncio.wait_for(
+        server._handle_retrieve({"hash": h, "pattern": _CATASTROPHIC_PATTERN}),
+        timeout=_REFUSAL_WAIT_FOR_SECONDS,
+    )
+    elapsed = time.monotonic() - start
+    env = _envelope(result)
+    assert elapsed < _NOT_FROZEN_CEILING_SECONDS, f"took {elapsed:.2f}s -- did it run unbounded?"
+    assert "error" in env, f"expected a refusal envelope, got a result: {env}"
+    assert "RE2" in env["error"]
+    assert to_thread_calls == [], (
+        "asyncio.to_thread was called on the refusal path -- the pattern was "
+        "dispatched to a worker thread instead of being refused before it "
+        f"ever got there: {to_thread_calls!r}"
+    )
+
+
+async def test_compress_refuses_benign_include_pattern_without_re2(server, without_re2) -> None:
+    """T11: the refusal is unconditional on RE2 absence, not on how dangerous a
+    pattern looks -- without RE2, ingress cannot tell a benign filter from a
+    catastrophic one (classify_boundability returns UNKNOWN either way), so
+    even an everyday pattern like "ERROR.*" is refused rather than guessed at."""
+    env = _envelope(
+        await server._handle_compress(
+            {"content": "line one\nERROR two\n", "include_patterns": ["ERROR.*"]}
+        )
+    )
+    assert "error" in env
+    assert "RE2" in env["error"]
+
+
+async def test_retrieve_refuses_benign_pattern_without_re2(server, without_re2) -> None:
+    """T11: the retrieve-side counterpart of the benign-pattern refusal above."""
+    h = "bbbb2222bbbb"
+    _seed(server, h, "line one\nERROR two\n")
+    env = _envelope(await server._handle_retrieve({"hash": h, "pattern": "ERROR.*"}))
+    assert "error" in env
+    assert "RE2" in env["error"]
+
+
+async def test_compress_without_patterns_unaffected_by_missing_re2(server, without_re2) -> None:
+    """T11 must not over-refuse: a plain compress call with no include/exclude
+    patterns never reaches the regex engine at all, so it must work exactly as
+    it does with RE2 present -- RE2 absence alone is not an error."""
+    env = _envelope(await server._handle_compress({"content": "line one\nline two\n"}))
+    assert "error" not in env
+    assert "compressed" in env
+
+
+async def test_retrieve_line_range_unaffected_by_missing_re2(server, without_re2) -> None:
+    """T11 must not over-refuse: line_range/fields/select filters carry no
+    regex at all -- only a `pattern` is the hazard this guard exists for."""
+    h = "cccc3333cccc"
+    _seed(server, h, "line one\nline two\nline three\n")
+    env = _envelope(await server._handle_retrieve({"hash": h, "line_range": [1, 2]}))
+    assert "error" not in env
+    assert env["filtered"] is True
+
+
+async def test_compress_include_pattern_works_normally_with_re2_present(server) -> None:
+    """T11 regression guard: with RE2 present (the default test environment,
+    and the common `pip install furl-ctx[mcp]` path), include_patterns must
+    keep working exactly as before -- the new guard must never fire when
+    re2_available() is True."""
+    assert regex_budget.re2_available(), "precondition: this test needs real RE2"
+    env = _envelope(
+        await server._handle_compress(
+            {"content": "keep this\nERROR this\n", "include_patterns": ["ERROR.*"]}
+        )
+    )
+    assert "error" not in env
+    assert env["filtered"] is True
+
+
+async def test_retrieve_pattern_works_normally_with_re2_present(server) -> None:
+    """T11 regression guard: with RE2 present, furl_retrieve's pattern filter
+    must keep matching normally, unaffected by the new refusal branch."""
+    assert regex_budget.re2_available(), "precondition: this test needs real RE2"
+    h = "dddd4444dddd"
+    _seed(server, h, "alpha\nERROR beta\ngamma")
+    env = _envelope(await server._handle_retrieve({"hash": h, "pattern": "ERROR"}))
+    assert "error" not in env
+    assert env["matched_count"] == 1
