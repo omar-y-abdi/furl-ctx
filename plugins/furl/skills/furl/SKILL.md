@@ -23,9 +23,9 @@ for surfacing an anomaly you were not already looking for.
 
 ## Current harness status
 
-Automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `updatedToolOutput` mirrored to the originating tool's output shape; Claude Code 2.1.163 and newer validate that replacement against the tool's schema, and the mirrored shape passes, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. Shape-mirroring was built for [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. `WebSearch` still passes through uncompressed, because its whole-object result has no single text field to mirror onto. Unaffected on every version: the manual MCP tools furl_compress, furl_retrieve, and the rest, durable `<<ccr:HASH>>` storage and retrieval, and the SessionStart status line. LIBRARY.md carries the canonical harness status.
+Automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `updatedToolOutput` mirrored to the originating tool's output shape; Claude Code 2.1.163 and newer validate that replacement against the tool's schema, and the mirrored shape passes, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. Shape-mirroring was built for [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. `WebSearch` still passes through uncompressed, because its whole-object result has no single text field to mirror onto. Unaffected on every version: the manual MCP tools furl_compress, furl_retrieve, and the rest, and durable `<<ccr:HASH>>` storage and retrieval. Below 2.1.163 the SessionStart status line and the first-run note say so directly instead of claiming PostToolUse compression is active, naming the detected version; the PreToolUse pipe (below) is unaffected either way. LIBRARY.md carries the canonical harness status.
 
-**Counters:** `furl_stats` shows `store.hook_activity.hook_invocations_seen` and `hook_compressions_applied`, cross-process and cumulative. A rising `hook_compressions_applied` confirms the hook is compressing and, on 2.1.163 and newer, delivering the shorter output the model reads.
+**Counters:** `furl_stats` shows `store.hook_activity.hook_invocations_seen` and `hook_compressions_applied`, cross-process and cumulative. A rising `hook_compressions_applied` confirms the hook is compressing and, on 2.1.163 and newer, delivering the shorter output the model reads; below the floor it stops incrementing instead, bucketed under `hook_noop:below-version-floor`. `store.post_tool_use_compression` reports the detected host version and whether it can receive a replacement at all, independent of the counters.
 
 **Real savings now (enabled by default):** a **PreToolUse** pipe compresses a `Bash`
 command's stdout at the source (so the tool result *is* the compressed form, original
@@ -98,10 +98,13 @@ LIBRARY.md carries the full CCR marker grammar.
 When you need the full content behind a marker, **call `furl_retrieve` with that
 hash** — it returns the stored original, byte-exact for raw text and a
 semantically-complete re-serialization for a structured JSON array, as long as the
-entry is still within its retention window. **The plugin keeps offloaded originals for 24 hours by
-default (`FURL_CCR_TTL_SECONDS=86400`); lower it to expire them sooner or raise it
-for a longer window.** After that the entry expires and a retrieve is a loud miss,
-never a silent wrong answer. The hook and the `furl` MCP server share one durable
+entry is still within its retention window. **The plugin's 24-hour default
+(`FURL_CCR_TTL_SECONDS=86400`) is a ceiling, not a guarantee: the store also caps
+at 1000 live entries per project, and a single moderately-sized tool output can
+consume dozens of those, so a handful of large outputs typically evict well
+before 24 hours.** Past either limit the entry is gone and a retrieve is a loud
+miss, never a silent wrong answer; check `furl_stats` for live entry counts
+against the cap. The hook and the `furl` MCP server share one durable
 per-project SQLite store, `~/.furl/ccr-ns-<hash>.sqlite3`, keyed by
 `FURL_CCR_PROJECT_DIR` so one project never sees another's entries. The global
 `~/.furl/ccr.sqlite3` is used only when project scoping is turned off, and it is the

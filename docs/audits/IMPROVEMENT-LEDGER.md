@@ -25,6 +25,7 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-19 | correctness, CCR recovery-key width and store collision guard, audit T3 | crates/furl-core ccr persist/mod/in_memory and smart_crusher persist/walker/compactor, furl_ctx/transforms/smart_crusher.py, furl_ctx/ccr/marker_grammar.py | widened the 48-bit 12-hex crusher recovery key to 96-bit 24-hex so a birthday collision no longer lets one dropped row silently recover as another row's content; InMemoryCcrStore now drops the binding loudly on same-key different-payload instead of silently overwriting; the Rust to Python mirror hash-verifies fetched bytes before storing; 12-hex legacy markers still resolve | #133 |
 | 2026-07-19 | correctness, ccr marker resolution (T4 pre-mortem audit) | furl_ctx/retrieve.py, furl_ctx/ccr/marker_grammar.py, tests/test_resolve_markers_roundtrip.py | resolve_markers substituted only the marker head for the double-angle `<<ccr:...>>` family, leaving a descriptive tail (e.g. `_rows_offloaded>>`) glued onto recovered content and breaking JSON round trips on all 6 double-angle sub-shapes; new DOUBLE_ANGLE_FULL_PATTERN + substitution_patterns fix the span, bracket family (G/H) confirmed unaffected and pinned; tail bounded to `[^>]{0,64}` after review found the unbounded pattern reintroduced O(n squared) ReDoS on the public resolve_markers API | #131 |
 | 2026-07-19 | compression correctness, lossless type and byte fidelity | crates/furl-core compaction (compactor, formatter, ir), furl_ctx/transforms/csv_schema_decoder.py | fixed three silent value-corruption defects the reference decoder reconstructed to the wrong value with no CCR marker (audit T1/T2/T12): T1 mixed-type columns rendered a string bare so "200"/"true"/"null" decoded as int/bool/None, now CSV-quoted in json columns or declined to CCR when a container-string can't be disambiguated; T2 stringified-JSON fields were deserialized and object-strings flattened into dotted columns so the original vanished, now kept as verbatim string bytes; T12 a literal dotted key colliding with a synthesized flatten name silently overwrote a value, now the flatten is skipped and the decoder fails loud on duplicate columns. verify.run counters (degradations=6, silent_loss=0) and the benchmark baseline unchanged | #132 |
+| 2026-07-19 | security, retention honesty, hook version gating | plugins/furl/hooks/{pipe_compress,compress_tool_output,_furl_ccr_counters,session_start_banner}.py, furl_ctx/host_version.py (new), furl_ctx/ccr/mcp_server.py | pipe path now redacts built-in credential patterns (was env-only, a true no-op with nothing configured); plugin retention docs corrected to name the 1000-entry cap instead of a plain 24h claim, the audit's FURL_CCR_SPILL=1 flip withheld after proving it is a no-op for the namespaced store the plugin actually uses; PostToolUse compression claims now check the running Claude Code version via a new detector and stop overclaiming below 2.1.163 | #134 |
 
 ## Open candidates, fair game for future sessions
 
@@ -83,6 +84,17 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   active wheel-size pressure (hit PyPI's 10GB/project ceiling at v0.21.36),
   so converging these transitive versions (a `dashmap` bump may pull its
   hashbrown pin to 0.15.x) is worth a dedicated bump-and-recheck pass.
+- T6 real fix, PR #134: `FURL_CCR_SPILL=1` only wires a spill tier into
+  `get_compression_store`'s global singleton. The plugin never reaches that
+  path since every hook and the MCP server set `FURL_CCR_PROJECT_DIR`, which
+  routes through `resolve_ccr_namespace_store` -> `_build_namespace_store`
+  instead, and that function never wires a spill backend regardless of the
+  env var, on purpose, to avoid demoting every tenant into one shared file.
+  Proven with `tests/test_ccr_spill_plugin_namespace_gap.py`. Real fix needs
+  a per-namespace spill backend added to `_build_namespace_store` in
+  `furl_ctx/cache/compression_store.py`. Out of PR #134's file scope and
+  explicitly excluded from that batch's mandate, which forbade redesigning
+  cap accounting; needs its own design pass on the cap and spill interaction.
 - Residual COR-14 dotted-key ambiguity on a pathological uniform-nested shape
   such as `[{"a.b": {"c": i}, "a": {"b.c": i}}]`, surfaced by the PR #132
   adversarial review. Both branches flatten toward the same `a.b.c` dotted
@@ -93,6 +105,15 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   are ambiguous about the original nesting. A grammar-level record of the
   flatten, or a decline for the collision-shaped input, would make it exact.
   Deferred: its own session, not folded into the fidelity fix.
+- CI test job installs only the `[dev]` extra, never `[mcp]`, so every test
+  file gated by `pytest.importorskip("mcp")` (e.g.
+  `tests/test_mcp_stats_version_gate.py`) is silently skipped in CI and gives
+  zero signal there, positive or negative. Surfaced reading the PR #134 CI
+  shard logs directly. The local armed gate installs `dev,mcp` so it covers
+  them, but CI's required `test` check does not. Fix: add the `[mcp]` extra to
+  the ci.yml test install, minding the required-check deadlock guard, so the
+  mcp-gated suites actually run in CI. Its own small session since it touches
+  ci.yml.
 
 Removed (already satisfied): "Property-based tests for the tabling grammar
 round-trip, encode then decode equals identity" — verified 2026-07-19 that

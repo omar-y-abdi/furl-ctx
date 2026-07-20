@@ -468,3 +468,87 @@ def test_pipe_compress_fail_open_when_furl_ctx_missing(tmp_path) -> None:
     )
     assert proc.returncode == 0
     assert proc.stdout == data  # furl_ctx unimportable → raw passthrough
+
+
+# --- T8: built-in credential redaction on the pipe path (audit finding) -----------
+# ``pipe_compress.py`` used to scrub secrets with ``build_env_redactor`` only — the
+# operator-configured ``FURL_REDACT_PATTERNS`` regexes, a true no-op with nothing
+# configured. The ON-by-default built-in credential patterns
+# (``furl_ctx.redaction.build_default_redactor`` — AWS keys, GitHub tokens, etc.)
+# live in ``build_store_redactor`` and never ran on this path, so a below-threshold
+# or non-compressing Bash output carrying a real credential shape reached the model
+# byte-exact. The PostToolUse hook (``compress_tool_output.py``) already used
+# ``build_store_redactor`` for the identical purpose — this is the pipe path catching
+# up to parity, not new behavior.
+
+
+def _credential_bearing_output() -> str:
+    """A short (well below FURL_HOOK_MIN_CHARS=2000) Bash-shaped output carrying an
+    AWS access key and a GitHub token. Built by concatenation (not a string literal)
+    so this test file itself never carries a scannable secret shape."""
+    aws_key = "AKIA" + "IOSFODNN7EXAMPLE"
+    gh_token = "ghp_" + "A" * 36
+    return (
+        "Fetched 2 credentials from the deploy log:\n"
+        f"AWS_ACCESS_KEY_ID={aws_key}\n"
+        f"GITHUB_TOKEN={gh_token}\n"
+    )
+
+
+def test_pipe_compress_redacts_builtin_credentials_in_small_output() -> None:
+    """T8 red/green: a SMALL (below-min-chars) output carrying an AKIA-shaped AWS
+    key and a ghp_-shaped GitHub token must never reach stdout verbatim. Pre-fix,
+    ``_apply_env_redaction`` called ``build_env_redactor`` (FURL_REDACT_PATTERNS
+    only, unset here -> true no-op), so this failed red on main. Post-fix it calls
+    ``build_store_redactor`` (built-ins + env, matching the PostToolUse hook), so
+    both credentials come out as ``[REDACTED:...]`` markers instead."""
+    text = _credential_bearing_output()
+    assert len(text) < 2000, "must stay below the compression threshold to isolate the bug"
+    aws_key = "AKIA" + "IOSFODNN7EXAMPLE"
+    gh_token = "ghp_" + "A" * 36
+
+    proc = subprocess.run(
+        [sys.executable, str(_COMPRESSOR)],
+        input=text.encode(),
+        capture_output=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("FURL_REDACT")},
+    )
+    assert proc.returncode == 0
+    out = proc.stdout.decode()
+
+    assert aws_key not in out, f"AWS access key leaked verbatim through the pipe: {out!r}"
+    assert gh_token not in out, f"GitHub token leaked verbatim through the pipe: {out!r}"
+    assert "[REDACTED:aws-access-key]" in out
+    assert "[REDACTED:github-token]" in out
+
+
+def test_pipe_compress_redacts_builtin_credentials_when_no_savings() -> None:
+    """T8's other half: an output at/above the compression threshold whose
+    compression attempt yields NO savings must still be built-in-redacted before
+    the raw-passthrough fallback — not just the below-threshold case above.
+    High-entropy, non-repeating filler defeats the compressor (verified empirically:
+    the pre-fix pipe emits this UNCHANGED, i.e. genuinely takes the no-savings
+    branch), isolating this from the below-min-chars branch above."""
+    import random
+
+    rng = random.Random(20260719)
+    aws_key = "AKIA" + "IOSFODNN7EXAMPLE"
+    noise = " ".join(
+        "".join(rng.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=12)) for _ in range(220)
+    )
+    text = f"AWS_ACCESS_KEY_ID={aws_key}\n{noise}\n"
+    assert len(text) >= 2000, (
+        "must reach the compression threshold to isolate the no-savings branch"
+    )
+
+    proc = subprocess.run(
+        [sys.executable, str(_COMPRESSOR)],
+        input=text.encode(),
+        capture_output=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("FURL_REDACT")},
+    )
+    assert proc.returncode == 0
+    out = proc.stdout.decode()
+
+    assert aws_key not in out, f"AWS access key leaked verbatim through the pipe: {out!r}"
+    assert "[REDACTED:aws-access-key]" in out

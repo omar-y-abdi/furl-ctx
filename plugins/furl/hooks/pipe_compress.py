@@ -8,12 +8,12 @@ sees at the SOURCE: it reads the command's stdout on STDIN and writes a
 COMPRESSED form to STDOUT, storing the original under a ``<<ccr:HASH>>`` marker
 in the SAME durable per-project CCR store the PostToolUse hook and MCP server
 use — so ``furl_retrieve`` resolves it. Same size threshold and same store / TTL
-semantics as the PostToolUse path; the same env redaction
-(``FURL_REDACT_PATTERNS``) applies on the NORMAL path only — the fail-open paths
-skip it (review F5): binary/undecodable stdin and the furl_ctx-unavailable
-fallback pass through raw and UNREDACTED, and the raw stdout also transits the
-rewrite's ``0600`` tempfile for the command's runtime (see the plugin README's
-"Known limitations").
+semantics as the PostToolUse path; the same redaction (the ON-by-default
+built-in credential patterns AND ``FURL_REDACT_PATTERNS`` — ``build_store_redactor``,
+T8 fix) applies on the NORMAL path only — the fail-open paths skip it (review F5):
+binary/undecodable stdin and the furl_ctx-unavailable fallback pass through raw
+and UNREDACTED, and the raw stdout also transits the rewrite's ``0600`` tempfile
+for the command's runtime (see the plugin README's "Known limitations").
 
 Contract:
   stdin  : raw bytes (a command's stdout).
@@ -67,15 +67,22 @@ def _min_chars() -> int:
 
 
 def _apply_env_redaction(text: str) -> str:
-    """Scrub ``FURL_REDACT_PATTERNS`` secrets before any gate — same builder the
-    hook, MCP server, and library share, so one env var governs all four paths.
-    Fail-open: unimportable furl_ctx or redactor-off returns *text* unchanged."""
+    """Scrub credentials from *text* before any gate.
+
+    Applies the ON-by-default built-in credential patterns AND
+    ``FURL_REDACT_PATTERNS`` (T8 fix: was ``build_env_redactor``, which is
+    ``FURL_REDACT_PATTERNS``-only and a true no-op with nothing configured — so a
+    below-min-chars or no-savings output skipped the built-in AWS/GitHub/etc.
+    patterns entirely and reached the model verbatim). ``build_store_redactor``
+    is the same builder ``compress_tool_output.py``'s identically-named helper
+    uses, so both hook paths redact identically. Fail-open: unimportable
+    furl_ctx or every redactor off returns *text* unchanged."""
     try:
-        from furl_ctx.redaction import build_env_redactor
+        from furl_ctx.redaction import build_store_redactor
     except Exception:
         return text
     try:
-        redactor = build_env_redactor()
+        redactor = build_store_redactor()
         if redactor is None:
             return text
         return redactor(text)

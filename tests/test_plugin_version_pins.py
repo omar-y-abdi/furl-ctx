@@ -32,7 +32,10 @@ the built extension.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import tomllib
@@ -42,6 +45,7 @@ _PYPROJECT = _ROOT / "pyproject.toml"
 _PLUGIN_DIR = _ROOT / "plugins" / "furl"
 _HOOKS_JSON = _PLUGIN_DIR / "hooks" / "hooks.json"
 _PRETOOL_SCRIPT = _PLUGIN_DIR / "hooks" / "pretool_pipe.py"
+_SESSION_START_SCRIPT = _PLUGIN_DIR / "hooks" / "session_start_banner.py"
 _MCP_JSON = _PLUGIN_DIR / ".mcp.json"
 _PLUGIN_JSON = _PLUGIN_DIR / ".claude-plugin" / "plugin.json"
 _SKILL_MD = _PLUGIN_DIR / "skills" / "furl" / "SKILL.md"
@@ -84,9 +88,28 @@ def _mcp_command() -> str:
     return " ".join(json.loads(_read(_MCP_JSON))["mcpServers"]["furl"]["args"])
 
 
-def _session_start_command() -> str:
-    hooks = json.loads(_read(_HOOKS_JSON))["hooks"]
-    return str(hooks["SessionStart"][0]["hooks"][0]["command"])
+def _session_start_banner_message() -> str:
+    """The RENDERED ``systemMessage`` text session_start_banner.py emits.
+
+    Since T7 the banner's version string is built from f-string-interpolated
+    ``_PLUGIN_VERSION`` / ``_ENGINE_VERSION`` constants, not a literal string in
+    hooks.json's command — a source-text regex would no longer see the two
+    numbers adjacent. Running the script and reading its actual output is
+    strictly stronger anyway: it pins what a real session start renders, not
+    just two nearby literals. Version-detection env vars are scrubbed so the
+    default (armed) wording renders regardless of the running host.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "FURL_STATUS_LINE"}
+    for var in ("CLAUDE_CODE_EXECPATH", "AI_AGENT"):
+        env.pop(var, None)
+    proc = subprocess.run(
+        [sys.executable, str(_SESSION_START_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return str(json.loads(proc.stdout)["systemMessage"])
 
 
 def _extract(pattern: re.Pattern[str], text: str, label: str, group: int = 1) -> str:
@@ -147,7 +170,7 @@ def test_plugin_readme_prose_pins_match_pyproject_version() -> None:
 
 def test_session_start_status_line_engine_version_matches_pyproject_version() -> None:
     version = _extract(
-        _STATUS_VERSION_RE, _session_start_command(), "status-line engine version", group=2
+        _STATUS_VERSION_RE, _session_start_banner_message(), "status-line engine version", group=2
     )
     assert version == _pyproject_version()
 
@@ -170,5 +193,7 @@ def test_skill_frontmatter_matches_plugin_version() -> None:
 
 
 def test_session_start_status_line_version_matches_plugin_version() -> None:
-    version = _extract(_STATUS_VERSION_RE, _session_start_command(), "status-line plugin version")
+    version = _extract(
+        _STATUS_VERSION_RE, _session_start_banner_message(), "status-line plugin version"
+    )
     assert version == _plugin_version()

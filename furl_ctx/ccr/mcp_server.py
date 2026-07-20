@@ -51,6 +51,12 @@ from furl_ctx.ccr.retrieve_filters import (
     RetrieveFilters,
     apply_filters,
 )
+from furl_ctx.host_version import (
+    MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT,
+    detect_host_version,
+    format_version,
+    meets_compression_floor,
+)
 
 if TYPE_CHECKING:
     from furl_ctx.cache.backends import CompressionStoreBackend
@@ -2131,6 +2137,11 @@ class FurlMCPServer:
             "estimated_tokens_saved": tokens_saved,
             # Cross-process hook/pipe activity counters (persisted in this store).
             "hook_activity": self._hook_activity_block(store),
+            # T7: whether THIS host can even receive a PostToolUse replacement,
+            # independent of and more thorough than hook_activity's cheap,
+            # per-invocation check (this call can afford a subprocess; the
+            # per-tool-call hook path cannot) — see _post_tool_use_compression_block.
+            "post_tool_use_compression": self._post_tool_use_compression_block(),
         }
         if live:
             ages = [now - entry.created_at for _, entry in live]
@@ -2185,6 +2196,46 @@ class FurlMCPServer:
             block["pipe_compressions_applied"] = pipe_applied
             block["pipe_noop_reasons"] = pipe_noop
         return block
+
+    @staticmethod
+    def _post_tool_use_compression_block() -> dict[str, Any]:
+        """T7: an explicit, independently-computed readout of whether THIS host
+        can even receive a PostToolUse ``updatedToolOutput`` replacement, to
+        answer ``hook_activity``'s "produced vs delivered" gap directly rather
+        than leaving the reader to infer it from counters alone.
+
+        ``hook_compressions_applied`` (``hook_activity`` above) counts
+        replacements the PostToolUse hook PRODUCED; below the compression floor
+        the hook now stops incrementing it at all (bucketed as
+        ``hook_noop:below-version-floor`` instead — see compress_tool_output.py),
+        but that hot-path check is cheap and env-var-only, so it reports
+        ``unknown`` on a non-native install rather than guessing. This block can
+        afford a slower, more thorough check (an on-demand diagnostic call, not a
+        per-tool-call hot path), including a ``--version`` subprocess fallback —
+        see ``furl_ctx.host_version.detect_host_version``.
+
+        ``can_deliver`` is ``None`` when the host version could not be determined
+        at all (cannot prove either way — never coerced to True/False); the
+        PreToolUse pipe is unaffected either way and is reported separately in
+        ``hook_activity``'s ``pipe_*`` fields. FAIL-OPEN: never raises into
+        furl_stats.
+        """
+        try:
+            version = detect_host_version(allow_subprocess=True)
+            can_deliver = meets_compression_floor(version)
+        except Exception:
+            version, can_deliver = None, None
+        return {
+            "note": (
+                "whether THIS host can receive a PostToolUse updatedToolOutput "
+                "replacement at all, independent of the hook_activity counters "
+                "above; the PreToolUse pipe does not depend on this and is "
+                "unaffected either way."
+            ),
+            "host_version": format_version(version) if version is not None else None,
+            "min_version_required": format_version(MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT),
+            "can_deliver": can_deliver,
+        }
 
     async def _handle_purge(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_purge — erase one entry (by hash) or the whole store.
