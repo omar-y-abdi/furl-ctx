@@ -22,6 +22,7 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-19 | type strength, mypy override, ccr/mcp_server | pyproject.toml, furl_ctx/ccr/mcp_server.py | removed the last remaining disallow_untyped_defs override, proven dead (`mypy furl_ctx` passes with 0 errors without it); fixed the 7 real Any-leaks it was hiding (store/backend/entry/result signatures) with the concrete domain types (CompressionStore, CompressionStoreBackend, CompressionEntry, TextContent) already defined elsewhere in the codebase | #129 |
 | 2026-07-19 | performance, cross-message dedup | furl_ctx/transforms/cross_message_dedup.py, tests/test_cross_message_dedup.py | bounded the near-dup reference window (`array_sources`) to the most recent 64 kept-verbatim arrays, eliminating O(n^2) scan cost and unbounded memory growth on long conversations; 3200-message repro went 5444ms -> 1002ms with per-message cost flat instead of climbing | #128 |
 | 2026-07-19 | test rigor, faA2 hardening follow-up | tests/test_hook_audit_fixes.py | portable anchored pgrep poll restored macOS coverage and a returncode assert replaced the vacuous SIGINT pin | #130 |
+| 2026-07-20 | test rigor, relevance/bm25 | tests/test_bm25_scorer.py | added 15 direct unit tests (tokenization boundaries, IDF known-values, hand-derived exact-score pins, the long-match bonus threshold/order-of-operations, normalization clamp, matched_terms cap) for `BM25Scorer`, previously covered only by one loose integration assertion despite sitting on `CompressionStore`'s search/search_all hot path; red-proofed by mutating the bonus threshold 8->3 chars, which left the full 2481-test suite green and 3 of the new tests red, restored with no production diff | #135 |
 
 ## Open candidates, fair game for future sessions
 
@@ -38,12 +39,25 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   survey turned up concrete targets: `furl_ctx/transforms/router_blocks.py`
   (589 lines, owns the content-block walk extracted from content_router's
   god-object) and `furl_ctx/transforms/compressor_registry.py` (151 lines)
-  have zero references anywhere under `tests/`; `furl_ctx/relevance/bm25.py`
-  (243 lines, on the retrieval hot path) has exactly one shallow integration
-  test (`tests/test_ccr.py::test_search_with_bm25`) and no direct unit tests
-  for empty query/corpus or the `avgdl == 0` division edge case;
-  `router_dispatch.py` and `router_message_policy.py` sit at 1-2 test-file
-  references versus 6-7 for comparably-sized siblings.
+  have zero references anywhere under `tests/`; `router_dispatch.py` and
+  `router_message_policy.py` sit at 1-2 test-file references versus 6-7 for
+  comparably-sized siblings. (`furl_ctx/relevance/bm25.py` was the same kind
+  of gap and is now covered as of #135; the three remaining router modules
+  above are still open.)
+- 2026-07-20 finding while writing `BM25Scorer` tests (#135), not fixed
+  there because both are dead code, not a testable behavior: the
+  `avgdl = avg_doc_len or doc_len or 1` fallback in `_bm25_score` can never
+  reach its trailing `or 1` — by the time that line executes, `doc_tokens`
+  has already passed the `if not doc_tokens: return` guard above it, so
+  `doc_len` is always >= 1. Likewise `_compute_idf`'s `doc_freq <= 0: return
+  0.0` guard is unreachable from `score_batch`, the only caller, because its
+  `idf_map` comprehension only includes terms already confirmed present in
+  `doc_freq_across`. Both are honest defensive guards for direct callers of
+  these "private" methods, not proven-dead in the non-negotiable-4 sense (no
+  repo-wide reference grep run, no removal proposed) — flagging for a future
+  simplification pass to either delete them with that proof or make the
+  intent (defends direct API use, not reachable via `score_batch`) explicit
+  in a comment.
 - Benchmark corpus growth: add a new real-world dataset family to
   benchmarks/datasets.py with provenance notes.
 - `furl_ctx/transforms/cross_message_dedup.py`'s `_DedupState.seen` (the
