@@ -55,6 +55,12 @@ _CCR_MARKER = "<<ccr:"
 # user override (e.g. ``FURL_CCR_BACKEND=memory``) intact. This does not depend on
 # the ``env`` block in hooks.json being honored by the host.
 os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
+# Opt into the per-namespace durable SPILL tier (T6): a capacity-evicted entry is
+# demoted to this project's own ``-spill`` sqlite file instead of being dropped at
+# the 1000-entry cap, so a ``<<ccr:HASH>>`` marker stays retrievable past eviction.
+# ``setdefault`` keeps a user's ``FURL_CCR_SPILL=0`` opt-out intact. Matches the
+# same var in .mcp.json so the hook that spills and the server that reads it agree.
+os.environ.setdefault("FURL_CCR_SPILL", "1")
 os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")
 
 # Furl's own tool output must never be recompressed (would double-compress or

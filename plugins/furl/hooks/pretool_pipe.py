@@ -351,9 +351,11 @@ def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
       * the compressor reads the tempfile; ``|| cat "$f"`` is the shell-level
         fail-open — if the compressor cannot even start (no ``uv``/python), the
         RAW captured output is emitted, never lost.
-      * ``FURL_CCR_PROJECT_DIR`` + ``FURL_CCR_BACKEND=sqlite`` are baked so the
-        compressor writes the original into the SAME durable per-project store
-        the MCP server reads (a memory store would make the marker unretrievable).
+      * ``FURL_CCR_PROJECT_DIR`` + ``FURL_CCR_BACKEND=sqlite`` + ``FURL_CCR_SPILL=1``
+        are baked so the compressor writes the original into the SAME durable
+        per-project store the MCP server reads, with the per-namespace spill tier
+        (T6) so an evicted marker stays retrievable past the 1000-entry cap
+        (a memory store would make the marker unretrievable).
     """
     qdir = shlex.quote(project_dir)
     qcomp = shlex.quote(compressor)
@@ -379,7 +381,7 @@ def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
         ') >"$__furl_f"\n'
         "__furl_ec=$?\n"
         "trap - INT TERM\n"
-        f"FURL_CCR_PROJECT_DIR={qdir} FURL_CCR_BACKEND=sqlite "
+        f"FURL_CCR_PROJECT_DIR={qdir} FURL_CCR_BACKEND=sqlite FURL_CCR_SPILL=1 "
         f'uv run --no-project --with "{_FURL_CTX_PIN}" python3 {qcomp} <"$__furl_f"'
         ' || cat "$__furl_f"\n'
         'rm -f "$__furl_f"\n'

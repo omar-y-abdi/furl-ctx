@@ -188,10 +188,13 @@ so originals survive across processes. `FURL_CCR_TTL_SECONDS=86400` sets a
 the MCP tools' stores alike — because the store also caps at 1000 live entries
 per project and a single moderately-sized tool output can consume dozens of
 those (one row per chunk), so a handful of large outputs typically evict well
-before 24 hours; the engine's opt-in spill tier (`FURL_CCR_SPILL`) does not yet
-apply to this per-project store, so raising `FURL_CCR_TTL_SECONDS` alone will
-not fix early eviction under heavy use — check `furl_stats` for live entry
-counts against the cap. The
+before 24 hours. To keep an evicted entry recoverable, the plugin now also sets
+the engine's durable spill tier (`FURL_CCR_SPILL=1`) by default: a
+capacity-evicted entry is demoted to a per-project `ccr-ns-<hash>-spill.sqlite3`
+file instead of dropped, so its `<<ccr:HASH>>` marker stays retrievable past the
+1000-entry cap — the spill is bounded in turn by its own row cap and TTL. Raising
+`FURL_CCR_TTL_SECONDS` widens the time ceiling, not the live cap — check
+`furl_stats` for live entry counts against the cap. The
 `furl-ctx[mcp]==1.3.0` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 
