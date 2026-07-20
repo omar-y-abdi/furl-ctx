@@ -935,10 +935,54 @@ impl SmartCrusher {
     }
 }
 
+/// Per-family variance of one excluded (identity) column, folded in a
+/// single pass over the original array. Drives the T5 display fix: an
+/// identity column is safe to SHOW on the representative only when every
+/// object member of the collapsed family carries it with the SAME value;
+/// otherwise row-0's concrete value there is not shared by the family, and
+/// leaving it in place asserts one id recurred `_dup_count` times when N
+/// distinct ids each occurred once.
+struct ColVariance {
+    /// First value seen for the column, or `None` until a member carries it.
+    first: Option<Value>,
+    /// A later member carried a different value.
+    varies: bool,
+    /// Object members of the family that carried the column.
+    present: usize,
+}
+
+impl ColVariance {
+    fn new() -> Self {
+        Self {
+            first: None,
+            varies: false,
+            present: 0,
+        }
+    }
+
+    /// Fold one member's value for this column into the tally.
+    fn observe(&mut self, value: &Value) {
+        self.present += 1;
+        match &self.first {
+            None => self.first = Some(value.clone()),
+            Some(seen) if seen != value => self.varies = true,
+            Some(_) => {}
+        }
+    }
+
+    /// The column holds one identical value on EVERY object member of the
+    /// family, so displaying that concrete value on the representative is
+    /// truthful (a genuine duplicate) rather than a fabricated recurrence.
+    fn is_uniform(&self, family_object_members: usize) -> bool {
+        self.first.is_some() && !self.varies && self.present == family_object_members
+    }
+}
+
 /// Stamp `_dup_count` on the kept REPRESENTATIVE of each
 /// stable-projection-hash family (over ALL original `items`, with
 /// `exclude` identity columns filtered) that has more than one member
-/// (DESIGN.md Imp2).
+/// (DESIGN.md Imp2), and render its VARYING identity columns as the
+/// `<varies>` sentinel (T5).
 ///
 /// `_dup_count = N` records that N original rows shared this row's
 /// value-bearing content (differing only in excluded identity columns).
@@ -947,21 +991,53 @@ impl SmartCrusher {
 /// visible, stamping each of them made N rows each claim N duplicates,
 /// reading like N² originals — token inflation, not information. Rows
 /// in a singleton family are left untouched, so all-distinct input is
-/// byte-for-byte unchanged. The representative keeps its own real
-/// varying values; the dropped duplicates remain CCR-recoverable from
-/// the full-original store entry.
+/// byte-for-byte unchanged.
+///
+/// The representative's excluded identity columns are exactly the ones
+/// that DROVE the collapse, so row-0's concrete value there is not shared
+/// by the family: leaving it in place made the model read one id /
+/// timestamp as recurring N times when N DISTINCT ids each occurred once
+/// (T5). Each such column that actually VARIES across the family is
+/// replaced with the `<varies>` sentinel; a column that is CONSTANT across
+/// the family (a genuine duplicate) keeps its real value. Only the DISPLAY
+/// changes — `_dup_count` is preserved and the dropped rows stay
+/// CCR-recoverable from the full-original store entry, so no data is lost.
 fn annotate_dup_counts(
     kept: &mut [Value],
     all_items: &[Value],
     exclude: &std::collections::BTreeSet<String>,
 ) {
     use crate::transforms::anchor_selector::stable_item_hash;
+    use std::collections::HashMap;
 
-    // Family sizes over the WHOLE original array.
-    let mut family_size: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    /// Sentinel shown for an identity column whose value is NOT constant
+    /// across its collapsed family (see the function doc; T5).
+    const VARIES_SENTINEL: &str = "<varies>";
+
+    // One pass over the WHOLE original array builds, per family hash:
+    //   * `family_size` — objects AND arrays: the `_dup_count` value, kept
+    //     deliberately UNCHANGED so the recorded multiplicity is identical.
+    //   * `object_members` — object members only: the denominator for the
+    //     "present on every member" uniform check below.
+    //   * `col_variance` — per excluded column, whether it varies.
+    let mut family_size: HashMap<String, usize> = HashMap::new();
+    let mut object_members: HashMap<String, usize> = HashMap::new();
+    let mut col_variance: HashMap<String, HashMap<String, ColVariance>> = HashMap::new();
+
     for item in all_items {
-        if item.is_object() || item.is_array() {
+        if let Some(obj) = item.as_object() {
+            let h = stable_item_hash(item, exclude);
+            *family_size.entry(h.clone()).or_insert(0) += 1;
+            *object_members.entry(h.clone()).or_insert(0) += 1;
+            let cols = col_variance.entry(h).or_default();
+            for name in exclude {
+                if let Some(value) = obj.get(name.as_str()) {
+                    cols.entry(name.clone())
+                        .or_insert_with(ColVariance::new)
+                        .observe(value);
+                }
+            }
+        } else if item.is_array() {
             *family_size
                 .entry(stable_item_hash(item, exclude))
                 .or_insert(0) += 1;
@@ -977,13 +1053,30 @@ fn annotate_dup_counts(
         }
         let h = stable_item_hash(row, exclude);
         let count = family_size.get(&h).copied().unwrap_or(1);
-        if count > 1 && stamped.insert(h) {
-            if let Some(obj) = row.as_object_mut() {
-                // Don't clobber a real `_dup_count` field the caller
-                // already had (extremely unlikely; defensive).
-                obj.entry("_dup_count")
-                    .or_insert_with(|| Value::from(count));
+        if count <= 1 || !stamped.insert(h.clone()) {
+            continue;
+        }
+        let members = object_members.get(&h).copied().unwrap_or(0);
+        let family_cols = col_variance.get(&h);
+        if let Some(obj) = row.as_object_mut() {
+            // Blank every excluded identity column that VARIES across the
+            // family; a column constant across the family keeps its value
+            // (genuine-duplicate preservation). T5.
+            for name in exclude {
+                if !obj.contains_key(name.as_str()) {
+                    continue;
+                }
+                let uniform = family_cols
+                    .and_then(|cols| cols.get(name))
+                    .is_some_and(|cv| cv.is_uniform(members));
+                if !uniform {
+                    obj.insert(name.clone(), Value::from(VARIES_SENTINEL));
+                }
             }
+            // Record the family size. Don't clobber a real `_dup_count`
+            // field the caller already had (extremely unlikely; defensive).
+            obj.entry("_dup_count")
+                .or_insert_with(|| Value::from(count));
         }
     }
 }
@@ -2203,6 +2296,127 @@ mod tests {
             result.items.iter().all(|r| r.get("_dup_count").is_none()),
             "a no-drop plan must not stamp `_dup_count` (COR-33); got {:?}",
             result.items
+        );
+    }
+
+    // ---------- T5: varying-identity blanking on the representative ----------
+
+    #[test]
+    fn dup_count_representative_blanks_varying_identity_columns_e2e() {
+        // T5 (furl-ctx pre-mortem audit): when rows collapse under the
+        // stable-projection hash because they differ ONLY in VaryingIdentity
+        // columns (hex id / ISO timestamp / monotone counter) while their
+        // content is constant, the kept REPRESENTATIVE must NOT keep row-0's
+        // concrete identity values beside `_dup_count:N`. Otherwise an agent
+        // reading the compressed view — which the skill tells it to trust —
+        // reads ONE concrete id/timestamp as having recurred N times when N
+        // DISTINCT ids/timestamps each occurred once. The fix renders those
+        // columns as the `<varies>` sentinel; `_dup_count` is kept; the
+        // dropped rows stay CCR-recoverable (a display change, not a data
+        // change).
+        //
+        // `without_compaction` runs the lossy dedup path (matching the Python
+        // `_crush_kept_rows` harness) so the collapse-and-stamp actually fires.
+        let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
+        // A heartbeat/audit trail: three distinct identity shapes per row and
+        // constant content per host. The first 60 rows are one repeated
+        // heartbeat (three hosts -> three families of 20); the last 60 vary so
+        // the array is unambiguously crushable.
+        let items: Vec<Value> = (0..120)
+            .map(|i| {
+                let (event, detail) = if i < 60 {
+                    ("heartbeat", "ok".to_string())
+                } else {
+                    ("request", format!("served shard {}", i % 7))
+                };
+                json!({
+                    "req_id": format!("{i:040x}"),
+                    "ts": format!("2026-06-12T10:{:02}:{:02}Z", i / 60, i % 60),
+                    "seq": i,
+                    "host": format!("web-{}", i % 3),
+                    "event": event,
+                    "detail": detail,
+                    "status": "ok",
+                })
+            })
+            .collect();
+        let result = c.crush_array(&items, "", 1.0);
+
+        let reps: Vec<&Value> = result
+            .items
+            .iter()
+            .filter(|r| r.is_object() && r.get("_dup_count").is_some())
+            .collect();
+        assert!(
+            !reps.is_empty(),
+            "T5 precondition: the collapse-and-stamp path must fire \
+             (strategy={}); items={:#?}",
+            result.strategy_info,
+            result.items
+        );
+        for rep in &reps {
+            let dup = rep
+                .get("_dup_count")
+                .and_then(|v| v.as_u64())
+                .expect("_dup_count is a number");
+            assert!(dup > 1, "a stamped representative records N>1: {rep:?}");
+            for col in ["req_id", "ts", "seq"] {
+                assert_eq!(
+                    rep.get(col),
+                    Some(&json!("<varies>")),
+                    "identity column `{col}` on a stamped representative must be \
+                     `<varies>`, not a concrete value implying it recurred {dup} \
+                     times: {rep:#?}"
+                );
+            }
+            assert_eq!(
+                rep.get("status"),
+                Some(&json!("ok")),
+                "constant content stays verbatim — only identity display changes: {rep:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn annotate_dup_counts_blanks_only_columns_that_vary_within_the_family() {
+        // The blanking is SELECTIVE. Within a collapsed family an excluded
+        // column is replaced with `<varies>` ONLY when its value actually
+        // differs across the family's members. A column that is CONSTANT
+        // across the family (a genuine shared value) keeps its real value, so
+        // the representative still tells the truth. Here `req_id` varies
+        // inside the `login` family while `region` is constant inside it;
+        // both are excluded, but only `req_id` blanks.
+        let all: Vec<Value> = vec![
+            json!({"req_id": format!("{:040x}", 1), "region": "us", "op": "login"}),
+            json!({"req_id": format!("{:040x}", 2), "region": "us", "op": "login"}),
+            json!({"req_id": format!("{:040x}", 9), "region": "eu", "op": "logout"}),
+        ];
+        let mut kept = vec![all[0].clone()];
+        let exclude: std::collections::BTreeSet<String> =
+            ["req_id".to_string(), "region".to_string()]
+                .into_iter()
+                .collect();
+        annotate_dup_counts(&mut kept, &all, &exclude);
+        let rep = kept[0].as_object().expect("representative stays an object");
+        assert_eq!(
+            rep.get("_dup_count"),
+            Some(&json!(2)),
+            "the `login` family has two members"
+        );
+        assert_eq!(
+            rep.get("req_id"),
+            Some(&json!("<varies>")),
+            "req_id differs across the family -> `<varies>`"
+        );
+        assert_eq!(
+            rep.get("region"),
+            Some(&json!("us")),
+            "region is constant across the family -> kept verbatim (genuine-duplicate preservation)"
+        );
+        assert_eq!(
+            rep.get("op"),
+            Some(&json!("login")),
+            "content field stays verbatim"
         );
     }
 

@@ -123,6 +123,18 @@ columnar table is not the universal case:
   middle so a buried error stays visible in the compressed view, with the full text
   behind the marker.
 
+**Dedup markers in a table (`_dup_count`, `<varies>`).** A kept row in the columnar
+table can carry a `_dup_count: N` field: N original rows shared this row's content and
+collapsed into it, so the row stands for N originals, not one. When those rows differed
+in a high-cardinality identity column — a per-row id, timestamp, or counter — that
+column shows the `<varies>` sentinel instead of a concrete value, because the N rows
+each had a *different* one. Read `<varies>` as "N distinct values here", never as one
+id or timestamp that recurred N times; the concrete per-row values are behind the
+marker, so `furl_retrieve` the rows when you need them. `<varies>` is a **reserved**
+sentinel: if a row's real identity value ever is literally the string `<varies>` and
+is constant across its family it is kept as-is and reads the same, and either way the
+exact per-row originals stay recoverable with `furl_retrieve`.
+
 For the array and summary cases you usually want a **slice, not the whole thing**.
 The summary carries a `retrieve` hint telling you which fields to filter on. Pass a
 row-select to `furl_retrieve`:
@@ -171,6 +183,7 @@ Set these in the plugin's `hooks/hooks.json` / `.mcp.json` env, or your shell:
 | `FURL_PRETOOL_PIPE` | on | The PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status") runs by default. Set `0`/`false`/`off`/`no`/`disabled` (case-insensitive) to disable; unset, empty, or any other value leaves it on. Disabled is a byte-identical no-op. |
 | `FURL_STATUS_LINE` | on | Set `0` to silence the one-line `furl … · engine furl-ctx …` SessionStart status signal. Must be exported in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 | `FURL_CCR_BACKEND` | `sqlite` (set by the plugin) | CCR store backend. Must match between the hook and the `furl` server for retrieval to work. |
+| `FURL_CCR_SPILL` | `1` (set by the plugin) | Durable per-namespace spill tier. When on, a capacity-evicted entry is demoted to a per-project `ccr-ns-<hash>-spill.sqlite3` file instead of dropped, so its marker stays retrievable past the 1000-entry cap (bounded by the spill's own row cap and TTL). Set `0` to opt out. Must match between the hook and the `furl` server. |
 | `FURL_CCR_TTL_SECONDS` | `86400` = 24h (set by the plugin) | How long offloaded originals stay retrievable before they expire. Lower to reclaim disk sooner; raise for a longer retrieval window. |
 | `FURL_CCR_PROJECT_DIR` | auto, per project (set by the plugin) | Scopes the CCR store to the current project so one machine-global `~/.furl` store never surfaces or evicts another project's entries. Derived automatically from the project root; set to `""` to share one store across all projects — this is also how you read a pre-1.0 global store after upgrading. |
 

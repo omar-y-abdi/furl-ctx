@@ -354,6 +354,9 @@ def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
       * ``FURL_CCR_PROJECT_DIR`` + ``FURL_CCR_BACKEND=sqlite`` are baked so the
         compressor writes the original into the SAME durable per-project store
         the MCP server reads (a memory store would make the marker unretrievable).
+        The per-namespace spill tier (T6) is enabled inside pipe_compress.py via
+        ``setdefault("FURL_CCR_SPILL", "1")``, which honors a user opt-out, so it
+        is deliberately NOT forced here.
     """
     qdir = shlex.quote(project_dir)
     qcomp = shlex.quote(compressor)
