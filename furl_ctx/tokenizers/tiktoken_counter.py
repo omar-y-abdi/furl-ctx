@@ -288,7 +288,7 @@ class TiktokenCounter(BaseTokenizer):
     _COUNT_CACHE_MIN_LEN = 65_536
     _COUNT_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-4o", *, proxy_for: str | None = None):
         """Initialize tiktoken counter.
 
         The encoding is resolved EAGERLY here — with a hard deadline
@@ -304,6 +304,17 @@ class TiktokenCounter(BaseTokenizer):
         Args:
             model: Model name to determine encoding.
                    Defaults to 'gpt-4o' (o200k_base encoding).
+            proxy_for: Set by the registry (T10) when this counter's
+                encoding is standing in for a vendor with no public
+                tokenizer — e.g. ``"anthropic"`` for claude-* models
+                routed through o200k_base, the same encoding as gpt-4o.
+                ``None`` (the default) means this counter is counting
+                real tokens for its own vendor, e.g. an actual gpt-4o
+                call. Exposed as ``self.proxy_for`` and included in
+                ``__repr__`` so the approximation is visible on the
+                object itself, not just in a docstring or a log line —
+                see ``furl_ctx.tokenizers.registry.ANTHROPIC_O200K_PROXY_NOTE``
+                for the documented error band.
 
         Raises:
             TimeoutError: Encoding did not load within
@@ -312,6 +323,7 @@ class TiktokenCounter(BaseTokenizer):
                 tiktoken build older than the model's encoding).
         """
         self.model = model
+        self.proxy_for = proxy_for
         # Lowercase once: encoding lookup is case-sensitive, and callers pass
         # names like "GPT-4o" which must not fall through to the default.
         self.encoding_name = get_encoding_for_model(model.lower())
@@ -490,4 +502,9 @@ class TiktokenCounter(BaseTokenizer):
         return self.encoding.decode(tokens)
 
     def __repr__(self) -> str:
+        if self.proxy_for is not None:
+            return (
+                f"TiktokenCounter(model={self.model!r}, encoding={self.encoding_name!r}, "
+                f"proxy_for={self.proxy_for!r})"
+            )
         return f"TiktokenCounter(model={self.model!r}, encoding={self.encoding_name!r})"

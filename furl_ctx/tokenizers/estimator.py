@@ -71,14 +71,27 @@ class EstimatingTokenCounter(BaseTokenizer):
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
     )
 
-    def __init__(self, chars_per_token: float | None = None):
+    def __init__(self, chars_per_token: float | None = None, *, proxy_for: str | None = None):
         """Initialize estimating counter.
 
         Args:
             chars_per_token: Override default chars per token ratio.
                             If None, auto-detects based on content type.
+            proxy_for: Set by the registry (T10) when this fixed-ratio
+                estimate is standing in for a vendor with no accessible
+                tokenizer — e.g. ``"fixed_ratio_estimate"`` for Gemini/
+                Cohere models, which get a flat 4.0 chars-per-token
+                estimate instead of a real BPE tokenizer. ``None`` (the
+                default) means generic/auto estimation with no specific
+                vendor claim attached. Exposed as ``self.proxy_for`` and
+                included in ``__repr__`` — see
+                ``furl_ctx.tokenizers.registry.FIXED_RATIO_ESTIMATOR_NOTE``
+                for the documented error band (can be roughly 2x off,
+                worse for CJK/non-Latin or densely structured content,
+                closer for plain English prose/code).
         """
         self._fixed_ratio = chars_per_token
+        self.proxy_for = proxy_for
 
     def count_text(self, text: str) -> int:
         """Estimate token count for text.
@@ -192,6 +205,11 @@ class EstimatingTokenCounter(BaseTokenizer):
         return overhead
 
     def __repr__(self) -> str:
+        if self.proxy_for is not None:
+            return (
+                f"EstimatingTokenCounter(chars_per_token={self._fixed_ratio}, "
+                f"proxy_for={self.proxy_for!r})"
+            )
         if self._fixed_ratio:
             return f"EstimatingTokenCounter(chars_per_token={self._fixed_ratio})"
         return "EstimatingTokenCounter(auto)"
