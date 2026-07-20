@@ -471,6 +471,191 @@ class TestTokenizerRegistry:
                 sys.modules["furl_ctx.tokenizers.tiktoken_counter"] = tc_module
             TokenizerRegistry.clear_cache()
 
+    def test_claude_proxy_is_labeled_with_documented_error_band(self):
+        """claude-* o200k_base counts are labeled a PROXY, not real Anthropic
+        billing tokens (T10 pre-mortem finding).
+
+        Pins the CURRENT, honest behavior: claude-* still resolves to
+        tiktoken's o200k_base encoding (byte-identical to gpt-4o) because
+        Anthropic's own tokenizer is not publicly available, but the
+        returned counter now says so about itself (``proxy_for``) instead
+        of only in a docstring nobody calling ``compress()`` would read.
+
+        Calibration limit (honest, not fabricated): the ``anthropic``
+        package is not installed in this environment (verified via ``pip
+        show anthropic`` while writing this fix), so there is no real
+        Anthropic tokenizer here to calibrate the o200k proxy against, and
+        even with the package installed, real calibration needs a live
+        ``POST /v1/messages/count_tokens`` API call (network + an API key)
+        that this hermetic suite should not depend on. The error band
+        asserted below is Anthropic's own published developer guidance on
+        tiktoken vs. Claude token counts ("undercounts Claude tokens by
+        ~15-20% on typical text, and by much more on code or non-English
+        input"), not a live measurement taken here.
+
+        If a future contributor wires in a real Anthropic tokenizer,
+        ``_create_anthropic`` must stop returning a
+        ``proxy_for="anthropic"`` TiktokenCounter, which breaks this test —
+        a deliberate forcing function, not a bug: the label must be
+        consciously removed, not silently left stale.
+        """
+        from furl_ctx.tokenizers.registry import ANTHROPIC_O200K_PROXY_NOTE
+
+        TokenizerRegistry.clear_cache()
+        tokenizer = get_tokenizer("claude-3-sonnet")
+
+        assert isinstance(tokenizer, TiktokenCounter)
+        assert tokenizer.encoding_name == "o200k_base"
+        assert tokenizer.proxy_for == "anthropic"
+
+        # The documented error band is present and approximate, not a
+        # fabricated precise conversion factor.
+        assert "o200k_base" in ANTHROPIC_O200K_PROXY_NOTE
+        assert "Anthropic" in ANTHROPIC_O200K_PROXY_NOTE
+        assert "15-20%" in ANTHROPIC_O200K_PROXY_NOTE
+
+    def test_claude_proxy_construction_never_warns(self, caplog):
+        """Selecting a claude-* model must NOT log at construction time, not
+        even across N fresh constructions (T10 remediation, MAJOR finding).
+
+        ``_cache`` only dedups within one long-lived process. Furl's own
+        hooks (plugins/furl/hooks/pipe_compress.py,
+        compress_tool_output.py) are spawned as a FRESH subprocess per tool
+        call, so ``_cache`` is empty on every single invocation — a
+        construction-time ``logger.warning`` here fired on EVERY tool call,
+        not once per session: roughly 100 stderr writes over a 50-call
+        default-config session, since Python's ``lastResort`` handler
+        prints straight to stderr when nothing configures logging. An
+        adversarial review of PR #137 caught this; this test used to
+        assert the opposite (see git history for
+        ``test_claude_proxy_warns_at_construction``).
+
+        ``clear_cache()`` between iterations simulates a fresh subprocess's
+        empty ``_cache`` — the only externally-observable condition
+        ``get_tokenizer`` branches on, so it is behaviorally identical to a
+        real process boundary here. See
+        ``test_claude_proxy_construction_note_never_leaks_across_real_subprocesses``
+        for the same property proven across genuinely separate interpreters.
+        ``proxy_for`` and the NOTE constants remain the honesty signal —
+        see ``test_claude_proxy_is_labeled_with_documented_error_band``.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="furl_ctx.tokenizers.registry"):
+            for _ in range(5):
+                TokenizerRegistry.clear_cache()
+                get_tokenizer("claude-3-opus")
+
+        assert not any("o200k_base" in record.getMessage() for record in caplog.records)
+
+    def test_claude_proxy_construction_note_never_leaks_across_real_subprocesses(self):
+        """Red-proof for the T10 remediation MAJOR finding, at process
+        granularity rather than a simulated cache-clear: N genuinely fresh
+        Python interpreters constructing the DEFAULT claude tokenizer must
+        never write the proxy note to stderr.
+
+        This reproduces exactly what Furl's PostToolUse/PreToolUse hooks do
+        — a fresh subprocess per tool call, see pipe_compress.py /
+        compress_tool_output.py's module docstrings. Before the
+        remediation, every one of these N subprocesses printed the note to
+        stderr (confirmed by hand: ``.venv/bin/python -c "from
+        furl_ctx.tokenizers.registry import get_tokenizer;
+        get_tokenizer('claude-sonnet-4-5-20250929')"`` on the pre-fix code
+        wrote the full ``ANTHROPIC_O200K_PROXY_NOTE`` to stderr on that one
+        call alone) — the literal ~100-stderr-writes-per-50-tool-calls bug
+        an adversarial review of PR #137 caught. N is kept small (3)
+        because each iteration pays a real interpreter boot plus a
+        tiktoken import.
+        """
+        import subprocess
+        import sys
+
+        hits = 0
+        for _ in range(3):
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from furl_ctx.tokenizers.registry import get_tokenizer; "
+                    "get_tokenizer('claude-sonnet-4-5-20250929')",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            assert proc.returncode == 0
+            if "o200k_base" in proc.stderr:
+                hits += 1
+
+        assert hits == 0, f"proxy note leaked to stderr in {hits}/3 fresh subprocesses"
+
+    def test_gemini_cohere_fixed_ratio_is_labeled_with_documented_error_band(self):
+        """Gemini/Cohere's fixed 4.0 chars-per-token estimate is labeled, so
+        a caller is not silently shown a number that can be roughly 2x off
+        (T10 pre-mortem finding).
+
+        The "roughly 2x, worse for CJK/JSON, closer for English" claim in
+        ``FIXED_RATIO_ESTIMATOR_NOTE`` is asserted below against this
+        project's own o200k_base tokenizer (the Anthropic proxy), not left
+        as docstring narrative the test does not check (T10 remediation
+        MINOR finding — an earlier revision of this docstring stated
+        specific multipliers, roughly 3x CJK and roughly 1.6x JSON, that
+        nothing in the test body actually verified). Counts are pinned
+        exactly for this repo's tiktoken version; a tokenizer upgrade that
+        shifts them is a real change to the documented error band worth
+        seeing in a diff, not flakiness to hide.
+        """
+        from furl_ctx.tokenizers.registry import FIXED_RATIO_ESTIMATOR_NOTE
+        from furl_ctx.tokenizers.tiktoken_counter import TiktokenCounter
+
+        for model in ("gemini-1.5-pro", "command-r-plus"):
+            TokenizerRegistry.clear_cache()
+            tokenizer = get_tokenizer(model)
+
+            assert isinstance(tokenizer, EstimatingTokenCounter)
+            assert tokenizer.proxy_for == "fixed_ratio_estimate"
+
+        assert "4.0 chars-per-token" in FIXED_RATIO_ESTIMATOR_NOTE
+        assert "2x" in FIXED_RATIO_ESTIMATOR_NOTE
+
+        # The error band itself, measured against this project's own
+        # o200k_base tokenizer standing in for the real Gemini/Cohere
+        # tokenizers this project cannot access either.
+        real = TiktokenCounter("claude-sonnet-4-5-20250929")
+        fixed = EstimatingTokenCounter(chars_per_token=4.0)
+
+        cjk = "东京タワーは高いです。北京烤鸭很好吃。한국어 텍스트도 있다."
+        json_sample = (
+            '{"id": 42, "name": "widget", "tags": ["a", "b", "c"], '
+            '"active": true, "meta": {"x": 1, "y": 2}}'
+        )
+        english = "The quick brown fox jumps over the lazy dog near the riverbank at dawn."
+
+        # CJK: the fixed ratio undercounts by exactly 3x for this sample.
+        assert real.count_text(cjk) == 24
+        assert fixed.count_text(cjk) == 8
+
+        # Structured JSON: also meaningfully undercounted, though less than CJK.
+        assert real.count_text(json_sample) == 44
+        assert fixed.count_text(json_sample) == 24
+
+        # Plain English prose: the fixed ratio stays within about 12%.
+        assert real.count_text(english) == 16
+        assert fixed.count_text(english) == 18
+
+    def test_gemini_cohere_fixed_ratio_construction_never_warns(self, caplog):
+        """Selecting a Gemini/Cohere model must NOT log at construction
+        time, even across N fresh constructions (T10 remediation, MAJOR
+        finding, same root cause and fix as
+        ``test_claude_proxy_construction_never_warns``)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="furl_ctx.tokenizers.registry"):
+            for _ in range(5):
+                TokenizerRegistry.clear_cache()
+                get_tokenizer("gemini-1.5-pro")
+
+        assert not any("2x" in record.getMessage() for record in caplog.records)
+
     def test_get_unknown_model_fallback(self):
         """Test fallback for unknown model."""
         tokenizer = get_tokenizer("unknown-model-xyz")
