@@ -45,6 +45,7 @@ fallback. Build it locally with `scripts/build_rust_extension.sh`
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -857,6 +858,24 @@ class SmartCrusher(Transform):
                 ccr_hash,
             )
             return
+        # Hash-verify the fetched bytes actually hash to the key we are about to
+        # persist them under. Every content-addressed CCR key the mirror reaches
+        # here (whole-blob, per-row chunk, opaque blob) is ``SHA-256(payload)``
+        # truncated to the key's own width — 12 hex legacy, 24 hex current — so
+        # ``sha256(bytes)[:len(key)] == key``. A mismatch means ``ccr_get``
+        # returned FOREIGN bytes: a store collision that slipped the producer,
+        # or corruption. The Rust store's collision guard already drops such a
+        # binding, but this is the last line of defense on the Python side —
+        # never persist wrong bytes under a key (a later ``retrieve`` would
+        # serve them as truth). Raising routes through ``compress()``'s
+        # fail-open boundary, which reverts to the ORIGINAL rows. ``#rows``
+        # index keys never reach here (handled by the early return above).
+        computed = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[: len(ccr_hash)]
+        if computed != ccr_hash.lower():
+            raise CcrMirrorError(
+                f"CCR mirror: bytes fetched for hash {ccr_hash} do not hash to it "
+                f"(computed {computed}); refusing to store foreign content under the key"
+            )
         try:
             from ..cache.compression_store import DurableWriteError, get_compression_store
         except ImportError as e:

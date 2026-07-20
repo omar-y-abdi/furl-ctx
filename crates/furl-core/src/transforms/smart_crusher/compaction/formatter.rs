@@ -36,7 +36,7 @@
 use serde_json::{json, Value};
 
 use super::encodings;
-use super::ir::{CellValue, ColumnEncoding, Compaction, OpaqueKind, Row, Schema};
+use super::ir::{CellValue, ColumnEncoding, Compaction, FieldSpec, OpaqueKind, Row, Schema};
 use crate::ccr::marker_for_opaque;
 
 // ─────────────────── CSV-schema preamble grammar markers ───────────────────
@@ -494,7 +494,7 @@ fn write_table(
                     // Unreachable for stamped columns; degrade verbatim.
                     None => format_cell(c),
                 },
-                _ => format_cell(c),
+                _ => format_row_cell(c, f),
             };
             rendered.push(cell);
             slot += 1;
@@ -599,6 +599,26 @@ pub(super) fn csv_render_str(s: &str) -> String {
 /// declines EXACTLY the names this formatter cannot ship safely.
 pub(super) fn column_name_breaks_grammar(name: &str) -> bool {
     name.starts_with("__") || name.contains([':', ',', '{', '}', '=', '"', '\n', '\r'])
+}
+
+/// Render a row cell with its column-type context.
+///
+/// Identical to [`format_cell`] EXCEPT in a `json`-tagged (type-mixed)
+/// column, where a `Scalar` string cell is CSV-quoted so the reference
+/// decoder reads it back as the EXACT string. A bare string in a `json`
+/// column is `json.loads`-coerced by the decoder — `"200"` -> `200`,
+/// `"true"` -> `True`, `"null"` -> `None` (T1) — while a quoted cell whose
+/// payload is not a JSON container decodes verbatim as a string. Container-
+/// looking strings that a quoted cell still cannot disambiguate from a real
+/// container are declined upstream by [`Compaction::is_decoder_verifiable`],
+/// so they never reach this renderer on the lossless tier.
+fn format_row_cell(c: &CellValue, f: &FieldSpec) -> String {
+    if f.type_tag == "json" {
+        if let CellValue::Scalar(Value::String(s)) = c {
+            return csv_quote(s);
+        }
+    }
+    format_cell(c)
 }
 
 fn format_cell(c: &CellValue) -> String {
@@ -1007,14 +1027,17 @@ mod tests {
 
     #[test]
     fn csv_formatter_nested_cell_inline_json() {
+        // A GENUINE array-of-objects value (not a string) recurses into a
+        // Nested cell, JSON-rendered then CSV-quoted, so a `_compaction`
+        // substring appears inside quotes. String-origin arrays are kept
+        // verbatim instead (T2 — see
+        // `compactor::tests::stringified_json_array_stays_verbatim_string`).
         let items = vec![
-            json!({"event": "batch", "payload": r#"[{"x":1},{"x":2},{"x":3}]"#}),
-            json!({"event": "batch", "payload": r#"[{"x":4},{"x":5}]"#}),
+            json!({"event": "batch", "payload": [{"x":1},{"x":2},{"x":3}]}),
+            json!({"event": "batch", "payload": [{"x":4},{"x":5}]}),
         ];
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
-        // Nested compaction is JSON-rendered then CSV-quoted, so a
-        // `_compaction":"table"` substring should appear inside quotes.
         assert!(out.contains("_compaction"), "got: {out}");
     }
 
@@ -1485,6 +1508,41 @@ mod tests {
             })
             .collect();
         assert_eq!(recovered, originals, "affix round-trip must be exact");
+    }
+
+    #[test]
+    fn csv_json_column_quotes_scalar_string_cells() {
+        // T1: in a `json`-tagged (type-mixed) column a scalar-looking string
+        // must render CSV-QUOTED so the reference decoder reads it back as the
+        // exact string instead of `json.loads`-coercing a bare `200` to an int.
+        let items: Vec<Value> = (0..6)
+            .map(|i| {
+                if i % 2 == 0 {
+                    json!({"id": i, "code": "200"})
+                } else {
+                    json!({"id": i, "code": 500})
+                }
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        let out = CsvSchemaFormatter::new().format(&c);
+        let decl = out.lines().next().unwrap();
+        assert!(
+            decl.contains("code:json"),
+            "expected a json column; decl: {decl}"
+        );
+        // The string cell renders quoted; a bare, unquoted `200` line (the
+        // coercion bug) must NOT appear.
+        assert!(out.contains("\"200\""), "scalar-string not quoted:\n{out}");
+        assert!(
+            !out.lines().any(|l| l == "200"),
+            "scalar-string rendered BARE (decoder would coerce to int):\n{out}"
+        );
+        // The real int still renders bare.
+        assert!(
+            out.lines().any(|l| l == "500"),
+            "int cell should render bare:\n{out}"
+        );
     }
 
     // ── Head-dict fold (CSV) ──
@@ -2025,9 +2083,11 @@ mod tests {
 
     #[test]
     fn markdown_kv_nested_cell_inline_json() {
+        // As above: a GENUINE array-of-objects recurses into a Nested cell.
+        // String-origin arrays are kept verbatim (T2).
         let items = vec![
-            json!({"event": "batch", "payload": r#"[{"x":1},{"x":2},{"x":3}]"#}),
-            json!({"event": "batch", "payload": r#"[{"x":4},{"x":5}]"#}),
+            json!({"event": "batch", "payload": [{"x":1},{"x":2},{"x":3}]}),
+            json!({"event": "batch", "payload": [{"x":4},{"x":5}]}),
         ];
         let c = compact(&items, &cfg());
         let out = MarkdownKvFormatter::new().format(&c);

@@ -184,10 +184,10 @@ impl CcrStore for InMemoryCcrStore {
     fn put(&self, hash: &str, payload: &str) {
         // Claim a fresh generation *before* touching either the map or
         // the order queue. This is a global counter — each put (insert
-        // or overwrite) gets a unique, monotonically increasing stamp.
+        // or refresh) gets a unique, monotonically increasing stamp.
         let gen = self.generation.fetch_add(1, Ordering::Relaxed);
 
-        // Overwrite fast-path: key already exists.
+        // Existing-key path: the key already holds an entry.
         //
         // IMPORTANT — lock order discipline:
         //   Rule: acquire `order` mutex BEFORE any DashMap shard lock.
@@ -196,40 +196,78 @@ impl CcrStore for InMemoryCcrStore {
         //   `order` while holding it would invert the order (shard→order)
         //   and deadlock with eviction (order→shard).
         //
-        //   Solution: use `get_mut` as the test, mutate under its lock,
-        //   then DROP the RefMut, and ONLY THEN lock `order`. If `get_mut`
-        //   returns `None` (key was removed between intent and attempt —
-        //   e.g. a concurrent TTL expiry or capacity eviction), we fall
-        //   through to the new-entry path, which always stores the payload.
-        //   This mirrors the baseline's fall-through and preserves Contract
-        //   #1 (no silent loss): a `put()` call always results in a stored
-        //   entry.
-        let overwritten = if let Some(mut existing) = self.map.get_mut(hash) {
-            // Mutate fully under the shard write-lock.
-            existing.payload = payload.to_string();
-            existing.inserted = Instant::now();
-            existing.generation = gen;
-            true
+        //   Solution: use `get_mut` as the TEST, act under its lock, then
+        //   DROP the RefMut, and ONLY THEN lock `order` / touch another
+        //   shard. If `get_mut` returns `None` (key absent, or removed
+        //   between intent and attempt — a concurrent TTL expiry or
+        //   capacity eviction), we fall through to the new-entry path.
+        //
+        // Two outcomes for an existing key — the store is CONTENT-ADDRESSED
+        // (key = hash of payload), so:
+        //   * SAME payload -> content-addressed dedup: an idempotent refresh
+        //     (bump generation + timestamp). Normal, common, always kept.
+        //   * DIFFERENT payload -> a TRUE hash collision (astronomically rare
+        //     at a 24-hex/96-bit key). Two distinct payloads under one key are
+        //     indistinguishable at retrieval; serving EITHER would hand one
+        //     marker the OTHER's bytes — silent corruption (T3). We DROP the
+        //     ambiguous binding: remove the entry and REFUSE the new payload,
+        //     so every marker on the key resolves to a LOUD miss instead of
+        //     foreign content. Mirrors the Python `CompressionStore` guard
+        //     (audit #9). This deliberately relaxes the old "a put always
+        //     stores" contract for the collision case: a loud miss is
+        //     recoverable (recompute), foreign bytes are not.
+        enum Existing {
+            Refreshed,
+            Collision,
+        }
+        let outcome = if let Some(mut existing) = self.map.get_mut(hash) {
+            if existing.payload == payload {
+                // Idempotent refresh, fully under the shard write-lock.
+                existing.inserted = Instant::now();
+                existing.generation = gen;
+                Some(Existing::Refreshed)
+            } else {
+                Some(Existing::Collision)
+            }
             // RefMut guard drops here, releasing the shard write-lock.
         } else {
-            false
+            None
         };
-        if overwritten {
-            // Push a fresh token for the updated generation so that the
-            // OLD token becomes a harmless tombstone (gen-mismatch skip).
-            // Lock order: shard already released above, so order→shard is
-            // maintained.
-            let mut guard = self.order.lock().expect("ccr order mutex poisoned");
-            guard.push_back((hash.to_string(), gen));
-            // Compact if tombstones have accumulated.
-            if guard.len() > self.capacity * TOMBSTONE_K {
-                self.compact_order_queue(&mut guard);
+        match outcome {
+            Some(Existing::Refreshed) => {
+                // Push a fresh token for the updated generation so that the
+                // OLD token becomes a harmless tombstone (gen-mismatch skip).
+                // Lock order: shard already released above, so order→shard is
+                // maintained.
+                let mut guard = self.order.lock().expect("ccr order mutex poisoned");
+                guard.push_back((hash.to_string(), gen));
+                if guard.len() > self.capacity * TOMBSTONE_K {
+                    self.compact_order_queue(&mut guard);
+                }
+                return;
             }
-            return;
+            Some(Existing::Collision) => {
+                // Drop the ambiguous binding. `remove_if` re-checks under the
+                // shard write-lock that the payload is STILL different (a
+                // concurrent put may have refreshed it to the same content,
+                // which is fine to keep). The removed key's stale order token
+                // becomes a harmless absent-key/gen-mismatch tombstone the
+                // eviction loop skips — so no fresh token is pushed.
+                self.map
+                    .remove_if(hash, |_, entry| entry.payload != payload);
+                tracing::error!(
+                    hash = %hash,
+                    "CCR hash collision: same key, different payload; dropping the \
+                     ambiguous binding so retrieval loud-misses instead of serving \
+                     foreign content"
+                );
+                return;
+            }
+            None => {}
         }
         // Fall-through: key was absent (new entry) or was concurrently
-        // removed between our `get_mut` and now. Either way, store the
-        // payload as a fresh entry so this put is never a no-op.
+        // removed between our `get_mut` and now. Store the payload as a
+        // fresh entry so a genuine first write is never a no-op.
 
         // New entry path. Take the order lock first (lock-order rule),
         // then insert into the map.
@@ -342,12 +380,60 @@ mod tests {
     }
 
     #[test]
-    fn put_overwrites_under_same_hash() {
+    fn put_same_key_same_payload_refreshes_idempotently() {
+        // Content-addressed dedup: re-storing the SAME payload under the same
+        // key is the normal idempotent path (generation + timestamp refresh
+        // only). It stays resolvable and is NEVER treated as a collision.
+        let store = InMemoryCcrStore::new();
+        store.put("h", "same-content");
+        store.put("h", "same-content");
+        assert_eq!(store.get("h"), Some("same-content".to_string()));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn put_collision_different_payload_drops_binding() {
+        // NEW CONTRACT (T3): a same-key / DIFFERENT-payload put is a true hash
+        // collision. The store must NOT silently overwrite — that let a dropped
+        // row recover as ANOTHER row's content (silent corruption). It drops the
+        // ambiguous binding and refuses the new payload, so every marker on the
+        // key resolves to a LOUD miss (None) instead of FOREIGN content. This
+        // mirrors the Python `CompressionStore` guard (audit #9). The prior
+        // `put_overwrites_under_same_hash` test pinned the silent-overwrite
+        // behavior this fix removes.
         let store = InMemoryCcrStore::new();
         store.put("h", "first");
-        store.put("h", "second");
-        assert_eq!(store.get("h"), Some("second".to_string()));
-        assert_eq!(store.len(), 1);
+        store.put("h", "second"); // same key, different payload = collision
+        assert_eq!(
+            store.get("h"),
+            None,
+            "collision must drop the binding so retrieval loud-misses"
+        );
+        assert_eq!(
+            store.len(),
+            0,
+            "neither payload is served after a collision"
+        );
+    }
+
+    #[test]
+    fn legacy_twelve_hex_key_round_trips_alongside_wide_key() {
+        // Backward compatibility: existing stores hold 12-hex keys emitted
+        // before the recovery key was widened to 24 hex. The store keys on the
+        // raw string, so a 12-hex legacy key round-trips exactly like a 24-hex
+        // current key — legacy `<<ccr:HASH>>` markers still resolve.
+        let store = InMemoryCcrStore::new();
+        store.put("09659eb7ee43", r#"["legacy-row"]"#); // 12-hex legacy
+        assert_eq!(
+            store.get("09659eb7ee43"),
+            Some(r#"["legacy-row"]"#.to_string())
+        );
+        store.put("09659eb7ee438a05005562f5", r#"["current-row"]"#); // 24-hex current
+        assert_eq!(
+            store.get("09659eb7ee438a05005562f5"),
+            Some(r#"["current-row"]"#.to_string())
+        );
+        assert_eq!(store.len(), 2, "both widths coexist");
     }
 
     #[test]
@@ -413,15 +499,17 @@ mod tests {
         assert!(!store.is_empty());
     }
 
-    /// ABA test: overwriting a key must NOT allow the stale pre-overwrite
-    /// order token to evict the live re-inserted entry.
+    /// ABA test: refreshing a key (idempotent same-payload re-put) must NOT
+    /// allow the stale pre-refresh order token to evict the live entry.
     ///
-    /// Setup: capacity=2.
-    ///   1. put("a", ...) → order: [(a,0)]
-    ///   2. put("b", ...) → order: [(a,0),(b,1)]
-    ///   3. put("a", ...) — overwrite → order: [(a,0),(b,1),(a,2)]; a's
-    ///      gen is now 2, so the (a,0) token is a stale tombstone.
-    ///   4. put("c", ...) → eviction needed; pops (a,0) — gen mismatch
+    /// Setup: capacity=2. Same-payload re-puts because the store is
+    /// content-addressed — a DIFFERENT payload under one key is a collision
+    /// (dropped), so only a same-payload refresh re-stamps the generation.
+    ///   1. put("a", va) → order: [(a,0)]
+    ///   2. put("b", vb) → order: [(a,0),(b,1)]
+    ///   3. put("a", va) — refresh → order: [(a,0),(b,1),(a,2)]; a's gen is
+    ///      now 2, so the (a,0) token is a stale tombstone.
+    ///   4. put("c", vc) → eviction needed; pops (a,0) — gen mismatch
     ///      (live gen=2 ≠ 0), skip; pops (b,1) — gen match, evict b.
     ///      Now map.len()==1 (<2), insert c. Map: {a,c}.
     ///
@@ -430,16 +518,17 @@ mod tests {
     ///
     /// On the baseline FIFO-by-key implementation:
     ///   - put("a") inserts order token "a".
-    ///   - put("a") overwrite does NOT push another token (returns early).
+    ///   - put("a") refresh does NOT push another token (returns early).
     ///   - put("c") triggers eviction; pops "a" (front) → removes live a.
     ///   - Result: a is None (WRONG), b survives (wrong eviction choice).
     #[test]
-    fn aba_overwrite_does_not_evict_live_reinserted_entry() {
+    fn aba_refresh_does_not_evict_live_reinserted_entry() {
         let store = InMemoryCcrStore::with_capacity_and_ttl(2, DEFAULT_TTL);
-        store.put("a", "first_a");
+        store.put("a", "a_val");
         store.put("b", "b_val");
-        // Overwrite "a" — bumps generation, pushes fresh token.
-        store.put("a", "second_a");
+        // Refresh "a" with the SAME payload — bumps generation, pushes fresh
+        // token (a DIFFERENT payload would be a collision and drop the entry).
+        store.put("a", "a_val");
         // Adding "c" forces eviction. The stale (a, gen=0) token should
         // be skipped; (b, gen=1) is the oldest live entry and gets evicted.
         store.put("c", "c_val");
@@ -451,8 +540,8 @@ mod tests {
         );
         assert_eq!(
             store.get("a"),
-            Some("second_a".to_string()),
-            "'a' was re-inserted (live gen) and must NOT be evicted by stale token"
+            Some("a_val".to_string()),
+            "'a' was refreshed (live gen) and must NOT be evicted by stale token"
         );
         assert_eq!(
             store.get("b"),
@@ -466,11 +555,14 @@ mod tests {
         );
     }
 
-    /// Tombstone-bound test: repeatedly overwriting a small set of keys
+    /// Tombstone-bound test: repeatedly refreshing a small set of keys
     /// under a larger capacity must keep the order queue bounded.
     ///
     /// With capacity=8 and TOMBSTONE_K=2, the queue must never grow
-    /// beyond 8*2=16 entries. We perform 10_000 overwrites across 4 keys.
+    /// beyond 8*2=16 entries. We perform 10_000 same-payload refreshes
+    /// across 4 keys (a DIFFERENT payload would be a collision-drop, not a
+    /// refresh — each refresh still pushes an order token, which is what
+    /// stresses the tombstone bound).
     ///
     /// On the baseline (no compaction), the queue would grow to 10_000 +
     /// initial 4 = 10_004 entries — unbounded memory growth.
@@ -479,14 +571,17 @@ mod tests {
         let cap = 8usize;
         let store = InMemoryCcrStore::with_capacity_and_ttl(cap, DEFAULT_TTL);
         let keys = ["x0", "x1", "x2", "x3"];
+        // Each key keeps ONE stable payload (content-addressed): re-putting it
+        // is an idempotent refresh, not a collision.
+        let payloads = ["p0", "p1", "p2", "p3"];
         // Initial inserts.
-        for k in &keys {
-            store.put(k, "init");
+        for (k, p) in keys.iter().zip(payloads.iter()) {
+            store.put(k, p);
         }
-        // 10_000 overwrites cycling through the same 4 keys.
+        // 10_000 same-payload refreshes cycling through the same 4 keys.
         for i in 0..10_000usize {
-            let k = keys[i % keys.len()];
-            store.put(k, &format!("v{i}"));
+            let j = i % keys.len();
+            store.put(keys[j], payloads[j]);
         }
 
         // All 4 live keys must still be readable.
@@ -494,7 +589,7 @@ mod tests {
         for k in &keys {
             assert!(
                 store.get(k).is_some(),
-                "key '{k}' must be readable after overwrites"
+                "key '{k}' must be readable after refreshes"
             );
         }
 

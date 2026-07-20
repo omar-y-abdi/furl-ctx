@@ -581,7 +581,8 @@ class CompressionStore:
                 instead of computing SHA-256(original)[:24]. Required when
                 the marker that points at this entry was emitted by a
                 producer with its own hash function (e.g. SmartCrusher's
-                Rust row-drop path uses SHA-256[:12]). If not a hex
+                Rust row-drop path emits SHA-256[:24] for new content, and
+                SHA-256[:12] for legacy keys only). If not a hex
                 string, raises ``ValueError``. The marker hash and the
                 store key MUST match — otherwise a ``furl_retrieve`` of the
                 marker hash misses even though the data is present.
@@ -627,8 +628,9 @@ class CompressionStore:
         # original. When the caller provides `explicit_hash`, use it
         # verbatim — required when the hash that ends up in the prompt
         # marker is produced by another component (e.g. the Rust
-        # SmartCrusher row-drop path emits SHA-256[:12], which the
-        # Python store has to mirror so the MCP furl_retrieve tool resolves it).
+        # SmartCrusher row-drop path emits SHA-256[:24] for new content, and
+        # SHA-256[:12] for legacy keys only, which the Python store has to
+        # mirror so the MCP furl_retrieve tool resolves it).
         # 24 chars (96 bits) was chosen for collision resistance under the
         # birthday bound: 50% collision probability at ~280 trillion entries
         # (2^48), versus ~4 billion (2^32) for the previous 16-char default.

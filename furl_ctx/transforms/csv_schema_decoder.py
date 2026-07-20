@@ -457,6 +457,17 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
             return None
         specs.append(spec)
 
+    # T12 fail-loud: duplicate column names make row reconstruction ambiguous
+    # — the row dict would silently OVERWRITE one value with the other (last
+    # write wins), losing data with no marker. A conformant producer never
+    # emits duplicate names (the Rust ``flatten_uniform_nested`` skips a
+    # flatten whose synthesized ``parent.key`` collides with an existing
+    # column), so this only fires on corrupt/adversarial input: decline the
+    # whole table rather than invent a reconstruction the output cannot prove.
+    names = [s.name for s in specs]
+    if len(names) != len(set(names)):
+        return None
+
     const_cols = [s for s in specs if s.has_const]
     arith_cols = [s for s in specs if s.arith is not None]
     var_cols = [s for s in specs if not s.has_const and s.arith is None]

@@ -258,9 +258,9 @@ pub fn emit_opaque_ccr_marker(
     kind: &OpaqueKind,
     store: Option<&Arc<dyn CcrStore>>,
 ) -> (String, DroppedRef) {
-    // 12-char SHA-256 hex prefix via the consolidated `ccr::persist`
+    // 24-hex (96-bit) SHA-256 prefix via the consolidated `ccr::persist`
     // implementation (ARCH-5) — same key with or without a store.
-    let hash = crate::ccr::persist::sha6_hex12(payload.as_bytes());
+    let hash = crate::ccr::persist::sha256_recovery_key(payload.as_bytes());
     if let Some(s) = store {
         s.put(&hash, payload);
     }

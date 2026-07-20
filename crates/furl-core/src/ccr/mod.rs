@@ -37,9 +37,18 @@ pub(crate) use markers::{
 /// Pluggable CCR storage backend. `Send + Sync` so it can sit behind an
 /// `Arc` and be shared across threads in the engine.
 pub trait CcrStore: Send + Sync {
-    /// Stash `payload` under `hash`. If the hash already exists, the
-    /// new payload overwrites — same hash should mean same content, so
-    /// re-storing is idempotent.
+    /// Stash `payload` under `hash`. The store is content-addressed, so
+    /// `hash` should uniquely determine `payload`:
+    ///
+    /// * hash absent → the payload is stored;
+    /// * hash present with the SAME payload → idempotent refresh (re-storing
+    ///   the same content is normal dedup);
+    /// * hash present with a DIFFERENT payload → a true hash collision. The
+    ///   binding is DROPPED (the entry is removed and the new payload refused)
+    ///   and the collision is logged, so every marker on the key resolves to a
+    ///   LOUD miss instead of FOREIGN content — a recoverable recompute rather
+    ///   than silent corruption (T3). Mirrors the Python `CompressionStore`
+    ///   collision guard (audit #9).
     fn put(&self, hash: &str, payload: &str);
 
     /// Look up `hash`. Returns `None` if missing or expired.
@@ -78,7 +87,7 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(1800);
 // CCR marker construction lives in `markers.rs` — the single
 // construction point every Rust producer routes through. CCR *key
 // algorithms* live in `persist.rs` — one `md5_hex_24` (diff/log/search/
-// text cache keys) and one `sha6_hex12` (crusher row hashes, opaque
-// prefixes), consolidated from the per-producer copies (ARCH-5) so a
-// hash change can only happen in one place. Grammar and hashing remain
-// deliberately separate concerns (separate modules).
+// text cache keys) and one `sha256_recovery_key` (crusher row hashes,
+// opaque prefixes; 24 hex / 96 bits), consolidated from the per-producer
+// copies (ARCH-5) so a hash change can only happen in one place. Grammar
+// and hashing remain deliberately separate concerns (separate modules).

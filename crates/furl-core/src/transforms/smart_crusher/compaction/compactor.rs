@@ -291,20 +291,22 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
             }
             CellValue::Scalar(v.clone())
         }
-        CellClass::StringifiedJson(parsed) => {
-            // If the parsed JSON is an array of objects, recurse; else
-            // store the parsed value as a Scalar (un-escapes for free).
-            if let Value::Array(items) = &parsed {
-                if items.iter().all(|i| matches!(i, Value::Object(_))) && items.len() >= 2 {
-                    let sub = compact(items, cfg);
-                    if sub.was_compacted() {
-                        return CellValue::Nested(Box::new(sub));
-                    }
-                    // See the JsonArray arm above (PERF-5).
-                    return CellValue::DeclinedJson(parsed);
-                }
-            }
-            CellValue::Scalar(parsed)
+        CellClass::StringifiedJson(_) => {
+            // T2 fidelity: a value that ORIGINATED as a string is kept as the
+            // EXACT original string bytes — never deserialized. Parsing it
+            // (the old behaviour) let `flatten_uniform_nested` promote
+            // object-strings into dotted columns so the original string field
+            // vanished, and re-serialized array-strings dropped their interior
+            // whitespace — both silent, markerless corruption on the lossless
+            // path. `classify_string` still parses to gate CCR/opaque routing,
+            // but the cell it yields here is the verbatim source string.
+            //
+            // A container-string that lands in a type-mixed (`json`-tagged)
+            // column is then declined from the lossless tier by
+            // `Compaction::is_decoder_verifiable`: a quoted container-string
+            // is indistinguishable from a real container cell to the reference
+            // decoder, so the array routes to the recoverable tier instead.
+            CellValue::Scalar(v.clone())
         }
         CellClass::Opaque(kind) => {
             // Strict lossless-or-passthrough callers disable substitution
@@ -373,6 +375,27 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
         };
 
         let parent_name = specs[i].name.clone();
+
+        // T12 fail-closed: synthesized `parent.key` columns ship as RAW names
+        // in the declaration with no free-name check. If any collides with an
+        // existing column — a literal top-level `parent.key`, or a sibling
+        // already flattened to the same dotted name — flattening would emit
+        // two identically named columns and the reference decoder would
+        // silently OVERWRITE one value (last write wins). Skip the flatten for
+        // this column; it stays a nested-object cell (CSV-quoted JSON, decoded
+        // back to the object) so both distinct values survive.
+        let collides = inner_keys.iter().any(|k| {
+            let synthesized = format!("{parent_name}.{k}");
+            specs
+                .iter()
+                .enumerate()
+                .any(|(idx, s)| idx != i && s.name == synthesized)
+        });
+        if collides {
+            i += 1;
+            continue;
+        }
+
         let new_specs: Vec<FieldSpec> = inner_keys
             .iter()
             .map(|k| FieldSpec {
@@ -1086,11 +1109,11 @@ fn type_tag_for(v: &Value) -> &'static str {
 }
 
 fn hash_opaque(bytes: &[u8]) -> String {
-    // 12-char SHA-256 hex prefix — collision-resistant enough for a
-    // single payload in flight, short enough to keep the marker compact.
-    // Algorithm consolidated in `ccr::persist` (ARCH-5); this domain
+    // 24-hex (96-bit) SHA-256 prefix — collision-resistant well past this
+    // store's request-window population, short enough to keep the marker
+    // compact. Algorithm consolidated in `ccr::persist` (ARCH-5); this domain
     // alias stays so call sites and tests keep their vocabulary.
-    crate::ccr::persist::sha6_hex12(bytes)
+    crate::ccr::persist::sha256_recovery_key(bytes)
 }
 
 // ─────────────────────────── heterogeneous bucketing ───────────────────────────
@@ -1288,6 +1311,173 @@ mod tests {
     }
 
     #[test]
+    fn stringified_json_object_stays_string_scalar_not_flattened() {
+        // T2: a value that ORIGINATED as a JSON-object string is kept verbatim
+        // as a Scalar(String), never parsed + flattened into dotted columns
+        // (which dropped the original `payload` field entirely).
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "payload": format!("{{\"a\": {i}}}")}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, rows, .. } => {
+                let names = schema.field_names();
+                assert!(
+                    names.contains(&"payload"),
+                    "payload column vanished: {names:?}"
+                );
+                assert!(
+                    !names.iter().any(|n| n.starts_with("payload.")),
+                    "object-string was flattened into dotted columns: {names:?}"
+                );
+                let col = schema
+                    .fields
+                    .iter()
+                    .position(|f| f.name == "payload")
+                    .unwrap();
+                match &rows[0].0[col] {
+                    CellValue::Scalar(Value::String(s)) => assert_eq!(s, "{\"a\": 0}"),
+                    other => panic!("expected verbatim Scalar(String), got {other:?}"),
+                }
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stringified_json_array_keeps_exact_bytes() {
+        // T2: an array-string keeps its interior whitespace (no parse +
+        // compact re-serialization that dropped the spaces).
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "arr": format!("[1, 2, {i}]")}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, rows, .. } => {
+                let col = schema.fields.iter().position(|f| f.name == "arr").unwrap();
+                match &rows[0].0[col] {
+                    CellValue::Scalar(Value::String(s)) => assert_eq!(s, "[1, 2, 0]"),
+                    other => panic!("expected verbatim Scalar(String), got {other:?}"),
+                }
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn literal_dotted_key_collision_skips_flatten() {
+        // T12: a literal top-level `m.k` beside a nested `{"m": {"k": ..}}`
+        // must NOT synthesize a colliding `m.k` column. The nested `m` stays
+        // an object column; the literal `m.k` stays its own column, so both
+        // distinct values survive instead of one silently overwriting the
+        // other on decode.
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "m.k": format!("lit-{i}"), "m": {"k": 1000 + i}}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                let dotted = names.iter().filter(|n| **n == "m.k").count();
+                assert_eq!(dotted, 1, "duplicate m.k columns synthesized: {names:?}");
+                assert!(
+                    names.contains(&"m"),
+                    "nested `m` object column dropped: {names:?}"
+                );
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_column_container_string_declines_lossless() {
+        // T1/T2: a `json`-tagged (type-mixed) column holding a container-
+        // looking STRING cannot ship losslessly — a quoted container-string
+        // is indistinguishable from a real container to the reference
+        // decoder, so the table declines (`is_decoder_verifiable` == false).
+        let items: Vec<Value> = (0..6)
+            .map(|i| {
+                if i % 2 == 0 {
+                    json!({"id": i, "cfg": "{\"a\": 1}"}) // container STRING
+                } else {
+                    json!({"id": i, "cfg": i}) // real int -> mixes to `json`
+                }
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        match &c {
+            Compaction::Table { schema, .. } => {
+                let spec = schema.fields.iter().find(|f| f.name == "cfg").unwrap();
+                assert_eq!(spec.type_tag, "json", "expected a json-tagged mixed column");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        assert!(
+            !c.is_decoder_verifiable(),
+            "a json column with a container-string must decline the lossless tier"
+        );
+    }
+
+    #[test]
+    fn json_column_scalar_string_stays_verifiable() {
+        // Contrast: scalar-looking strings ("200") in a json column ARE
+        // quoted by the formatter and round-trip, so the table stays
+        // decoder-verifiable — only container-strings decline.
+        let items: Vec<Value> = (0..6)
+            .map(|i| {
+                if i % 2 == 0 {
+                    json!({"id": i, "code": "200"}) // scalar-looking STRING
+                } else {
+                    json!({"id": i, "code": 500}) // real int
+                }
+            })
+            .collect();
+        let c = compact(&items, &cfg());
+        match &c {
+            Compaction::Table { schema, .. } => {
+                let spec = schema.fields.iter().find(|f| f.name == "code").unwrap();
+                assert_eq!(spec.type_tag, "json");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        assert!(
+            c.is_decoder_verifiable(),
+            "a json column with only scalar-looking strings must stay verifiable"
+        );
+    }
+
+    #[test]
+    fn json_column_serde_rejected_container_string_still_declines() {
+        // The decline gate keys on cell SHAPE, not a serde re-parse. Python
+        // `json.loads` accepts NaN / Infinity and deep nesting that
+        // `serde_json` rejects, and it also skips leading JSON whitespace, so a
+        // container-SHAPED string that serde would fail must still decline, else
+        // it ships quoted and the reference decoder parses it as a container
+        // (silent loss). Includes a leading-whitespace variant for the trim.
+        let deep = "[".repeat(128) + &"]".repeat(128);
+        for bad in [
+            "[NaN]",
+            "[Infinity]",
+            "{\"x\": NaN}",
+            " [NaN]",
+            "\t[1]",
+            deep.as_str(),
+        ] {
+            let items: Vec<Value> = (0..6)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        json!({ "id": i, "cfg": bad })
+                    } else {
+                        json!({ "id": i, "cfg": i })
+                    }
+                })
+                .collect();
+            let c = compact(&items, &cfg());
+            assert!(
+                !c.is_decoder_verifiable(),
+                "container-shaped string {bad:?} must decline the lossless tier"
+            );
+        }
+    }
+
+    #[test]
     fn grammar_breaking_key_declines_compaction() {
         // COR-15: column names ship RAW in the `[N]{...}` declaration and
         // the `__dict:`/`__affix:`/`__head:` preamble lines — nothing
@@ -1340,23 +1530,36 @@ mod tests {
     }
 
     #[test]
-    fn stringified_json_array_recurses() {
+    fn stringified_json_array_stays_verbatim_string() {
+        // T2: a value that ORIGINATED as a stringified-JSON array is kept as
+        // the EXACT original string, never parsed into a recursive sub-table.
+        // The old recurse-into-Nested behaviour dropped the string's interior
+        // bytes and hid the original behind an un-decodable Nested cell on the
+        // lossless path. Genuine (non-string) arrays still recurse — see
+        // `formatter::tests::csv_formatter_nested_cell_inline_json`.
         let items = vec![
             json!({"event": "batch", "payload": r#"[{"x":1},{"x":2},{"x":3}]"#}),
             json!({"event": "batch", "payload": r#"[{"x":4},{"x":5}]"#}),
         ];
         match compact(&items, &cfg()) {
-            Compaction::Table { rows, .. } => {
-                // payload column should be Nested(Compaction::Table).
-                let payload_idx = 1; // depends on order; check both
-                let cell0 = &rows[0].0[0];
-                let cell1 = &rows[0].0[1];
-                let nested_count = [cell0, cell1]
+            Compaction::Table { schema, rows, .. } => {
+                for row in &rows {
+                    assert!(
+                        row.0.iter().all(|c| !matches!(c, CellValue::Nested(_))),
+                        "stringified array must not recurse into a Nested cell"
+                    );
+                }
+                let col = schema
+                    .fields
                     .iter()
-                    .filter(|c| matches!(***c, CellValue::Nested(_)))
-                    .count();
-                let _ = payload_idx;
-                assert_eq!(nested_count, 1, "expected exactly one Nested cell");
+                    .position(|f| f.name == "payload")
+                    .unwrap();
+                match &rows[0].0[col] {
+                    CellValue::Scalar(Value::String(s)) => {
+                        assert_eq!(s, r#"[{"x":1},{"x":2},{"x":3}]"#)
+                    }
+                    other => panic!("expected verbatim Scalar(String), got {other:?}"),
+                }
             }
             other => panic!("expected Table, got {other:?}"),
         }
@@ -1800,6 +2003,6 @@ mod tests {
         let h3 = hash_opaque(b"different");
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
-        assert_eq!(h1.len(), 12);
+        assert_eq!(h1.len(), 24);
     }
 }
