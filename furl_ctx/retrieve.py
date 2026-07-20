@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from .cache.compression_store import CompressionStore, _active_ccr_store
-from .ccr.marker_grammar import hash_of_match, marker_patterns, sub_within_budget
+from .ccr.marker_grammar import hash_of_match, sub_within_budget, substitution_patterns
 from .ccr.retrieve_filters import FilterError, RetrieveFilters, apply_filters
 
 # Distinguishes "select_equals was omitted" from an explicit ``select_equals=None``
@@ -182,7 +182,7 @@ def resolve_markers(
     active = store or _active_ccr_store(session_id, agent_id)
 
     def _expand(text: str) -> str:
-        for pattern in marker_patterns():
+        for pattern in substitution_patterns():
 
             def _sub(match: Any) -> str:
                 # lazy: bulk expansion does NOT feed the retrieval-feedback loop
