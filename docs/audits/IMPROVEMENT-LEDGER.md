@@ -27,6 +27,7 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-19 | compression correctness, lossless type and byte fidelity | crates/furl-core compaction (compactor, formatter, ir), furl_ctx/transforms/csv_schema_decoder.py | fixed three silent value-corruption defects the reference decoder reconstructed to the wrong value with no CCR marker (audit T1/T2/T12): T1 mixed-type columns rendered a string bare so "200"/"true"/"null" decoded as int/bool/None, now CSV-quoted in json columns or declined to CCR when a container-string can't be disambiguated; T2 stringified-JSON fields were deserialized and object-strings flattened into dotted columns so the original vanished, now kept as verbatim string bytes; T12 a literal dotted key colliding with a synthesized flatten name silently overwrote a value, now the flatten is skipped and the decoder fails loud on duplicate columns. verify.run counters (degradations=6, silent_loss=0) and the benchmark baseline unchanged | #132 |
 | 2026-07-19 | security, retention honesty, hook version gating | plugins/furl/hooks/{pipe_compress,compress_tool_output,_furl_ccr_counters,session_start_banner}.py, furl_ctx/host_version.py (new), furl_ctx/ccr/mcp_server.py | pipe path now redacts built-in credential patterns (was env-only, a true no-op with nothing configured); plugin retention docs corrected to name the 1000-entry cap instead of a plain 24h claim, the audit's FURL_CCR_SPILL=1 flip withheld after proving it is a no-op for the namespaced store the plugin actually uses; PostToolUse compression claims now check the running Claude Code version via a new detector and stop overclaiming below 2.1.163 | #134 |
 | 2026-07-20 | correctness, dup-count display honesty, audit T5 | crates/furl-core smart_crusher/route.rs, plugins/furl skills/furl/SKILL.md, tests/test_dup_count_varies_sentinel.py | annotate_dup_counts stamped _dup_count:N on a kept representative that still showed row-0's concrete identity values, so a collapsed audit trail, heartbeat, or retry log read as one id or timestamp recurring N times when N distinct ids each occurred once; the representative now renders each excluded identity column that varies across the collapsed family as a `<varies>` sentinel while a column constant within the family keeps its real value, and _dup_count plus what gets dropped or recovered stay unchanged because persist_dropped hashes the original items not the annotated survivors; documented _dup_count and the `<varies>` sentinel in the model-facing SKILL.md where they appeared in no legend; verify.run silent_loss and hash_failures stayed 0 and the benchmark baseline was unchanged | #136 |
+| 2026-07-20 | retention, per-namespace CCR spill, audit T6 | furl_ctx/cache/compression_store.py, plugins/furl/.mcp.json, plugins/furl/hooks/{compress_tool_output,pipe_compress,pretool_pipe}.py, plugins/furl/{README.md,skills/furl/SKILL.md}, tests/test_ccr_spill_plugin_namespace_gap.py | `_build_namespace_store` now wires a per-namespace durable spill gated by `FURL_CCR_SPILL`, so a capacity-evicted entry is demoted to the namespace's own `ccr-ns-<digest>-spill.sqlite3` instead of dropped at the 1000-entry cap and stays retrievable past eviction; per-namespace and `-spill` suffixed so no tenant reads another's rows, deliberately skipping the global sqlite-primary guard that would otherwise leave the sqlite-backed plugin with no spill at all; the plugin now sets `FURL_CCR_SPILL` in `.mcp.json` and the hooks so retention is real, and the #134 gap pin flips to a spill HIT alongside an isolation test proving two namespaces spill to different 0600 files under a 0700 dir | #138 |
 
 ## Open candidates, fair game for future sessions
 
@@ -94,17 +95,6 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   active wheel-size pressure (hit PyPI's 10GB/project ceiling at v0.21.36),
   so converging these transitive versions (a `dashmap` bump may pull its
   hashbrown pin to 0.15.x) is worth a dedicated bump-and-recheck pass.
-- T6 real fix, PR #134: `FURL_CCR_SPILL=1` only wires a spill tier into
-  `get_compression_store`'s global singleton. The plugin never reaches that
-  path since every hook and the MCP server set `FURL_CCR_PROJECT_DIR`, which
-  routes through `resolve_ccr_namespace_store` -> `_build_namespace_store`
-  instead, and that function never wires a spill backend regardless of the
-  env var, on purpose, to avoid demoting every tenant into one shared file.
-  Proven with `tests/test_ccr_spill_plugin_namespace_gap.py`. Real fix needs
-  a per-namespace spill backend added to `_build_namespace_store` in
-  `furl_ctx/cache/compression_store.py`. Out of PR #134's file scope and
-  explicitly excluded from that batch's mandate, which forbade redesigning
-  cap accounting; needs its own design pass on the cap and spill interaction.
 - Residual COR-14 dotted-key ambiguity on a pathological uniform-nested shape
   such as `[{"a.b": {"c": i}, "a": {"b.c": i}}]`, surfaced by the PR #132
   adversarial review. Both branches flatten toward the same `a.b.c` dotted
