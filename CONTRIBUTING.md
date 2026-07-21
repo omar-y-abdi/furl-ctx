@@ -93,7 +93,8 @@ until they agree:
 - **Library version** (`pyproject.toml` `project.version`): release-please bumps it on the
   release PR. release-please has **no updater that can rewrite a version embedded inside a
   shell command**, so hand-sync the `furl-ctx[mcp]==X.Y.Z` pins in
-  `plugins/furl/hooks/hooks.json` and `plugins/furl/.mcp.json`, the same pin in the prose
+  `plugins/furl/hooks/hooks.json`, `plugins/furl/.mcp.json`, and `_FURL_CTX_PIN` in
+  `plugins/furl/hooks/pretool_pipe.py`, the same pin in the prose
   examples of `plugins/furl/skills/furl/SKILL.md` and `plugins/furl/README.md`, and
   `_ENGINE_VERSION` in `plugins/furl/hooks/session_start_banner.py` (the engine half of
   the SessionStart status line — moved out of `hooks.json` in the T7 version-gating fix),
@@ -103,6 +104,8 @@ until they agree:
   `plugins/furl/skills/furl/SKILL.md` frontmatter, and `_PLUGIN_VERSION` in
   `plugins/furl/hooks/session_start_banner.py` (the plugin half of the same
   `furl <version> · engine furl-ctx <version>` string).
+
+On the release-please release PR the `.release-please-manifest.json` version is bumped ahead of git tags until the post-merge tag lands, so `tests/test_release_manifest_tag_guard.py` skips its tag-drift assertion when the environment variable `FURL_RELEASE_PR_CONTEXT` equals `1`, which `ci.yml` sets automatically only for `release-please--` head branches; leave it unset everywhere else so the guard stays armed.
 
 **Public API surface:** The stable public API is what `furl_ctx` exports at the top level, including `compress()`, `retrieve()`, `purge()`, and `resolve_markers()`. Those signatures are what downstream integrations should depend on. Submodule internals under `furl_ctx.*` may change between releases, so import from the top-level package rather than from submodules. Pin a minor version for reproducible builds.
 

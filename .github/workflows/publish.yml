@@ -42,7 +42,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          python -m pip install --upgrade pip 'maturin>=1.9,<2.0' cyclonedx-bom
+          python -m pip install --upgrade pip 'maturin>=1.9,<2.0' 'cyclonedx-bom>=7,<8'
 
       - name: Build wheel + sdist
         run: |
@@ -54,7 +54,7 @@ jobs:
           pip install -e "."
           cyclonedx-py environment \
             --output-format json \
-            --outfile dist/furl-sbom.cdx.json
+            --output-file dist/furl-sbom.cdx.json
 
       - name: Upload SBOM to release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3

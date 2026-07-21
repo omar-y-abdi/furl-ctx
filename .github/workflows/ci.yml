@@ -232,6 +232,16 @@ jobs:
     needs: [changes, build-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # FURL_RELEASE_PR_CONTEXT arms the release-PR escape hatch in
+    # tests/test_release_manifest_tag_guard.py. A release-please release PR bumps
+    # .release-please-manifest.json ahead of its git tag, which does not exist
+    # until the PR merges, so the tag-drift guard would otherwise fail every
+    # release PR. This sets the variable to "1" only when the PR head branch is a
+    # release-please-- branch, and to empty for push, schedule, and
+    # workflow_dispatch runs where github.head_ref is empty, so the guard stays
+    # fully armed everywhere except release PRs. See that test's module docstring.
+    env:
+      FURL_RELEASE_PR_CONTEXT: ${{ startsWith(github.head_ref, 'release-please--') && '1' || '' }}
     strategy:
       fail-fast: false
       matrix:

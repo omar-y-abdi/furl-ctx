@@ -30,6 +30,21 @@ this file as part of `pytest tests`) sets ``fetch-tags: true`` on its checkout s
 specifically so this guard actually arms there instead of skipping on every PR — see
 the comment beside that setting.
 
+Release-PR escape hatch: a release-please release PR bumps
+``.release-please-manifest.json`` to the NEXT version while the matching tag does
+not exist until that PR merges and release-please tags the commit. With
+``fetch-tags: true`` the release PR's checkout sees the repo's other tags, so this
+guard would otherwise fail every release PR forever over a version that is merely
+not tagged yet. To let those PRs pass while the guard stays armed everywhere else,
+``test_manifest_version_has_matching_git_tag`` skips its tag assertion when the
+environment variable ``FURL_RELEASE_PR_CONTEXT`` holds the exact value ``"1"``.
+``ci.yml``'s ``test`` job sets that variable to ``"1"`` only when
+``github.head_ref`` starts with ``release-please--``, and to empty otherwise, so
+push, schedule, and workflow_dispatch runs keep the guard fully armed. Any other
+value, unset included, leaves the assertion armed. Because setting this variable
+outside a release-PR check run disarms a real supply-chain drift guard, only
+ci.yml's branch-scoped wiring should ever set it.
+
 Pure stdlib; shells out to the system ``git`` binary. A missing manifest, a manifest
 that fails to parse, or a manifest missing the ``.`` package is a hard failure,
 never a skip — only "we cannot see any tags at all" skips.
@@ -38,7 +53,9 @@ never a skip — only "we cannot see any tags at all" skips.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -52,6 +69,23 @@ _MANIFEST = _ROOT / ".release-please-manifest.json"
 # edit point, and a renamed/added package key fails loudly below rather than being
 # silently skipped over.
 _MANIFEST_PACKAGE_KEY = "."
+
+# Release-PR escape hatch. ci.yml's `test` job sets this to "1" only for
+# release-please-- head branches, and to empty everywhere else; see this module's
+# docstring for the full rationale. The exact-match boundary is deliberately
+# narrow: the variable disarms a supply-chain drift guard, so only the one value
+# ci.yml sets counts, and unset / "" / "0" / "true" all leave the guard armed.
+_RELEASE_PR_ENV_VAR = "FURL_RELEASE_PR_CONTEXT"
+
+
+def _release_pr_context(env_value: str | None) -> bool:
+    """Whether the guard is running inside a release-please release PR.
+
+    Total over ``str | None``: True for the single exact string ``"1"`` and False
+    for everything else, so a stray ``"true"``, ``" 1"``, ``"0"``, empty, or unset
+    value cannot silently disarm the tag-drift assertion.
+    """
+    return env_value == "1"
 
 
 def _load_manifest_version() -> str:
@@ -93,6 +127,17 @@ def test_manifest_version_has_matching_git_tag() -> None:
     version = _load_manifest_version()
     expected_tag = f"v{version}"
 
+    if _release_pr_context(os.environ.get(_RELEASE_PR_ENV_VAR)):
+        pytest.skip(
+            f"{_RELEASE_PR_ENV_VAR}=1: a release-please release PR legitimately "
+            "carries a manifest version bumped ahead of git tags until the "
+            "post-merge tag lands, so the tag-drift assertion is deliberately "
+            "skipped for this run. The structural manifest validation above still "
+            "ran. Setting this variable outside a release-PR check run disarms the "
+            "drift guard, so ci.yml sets it only for release-please-- head "
+            "branches; see this module's docstring."
+        )
+
     listed = subprocess.run(
         ["git", "tag", "-l"],
         cwd=_ROOT,
@@ -130,3 +175,46 @@ def test_manifest_version_has_matching_git_tag() -> None:
         f"merged (`git tag {expected_tag} <sha> && git push origin {expected_tag}`), "
         "or revert the manifest if the bump was a mistake."
     )
+
+
+# --- Release-PR escape hatch --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("1", True),
+        (None, False),
+        ("", False),
+        ("0", False),
+        ("true", False),
+        ("TRUE", False),
+        (" 1", False),
+    ],
+)
+def test_release_pr_context_decision(env_value: str | None, expected: bool) -> None:
+    """The pure boundary: only the exact string "1" arms the escape hatch."""
+    assert _release_pr_context(env_value) is expected
+
+
+def test_guard_skips_inside_release_pr_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the env var set to "1", the tag assertion is skipped, not evaluated."""
+    monkeypatch.setenv(_RELEASE_PR_ENV_VAR, "1")
+    with pytest.raises(pytest.skip.Exception):
+        test_manifest_version_has_matching_git_tag()
+
+
+def test_guard_armed_when_env_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the env var absent, the guard runs its real tag assertion and passes.
+
+    The manifest read is pinned to ``1.3.0``, which has a real ``v1.3.0`` tag in
+    this repo, so the assertion path runs to a deterministic pass regardless of any
+    in-flight release bump. Pinning is load-bearing: because ci.yml's ``code`` path
+    filter includes ``.release-please-manifest.json``, this test itself also runs
+    on release PRs, where the live manifest races ahead of the tags; reading the
+    live manifest here would make this very test fail the release PR it exists to
+    keep green.
+    """
+    monkeypatch.delenv(_RELEASE_PR_ENV_VAR, raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "_load_manifest_version", lambda: "1.3.0")
+    test_manifest_version_has_matching_git_tag()
