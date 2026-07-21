@@ -81,58 +81,6 @@ def gt_chrome_trace_full(corpus_str: str, _meta: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Corpus 2: chrome_trace_slice
-# ---------------------------------------------------------------------------
-
-
-def build_chrome_trace_slice() -> tuple[str, dict, str]:
-    """First 8000 trace events, in-memory (~4MB, below size-guard → crush path)."""
-    data = json.loads(TRACE_PATH.read_text(encoding="utf-8"))
-    events = data["traceEvents"]
-    slice_data = {**data["metadata"], "traceEvents": events[:8000]}
-    corpus_str = json.dumps(slice_data)
-    return corpus_str, {"events_count": 8000}, "generated:chrome_trace_slice"
-
-
-def gt_chrome_trace_slice(corpus_str: str, _meta: dict) -> dict:
-    """GT computed from the 8000-event slice only."""
-    data = json.loads(corpus_str)
-    events = data.get("traceEvents", [])
-
-    dropped = [e for e in events if e.get("name") == "DroppedFrame"]
-    dropped_ts = sorted(e["ts"] for e in dropped if "ts" in e)
-
-    anchor_event = dropped[len(dropped) // 2] if dropped else events[len(events) // 2]
-    anchor_pos = next((i for i, e in enumerate(events) if e is anchor_event), len(events) // 2)
-    ws, we = max(0, anchor_pos - 2), min(len(events), anchor_pos + 3)
-    locality_ts = [e.get("ts") for e in events[ws:we] if "ts" in e]
-
-    name_counts: dict[str, int] = {}
-    for e in events:
-        name_counts[e.get("name", "")] = name_counts.get(e.get("name", ""), 0) + 1
-    top10 = sorted(name_counts.items(), key=lambda x: -x[1])[:10]
-
-    return {
-        "anomaly": {
-            "description": "DroppedFrame events in 8000-event slice",
-            "count": len(dropped_ts),
-            "sample_ts": dropped_ts[:5],
-        },
-        "locality": {
-            "description": f"5 events around anchor (pos {anchor_pos} in slice)",
-            "anchor_ts": anchor_event.get("ts"),
-            "anchor_name": anchor_event.get("name"),
-            "window_ts": locality_ts,
-        },
-        "aggregate": {
-            "description": "Per-name histogram top-10 within 8000-event slice",
-            "total_events": len(events),
-            "top10_names": [{"name": n, "count": c} for n, c in top10],
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # Corpus 3: app_log
 # ---------------------------------------------------------------------------
 
@@ -555,10 +503,6 @@ def gt_stacktrace(corpus_str: str, corpus_meta: dict) -> dict:
 
 CORPUS_BUILDERS = [
     ("chrome_trace_full", build_chrome_trace_full, gt_chrome_trace_full),
-    # chrome_trace_slice (8000 ev / 4MB) EXCLUDED: crush path HANGS >7min even on a clean
-    # release build (below the 8MB size-guard → no offload). Documented perf pathology; kept
-    # out of the run so the baseline completes. Re-enable once the crush→summary fix lands.
-    # ("chrome_trace_slice", build_chrome_trace_slice, gt_chrome_trace_slice),
     ("app_log", build_app_log, gt_app_log),
     ("source_file", build_source_file, gt_source_file),
     ("json_api", build_json_api, gt_json_api),

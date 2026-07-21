@@ -58,11 +58,6 @@ CORPUS_QUERIES: dict[str, dict[str, str]] = {
         "locality": "What events occur immediately around the middle DroppedFrame event?",
         "aggregate": "What is the per-name event histogram (top 10) over all trace events?",
     },
-    "chrome_trace_slice": {
-        "anomaly": "Find all DroppedFrame events in this trace slice.",
-        "locality": "What events occur immediately around the middle DroppedFrame in this slice?",
-        "aggregate": "What is the per-name event count distribution (top 10) in this 8000-event slice?",
-    },
     "app_log": {
         "anomaly": "Find all ERROR and WARN log entries and report their line numbers.",
         "locality": "What log lines appear immediately around line 2001?",
@@ -360,8 +355,8 @@ def main() -> int:
 
     print_summary(all_records)
 
-    # Blob previews for the two trace corpora (required by spec)
-    for cid in ("chrome_trace_full", "chrome_trace_slice"):
+    # Blob preview for the trace corpus (required by spec)
+    for cid in ("chrome_trace_full",):
         recs = [r for r in all_records if r["corpus_id"] == cid]
         if recs:
             print(f"\n=== BLOB PREVIEW: {cid} (first 1500 chars) ===")

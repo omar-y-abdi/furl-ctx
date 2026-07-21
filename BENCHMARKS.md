@@ -144,8 +144,9 @@ committed `benchmarks/data/code.raw.json` fixture of 7 real repo source files.
 |---|---:|---:|---:|---:|
 | `code`, opaque whole-blob offload | 95.9% | **-4.1%** | **-4.2%** | **-4.1%** |
 
-Measured fresh on this engine with `python -m benchmarks.code_roundtrip`, gpt-4o
-tokens, the same 12 token per-call overhead as the table above. The 95.9 percent
+Measured fresh on this engine (harness removed; see git history for
+`benchmarks/code_roundtrip.py`), gpt-4o tokens, the same 12 token per-call
+overhead as the table above. The 95.9 percent
 is a marker saving, not a token saving: `compress()` moved 41005 of 41025 tokens
 into the store and left a 1601 token summary, so retrieving the code back to use
 it costs more than never compressing it at all. This is why the front-page
@@ -566,7 +567,6 @@ lossless rendering now crosses the 0.30 gate for more log-array cardinalities
 Re-run (deterministic, off the committed snapshots under `benchmarks/data/`):
 
     .venv/bin/python -m benchmarks.run_bench     # suite + needle-recall
-    .venv/bin/python -m benchmarks.run_final     # final suite + Imp2 A/B
 
 ## Methodology
 
