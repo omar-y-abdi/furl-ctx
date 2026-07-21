@@ -320,3 +320,63 @@ def test_forged_marker_cannot_swallow_more_than_bound_chars_of_filler() -> None:
         f"the nearest '>>' must be left completely untouched, not partially "
         f"substituted; got {resolved[0]['content']!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Double-angle marker tail guard, review finding 3, docs/audits/
+# IMPROVEMENT-LEDGER.md's "Guard the double-angle marker tail": shape C's
+# `kind` field is the one sub-shape whose text is not a producer-fixed
+# literal. `crates/furl-core/src/ccr/markers.rs::marker_for_opaque` now
+# neutralizes '>' in `kind` at construction, the producer-side half of this
+# guard, PR-pinned by `opaque_marker_neutralizes_angle_bracket_in_kind` in
+# `markers.rs`, so no real producer can hand this scan a raw '>' inside a
+# tail. These two document the CONSUMER-side consequence directly -- via a
+# hand-built marker, bypassing the Rust producer entirely -- so the boundary
+# behavior a regression on EITHER side of the guard would fall back to is
+# pinned here too, not just asserted about in a docstring.
+# --------------------------------------------------------------------------- #
+
+
+def test_tail_with_lone_angle_bracket_is_left_unresolved_not_corrupted() -> None:
+    """A single stray '>' inside the tail, what an unguarded kind like
+    "weird>thing" would produce, can never pair up with
+    DOUBLE_ANGLE_FULL_PATTERN's own '>>' terminator: `[^>]` cannot consume
+    the stray '>' itself, and it is not immediately followed by a second
+    '>', so the pattern fails to match this marker AT ALL. Fail-closed: the
+    raw marker text -- hash still visible -- is left completely untouched
+    rather than partially substituted."""
+    ccr_hash = "abc123def456"
+    get_compression_store().store("SAFE-ORIGINAL", "compressed-placeholder", explicit_hash=ccr_hash)
+
+    marker = f"<<ccr:{ccr_hash},weird>thing,512B>>"
+    resolved = resolve_markers([{"role": "tool", "content": marker}])
+    assert resolved[0]["content"] == marker, (
+        f"a lone '>' inside the tail must leave the marker completely "
+        f"unresolved, not partially substituted; got {resolved[0]['content']!r}"
+    )
+
+
+def test_tail_with_doubled_angle_bracket_truncates_the_substitution() -> None:
+    """The genuinely dangerous shape, PR #131 review finding 3: TWO
+    adjacent '>' inside the tail, what an unguarded kind like "weird>>hack"
+    would produce, accidentally satisfy DOUBLE_ANGLE_FULL_PATTERN's own
+    '>>' terminator early, so match.group(0) ends right there instead of at
+    the marker's real close -- resolve_markers substitutes only that
+    truncated span and glues the unconsumed remainder of the original text
+    back on raw, byte for byte. This is the failure `marker_for_opaque`'s
+    '>' neutralization now makes unreachable for any real producer; this
+    test pins the exact corrupted shape so a regression on either side of
+    the guard cannot silently start producing valid-looking-but-wrong
+    content again."""
+    ccr_hash = "abc123def456"
+    get_compression_store().store("SAFE-ORIGINAL", "compressed-placeholder", explicit_hash=ccr_hash)
+
+    marker = f"<<ccr:{ccr_hash},weird>>hack,512B>>"
+    resolved = resolve_markers([{"role": "tool", "content": marker}])
+    resolved_content = resolved[0]["content"]
+
+    assert resolved_content == "SAFE-ORIGINALhack,512B>>", (
+        f"a '>>' pair inside the tail must truncate the substitution at "
+        f"exactly that point -- the store's original glued directly to the "
+        f"unconsumed remainder of the forged marker; got {resolved_content!r}"
+    )
