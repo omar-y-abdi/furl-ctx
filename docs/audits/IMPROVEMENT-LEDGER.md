@@ -34,6 +34,7 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-21 | correctness, ccr marker tail guard, PR #131 review finding 3 | crates/furl-core/src/ccr/markers.rs, tests/test_resolve_markers_roundtrip.py | `marker_for_opaque` now replaces any `>` in the opaque KIND label with `_` before it enters the double-angle wire format; the single Rust construction point for shape C, so the guard covers the walker's live substitution and the CSV/KV formatter alike, for every kind present or future, not only the currently-unreachable `OpaqueKind::Other` path; empirically verified both failure modes first: a lone `>` in the tail leaves resolve_markers's `[^>]{0,64}>>` scan unmatched and the marker unresolved, but a `>>` pair aligns with its own terminator and truncates the substitution mid-marker, corrupting the recovered content; `kind` is a display-only hint resolve_markers never captures back out of the marker text, so replacing costs no round-tripped data and the function stays total; red proofed by temporarily reverting the guard and confirming the pinning test failed on the identical assertion before restoring it; two new consumer-side tests pin the exact boundary a regression on either side of the guard would fall back to | #140 |
 | 2026-07-21 | CI hardening, mcp extra gap | .github/workflows/ci.yml | test job's wheel install now adds the `mcp` extra and `google-re2` alongside `dev`, so every test gated by `pytest.importorskip("mcp")` or `skipif(not re2_available())` actually runs in CI instead of silently skipping; confirmed the gap against a real run first, CI run 29731339248 summed 2188 passed/136 skipped across its four shards before this fix, this PR's own CI run summed 2598 passed/17 skipped after, 0 failed either time, the 17 residual skips are the pre-existing `[code]` extra gate plus one machine-specific empirical pin unrelated to mcp/re2; `google-re2` is technically redundant for this specific wheel-based install, a `pip install --dry-run` against a real built wheel confirmed the mcp extra's self-referential `furl-ctx[re2]` resolves it transitively already, unlike `maturin develop --extras` which does not, but it is kept explicit to match the local gate's own install command exactly | #140 |
 | 2026-07-21 | correctness, opaque code-offload economics honesty, T9 pre-mortem audit | furl_ctx/compress.py, furl_ctx/cache/compression_store.py, furl_ctx/ccr/mcp_server.py, furl_ctx/__init__.py, benchmarks/code_roundtrip.py, BENCHMARKS.md, README.md, tests/test_opaque_offload.py | the front-page `code` row marketed a raw marker reduction near 99 percent, but that content is an opaque whole-blob CCR offload with strategy `ccr_offload` and no granular row index, so an agent that needs the code must retrieve the entire payload back and the round trip is a net token LOSS; measured fresh on this machine with `python -m benchmarks.code_roundtrip` the committed `benchmarks/data/code.raw.json` fixture is raw 95.9 percent but effective -4.1 percent after one retrieval, reproducing the pre-mortem's -4.1 percent exactly. `compress()` now surfaces every opaque whole-blob offload as a typed `result.opaque_offloads` list carrying offloaded and preview token counts and a `net_negative_on_retrieval` flag, discriminated from cheap granular per-row drops by the store entry's `compression_strategy`; the MCP `furl_compress` response carries the same field plus one honest line of copy. Following the #137 lesson the signal is a structured field the caller reads at its own cadence, never a per-call log, because the hook spawns a fresh subprocess per tool call so per-call stderr would spam; `store.get_metadata` was extended additively with `compression_strategy` and token counts and the router was left untouched, so the change is purely additive on the compression path. BENCHMARKS.md gains a labeled `code` round-trip row distinguishing opaque whole-blob offload from granular offload, and the README code claim is reframed to say the headline percent is a marker reduction not a token saving. verify.run stayed degradations=6 hash_failures=0 silent_loss=0 cache_prefix_violations=0 and the full pytest suite passed; RED proofs documented in the PR | #141 |
+| 2026-07-21 | test rigor, router_dispatch SMART_CRUSHER no-savings fallback | tests/test_router_dispatch_no_savings_fallback.py | `StrategyDispatcher.apply`'s post-dispatch fallback chain (the safety net that reverts an expanded SMART_CRUSHER result and decides whether a last-ditch LOG fallback is actually smaller before adopting it) had zero direct or indirect coverage; proved by independently disabling the expansion-revert arm, the log-adoption comparison, forcing unconditional log adoption, widening `<` to `<=` at the exact-equal boundary, and removing the `try/except` fail-open around the log compressor call — each of the 5 mutations left the full 2597-test suite 100% green; 5 new tests pin all 5 behaviors with a RED proof per test (each mutation reproduced and shown to fail only its own test, then reverted); no production code changed | #142 |
 
 ## Open candidates, fair game for future sessions
 
@@ -62,8 +63,24 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
   have zero references anywhere under `tests/`; `router_dispatch.py` and
   `router_message_policy.py` sit at 1-2 test-file references versus 6-7 for
   comparably-sized siblings. (`furl_ctx/relevance/bm25.py` was the same kind
-  of gap and is now covered as of #135; the three remaining router modules
-  above are still open.)
+  of gap and is now covered as of #135; `router_dispatch.py`'s SMART_CRUSHER
+  no-savings fallback chain specifically — the expansion-revert and the
+  log-fallback adoption comparison, both boundary cases — is now covered by
+  the mutation-proofed tests added in this session, see the row below.
+  `router_dispatch.py`'s other branches, `router_blocks.py`,
+  `compressor_registry.py`, and `router_message_policy.py` remain open.)
+  Also surfaced while mutation-testing this file this session but not
+  chased down: forcing `router_dispatch.py`'s envelope-ingestion
+  `suppress_no_savings_fallback` flag to `False` (the sibling of the
+  tabular-CSV flag two lines below it, which the existing
+  `test_csv_schema_decoder_roundtrip_fuzz.py`/`test_lossless_fidelity.py`
+  suite already catches) made one `pytest` run stall past a 2-minute
+  timeout on a rerun that otherwise takes ~70 seconds; a second, careful
+  rerun of an unrelated mutation nearby completed normally, so this reads
+  as environment flakiness rather than a reproduced hang, but it was never
+  confirmed innocent either. Needs a dedicated, isolated repro (single test
+  file, `-p no:randomly` if applicable, resource monitoring) before either
+  writing a regression test or dismissing it.
 - 2026-07-20 finding while writing `BM25Scorer` tests (#135), not fixed
   there because both are dead code, not a testable behavior: the
   `avgdl = avg_doc_len or doc_len or 1` fallback in `_bm25_score` can never
@@ -131,3 +148,17 @@ would only cost a future session the time to rediscover this.
   Advanced Security / Copilot platform feature outside `ci.yml` entirely.
   Confirmed persistent across two separate PRs; left as red each time —
   nothing in this repo can fix a 400 from GitHub's own model routing.
+- 2026-07-21 session start: `python -c "import furl_ctx, re2"` passed (Phase
+  0's own smoke check), but the first full `pytest tests/ -q` run on a
+  completely untouched checkout showed 16 failures, all CCR recovery-hash
+  and lossless-fidelity tests expecting the 24-hex key width from #133
+  while the actual crush output still carried the pre-#133 12-hex key. Root
+  cause: `target/release/lib_core.so` was compiled before #133/#137/#139
+  landed (its mtime was `Jul 18 23:14`, HEAD was already at #135's merge),
+  so the environment's Rust extension was stale relative to `HEAD` even
+  though it imported fine. `maturin develop --release --extras dev,mcp`
+  rebuilt it and the exact same checkout went to 2597 passed, 0 failed.
+  Not a code regression — a container/session artifact — but worth this
+  note so a future session facing a red `pytest` on an "untouched" checkout
+  checks the compiled extension's freshness before concluding main is
+  broken and starting a root-cause-fix session per Phase 0.5.
