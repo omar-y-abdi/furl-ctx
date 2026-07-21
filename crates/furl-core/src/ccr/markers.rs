@@ -51,8 +51,36 @@ pub(crate) fn marker_for_row_index(hash: &str, n_chunks: usize) -> String {
 /// rendered human-readable (`123B`, `4.5KB`, `1.2MB`). Used by both the
 /// walker (live substitution) and the CSV/KV formatters (rendering an
 /// already-classified opaque cell).
+///
+/// Fail-closed guard, docs/audits/IMPROVEMENT-LEDGER.md's "Guard the
+/// double-angle marker tail", PR #131 review finding 3: `kind` is
+/// neutralized against `>` before it enters the wire text. The consumer's
+/// substitution scan for this marker family,
+/// `furl_ctx.ccr.marker_grammar.DOUBLE_ANGLE_FULL_PATTERN`, bounds the
+/// marker's tail with `[^>]{0,64}>>`, on the assumption that no producer
+/// ever emits a `>` inside it -- true today for every kind. The three
+/// built-in variants are fixed literals, and `OpaqueKind::Other`'s
+/// classifier-supplied string is unreachable outside a `#[cfg(test)]`
+/// fixture, but a future `Other` producer that fed it an untrusted format
+/// name could break that assumption silently: a `>>` pair inside `kind`
+/// would align with the consumer's own tail terminator and truncate the
+/// substitution mid-marker, corrupting the caller's document. This is the
+/// single construction point for every opaque marker per the module docs
+/// above, so guarding here covers the walker's live substitution and the
+/// CSV/KV formatters' rendering of an already-classified cell alike, for
+/// every kind, present or future -- not only the currently-unreachable
+/// `Other` path. `kind` is a display-only hint that resolve_markers never
+/// parses back out of the marker text, no capture group covers it, so
+/// replacing rather than rejecting a stray `>` costs no round-tripped
+/// information.
 pub(crate) fn marker_for_opaque(hash: &str, kind: &str, byte_size: usize) -> String {
-    format!("<<ccr:{},{},{}>>", hash, kind, humanize_bytes(byte_size))
+    let safe_kind = kind.replace('>', "_");
+    format!(
+        "<<ccr:{},{},{}>>",
+        hash,
+        safe_kind,
+        humanize_bytes(byte_size)
+    )
 }
 
 /// Diff-compressor retrieval marker (no leading newline — the compressor
@@ -209,5 +237,44 @@ mod tests {
         assert_eq!(humanize_bytes(2048), "2.0KB"); // KB branch
         assert_eq!(humanize_bytes(2150), "2.1KB"); // KB rounding
         assert_eq!(humanize_bytes(5 * 1024 * 1024), "5.0MB"); // MB branch
+    }
+
+    // ── Double-angle marker tail guard, docs/audits/IMPROVEMENT-LEDGER.md's
+    // "Guard the double-angle marker tail", PR #131 review finding 3 ──
+    //
+    // The three built-in OpaqueKind kinds, base64, string, and html, are
+    // fixed literals and never carry a `>`. OpaqueKind::Other's kind is a
+    // classifier-supplied String and today unreachable outside a
+    // #[cfg(test)] fixture in compaction/ir.rs -- but if a future producer
+    // ever fed it a name containing `>`, an unguarded marker could let the
+    // consumer's DOUBLE_ANGLE_FULL_PATTERN in furl_ctx/ccr/marker_grammar.py,
+    // `[^>]{0,64}>>`, terminate on a `>>` INSIDE the kind field instead of
+    // the marker's real close, truncating the resolve_markers substitution
+    // and leaving the rest of the marker as dangling raw text in the
+    // caller's document. A lone unpaired `>` does not trigger that specific
+    // truncation, the bounded tail scan simply fails to match the marker at
+    // all and leaves it unresolved rather than corrupted, but is neutralized
+    // here too, since the wire grammar's own invariant is "no `>` in a
+    // marker body, ever" -- not "no `>>` pair".
+    #[test]
+    fn opaque_marker_neutralizes_angle_bracket_in_kind() {
+        // Two adjacent '>' in `kind` is the dangerous case: unguarded, it
+        // would align with DOUBLE_ANGLE_FULL_PATTERN's own `>>` terminator
+        // and truncate the substitution mid-marker.
+        assert_eq!(
+            marker_for_opaque("abc123def456", "weird>>injected", 512),
+            "<<ccr:abc123def456,weird__injected,512B>>"
+        );
+        // A single stray '>' is neutralized too, not just the adjacent pair.
+        assert_eq!(
+            marker_for_opaque("abc123def456", "html>hack", 10),
+            "<<ccr:abc123def456,html_hack,10B>>"
+        );
+        // The three real production kinds never contain '>', so this must
+        // not change their existing byte-identical wire text.
+        assert_eq!(
+            marker_for_opaque("abc123def456", "base64", 2150),
+            "<<ccr:abc123def456,base64,2.1KB>>"
+        );
     }
 }

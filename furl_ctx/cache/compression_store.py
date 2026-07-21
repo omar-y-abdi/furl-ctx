@@ -951,6 +951,13 @@ class CompressionStore:
                 "compressed_content": entry.compressed_content,
                 "created_at": entry.created_at,
                 "ttl": entry.ttl,
+                # Strategy + token counts let a caller tell an opaque whole-blob
+                # offload (``ccr_offload``: retrieval returns the entire payload)
+                # apart from a granular per-row drop, and quantify the round-trip
+                # cost, without fetching the full original content.
+                "compression_strategy": entry.compression_strategy,
+                "original_tokens": entry.original_tokens,
+                "compressed_tokens": entry.compressed_tokens,
             }
 
     def search(

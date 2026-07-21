@@ -54,7 +54,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-from .compress import CompressConfig, CompressResult, compress
+from .compress import CompressConfig, CompressResult, OpaqueOffload, compress
 from .compress_to import compress_to
 from .retrieve import purge, resolve_markers, retrieve
 
@@ -100,6 +100,7 @@ __all__ = [
     "ccr_import",
     "CompressConfig",
     "CompressResult",
+    "OpaqueOffload",
     # Hooks
     "CompressionHooks",
     "CompressContext",

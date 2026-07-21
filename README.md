@@ -141,21 +141,21 @@ Read every figure below as a **best-case ceiling**, not a typical — the honest
 
 | Dataset       | Items | Before | After  | Reduction | Info retention |
 |---------------|------:|-------:|-------:|----------:|---------------:|
-| code          |     7 | 41,025 |    471 |       99% |           100% |
+| code          |     7 | 41,025 |  1,678 |     95.9% |           100% |
 | multiturn     |   135 | 14,866 |  2,073 |       86% |           100% |
 | logs          |    90 |  8,595 |    619 |       93% |           100% |
 | search        |    90 |  4,102 |    318 |       92% |           100% |
 | repeated logs |    90 |  3,621 |    120 |       97% |           100% |
 | disk          |     9 |    694 |    279 |       60% |           100% |
 
-Across the corpus: **95% fewer tokens** (72,903 → 3,880) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
+Across the corpus: **93% fewer tokens** (72,903 → 5,087) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
 
 Information retention here means every byte is recoverable byte-exact through `furl_retrieve`. It does not mean the compressed view shows every row. Retrieval is pull-based, so an agent has to query for a specific dropped item to see it, and a lone anomaly will not surface in the compressed summary on its own.
 
 **Honest read:** the numbers above are best-case, low-entropy *ceilings* measured on the dev fixtures — two independent, out-of-sample audits show they degrade by 6–43pp on fresh high-entropy / near-unique / realistic data (exactly where real logs and listings live). 
 On genuinely high-entropy content, honest lossless savings sit in the **0–54% band**, not 60–95% (code 0%, search 40%, repeated_logs 54%); read every figure here as a ceiling, not a typical, and see the tier-aware breakdown in [BENCHMARKS.md](BENCHMARKS.md).
 
-The `code` row's 99% is CCR-offload of a large non-file-read tool output (e.g. `Bash` dumping source text); an agent's own `Read`/`Grep`/`Glob` file access bypasses the compression hook by design and passes through unchanged, at 0%.
+The `code` row is not reversible structural compression like the logs, search, and disk rows. It is an opaque whole-blob offload: the router cannot shrink source code structurally, so it moves the whole blob to the CCR store behind one marker and leaves a small summary. The headline percent is a marker reduction, not a token saving, and the offload has no granular row index, so an agent that needs the code must retrieve the entire blob back. That round trip is net-negative: measured fresh this fixture is raw 95.9% but effective -4.1% after one retrieval. See the `code` row in the effective-savings section of [BENCHMARKS.md](BENCHMARKS.md); `compress()` also reports each opaque offload per call as `result.opaque_offloads` so a caller can see the round trip is net-negative before paying for it. An agent's own `Read`, `Grep`, or `Glob` file access bypasses the compression hook by design and passes through unchanged, at 0%.
 
 **Stability:** The public API is what `furl_ctx` exports at the top level, including `compress()`, `retrieve()`, `purge()`, and `resolve_markers()`. Those signatures are the surface to build against. Submodule internals under `furl_ctx.*` may change between releases, so import from the top-level package rather than reaching into submodules. Releases have been frequent during early development, so pin a minor version if you need a fixed surface to depend on.
 
