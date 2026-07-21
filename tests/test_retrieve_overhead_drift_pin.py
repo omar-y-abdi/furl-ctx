@@ -9,8 +9,13 @@ so the library and the bench harness price a round trip the same way.
 The library must not import the bench harness to keep them in sync, so the two
 constants can silently drift apart. This test is the guard: it does the
 cross-import that the library deliberately avoids and asserts the two values
-match, and it checks that ``furl_ctx.compress`` still imports no ``verify``
-module so the pin, not a library-to-bench dependency, is what holds the line.
+match, and it AST-scans ``furl_ctx/compress.py``'s own source for a direct,
+absolute ``import verify`` or ``from verify import ...`` statement, at module
+level or nested inside a function body. It does not follow transitive imports
+through other modules ``compress.py`` imports, does not see relative
+``from . import verify`` forms, and does not catch a dynamic
+``importlib.import_module('verify...')`` call, so the equality pin above, not
+this guard alone, is what actually holds the line.
 """
 
 from __future__ import annotations

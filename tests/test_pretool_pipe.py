@@ -2,9 +2,14 @@
 compressor (pipe_compress.py).
 
 This is the real-savings path that does NOT depend on PostToolUse
-``updatedToolOutput`` (dropped by Claude Code >=2.1.163, #68951): it rewrites a
-Bash command so its stdout is compressed at the SOURCE. The load-bearing
-invariants pinned here:
+``updatedToolOutput`` being applied at all: Claude Code >=2.1.163 (the floor
+tracked as ``MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT`` in
+``furl_ctx/host_version.py``) schema-validates that field and applies a
+correctly shape-mirrored replacement, dropping only ones that fail
+validation (see ``compress_tool_output.py`` and anthropics/claude-code#68951).
+This pipe's justification is independent of that fact: it rewrites a Bash
+command so its stdout is compressed at the SOURCE, banking savings before the
+tool result even exists. The load-bearing invariants pinned here:
 
 * ON BY DEFAULT (S1) — unset/empty/unknown values run the pipe; only an explicit
   falsy FURL_PRETOOL_PIPE (0/false/off/no/disabled, case-insensitive) disables

@@ -9,9 +9,13 @@ pairs: UUIDs, long tokens, duplicated terms, CJK, numbers-in-words, pure
 numerics including non-ASCII Unicode digits, and empty edges.
 
 The exhaustive float-identical before/after evidence for the deletion lives in
-the PR body. This module locks the behavior permanently via a category-covering
-sweep plus transparent per-case ``matched_terms`` pins, so a future edit that
-alters tokenization or scoring on any of these shapes fails loudly.
+the PR body. This module locks the behavior permanently: a category-covering
+sweep plus transparent per-case ``matched_terms`` pins catch shape and range
+regressions, and a committed golden snapshot,
+``tests/data/bm25_dead_branch_parity_golden.json``, pins the exact ``score``,
+``reason``, and ``matched_terms`` for all 468 pairs, so a same-shape
+regression invisible to the range check, such as a constant-IDF change,
+fails loudly too.
 
 One case is load bearing beyond parity: ``_TOKEN_PATTERN``'s ``\\b\\d{4,}\\b``
 numeric-ID branch is NOT redundant with the ``[a-zA-Z0-9_]+`` branch, because
@@ -21,7 +25,12 @@ Unicode-digit tests below fail if that branch is ever removed.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from furl_ctx.relevance.bm25 import BM25Scorer
+
+_GOLDEN_PATH = Path(__file__).resolve().parent / "data" / "bm25_dead_branch_parity_golden.json"
 
 _UUID = "550e8400-e29b-41d4-a716-446655440000"
 _UUID2 = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
@@ -155,3 +164,38 @@ def test_empty_query_scores_every_item_zero() -> None:
     results = BM25Scorer().score_batch(documents, "")
     assert all(result.score == 0.0 for result in results)
     assert all(result.reason == "BM25: empty context" for result in results)
+
+
+def test_score_batch_matches_golden_snapshot_exactly() -> None:
+    """Exact-value pin over all 468 pairs: score, reason, and matched_terms
+    must match the committed golden snapshot bit for bit.
+
+    ``repr`` of a Python float is the shortest string that round-trips back
+    to the identical float, so comparing repr strings is equivalent to
+    comparing exact bit patterns without a float-equality footgun. This is
+    the one check in this module that a same-shape regression, such as a
+    constant-IDF change, cannot pass silently: the range and matched_terms
+    shape checks above stay green under that mutation, this does not. See
+    ``tests/data/bm25_dead_branch_parity_golden.json``, regenerated from a
+    known-good ``BM25Scorer()`` over ``build_corpus()``.
+    """
+    documents, queries = build_corpus()
+    scorer = BM25Scorer()
+    rows = []
+    for qi, query in enumerate(queries):
+        results = scorer.score_batch(documents, query)
+        for di, result in enumerate(results):
+            rows.append(
+                {
+                    "qi": qi,
+                    "di": di,
+                    "score": repr(result.score),
+                    "reason": result.reason,
+                    "matched_terms": list(result.matched_terms),
+                }
+            )
+
+    golden = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
+    rows.sort(key=lambda r: (r["qi"], r["di"]))
+    golden.sort(key=lambda r: (r["qi"], r["di"]))
+    assert rows == golden

@@ -217,4 +217,14 @@ def test_log_fallback_exception_fails_open(caplog: pytest.LogCaptureFixture) -> 
     assert tokens == len(CONTENT)
     assert chain == [CompressionStrategy.SMART_CRUSHER.value, CompressionStrategy.LOG.value]
     assert _reason(debug_events) == "smart_crusher"
-    assert any("Log fallback failed for SMART_CRUSHER" in r.getMessage() for r in caplog.records)
+    # Pin the stable token and the debug level, not the full sentence: the
+    # exception detail interpolated after it is not load-bearing here, and a
+    # future rewording of that detail should not break this test.
+    matching = [
+        r
+        for r in caplog.records
+        if r.name == "test.router_dispatch.no_savings_fallback"
+        and "Log fallback failed" in r.getMessage()
+    ]
+    assert matching, "expected a log record noting the LOG fallback failed"
+    assert matching[0].levelno == logging.DEBUG

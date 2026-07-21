@@ -74,6 +74,14 @@ def _load_manifest_version() -> str:
         f"entries: {sorted(data)}. If .release-please-config.json now tracks a "
         "different package layout, update _MANIFEST_PACKAGE_KEY here to match."
     )
+    assert set(data) == {_MANIFEST_PACKAGE_KEY}, (
+        f"{_MANIFEST} now has package entries beyond {_MANIFEST_PACKAGE_KEY!r}: "
+        f"{sorted(data)}. This guard only derives and checks a tag for the "
+        "single root package; a future editor adding a second package here "
+        "must extend this test to load and verify every entry, not just "
+        "_MANIFEST_PACKAGE_KEY, or the new package's tag drift will be "
+        "silently ignored."
+    )
     version = data[_MANIFEST_PACKAGE_KEY]
     assert isinstance(version, str) and version, (
         f"{_MANIFEST}[{_MANIFEST_PACKAGE_KEY!r}] is not a non-empty string: {version!r}."

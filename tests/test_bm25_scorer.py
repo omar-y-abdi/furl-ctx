@@ -63,11 +63,14 @@ def test_uuid_is_preserved_as_one_token_through_score_batch() -> None:
     # A UUID matches only when the whole 36-char token is present: a document
     # holding the identical UUID matches it, one whose UUID differs by a single
     # hex character does not. That proves the UUID is one token, not split into
-    # hex runs that would match piecewise.
+    # hex runs that would match piecewise. The matching document's UUID is
+    # uppercase while the query's is lowercase, so this also pins that
+    # tokenization folds case before matching, not just that the UUID
+    # survives as one token.
     uuid = "550e8400-e29b-41d4-a716-446655440000"
     altered = "550e8400-e29b-41d4-a716-44665544ffff"
     results = BM25Scorer().score_batch(
-        [f'{{"id": "{uuid}"}}', f'{{"id": "{altered}"}}'], f"find {uuid}"
+        [f'{{"id": "{uuid.upper()}"}}', f'{{"id": "{altered}"}}'], f"find {uuid}"
     )
     assert results[0].matched_terms == [uuid]
     assert results[1].matched_terms == []

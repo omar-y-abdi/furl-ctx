@@ -62,6 +62,8 @@ jobs:
               - 'pyproject.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.release-please-manifest.json'
+              - '.release-please-config.json'
               - 'tests/**'
               - 'scripts/**'
               # Conclusion of the required checks (lint/build-wheel/test) no
