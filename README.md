@@ -141,14 +141,14 @@ Read every figure below as a **best-case ceiling**, not a typical — the honest
 
 | Dataset       | Items | Before | After  | Reduction | Info retention |
 |---------------|------:|-------:|-------:|----------:|---------------:|
-| code          |     7 | 41,025 |    471 |       99% |           100% |
+| code          |     7 | 41,025 |  1,678 |     95.9% |           100% |
 | multiturn     |   135 | 14,866 |  2,073 |       86% |           100% |
 | logs          |    90 |  8,595 |    619 |       93% |           100% |
 | search        |    90 |  4,102 |    318 |       92% |           100% |
 | repeated logs |    90 |  3,621 |    120 |       97% |           100% |
 | disk          |     9 |    694 |    279 |       60% |           100% |
 
-Across the corpus: **95% fewer tokens** (72,903 → 3,880) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
+Across the corpus: **93% fewer tokens** (72,903 → 5,087) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
 
 Information retention here means every byte is recoverable byte-exact through `furl_retrieve`. It does not mean the compressed view shows every row. Retrieval is pull-based, so an agent has to query for a specific dropped item to see it, and a lone anomaly will not surface in the compressed summary on its own.
 
