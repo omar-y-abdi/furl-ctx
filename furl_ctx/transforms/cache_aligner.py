@@ -358,4 +358,3 @@ class CacheAligner(Transform):
         )
         result.markers_inserted.append(f"stable_prefix_hash:{stable_hash}")
         return result
-
