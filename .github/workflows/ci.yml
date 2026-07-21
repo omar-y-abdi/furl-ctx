@@ -235,7 +235,15 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
+      # fetch-tags: true (fetch-depth stays default) so `git tag -l` sees real
+      # tags here: tests/test_release_manifest_tag_guard.py runs as part of
+      # `pytest tests` below and needs tag visibility to check the release
+      # manifest against git tags. Without this the default shallow checkout
+      # fetches zero tags and the guard can only skip, never actually verify
+      # anything, on every PR.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-tags: true
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PY_VERSION }}
