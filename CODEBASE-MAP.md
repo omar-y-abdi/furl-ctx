@@ -71,7 +71,7 @@ End-to-end flow: `compress(messages,model)` (`furl_ctx/compress.py:397`) → `Tr
 - `log_compressor.rs:290` — `FormatDetector::detect` / `log_compressor.rs:366` — `LevelClassifier::classify` — AhoCorasick format detect + per-line log-level classifier.
 - `diff_compressor.rs:929` — `score_hunks` — change-density + context-word + priority weights.
 - `search_compressor.rs:405` — `parse_search_results` — byte-prefix parser (Windows drive + dash filenames).
-- `smart_crusher/traits.rs:62/108` — `Constraint`/`Observer` traits — the surviving extension points (keep/drop constraints + crush observers).
+- `smart_crusher/planning.rs:174` — `detect_error_items_for_preservation`/`detect_structural_outliers` — keep/drop constraint detection, now inlined direct calls (the `Constraint`/`Observer` traits in `traits.rs`/`constraints.rs`/`observer.rs` were deleted).
 
 **new Rust transforms (Phase-8)**
 - `transforms/text_crusher.rs:450` — `TextCrusher` struct; `compress` at `:473` — Rust-side text compression (Python wrapper at `text_crusher.py`).
@@ -91,14 +91,14 @@ End-to-end flow: `compress(messages,model)` (`furl_ctx/compress.py:397`) → `Tr
 - `furl_ctx/transforms/router_policy.py:30/60/95/110/125` — `CompressionStrategy` enum + `strategy_from_detection`/`strategy_from_detection_type`/`content_type_from_strategy`/`adaptive_min_ratio` — strategy mappings + the adaptive ratio, all re-exported from `content_router.py`.
 - `furl_ctx/transforms/router_dispatch.py:67/88` — `StrategyDispatcher` (`apply`) — per-strategy compressor dispatch + the SMART_CRUSHER→LOG→passthrough no-savings fallback chain.
 - `furl_ctx/transforms/router_ccr_mirror.py:47/59/142` — `CcrMirror` (`ensure_ccr_backed`/`extract_ccr_hashes`) — result-cache HIT re-mirror of `<<ccr:HASH>>` pointers back into the Python store + hash extraction.
-- `furl_ctx/transforms/router_engine.py:87/105/175` — NEW: `RoutingDecision` dataclass / `RouterCompressionResult` / `RouterHooks` Protocol — engine-layer types and hook protocol for the router core.
-- `furl_ctx/transforms/router_blocks.py:96/58` — NEW: `ContentBlockWalker` / `BlockCompressFn` Protocol — block-level walker abstraction used by the router to iterate content blocks.
-- `furl_ctx/transforms/router_message_policy.py:118/179` — NEW: `MessagePolicyConfig` Protocol / `MessageDisposition` ADT (`Frozen:179`, `ProtectedMsg:185`, `Small:198`, `NonString:204`) + `classify_message` — message-level classification ADT replacing scattered conditionals.
+- `furl_ctx/transforms/router_engine.py:213/231` — NEW: `RoutingDecision` dataclass / `RouterCompressionResult` — engine-layer types for the router core (the `RouterHooks` Protocol was deleted; hooks are the concrete `ContentRouter`).
+- `furl_ctx/transforms/router_blocks.py:96/60` — NEW: `ContentBlockWalker` / `BlockCompressFn` type alias — block-level walker abstraction used by the router to iterate content blocks (the single-implementer `Protocol` was collapsed to a plain `Callable` alias).
+- `furl_ctx/transforms/router_message_policy.py:238` — NEW: `MessageDisposition` ADT (`Frozen:179`, `ProtectedMsg:185`, `Small:198`, `NonString:204`) + `classify_message` — message-level classification ADT replacing scattered conditionals (the `MessagePolicyConfig` Protocol was deleted).
 - `furl_ctx/transforms/router_debug.py:45/49` — NEW: `_router_debug_dumps`/`_log_router_debug` — debug logging utilities extracted from the router orchestrator.
 
 **new Python transforms (Phase-8)**
 - `furl_ctx/transforms/text_crusher.py:101` — `TextCrusher` class — Python wrapper for Rust TextCrusher; `TextCrusherConfig` at `:51`, `TextCrushResult` at `:76`.
-- `furl_ctx/transforms/tag_protector.py:89/113` — `protect_tags`/`restore_tags` — Python wrapper for Rust tag-protector FFI.
+- `protect_tags`/`restore_tags` — Rust tag-protector, exposed to Python directly as PyO3 bindings (`crates/furl-py/src/lib.rs:1840`); the `furl_ctx/transforms/tag_protector.py` wrapper module was deleted.
 - `furl_ctx/transforms/code_aware_compressor.py` — `CodeAwareCompressor` — opt-in tree-sitter-backed code compressor; `CodeLanguage` enum at `:158`.
 - `furl_ctx/transforms/_ccr_persist.py:24` — `persist_to_python_ccr` — single Python entry for mirroring a CCR hash+payload into the Python `CompressionStore`.
 - `furl_ctx/transforms/compressor_registry.py:42` — `CompressorRegistry` — maps strategy→compressor instances; replaces ad-hoc compressor construction inside router dispatch.
