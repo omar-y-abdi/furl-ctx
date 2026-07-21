@@ -17,11 +17,14 @@ env:
   # Variables → New repository variable `PYPI_SKIP` = 'true'.
   # Locally via act: pass -e event.yml or set in .actrc.local (see
   # .actrc.local.example).
-  # Current state: 'true' — the `furl-ctx` PyPI project is owned by the
-  # upstream author; this fork has no PyPI trusted publisher configured, so
-  # the publish exchange fails (`invalid-publisher`). Set the variable to
-  # 'false' after configuring a trusted publisher under your own PyPI
-  # package name.
+  # Semantics: 'true' short-circuits the `publish-pypi` job's own `if:` below
+  # to skipped (no PyPI upload attempted) while still letting `create-release`
+  # proceed. Any other value (`false`, unset, or anything else) requires
+  # `publish-pypi` to actually run and succeed before `create-release` will
+  # proceed. This comment intentionally does not state which value is set
+  # right now: that is live repository state which drifts independently of
+  # this file, so check it directly with `gh variable get PYPI_SKIP` or the
+  # GitHub UI path above rather than trusting a comment to have kept up.
 
 on:
   # Triggered when release-please's release PR is merged: the bot
@@ -548,7 +551,25 @@ jobs:
                 # in deadsnakes. Add it on demand. ubuntu:22.04 has
                 # 3.10/3.11 in main and 3.12 via deadsnakes.
                 apt-get install -y -qq --no-install-recommends ca-certificates software-properties-common >/dev/null
-                add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1 || true
+                # Launchpad occasionally flakes on this add (seen on the x86
+                # runner only, arm passed the same run) — retry a few times
+                # with a short pause so a transient flake self-heals, but a
+                # real failure names itself here instead of resurfacing three
+                # steps later as a phantom "Unable to locate package
+                # python$PYTHON_VERSION" error.
+                ppa_added=0
+                for attempt in 1 2 3; do
+                  if add-apt-repository -y ppa:deadsnakes/ppa >/dev/null; then
+                    ppa_added=1
+                    break
+                  fi
+                  echo "WARN: add-apt-repository ppa:deadsnakes/ppa failed (attempt $attempt/3)" >&2
+                  sleep 2
+                done
+                if [ "$ppa_added" -ne 1 ]; then
+                  echo "ERROR: add-apt-repository ppa:deadsnakes/ppa failed after 3 attempts; python$PYTHON_VERSION may not be installable without it" >&2
+                  exit 1
+                fi
                 apt-get update -qq
                 apt-get install -y -qq --no-install-recommends \
                   "python$PYTHON_VERSION" \
