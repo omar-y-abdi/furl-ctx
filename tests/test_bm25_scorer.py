@@ -21,10 +21,15 @@ existing suite green, including ``tests/`` files that reference "bm25" or
 "relevance" by name. ``test_long_match_bonus_applies_at_exactly_eight_chars``
 below fails on that exact mutation (see the PR body's red-proof transcript).
 
-Every score assertion here is pinned to a concrete value hand-derived from
-the module's own documented formula (see the ``BM25Scorer`` class docstring),
-computed independently for a small, fully-worked corpus -- not merely
-"greater than zero" or "A ranks above B".
+The score assertions here are pinned to concrete values hand-derived from the
+module's own documented formula, see the ``BM25Scorer`` class docstring,
+computed independently for a small, fully-worked corpus, rather than merely
+"greater than zero". The tokenization-boundary tests instead drive
+``score_batch`` and assert exact ``matched_terms``, so the UUID, digit-in-word,
+and numeric-ID boundaries stay pinned through the public API even if the
+private ``_tokenize`` helper is later renamed or inlined. See
+``tests/test_bm25_dead_branch_parity.py`` for the same boundaries exercised
+across a 200+ pair corpus including non-ASCII Unicode digits.
 """
 
 from __future__ import annotations
@@ -42,21 +47,41 @@ def test_tokenize_empty_string_returns_no_tokens() -> None:
     assert BM25Scorer()._tokenize("") == []
 
 
-def test_tokenize_lowercases_and_preserves_uuid_as_one_token() -> None:
-    tokens = BM25Scorer()._tokenize("Find UUID 550E8400-E29B-41D4-A716-446655440000 now")
-    assert tokens == ["find", "uuid", "550e8400-e29b-41d4-a716-446655440000", "now"]
-
-
-def test_tokenize_digits_embedded_in_a_word_do_not_split_the_word() -> None:
-    # The numeric-ID branch (`\b\d{4,}\b`) requires a word boundary on both
-    # sides; digits with no boundary (surrounded by letters) must fall
-    # through to the generic alphanumeric branch as ONE token, not split
-    # into letters/digits/letters.
-    assert BM25Scorer()._tokenize("abc1234def") == ["abc1234def"]
-
-
 def test_tokenize_splits_on_non_alphanumeric_delimiters() -> None:
     assert BM25Scorer()._tokenize("ID-1234 code99 X") == ["id", "1234", "code99", "x"]
+
+
+# --------------------------------------------------------------------------- #
+# Tokenization boundaries pinned through the PUBLIC API (score_batch +
+# matched_terms), so they survive a behavior-preserving rename or inline of the
+# private _tokenize helper. The UUID and digit-in-word cases replace the former
+# direct _tokenize assertions for exactly those two boundaries.
+# --------------------------------------------------------------------------- #
+
+
+def test_uuid_is_preserved_as_one_token_through_score_batch() -> None:
+    # A UUID matches only when the whole 36-char token is present: a document
+    # holding the identical UUID matches it, one whose UUID differs by a single
+    # hex character does not. That proves the UUID is one token, not split into
+    # hex runs that would match piecewise.
+    uuid = "550e8400-e29b-41d4-a716-446655440000"
+    altered = "550e8400-e29b-41d4-a716-44665544ffff"
+    results = BM25Scorer().score_batch(
+        [f'{{"id": "{uuid}"}}', f'{{"id": "{altered}"}}'], f"find {uuid}"
+    )
+    assert results[0].matched_terms == [uuid]
+    assert results[1].matched_terms == []
+    assert results[0].score > results[1].score
+
+
+def test_digits_embedded_in_word_stay_one_token_through_score_batch() -> None:
+    # "abc1234def" is one token: it matches a document containing it verbatim
+    # and not one where the same characters are split by spaces. The 4+ digit
+    # numeric-ID boundary is covered across the corpus, including the non-ASCII
+    # Unicode-digit case, by tests/test_bm25_dead_branch_parity.py.
+    results = BM25Scorer().score_batch(["abc1234def zeta", "abc 1234 def zeta"], "abc1234def")
+    assert results[0].matched_terms == ["abc1234def"]
+    assert results[1].matched_terms == []
 
 
 # --------------------------------------------------------------------------- #
@@ -141,8 +166,18 @@ def test_duplicate_query_terms_scale_score_linearly_with_query_frequency() -> No
     single = scorer.score_batch(items, "alpha")[0].score
     double = scorer.score_batch(items, "alpha alpha")[0].score
 
-    assert single == 0.4700036292457356
-    assert double == 0.9400072584914712
+    # Derived symbolically like the worked-corpus test above, not pasted
+    # machine output. "alpha" is in 2 of 3 docs, so
+    #   idf("alpha") = log((3 - 2 + 0.5) / (2 + 0.5) + 1) = log(1.6).
+    # For item 0: doc_len=2, avgdl=(2+2+2)/3=2.0, f=1:
+    #   num = 1 * (k1 + 1) = 2.5
+    #   den = 1 + 1.5 * (0.25 + 0.75 * 2/2) = 2.5
+    # so single = log(1.6) * 2.5 / 2.5. The operation order matters: that
+    # product-then-quotient is 1 ULP off from log(1.6) itself, which is why
+    # pinning the bare log(1.6) would fail.
+    expected_single = math.log(1.6) * 2.5 / 2.5
+    assert single == expected_single
+    assert double == expected_single * 2
     assert double == single * 2
 
 
@@ -163,7 +198,9 @@ def test_long_match_bonus_applies_at_exactly_eight_chars_not_seven() -> None:
     assert results[0].score == 0.06931471805599453
     assert results[1].matched_terms == ["longerid"]  # 8 chars
     assert results[1].score == 0.36931471805599453
-    assert results[1].score - results[0].score == 0.3
+    # The 0.3 bonus is the only difference between the two scores. Use isclose
+    # so the subtraction is not a float-equality trap under operand change.
+    assert math.isclose(results[1].score - results[0].score, 0.3, abs_tol=1e-12)
 
 
 def test_normalization_divides_by_max_score_before_the_bonus_is_added() -> None:
@@ -179,7 +216,9 @@ def test_normalization_divides_by_max_score_before_the_bonus_is_added() -> None:
 
     assert raw == 0.5876820724517808
     assert normalized == 0.3287682072451781
-    assert normalized == (raw - 0.3) / 10.0 + 0.3
+    # Order of operations: (raw - bonus) / max_score + bonus. isclose keeps
+    # this from being a float-equality trap that holds only for these operands.
+    assert math.isclose(normalized, (raw - 0.3) / 10.0 + 0.3, abs_tol=1e-12)
 
 
 def test_normalized_score_clamps_to_one_when_it_would_exceed_max_score() -> None:
