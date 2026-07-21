@@ -159,7 +159,7 @@ first use with `uv run --no-project --with "furl-ctx[mcp]==1.3.2"`. Be explicit
 about that posture (audit High-6):
 
 - **Version-pinned, not hash-pinned.** The engine version is exact
-  (`==1.3.0`), so you always get that release, but the download is not verified
+  (`==1.3.2`), so you always get that release, but the download is not verified
   against a recorded artifact hash. `uv`'s inline `--with` has no per-package hash
   channel, so pinning digests would mean shipping and maintaining a full hashed
   requirements lockfile for the engine and every transitive dependency — a change
