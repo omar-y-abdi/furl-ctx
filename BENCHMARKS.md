@@ -131,6 +131,29 @@ payloads) have **zero retrieval cost** — effective savings equal the raw
 reduction at every fraction. (`verify/measure.py::effective_savings`
 + `per_row_chunk_tokens`; OLD/NEW recomputed on the same seeds.)
 
+#### The `code` fixture is the opposite case: opaque whole-blob offload, net-negative on retrieval
+
+The table above covers granular per-row offload, where retrieving a fraction
+pulls only the rows needed. Source code cannot be folded that way. When the
+router cannot structurally shrink content it moves the whole blob to the CCR
+store behind one marker with no granular row index, so retrieving any of it
+pulls the entire payload back. The README `code` row is exactly this shape: the
+committed `benchmarks/data/code.raw.json` fixture of 7 real repo source files.
+
+| fixture | raw marker reduction | effective @25% | effective @50% | one full retrieval |
+|---|---:|---:|---:|---:|
+| `code`, opaque whole-blob offload | 95.9% | **-4.1%** | **-4.2%** | **-4.1%** |
+
+Measured fresh on this engine with `python -m benchmarks.code_roundtrip`, gpt-4o
+tokens, the same 12 token per-call overhead as the table above. The 95.9 percent
+is a marker saving, not a token saving: `compress()` moved 41005 of 41025 tokens
+into the store and left a 1601 token summary, so retrieving the code back to use
+it costs more than never compressing it at all. This is why the front-page
+`code` row leads with a raw reduction that does not survive a round trip.
+`compress()` now flags this on the result as a structured `opaque_offloads`
+entry, and the MCP `furl_compress` response carries the same field, so a caller
+sees the round trip is net-negative before paying for it.
+
 ### What is genuinely guaranteed (holds at EVERY tier)
 
 - **Lossless recovery is real and byte-exact.** Under the de-cheated strict

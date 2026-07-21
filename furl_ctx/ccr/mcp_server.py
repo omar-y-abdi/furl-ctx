@@ -1178,7 +1178,36 @@ class FurlMCPServer:
                 f"the same way."
             )
 
-        return {
+        # T9: whole-blob opaque offloads are surfaced as a structured field the
+        # caller reads, plus one honest line of copy. The marker's raw savings
+        # are mostly opaque offload, and retrieving the content back is a
+        # net-negative round trip, so a bare high savings_percent overstates the
+        # win. Not logged per-call: the hook spawns a fresh subprocess per tool
+        # call, so per-call stderr would spam.
+        opaque_offloads = [
+            {
+                "hash": o.hash,
+                "tool_name": o.tool_name,
+                "offloaded_tokens": o.offloaded_tokens,
+                "preview_tokens": o.preview_tokens,
+                "net_tokens_if_retrieved": o.net_tokens_if_retrieved,
+                "net_negative_on_retrieval": o.net_negative_on_retrieval,
+            }
+            for o in result.opaque_offloads
+        ]
+        if opaque_offloads:
+            offloaded_total = sum(o.offloaded_tokens for o in result.opaque_offloads)
+            count = len(opaque_offloads)
+            blob_word = "blob" if count == 1 else "blobs"
+            note += (
+                f" Heads up on economics: {count} opaque whole-blob {blob_word} moved "
+                f"{offloaded_total} tokens to the store behind a marker instead of shrinking "
+                f"structurally. Retrieving that content back returns the whole payload, so a "
+                f"round trip costs more than never compressing it. Most of this reported "
+                f"saving is opaque offload, not a net win. See opaque_offloads."
+            )
+
+        response: dict[str, Any] = {
             "compressed": compressed_content,
             "hash": hash_key,
             "original_tokens": input_tokens,
@@ -1188,6 +1217,13 @@ class FurlMCPServer:
             "transforms": result.transforms_applied,
             "note": note,
         }
+        # Add the structured signal ONLY when there is an opaque offload to
+        # report, so the default response envelope stays byte-stable (the
+        # envelope-keys pin) and the field is present exactly when it means
+        # something.
+        if opaque_offloads:
+            response["opaque_offloads"] = opaque_offloads
+        return response
 
     def _compress_filtered(
         self,
