@@ -10,8 +10,8 @@ Two production failure modes pinned here:
    run off the main thread, where signal-based timeouts cannot fire. The
    load is also EAGER (in ``TiktokenCounter.__init__``) so a
    failure/timeout surfaces at construction, where
-   ``TokenizerRegistry.get()`` already degrades to the estimation
-   fallback WITHOUT caching the failure (COR-40c: the next ``get()``
+   ``get_tokenizer()`` already degrades to the estimation
+   fallback WITHOUT caching the failure (COR-40c: the next ``get_tokenizer()``
    retries the real tokenizer — a transient outage must not pin the
    model to chars/4 estimation for the process lifetime).
 
@@ -37,7 +37,7 @@ import pytest
 
 import furl_ctx.tokenizers.tiktoken_counter as tiktoken_counter_module
 from furl_ctx.tokenizers import EstimatingTokenCounter, TiktokenCounter, get_tokenizer
-from furl_ctx.tokenizers.registry import TokenizerRegistry
+from furl_ctx.tokenizers import registry as tokenizer_registry
 from furl_ctx.tokenizers.tiktoken_counter import (
     _MAX_SAFE_SAME_CLASS_RUN,
     _has_backtracking_prone_run,
@@ -99,9 +99,9 @@ class TestBoundedEncodingLoad:
     def _clean_registry_cache(self):
         """Isolate registry state: COR-40c semantics are exactly about
         what does / does not get cached across ``get()`` calls."""
-        TokenizerRegistry.clear_cache()
+        tokenizer_registry._cache.clear()
         yield
-        TokenizerRegistry.clear_cache()
+        tokenizer_registry._cache.clear()
 
     @staticmethod
     def _hung_get_encoding(release: threading.Event):

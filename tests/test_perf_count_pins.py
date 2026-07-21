@@ -6,8 +6,7 @@ the aligner enabled: pipeline entry+exit = 2, aligner = 2, dedup = 2, router
 = 2; copies: pipeline entry + aligner). The fix pins:
 
 * CacheAligner.apply: ONE count, ``tokens_after == tokens_before``, and the
-  result list IS the input list (the isolation copy moved to the public
-  ``align_for_cache`` wrapper).
+  result list IS the input list.
 * CrossMessageDeduper.apply: ONE full-conversation count at entry; the
   after-count derives from per-replaced-message deltas.
 * End-to-end pipeline: SIX full-conversation counts, ONE deep copy.
@@ -35,10 +34,9 @@ from typing import Any
 
 from furl_ctx.config import CacheAlignerConfig, FurlConfig
 from furl_ctx.tokenizer import Tokenizer
-from furl_ctx.transforms import cache_aligner as cache_aligner_module
 from furl_ctx.transforms import content_router as content_router_module
 from furl_ctx.transforms import pipeline as pipeline_module
-from furl_ctx.transforms.cache_aligner import CacheAligner, align_for_cache
+from furl_ctx.transforms.cache_aligner import CacheAligner
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 from furl_ctx.transforms.cross_message_dedup import CrossMessageDeduper
 from furl_ctx.transforms.pipeline import TransformPipeline
@@ -147,20 +145,6 @@ class TestCacheAlignerSingleCount:
         assert result.messages is messages
         assert result.messages == messages
 
-    def test_align_for_cache_wrapper_keeps_the_public_copy(self) -> None:
-        messages = [
-            {"role": "system", "content": "Prompt content"},
-            {"role": "user", "content": "hello"},
-        ]
-
-        aligned, stable_hash = align_for_cache(messages)
-
-        # Direct public callers still get an isolated list they can mutate.
-        assert aligned is not messages
-        assert aligned == messages
-        assert aligned[0] is not messages[0]
-        assert stable_hash
-
 
 # ---------------------------------------------------------------------------
 # PERF-1: dedup counts the full conversation once, at entry.
@@ -221,7 +205,6 @@ class TestPipelineFullConversationCounts:
             return real_deep_copy(messages)
 
         monkeypatch.setattr(pipeline_module, "deep_copy_messages", counting_deep_copy)
-        monkeypatch.setattr(cache_aligner_module, "deep_copy_messages", counting_deep_copy)
 
         pipeline = TransformPipeline(
             config=FurlConfig(cache_aligner=CacheAlignerConfig(enabled=True)),

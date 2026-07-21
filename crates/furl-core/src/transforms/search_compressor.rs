@@ -243,19 +243,6 @@ pub struct SearchCompressionResult {
     pub summaries: BTreeMap<String, String>,
 }
 
-impl SearchCompressionResult {
-    /// Estimate tokens saved (rough: 1 token per 4 chars), matching Python.
-    pub fn tokens_saved_estimate(&self) -> i64 {
-        let chars_saved = self.original.len() as i64 - self.compressed.len() as i64;
-        chars_saved.max(0) / 4
-    }
-
-    pub fn matches_omitted(&self) -> usize {
-        self.original_match_count
-            .saturating_sub(self.compressed_match_count)
-    }
-}
-
 /// Sidecar diagnostics not returned by the parity-equal API. Captures
 /// per-stage drop counts so OTel can see what the compressor actually
 /// did beyond the bytes Python emits.

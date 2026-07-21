@@ -49,7 +49,6 @@ use super::builder::SmartCrusherBuilder;
 use super::compaction::CompactionStage;
 use super::config::SmartCrusherConfig;
 use super::planning::SmartCrusherPlanner;
-use super::traits::{Constraint, Observer};
 use super::types::{CompressionPlan, DroppedRef};
 use crate::ccr::CcrStore;
 use crate::relevance::RelevanceScorer;
@@ -126,12 +125,11 @@ pub struct CrushArrayResult {
 
 /// Top-level SmartCrusher.
 ///
-/// Three pluggable extensions:
+/// Pluggable extension:
 /// - `scorer` — relevance scoring (`HybridScorer` by default).
-/// - `constraints` — must-keep predicates (`KeepErrorsConstraint` +
-///   `KeepStructuralOutliersConstraint` by default).
-/// - `observers` — decision-stream telemetry (`TracingObserver` by
-///   default).
+///
+/// Error-item and structural-outlier preservation are hardwired into
+/// the planner (see `planning.rs`); they are no longer pluggable.
 ///
 /// Compose via [`SmartCrusherBuilder`]; or call `SmartCrusher::new()`
 /// for the OSS default composition.
@@ -140,8 +138,6 @@ pub struct SmartCrusher {
     pub anchor_selector: AnchorSelector,
     pub scorer: Box<dyn RelevanceScorer + Send + Sync>,
     pub analyzer: SmartAnalyzer,
-    pub constraints: Vec<Box<dyn Constraint>>,
-    pub observers: Vec<Box<dyn Observer>>,
     /// Optional lossless-first compaction stage. When
     /// set, `crush_array` runs compaction up front and short-circuits
     /// the lossy path on success. When `None` (default OSS), parity
@@ -169,8 +165,8 @@ pub struct SmartCrusher {
 }
 
 impl SmartCrusher {
-    /// Construct with the OSS default composition: scorer + constraints +
-    /// observer + **lossless-first compaction stage**. Calling
+    /// Construct with the OSS default composition: scorer +
+    /// **lossless-first compaction stage**. Calling
     /// `crush_array` runs the dispatch:
     ///
     /// 1. Try the lossless compactor.
@@ -235,8 +231,6 @@ impl SmartCrusher {
         anchor_selector: AnchorSelector,
         scorer: Box<dyn RelevanceScorer + Send + Sync>,
         analyzer: SmartAnalyzer,
-        constraints: Vec<Box<dyn Constraint>>,
-        observers: Vec<Box<dyn Observer>>,
         compaction: Option<CompactionStage>,
         ccr_store: Option<Arc<dyn CcrStore>>,
         tokenizer: Box<dyn crate::tokenizer::Tokenizer>,
@@ -246,8 +240,6 @@ impl SmartCrusher {
             anchor_selector,
             scorer,
             analyzer,
-            constraints,
-            observers,
             compaction,
             ccr_store,
             tokenizer,
@@ -267,7 +259,6 @@ impl SmartCrusher {
             &self.anchor_selector,
             &*self.scorer,
             &self.analyzer,
-            &self.constraints,
         )
     }
 
@@ -391,7 +382,6 @@ mod tests {
         use crate::relevance::BM25Scorer;
         let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
             .with_scorer(Box::new(BM25Scorer::default()))
-            .add_default_oss_constraints()
             .build();
         // Sanity: crushing still works with a swapped scorer.
         let items: Vec<Value> = (0..30).map(|_| json!({"status": "ok"})).collect();

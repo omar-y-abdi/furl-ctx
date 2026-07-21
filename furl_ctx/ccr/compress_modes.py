@@ -17,8 +17,7 @@ today's exact behavior, so a default call is byte-identical:
       reject. Both are pre-existing ``ContentRouterConfig`` fields.
 
 * ``include_patterns`` / ``exclude_patterns`` — glob-or-regex filters over the
-  content, applied LINE-WISE (and, when present, over the message ``tool_name``
-  as a whole-name match — see ``tool_name_is_excluded``). Contract:
+  content, applied LINE-WISE. Contract:
     - A pattern is tried as a Python regex ``search`` first; if it does not
       COMPILE as a regex (e.g. a bare ``*.py`` glob), it falls back to
       ``fnmatch`` glob matching. This makes both ``ERROR.*`` (regex) and
@@ -267,18 +266,6 @@ class SectionPatterns:
             return exclude_err
         return cls(include=include, exclude=exclude)
 
-    def tool_name_is_excluded(self, tool_name: str | None) -> bool:
-        """True when a whole ``tool_name`` matches an exclude pattern.
-
-        Lets ``exclude_patterns`` target a tool by name (the contract mentions
-        tool names). The MCP compress path currently wraps content with no tool
-        name, so this returns False there — but the check is honest for callers
-        that do set one.
-        """
-        if tool_name is None:
-            return False
-        return any(_pattern_matches(pattern, tool_name) for pattern in self.exclude)
-
     def _resolve_matchers(self) -> _ResolvedMatchers:
         """Compile every pattern to a matcher ONCE (SEC-1).
 
@@ -412,17 +399,6 @@ def _resolve_matcher(pattern: str) -> Callable[[str], bool]:
     except re.error:
         return lambda text: len(text) <= _MAX_REGEX_LINE_CHARS and fnmatch.fnmatch(text, pattern)
     return lambda text: len(text) <= _MAX_REGEX_LINE_CHARS and matches_within_budget(compiled, text)
-
-
-def _pattern_matches(pattern: str, text: str) -> bool:
-    """Match ``text`` against ``pattern`` (regex-first, glob-fallback).
-
-    Thin wrapper over :func:`_resolve_matcher` so there is a single matching
-    code path; kept for the per-pattern call sites and the unit tests. Hot loops
-    resolve the matcher once via :func:`_resolve_matcher` instead of re-resolving
-    per line.
-    """
-    return _resolve_matcher(pattern)(text)
 
 
 @dataclass(frozen=True)

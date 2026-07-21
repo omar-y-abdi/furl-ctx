@@ -3,10 +3,8 @@
 Provides automatic tokenizer selection based on model name with
 support for multiple backends and custom tokenizers.
 
-The registry is module-level state + functions (SIMP-11); the public
-``TokenizerRegistry`` class survives as a thin compatibility wrapper so
-existing ``TokenizerRegistry.get(...)`` / ``.register(...)`` call sites
-keep working unchanged.
+The registry is module-level state + functions (SIMP-11): ``get_tokenizer``,
+``register_tokenizer``, and ``list_supported_models`` are the public API.
 """
 
 from __future__ import annotations
@@ -330,21 +328,6 @@ def register_tokenizer(
         del _cache[key]
 
 
-def register_backend(backend: str, factory: Callable[[str], TokenCounter]) -> None:
-    """Register a backend factory.
-
-    Args:
-        backend: Backend name.
-        factory: Factory function (model: str) -> TokenCounter.
-    """
-    _factories[backend] = factory
-
-
-def clear_cache() -> None:
-    """Clear the tokenizer cache."""
-    _cache.clear()
-
-
 def list_supported_models() -> dict[str, str]:
     """List models with known tokenizer mappings.
 
@@ -352,31 +335,3 @@ def list_supported_models() -> dict[str, str]:
         Dict mapping model pattern to backend.
     """
     return dict(MODEL_PATTERNS)
-
-
-# ── Compatibility wrapper ───────────────────────────────────────────────────
-
-
-class TokenizerRegistry:
-    """Thin compatibility wrapper over the module-level registry.
-
-    The registry used to be a singleton-of-classmethods; the state and
-    logic now live at module level (SIMP-11). The public entry points
-    (``get`` / ``register`` / ``register_backend`` / ``clear_cache``)
-    are preserved as static delegates so existing call sites keep working.
-
-    Example:
-        # Auto-detect tokenizer
-        tokenizer = TokenizerRegistry.get("gpt-4o")
-
-        # Register custom tokenizer
-        TokenizerRegistry.register("my-model", my_tokenizer)
-
-        # Use specific backend
-        tokenizer = TokenizerRegistry.get("gpt-4", backend="tiktoken")
-    """
-
-    get = staticmethod(get_tokenizer)
-    register = staticmethod(register_tokenizer)
-    register_backend = staticmethod(register_backend)
-    clear_cache = staticmethod(clear_cache)

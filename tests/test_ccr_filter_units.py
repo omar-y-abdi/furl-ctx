@@ -18,7 +18,7 @@ import pytest
 from furl_ctx.ccr.compress_modes import (
     CompressionMode,
     SectionPatterns,
-    _pattern_matches,
+    _resolve_matcher,
     build_mode_pipeline,
     partition_content,
 )
@@ -316,25 +316,25 @@ def test_aggressive_pipeline_config() -> None:
     assert config.min_ratio_aggressive == 0.99
 
 
-# ─── _pattern_matches: regex-first, glob-fallback ───────────────────────────
+# ─── _resolve_matcher: regex-first, glob-fallback ───────────────────────────
 
 
 def test_pattern_regex_partial_match() -> None:
     # A valid regex uses search (partial): "ERROR" matches a line containing it.
-    assert _pattern_matches("ERROR", "line with ERROR inside") is True
-    assert _pattern_matches("ERROR", "clean line") is False
+    assert _resolve_matcher("ERROR")("line with ERROR inside") is True
+    assert _resolve_matcher("ERROR")("clean line") is False
 
 
 def test_pattern_glob_fallback() -> None:
     # "*.py" is invalid as a regex (leading *), so it falls back to fnmatch,
     # which anchors the whole string.
-    assert _pattern_matches("*.py", "module.py") is True
-    assert _pattern_matches("*.py", "module.txt") is False
+    assert _resolve_matcher("*.py")("module.py") is True
+    assert _resolve_matcher("*.py")("module.txt") is False
 
 
 def test_pattern_regex_anchors_and_classes() -> None:
-    assert _pattern_matches(r"^\d+$", "12345") is True
-    assert _pattern_matches(r"^\d+$", "12a45") is False
+    assert _resolve_matcher(r"^\d+$")("12345") is True
+    assert _resolve_matcher(r"^\d+$")("12a45") is False
 
 
 # ─── SectionPatterns eligibility ────────────────────────────────────────────
@@ -356,13 +356,6 @@ def test_exclude_overrides_include() -> None:
     patterns = SectionPatterns(include=("DATA",), exclude=("SKIP",))
     # Matches include but ALSO matches exclude → protected.
     assert patterns.line_is_eligible("DATA but SKIP this") is False
-
-
-def test_tool_name_exclusion() -> None:
-    patterns = SectionPatterns(include=(), exclude=("Read",))
-    assert patterns.tool_name_is_excluded("Read") is True
-    assert patterns.tool_name_is_excluded("Bash") is False
-    assert patterns.tool_name_is_excluded(None) is False
 
 
 # ─── partition_content byte-exact reassembly ────────────────────────────────
@@ -408,12 +401,12 @@ def test_partition_alternating_runs() -> None:
 
 
 def test_compress_catastrophic_pattern_over_long_line_returns_fast() -> None:
-    # _pattern_matches bypasses parse (the unit/tool-name path), so the INPUT
+    # _resolve_matcher bypasses parse (the unit/tool-name path), so the INPUT
     # CAP is what protects it: a 20k-char line is past the 10k cap → no match,
     # no backtracking. Without the cap, (a+)+$ over this line hangs for minutes.
     long_line = "a" * 20_000
     start = time.monotonic()
-    result = _pattern_matches(_CATASTROPHIC, long_line)
+    result = _resolve_matcher(_CATASTROPHIC)(long_line)
     assert time.monotonic() - start < _REDOS_DEADLINE_S
     assert result is False  # over-cap line resolves conservatively to no-match
 
@@ -488,10 +481,10 @@ def test_retrieve_parse_rejects_overlong_pattern() -> None:
 def test_redos_guards_preserve_normal_patterns_byte_identically() -> None:
     # The must-preserve normal patterns are neither over-long nor nested, so
     # they parse and match exactly as before the guards.
-    assert _pattern_matches("ERROR.*", "line with ERROR here") is True
-    assert _pattern_matches("*.py", "module.py") is True  # glob fallback intact
-    assert _pattern_matches(r"^\d+$", "12345") is True
-    assert _pattern_matches(r"^\d+$", "12a45") is False
+    assert _resolve_matcher("ERROR.*")("line with ERROR here") is True
+    assert _resolve_matcher("*.py")("module.py") is True  # glob fallback intact
+    assert _resolve_matcher(r"^\d+$")("12345") is True
+    assert _resolve_matcher(r"^\d+$")("12a45") is False
     spec = RetrieveFilters.parse({"pattern": "ERROR.*"})
     assert isinstance(spec, RetrieveFilters)  # not rejected
     section = SectionPatterns.parse({"include_patterns": ["*.py"], "exclude_patterns": ["ERROR.*"]})
@@ -500,8 +493,8 @@ def test_redos_guards_preserve_normal_patterns_byte_identically() -> None:
 
 def test_regex_line_char_cap_boundary() -> None:
     # Exactly at the cap the line is still matched; one char over, it is skipped.
-    assert _pattern_matches("a+", "a" * 10_000) is True
-    assert _pattern_matches("a+", "a" * 10_001) is False
+    assert _resolve_matcher("a+")("a" * 10_000) is True
+    assert _resolve_matcher("a+")("a" * 10_001) is False
 
 
 # ─── A12: optional-chain ReDoS on SHORT (within-cap) lines ──────────────────

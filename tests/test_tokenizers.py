@@ -7,11 +7,11 @@ from furl_ctx.tokenizers import (
     EstimatingTokenCounter,
     TiktokenCounter,
     TokenCounter,
-    TokenizerRegistry,
     get_tokenizer,
     list_supported_models,
     register_tokenizer,
 )
+from furl_ctx.tokenizers import registry as tokenizer_registry
 
 
 class TestTiktokenCounter:
@@ -57,7 +57,7 @@ class TestTiktokenCounter:
         assert TiktokenCounter("GPT-4").encoding_name == "cl100k_base"
 
         # The registry path resolves identically.
-        TokenizerRegistry.clear_cache()
+        tokenizer_registry._cache.clear()
         tokenizer = get_tokenizer("GPT-4o")
         assert isinstance(tokenizer, TiktokenCounter)
         assert tokenizer.encoding_name == "o200k_base"
@@ -423,7 +423,7 @@ class TestEstimatorPrefixSampling:
 
 
 class TestTokenizerRegistry:
-    """Tests for TokenizerRegistry."""
+    """Tests for the module-level tokenizer registry (get_tokenizer et al.)."""
 
     def test_get_openai_model(self):
         """Test getting tokenizer for OpenAI model."""
@@ -440,7 +440,7 @@ class TestTokenizerRegistry:
         """o200k_base CJK count != 3.5-cpt estimate, proving real tokenizer (Q1)."""
         # CJK: est@3.5=9, o200k_base=24 — a 2.7x difference ensures we'd
         # never accidentally pass this with the old EstimatingTokenCounter.
-        TokenizerRegistry.clear_cache()
+        tokenizer_registry._cache.clear()
         cjk = "东京タワーは高いです。北京烤鸭很好吃。한국어 텍스트도 있다."
         tokenizer = get_tokenizer("claude-sonnet-4-6")
         assert tokenizer.count_text(cjk) == 24  # o200k_base, not est@3.5 (9)
@@ -463,13 +463,13 @@ class TestTokenizerRegistry:
         try:
             # Also block the top-level tiktoken so TiktokenCounter cannot re-import.
             monkeypatch.setitem(sys.modules, "tiktoken", None)
-            TokenizerRegistry.clear_cache()
+            tokenizer_registry._cache.clear()
             tokenizer = reg.get_tokenizer("claude-3-sonnet")
             assert isinstance(tokenizer, EstimatingTokenCounter)
         finally:
             if tc_module is not None:
                 sys.modules["furl_ctx.tokenizers.tiktoken_counter"] = tc_module
-            TokenizerRegistry.clear_cache()
+            tokenizer_registry._cache.clear()
 
     def test_claude_proxy_is_labeled_with_documented_error_band(self):
         """claude-* o200k_base counts are labeled a PROXY, not real Anthropic
@@ -501,7 +501,7 @@ class TestTokenizerRegistry:
         """
         from furl_ctx.tokenizers.registry import ANTHROPIC_O200K_PROXY_NOTE
 
-        TokenizerRegistry.clear_cache()
+        tokenizer_registry._cache.clear()
         tokenizer = get_tokenizer("claude-3-sonnet")
 
         assert isinstance(tokenizer, TiktokenCounter)
@@ -543,7 +543,7 @@ class TestTokenizerRegistry:
 
         with caplog.at_level(logging.WARNING, logger="furl_ctx.tokenizers.registry"):
             for _ in range(5):
-                TokenizerRegistry.clear_cache()
+                tokenizer_registry._cache.clear()
                 get_tokenizer("claude-3-opus")
 
         assert not any("o200k_base" in record.getMessage() for record in caplog.records)
@@ -608,7 +608,7 @@ class TestTokenizerRegistry:
         from furl_ctx.tokenizers.tiktoken_counter import TiktokenCounter
 
         for model in ("gemini-1.5-pro", "command-r-plus"):
-            TokenizerRegistry.clear_cache()
+            tokenizer_registry._cache.clear()
             tokenizer = get_tokenizer(model)
 
             assert isinstance(tokenizer, EstimatingTokenCounter)
@@ -651,7 +651,7 @@ class TestTokenizerRegistry:
 
         with caplog.at_level(logging.WARNING, logger="furl_ctx.tokenizers.registry"):
             for _ in range(5):
-                TokenizerRegistry.clear_cache()
+                tokenizer_registry._cache.clear()
                 get_tokenizer("gemini-1.5-pro")
 
         assert not any("2x" in record.getMessage() for record in caplog.records)
@@ -702,7 +702,7 @@ class TestTokenizerRegistry:
         # Get a tokenizer to populate cache
         get_tokenizer("gpt-4o")
         # Clear cache
-        TokenizerRegistry.clear_cache()
+        tokenizer_registry._cache.clear()
         # Should still work after clearing
         tokenizer = get_tokenizer("gpt-4o")
         assert tokenizer is not None
@@ -722,14 +722,14 @@ class TestTokenizerRegistry:
                 raise RuntimeError("simulated transient failure")
             return EstimatingTokenCounter(chars_per_token=2.0)
 
-        TokenizerRegistry.register_backend("flaky-test-backend", flaky_factory)
-        TokenizerRegistry.clear_cache()
+        tokenizer_registry._factories["flaky-test-backend"] = flaky_factory
+        tokenizer_registry._cache.clear()
 
-        first = TokenizerRegistry.get("flaky-model", backend="flaky-test-backend")
+        first = get_tokenizer("flaky-model", backend="flaky-test-backend")
         assert isinstance(first, EstimatingTokenCounter)
         assert first._fixed_ratio is None  # the generic fallback estimator
 
-        second = TokenizerRegistry.get("flaky-model", backend="flaky-test-backend")
+        second = get_tokenizer("flaky-model", backend="flaky-test-backend")
         assert calls["n"] == 2  # creation was retried, not served from cache
         assert isinstance(second, EstimatingTokenCounter)
         assert second._fixed_ratio == 2.0  # the real (retried) tokenizer

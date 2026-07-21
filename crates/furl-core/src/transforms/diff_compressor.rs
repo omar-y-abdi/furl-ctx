@@ -34,14 +34,13 @@
 //!
 //! # Observability
 //! [`DiffCompressorStats`] carries the granular metrics Python doesn't
-//! emit (per-file hunk drop counts, dropped file names, context lines
-//! trimmed, parse warnings, processing duration). The `compress_with_stats`
-//! method returns it alongside the parity-equal result; `compress` is the
-//! parity-only API that just emits a `tracing::info_span`.
+//! emit (per-file hunk drop counts, dropped file names, largest dropped
+//! hunk, parse warnings). The `compress_with_stats` method returns it
+//! alongside the parity-equal result; `compress` is the parity-only API
+//! that discards the sidecar stats.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
-use std::time::Instant;
 
 use regex::Regex;
 
@@ -92,11 +91,6 @@ pub struct DiffCompressorConfig {
     /// [`DiffCompressorStats::files_dropped`] for observability). Python
     /// default: 20.
     pub max_files: usize,
-    /// Reserved — Python config exposes this but the algorithm always keeps
-    /// `+` lines. Kept for fixture-config schema compatibility.
-    pub always_keep_additions: bool,
-    /// Reserved — same as `always_keep_additions` but for `-` lines.
-    pub always_keep_deletions: bool,
     /// If true, attach an MD5-based CCR retrieval marker to the compressed
     /// output when compression met the savings threshold. Python default: true.
     pub enable_ccr: bool,
@@ -150,8 +144,6 @@ impl Default for DiffCompressorConfig {
             max_context_lines: 2,
             max_hunks_per_file: 10,
             max_files: 20,
-            always_keep_additions: true,
-            always_keep_deletions: true,
             enable_ccr: true,
             min_lines_for_ccr: 50,
             min_compression_ratio_for_ccr: 0.8,
@@ -176,8 +168,8 @@ pub struct DiffCompressionResult {
     pub cache_key: Option<String>,
 }
 
-/// Sidecar stats. Not part of the parity output; surfaced to callers and
-/// `tracing` spans for prod observability. None of these fields exist in
+/// Sidecar stats. Not part of the parity output; surfaced to callers for
+/// prod observability. None of these fields exist in
 /// Python's `DiffCompressionResult`.
 #[derive(Debug, Clone, Default)]
 pub struct DiffCompressorStats {
@@ -199,13 +191,6 @@ pub struct DiffCompressorStats {
     /// Per-file hunk drop counts. Stable iteration order via `BTreeMap`.
     pub hunks_dropped_per_file: BTreeMap<String, usize>,
 
-    pub context_lines_input: usize,
-    pub context_lines_kept: usize,
-    pub context_lines_trimmed: usize,
-
-    /// Lines in the largest hunk we kept. Useful for spotting cases where
-    /// a single oversized hunk dominates the output.
-    pub largest_hunk_kept_lines: usize,
     /// Lines in the largest hunk we dropped (per-file cap). 0 if none dropped.
     pub largest_hunk_dropped_lines: usize,
 
@@ -246,8 +231,6 @@ pub struct DiffCompressorStats {
     /// hunk headers, etc. Surfacing them rather than dropping silently.
     pub parse_warnings: Vec<String>,
 
-    pub processing_duration_us: u64,
-
     /// True if the CCR cache_key was attached to the output (compression
     /// saved >20% of lines AND `enable_ccr` was true).
     pub cache_key_emitted: bool,
@@ -279,9 +262,8 @@ impl DiffCompressor {
 
     /// Compress `content`. `context` is an optional user-query string used
     /// for relevance scoring when `max_hunks_per_file` fires; pass `""` if
-    /// not applicable. Parity-only API: emits a `tracing::info_span` but
-    /// discards the granular sidecar stats. Use [`compress_with_stats`]
-    /// when you want them.
+    /// not applicable. Parity-only API: discards the granular sidecar
+    /// stats. Use [`compress_with_stats`] when you want them.
     ///
     /// [`compress_with_stats`]: Self::compress_with_stats
     pub fn compress(&self, content: &str, context: &str) -> DiffCompressionResult {
@@ -321,7 +303,6 @@ impl DiffCompressor {
         context: &str,
         store: Option<&dyn CcrStore>,
     ) -> (DiffCompressionResult, DiffCompressorStats) {
-        let start = Instant::now();
         let mut stats = DiffCompressorStats::default();
 
         // Python: `lines = content.split("\n")`. Rust `split` matches `str.split`
@@ -338,11 +319,7 @@ impl DiffCompressor {
             stats.output_lines = original_line_count;
             stats.compression_ratio = 1.0;
             stats.ccr_skipped_reason = Some("input below min_lines_for_ccr".into());
-            stats.processing_duration_us = start.elapsed().as_micros() as u64;
-            return (
-                pass_through_result(content, original_line_count),
-                emit_span_and_return(stats),
-            );
+            return (pass_through_result(content, original_line_count), stats);
         }
 
         // Parse the unified diff into files + hunks (and any pre-diff
@@ -354,11 +331,6 @@ impl DiffCompressor {
         stats.parse_warnings = parsed.parse_warnings;
         stats.files_total = diff_files.len();
         stats.hunks_total = diff_files.iter().map(|f| f.hunks.len()).sum();
-        stats.context_lines_input = diff_files
-            .iter()
-            .flat_map(|f| f.hunks.iter())
-            .map(|h| h.context_lines)
-            .sum();
 
         // Short-circuit 2: parser found no diff sections → pass through.
         // Same info-preservation rationale: malformed or non-diff input is
@@ -367,11 +339,7 @@ impl DiffCompressor {
             stats.output_lines = original_line_count;
             stats.compression_ratio = 1.0;
             stats.ccr_skipped_reason = Some("no diff sections parsed".into());
-            stats.processing_duration_us = start.elapsed().as_micros() as u64;
-            return (
-                pass_through_result(content, original_line_count),
-                emit_span_and_return(stats),
-            );
+            return (pass_through_result(content, original_line_count), stats);
         }
 
         // Noise elision (DiffNoise, P2-14; config-gated, default off).
@@ -446,9 +414,7 @@ impl DiffCompressor {
         let mut total_deletions = 0usize;
         let mut hunks_kept_total = 0usize;
         let mut hunks_removed_total = 0usize;
-        let mut largest_kept = 0usize;
         let mut largest_dropped = 0usize;
-        let mut context_kept_total = 0usize;
 
         for file in diff_files {
             total_additions += file.total_additions();
@@ -473,10 +439,6 @@ impl DiffCompressor {
             let mut compressed_hunks: Vec<DiffHunk> = Vec::with_capacity(selected.len());
             for hunk in selected {
                 let trimmed = reduce_context(&hunk, self.config.max_context_lines);
-                if trimmed.lines.len() > largest_kept {
-                    largest_kept = trimmed.lines.len();
-                }
-                context_kept_total += trimmed.context_lines;
                 compressed_hunks.push(trimmed);
             }
 
@@ -496,9 +458,6 @@ impl DiffCompressor {
 
         stats.hunks_kept = hunks_kept_total;
         stats.hunks_dropped = hunks_removed_total;
-        stats.context_lines_kept = context_kept_total;
-        stats.context_lines_trimmed = stats.context_lines_input.saturating_sub(context_kept_total);
-        stats.largest_hunk_kept_lines = largest_kept;
         stats.largest_hunk_dropped_lines = largest_dropped;
 
         let files_affected = compressed_files.len();
@@ -569,7 +528,6 @@ impl DiffCompressor {
         } else {
             compressed_line_count as f64 / original_line_count as f64
         };
-        stats.processing_duration_us = start.elapsed().as_micros() as u64;
 
         let result = DiffCompressionResult {
             compressed: compressed_output,
@@ -583,7 +541,7 @@ impl DiffCompressor {
             cache_key,
         };
 
-        (result, emit_span_and_return(stats))
+        (result, stats)
     }
 }
 
@@ -1319,34 +1277,6 @@ fn count_split_lines(s: &str) -> usize {
 // shared implementation for the diff/log/search/text family (ARCH-5),
 // imported at the top of this module. Its Python-parity pin
 // (`md5_24_matches_python`) moved there with it.
-
-/// Emit a `tracing::info` event for the OTel pipeline and return the stats
-/// unchanged (so callers can see them too).
-fn emit_span_and_return(stats: DiffCompressorStats) -> DiffCompressorStats {
-    tracing::info!(
-        target: "diff_compressor",
-        input_lines = stats.input_lines,
-        output_lines = stats.output_lines,
-        compression_ratio = stats.compression_ratio,
-        files_total = stats.files_total,
-        files_kept = stats.files_kept,
-        files_dropped = stats.files_dropped.len(),
-        hunks_total = stats.hunks_total,
-        hunks_kept = stats.hunks_kept,
-        hunks_dropped = stats.hunks_dropped,
-        noise_hunks_elided = stats.noise_hunks_elided,
-        context_lines_trimmed = stats.context_lines_trimmed,
-        largest_hunk_kept_lines = stats.largest_hunk_kept_lines,
-        largest_hunk_dropped_lines = stats.largest_hunk_dropped_lines,
-        parse_warnings = stats.parse_warnings.len(),
-        processing_duration_us = stats.processing_duration_us,
-        cache_key_emitted = stats.cache_key_emitted,
-        file_mode_normalizations = stats.file_mode_normalizations.len(),
-        binary_files_simplified = stats.binary_files_simplified.len(),
-        "diff_compressor finished"
-    );
-    stats
-}
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
 

@@ -38,12 +38,8 @@ use super::field_detect::detect_score_field_statistically;
 use super::field_role::compute_exclude_set;
 use super::hashing::hash_field_name;
 use super::orchestration::{prioritize_indices, PrioritizeParams};
-use super::traits::Constraint;
+use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
 use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldStats, FieldType};
-// Note: `detect_error_items_for_preservation` and `detect_structural_outliers`
-// are still imported transitively by `constraints.rs` (via `KeepErrorsConstraint`
-// and `KeepStructuralOutliersConstraint`). Planning no longer calls them
-// directly; it iterates `self.constraints` via `apply_constraints`.
 use crate::relevance::RelevanceScorer;
 use crate::transforms::anchor_selector::{AnchorSelector, DataPattern};
 
@@ -54,12 +50,6 @@ pub struct SmartCrusherPlanner<'a> {
     pub anchor_selector: &'a AnchorSelector,
     pub scorer: &'a (dyn RelevanceScorer + Send + Sync),
     pub analyzer: &'a SmartAnalyzer,
-    /// User-configured must-keep predicates. The plan methods union
-    /// the output of every constraint into the kept set; OSS default
-    /// composition includes `KeepErrorsConstraint` and
-    /// `KeepStructuralOutliersConstraint`, reproducing the original
-    /// hardcoded behavior byte-for-byte.
-    pub constraints: &'a [Box<dyn Constraint>],
 }
 
 impl<'a> SmartCrusherPlanner<'a> {
@@ -68,31 +58,12 @@ impl<'a> SmartCrusherPlanner<'a> {
         anchor_selector: &'a AnchorSelector,
         scorer: &'a (dyn RelevanceScorer + Send + Sync),
         analyzer: &'a SmartAnalyzer,
-        constraints: &'a [Box<dyn Constraint>],
     ) -> Self {
         SmartCrusherPlanner {
             config,
             anchor_selector,
             scorer,
             analyzer,
-            constraints,
-        }
-    }
-
-    /// Apply every configured `Constraint::must_keep` and union the
-    /// results into `keep`. Replaces the hardcoded
-    /// `detect_error_items_for_preservation` +
-    /// `detect_structural_outliers` calls that lived in each plan
-    /// method. With the OSS default constraint stack the output is
-    /// byte-identical to the original behavior.
-    fn apply_constraints(
-        &self,
-        items: &[Value],
-        item_strings: Option<&[String]>,
-        keep: &mut BTreeSet<usize>,
-    ) {
-        for c in self.constraints {
-            keep.extend(c.must_keep(items, item_strings));
         }
     }
 
@@ -199,8 +170,9 @@ impl<'a> SmartCrusherPlanner<'a> {
             query_or_none(query_context),
         ));
 
-        // 2. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        // 2. Structural outliers + error keywords.
+        keep.extend(detect_error_items_for_preservation(items, item_strings));
+        keep.extend(detect_structural_outliers(items));
 
         // 3. Numeric anomalies (>variance_threshold σ from per-field mean).
         for (name, stats) in &analysis.field_stats {
@@ -310,8 +282,9 @@ impl<'a> SmartCrusherPlanner<'a> {
             keep.insert(*idx);
         }
 
-        // 2. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        // 2. Structural outliers + error keywords.
+        keep.extend(detect_error_items_for_preservation(items, item_strings));
+        keep.extend(detect_structural_outliers(items));
 
         // 3. Query-anchor matches (additive — preserved regardless of
         // top-N). Collected separately: anchor matches take priority when
@@ -418,8 +391,9 @@ impl<'a> SmartCrusherPlanner<'a> {
             query_or_none(query_context),
         ));
 
-        // 2. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        // 2. Structural outliers + error keywords.
+        keep.extend(detect_error_items_for_preservation(items, item_strings));
+        keep.extend(detect_structural_outliers(items));
 
         // 3. Cluster by message-like field (highest unique_ratio > 0.3).
         let mut message_field: Option<&str> = None;
@@ -519,8 +493,9 @@ impl<'a> SmartCrusherPlanner<'a> {
             }
         }
 
-        // 3. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        // 3. Structural outliers + error keywords.
+        keep.extend(detect_error_items_for_preservation(items, item_strings));
+        keep.extend(detect_structural_outliers(items));
 
         // 4/5. Query signals.
         let query_pinned = self.apply_query_signals(items, query_context, item_strings, &mut keep);
@@ -734,7 +709,6 @@ mod tests {
     use super::*;
     use crate::relevance::HybridScorer;
     use crate::transforms::anchor_selector::AnchorConfig;
-    use crate::transforms::smart_crusher::constraints::default_oss_constraints;
     use serde_json::json;
 
     fn fixture<'a>(
@@ -742,9 +716,8 @@ mod tests {
         anchor_selector: &'a AnchorSelector,
         scorer: &'a HybridScorer,
         analyzer: &'a SmartAnalyzer,
-        constraints: &'a [Box<dyn Constraint>],
     ) -> SmartCrusherPlanner<'a> {
-        SmartCrusherPlanner::new(config, anchor_selector, scorer, analyzer, constraints)
+        SmartCrusherPlanner::new(config, anchor_selector, scorer, analyzer)
     }
 
     fn make_planner_deps() -> (
@@ -752,14 +725,12 @@ mod tests {
         AnchorSelector,
         HybridScorer,
         SmartAnalyzer,
-        Vec<Box<dyn Constraint>>,
     ) {
         let cfg = SmartCrusherConfig::default();
         let asel = AnchorSelector::new(AnchorConfig::default());
         let scorer = HybridScorer::default();
         let analyzer = SmartAnalyzer::new(cfg.clone());
-        let constraints = default_oss_constraints();
-        (cfg, asel, scorer, analyzer, constraints)
+        (cfg, asel, scorer, analyzer)
     }
 
     // ---------- map_to_anchor_pattern ----------
@@ -828,8 +799,8 @@ mod tests {
 
     #[test]
     fn create_plan_skip_returns_all_indices() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         let analysis = ArrayAnalysis {
             item_count: 5,
             field_stats: BTreeMap::new(),
@@ -845,8 +816,8 @@ mod tests {
 
     #[test]
     fn create_plan_routes_smart_sample_to_smart_sample() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i, "v": i})).collect();
         let analysis = analyzer.analyze_array(&items);
         let plan = p.create_plan(&analysis, &items, "", None, Some(15), None);
@@ -860,8 +831,8 @@ mod tests {
 
     #[test]
     fn smart_sample_keeps_error_items() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         let mut items: Vec<Value> = (0..30)
             .map(|i| json!({"id": i, "msg": format!("ok {}", i)}))
             .collect();
@@ -889,8 +860,8 @@ mod tests {
 
     #[test]
     fn smart_sample_query_anchor_pinned() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         let items: Vec<Value> = (0..30)
             .map(|i| {
                 json!({
@@ -928,8 +899,8 @@ mod tests {
 
     #[test]
     fn top_n_falls_back_when_no_score_field() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         // No bounded score field — top_n falls through to smart_sample.
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i})).collect();
         let analysis = analyzer.analyze_array(&items);
@@ -953,8 +924,8 @@ mod tests {
 
     #[test]
     fn top_n_keeps_highest_scored_items() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         // 20 items with score 0.0..0.95 in 0.05 increments. Top-K
         // should be the highest scores.
         let items: Vec<Value> = (0..20)
@@ -990,8 +961,8 @@ mod tests {
         // the CCR-backed (possibly halved) budget on the TopN strategy.
         // The cap keeps query-anchor matches (user-named values) first,
         // then fills by score.
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         let shared = "550e8400-e29b-41d4-a716-446655440000";
         let other = "11111111-2222-3333-4444-555555555555";
         let items: Vec<Value> = (0..30)
@@ -1038,8 +1009,8 @@ mod tests {
 
     #[test]
     fn cluster_sample_assigns_cluster_field() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         // Logs-shaped data: high-cardinality message + low-cardinality level.
         let items: Vec<Value> = (0..30)
             .map(|i| {
@@ -1073,8 +1044,8 @@ mod tests {
 
     #[test]
     fn time_series_keeps_window_around_change_points() {
-        let (cfg, asel, scorer, analyzer, cs) = make_planner_deps();
-        let p = fixture(&cfg, &asel, &scorer, &analyzer, &cs);
+        let (cfg, asel, scorer, analyzer) = make_planner_deps();
+        let p = fixture(&cfg, &asel, &scorer, &analyzer);
         // 60 items with a step at index 50. The split is deliberately
         // ASYMMETRIC (50 low / 10 high): the detector fires on
         // |mean_after - mean_before| > variance_threshold (2.0) x overall

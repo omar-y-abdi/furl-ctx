@@ -310,37 +310,3 @@ class BaseTokenizer(ABC):
         total += self.count_text(function_call.get("name", ""))
         total += self.count_text(function_call.get("arguments", ""))
         return total
-
-    def encode(self, text: str) -> list[int]:
-        """Encode text to token IDs.
-
-        Optional method - not all backends support encoding.
-        Default implementation raises NotImplementedError.
-
-        Args:
-            text: Text to encode.
-
-        Returns:
-            List of token IDs.
-
-        Raises:
-            NotImplementedError: If encoding is not supported.
-        """
-        raise NotImplementedError(f"{self.__class__.__name__} does not support encoding")
-
-    def decode(self, tokens: list[int]) -> str:
-        """Decode token IDs to text.
-
-        Optional method - not all backends support decoding.
-        Default implementation raises NotImplementedError.
-
-        Args:
-            tokens: List of token IDs.
-
-        Returns:
-            Decoded text.
-
-        Raises:
-            NotImplementedError: If decoding is not supported.
-        """
-        raise NotImplementedError(f"{self.__class__.__name__} does not support decoding")

@@ -175,12 +175,6 @@ def test_block_volatile_content_emits_warning(caplog) -> None:
     assert any("volatile content" in rec.getMessage() for rec in caplog.records)
 
 
-def test_alignment_score_penalizes_block_volatile_content() -> None:
-    volatile = [_sys_blocks("id 3fa85f64-5717-4562-b3fc-2c963f66afa6")]
-    assert _aligner().get_alignment_score(volatile) < 100.0
-    assert _aligner().get_alignment_score([_sys_blocks("no dynamic content here")]) == 100.0
-
-
 # ── detector-only invariant on the new path ─────────────────────────────
 
 

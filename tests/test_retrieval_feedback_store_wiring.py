@@ -67,7 +67,18 @@ def _isolated_feedback_and_store():
 
 
 def _events_in_window() -> int:
-    return int(get_retrieval_feedback().get_stats()["events_in_window"])
+    """Total in-window signal count across every shape.
+
+    ``RetrievalFeedback`` no longer exposes an ``get_stats()`` observability
+    method (dead code, zero production consumers); this recomputes the same
+    total-in-window figure directly from the aggregator's own window/clock so
+    the wiring pins below keep exercising the real wall-clock window, not a
+    weaker per-shape stand-in.
+    """
+    fb = get_retrieval_feedback()
+    cutoff = fb._clock() - fb._window_seconds  # noqa: SLF001 - test-only introspection
+    with fb._lock:  # noqa: SLF001
+        return sum(1 for events in fb._events.values() for ts in events if ts > cutoff)
 
 
 def _seeded_store() -> tuple[CompressionStore, str]:

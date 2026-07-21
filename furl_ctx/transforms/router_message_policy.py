@@ -43,7 +43,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from ..ccr import marker_grammar
 from ..ccr.marker_grammar import CCR_TOOL_NAME
@@ -52,6 +52,13 @@ from ..utils import concat_text_parts
 from .content_detector import ContentType, DetectionResult
 from .error_detection import content_has_strong_error_indicators
 from .router_cache import CacheKey
+
+if TYPE_CHECKING:
+    # Annotation-only (this is a TRUE leaf module — no runtime cycle): the
+    # concrete config the gate chain reads and the frozen retrieval-feedback
+    # hints dataclass it consumes.
+    from ..cache.retrieval_feedback import FeedbackHints
+    from .content_router import ContentRouterConfig
 
 # Engine-emitted retrieval hints always carry a real 12/24-hex hash; content
 # that merely talks about the grammar (docs, this repo's own source read back
@@ -113,28 +120,6 @@ ALWAYS_EXCLUDE_TOOLS: frozenset[str] = frozenset(
         f"mcp__*__{CCR_TOOL_NAME}",
     }
 )
-
-
-class MessagePolicyConfig(Protocol):
-    """The config fields the Pass-1 gate chain reads (a structural subset of
-    ``ContentRouterConfig``)."""
-
-    protect_error_outputs: bool
-    error_protection_max_chars: int
-    enable_retrieval_feedback: bool
-
-
-class FeedbackHintsLike(Protocol):
-    """The two retrieval-feedback fields the gate chain reads (structural —
-    ``furl_ctx.cache.retrieval_feedback.FeedbackHints``, a FROZEN dataclass,
-    satisfies it without this leaf module importing the cache package;
-    read-only properties so frozen attributes type-check)."""
-
-    @property
-    def skip_compression(self) -> bool: ...
-
-    @property
-    def keep_budget_multiplier(self) -> float: ...
 
 
 def _is_retrieval_tool(tool_name: str) -> bool:
@@ -267,11 +252,11 @@ def classify_message(
     protect_analysis: bool,
     analysis_intent: bool,
     hook_biases: dict[int, float],
-    config: MessagePolicyConfig,
+    config: ContentRouterConfig,
     count_text: Callable[[str], int],
     detect_content: Callable[[str], DetectionResult],
     get_tool_bias: Callable[[str], float],
-    get_feedback_hints: Callable[..., FeedbackHintsLike],
+    get_feedback_hints: Callable[..., FeedbackHints],
     result_cache_key: Callable[[str, float], CacheKey],
 ) -> MessageDisposition:
     """Resolve one message to its :class:`MessageDisposition` — the Pass-1

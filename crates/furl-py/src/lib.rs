@@ -14,7 +14,6 @@
 //! save. PyO3 calls cost ~microseconds; staying in-process is ~free.
 
 use std::any::Any;
-use std::collections::BTreeMap;
 
 use furl_core::signals::{
     ImportanceCategory, ImportanceContext, KeywordDetector, KeywordRegistry, LineImportanceDetector,
@@ -33,13 +32,13 @@ use furl_core::transforms::tag_protector::{
 };
 use furl_core::transforms::{
     detect as rust_detect_chain, DetectionResult as RustDetectionResult, DiffCompressionResult,
-    DiffCompressor, DiffCompressorConfig, DiffCompressorStats,
-    LogCompressionResult as RustLogResult, LogCompressor as RustLogCompressor,
-    LogCompressorConfig as RustLogConfig, LogCompressorStats as RustLogStats,
-    SearchCompressionResult as RustSearchResult, SearchCompressor as RustSearchCompressor,
-    SearchCompressorConfig as RustSearchConfig, SearchCompressorStats as RustSearchStats,
-    TextCrushResult as RustTextCrushResult, TextCrusher as RustTextCrusher,
-    TextCrusherConfig as RustTextCrusherConfig, TextCrusherStats as RustTextCrusherStats,
+    DiffCompressor, DiffCompressorConfig, LogCompressionResult as RustLogResult,
+    LogCompressor as RustLogCompressor, LogCompressorConfig as RustLogConfig,
+    LogCompressorStats as RustLogStats, SearchCompressionResult as RustSearchResult,
+    SearchCompressor as RustSearchCompressor, SearchCompressorConfig as RustSearchConfig,
+    SearchCompressorStats as RustSearchStats, TextCrushResult as RustTextCrushResult,
+    TextCrusher as RustTextCrusher, TextCrusherConfig as RustTextCrusherConfig,
+    TextCrusherStats as RustTextCrusherStats,
 };
 use pyo3::exceptions::PyDeprecationWarning;
 use pyo3::prelude::*;
@@ -152,8 +151,6 @@ impl PyDiffCompressorConfig {
         max_context_lines = 2,
         max_hunks_per_file = 10,
         max_files = 20,
-        always_keep_additions = true,
-        always_keep_deletions = true,
         enable_ccr = true,
         min_lines_for_ccr = 50,
         min_compression_ratio_for_ccr = 0.8,
@@ -164,8 +161,6 @@ impl PyDiffCompressorConfig {
         max_context_lines: usize,
         max_hunks_per_file: usize,
         max_files: usize,
-        always_keep_additions: bool,
-        always_keep_deletions: bool,
         enable_ccr: bool,
         min_lines_for_ccr: usize,
         min_compression_ratio_for_ccr: f64,
@@ -176,8 +171,6 @@ impl PyDiffCompressorConfig {
                 max_context_lines,
                 max_hunks_per_file,
                 max_files,
-                always_keep_additions,
-                always_keep_deletions,
                 enable_ccr,
                 min_lines_for_ccr,
                 min_compression_ratio_for_ccr,
@@ -200,14 +193,6 @@ impl PyDiffCompressorConfig {
         self.inner.max_files
     }
     #[getter]
-    fn always_keep_additions(&self) -> bool {
-        self.inner.always_keep_additions
-    }
-    #[getter]
-    fn always_keep_deletions(&self) -> bool {
-        self.inner.always_keep_deletions
-    }
-    #[getter]
     fn enable_ccr(&self) -> bool {
         self.inner.enable_ccr
     }
@@ -227,13 +212,11 @@ impl PyDiffCompressorConfig {
     fn __repr__(&self) -> String {
         format!(
             "DiffCompressorConfig(max_context_lines={}, max_hunks_per_file={}, max_files={}, \
-             always_keep_additions={}, always_keep_deletions={}, enable_ccr={}, \
+             enable_ccr={}, \
              min_lines_for_ccr={}, min_compression_ratio_for_ccr={}, drop_noise_hunks={})",
             self.inner.max_context_lines,
             self.inner.max_hunks_per_file,
             self.inner.max_files,
-            self.inner.always_keep_additions,
-            self.inner.always_keep_deletions,
             self.inner.enable_ccr,
             self.inner.min_lines_for_ccr,
             self.inner.min_compression_ratio_for_ccr,
@@ -333,109 +316,6 @@ impl PyDiffCompressionResult {
     }
 }
 
-// ─── DiffCompressorStats ───────────────────────────────────────────────────
-
-/// Mirror of Rust `DiffCompressorStats` — sidecar observability not
-/// present in the Python dataclass. Returned only from `compress_with_stats`,
-/// which the Python adapter exposes as a method on the wrapper. `Vec`s are
-/// returned as Python lists; the `BTreeMap` becomes a `dict`.
-#[pyclass(name = "DiffCompressorStats", module = "furl_ctx._core")]
-struct PyDiffCompressorStats {
-    inner: DiffCompressorStats,
-}
-
-#[pymethods]
-impl PyDiffCompressorStats {
-    #[getter]
-    fn input_lines(&self) -> usize {
-        self.inner.input_lines
-    }
-    #[getter]
-    fn output_lines(&self) -> usize {
-        self.inner.output_lines
-    }
-    #[getter]
-    fn compression_ratio(&self) -> f64 {
-        self.inner.compression_ratio
-    }
-    #[getter]
-    fn files_total(&self) -> usize {
-        self.inner.files_total
-    }
-    #[getter]
-    fn files_kept(&self) -> usize {
-        self.inner.files_kept
-    }
-    #[getter]
-    fn files_dropped(&self) -> Vec<String> {
-        self.inner.files_dropped.clone()
-    }
-    #[getter]
-    fn hunks_total(&self) -> usize {
-        self.inner.hunks_total
-    }
-    #[getter]
-    fn hunks_kept(&self) -> usize {
-        self.inner.hunks_kept
-    }
-    #[getter]
-    fn hunks_dropped(&self) -> usize {
-        self.inner.hunks_dropped
-    }
-    #[getter]
-    fn hunks_dropped_per_file(&self) -> BTreeMap<String, usize> {
-        self.inner.hunks_dropped_per_file.clone()
-    }
-    #[getter]
-    fn noise_hunks_elided(&self) -> usize {
-        self.inner.noise_hunks_elided
-    }
-    #[getter]
-    fn context_lines_input(&self) -> usize {
-        self.inner.context_lines_input
-    }
-    #[getter]
-    fn context_lines_kept(&self) -> usize {
-        self.inner.context_lines_kept
-    }
-    #[getter]
-    fn context_lines_trimmed(&self) -> usize {
-        self.inner.context_lines_trimmed
-    }
-    #[getter]
-    fn largest_hunk_kept_lines(&self) -> usize {
-        self.inner.largest_hunk_kept_lines
-    }
-    #[getter]
-    fn largest_hunk_dropped_lines(&self) -> usize {
-        self.inner.largest_hunk_dropped_lines
-    }
-    #[getter]
-    fn parse_warnings(&self) -> Vec<String> {
-        self.inner.parse_warnings.clone()
-    }
-    #[getter]
-    fn processing_duration_us(&self) -> u64 {
-        self.inner.processing_duration_us
-    }
-    #[getter]
-    fn cache_key_emitted(&self) -> bool {
-        self.inner.cache_key_emitted
-    }
-    #[getter]
-    fn ccr_skipped_reason(&self) -> Option<String> {
-        self.inner.ccr_skipped_reason.clone()
-    }
-    #[getter]
-    fn file_mode_normalizations(&self) -> Vec<(String, String)> {
-        self.inner.file_mode_normalizations.clone()
-    }
-    #[getter]
-    fn binary_files_simplified(&self) -> Vec<String> {
-        self.inner.binary_files_simplified.clone()
-    }
-}
-
 // ─── DiffCompressor ────────────────────────────────────────────────────────
 
 /// Mirror of `furl_ctx.transforms.diff_compressor.DiffCompressor`. The
@@ -488,36 +368,6 @@ impl PyDiffCompressor {
             })
             .map_err(panic_to_pyerr)?;
         Ok(PyDiffCompressionResult { inner })
-    }
-
-    /// `compress_with_stats(content, context="") -> (result, stats)`.
-    /// Sidecar API not present in Python — exposes the Rust observability
-    /// struct alongside the parity-equal result. Returned as a 2-tuple to
-    /// keep the call site Pythonic.
-    #[pyo3(signature = (content, context = ""))]
-    fn compress_with_stats(
-        &self,
-        py: Python<'_>,
-        content: &str,
-        context: &str,
-    ) -> PyResult<(PyDiffCompressionResult, PyDiffCompressorStats)> {
-        let content = content.to_string();
-        let context = context.to_string();
-        // catch_unwind inside detach (see `panic_to_pyerr`): the
-        // sidecar path parses the same diff as `compress` and can hit the
-        // same unidiff panics (e.g. orphaned `+++` headers) — same COR-7
-        // containment (P0-1).
-        let (result, stats) = py
-            .detach(|| {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.inner.compress_with_stats(&content, &context)
-                }))
-            })
-            .map_err(panic_to_pyerr)?;
-        Ok((
-            PyDiffCompressionResult { inner: result },
-            PyDiffCompressorStats { inner: stats },
-        ))
     }
 }
 
@@ -630,18 +480,6 @@ impl PySmartCrusherConfig {
                 advertise_retrieval_tool,
                 routing_policy,
                 lossless_only,
-                // Entropy-floor crushability override: FORCED true here
-                // so the Python `compress()` pipeline crushes near-unique
-                // no-signal data recoverably (deterministic, aggressive).
-                // DELIBERATELY not exposed as a constructor kwarg (owner
-                // decision Q12: keep the comment-guarded divergence) —
-                // the Python dataclass has no such field, the parity
-                // fixtures assume it, and the one Rust-side caller that
-                // needs it off (the byte-faithful live-zone dispatcher)
-                // constructs its own core config directly. If a Python
-                // knob is ever wanted, add the dataclass field + this
-                // kwarg in ONE commit (wire-contract rule).
-                crush_unique_entities_when_recoverable: true,
             },
         })
     }
@@ -981,35 +819,6 @@ impl PySmartCrusher {
         Ok(PyCrushResult { inner })
     }
 
-    /// `smart_crush_content(content, query="", bias=1.0) -> (str, bool, str)`.
-    /// Mirrors Python's `_smart_crush_content` — used by
-    /// `smart_crush_tool_output` convenience function and direct
-    /// callers that want the tuple form. Releases the GIL across the
-    /// compute (same rationale as `crush`).
-    ///
-    /// Deprecated (§4.2 R3/R4): prefer `smart_crush_content_typed`,
-    /// which additionally returns the typed recovery refs — this shape
-    /// forces the caller back onto the text scrape for recovery.
-    /// Delegates to the same engine walk; rendered bytes are identical.
-    #[pyo3(signature = (content, query = "", bias = 1.0))]
-    fn smart_crush_content(
-        &self,
-        py: Python<'_>,
-        content: &str,
-        query: &str,
-        bias: f64,
-    ) -> PyResult<(String, bool, String)> {
-        let content = content.to_string();
-        let query = query.to_string();
-        // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
-        py.detach(|| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.inner.smart_crush_content(&content, &query, bias)
-            }))
-        })
-        .map_err(panic_to_pyerr)
-    }
-
     /// `smart_crush_content_typed(content, query="", bias=1.0) ->
     /// (str, bool, str, list[DroppedRef])` — the typed sibling of
     /// `smart_crush_content` (§4.2 R3/R4): identical first three
@@ -1152,8 +961,12 @@ impl PySmartCrusher {
         )
     }
 
-    /// Run the document-level walker on `doc_json` (JSON string) and
-    /// return the compacted document as JSON.
+    /// `compact_document_json_typed(doc_json) -> (str, list[DroppedRef])`
+    /// — the document-level walker on `doc_json` (JSON string): returns
+    /// the compacted document as JSON, plus every typed opaque ref the
+    /// walker shipped (both the live string substitutions and the opaque
+    /// cells baked into rendered sub-tables) so the Python mirror
+    /// consumes refs directly instead of re-parsing rendered markers.
     ///
     /// The walker recursively descends through objects, arrays, and
     /// strings; tabular sub-arrays become rendered CSV+schema strings,
@@ -1167,23 +980,6 @@ impl PySmartCrusher {
     /// rather than statistical row drop.
     /// Raises `ValueError` when `doc_json` is not valid JSON — boundary
     /// validation, not a panic (same rationale as `crush_array_json`).
-    ///
-    /// Deprecated (§4.2 R3/R4): prefer `compact_document_json_typed`,
-    /// which additionally returns the typed opaque refs — this shape
-    /// forces the caller back onto the text scrape for recovery.
-    /// Delegates to the typed sibling and discards the refs, so the
-    /// returned JSON is identical by construction.
-    fn compact_document_json(&self, py: Python<'_>, doc_json: &str) -> PyResult<String> {
-        let (compacted, _refs) = self.compact_document_json_typed(py, doc_json)?;
-        Ok(compacted)
-    }
-
-    /// `compact_document_json_typed(doc_json) -> (str, list[DroppedRef])`
-    /// — the typed sibling of `compact_document_json` (§4.2 R3/R4):
-    /// identical compacted JSON, plus every typed opaque ref the walker
-    /// shipped (both the live string substitutions and the opaque cells
-    /// baked into rendered sub-tables) so the Python mirror consumes
-    /// refs directly instead of re-parsing rendered markers.
     fn compact_document_json_typed(
         &self,
         py: Python<'_>,
@@ -2097,7 +1893,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hello, m)?)?;
     m.add_class::<PyDiffCompressorConfig>()?;
     m.add_class::<PyDiffCompressionResult>()?;
-    m.add_class::<PyDiffCompressorStats>()?;
     m.add_class::<PyDiffCompressor>()?;
     m.add_class::<PySearchCompressorConfig>()?;
     m.add_class::<PySearchCompressionResult>()?;

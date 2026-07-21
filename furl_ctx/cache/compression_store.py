@@ -402,7 +402,6 @@ class RetrievalEvent:
     items_retrieved: int
     total_items: int
     tool_name: str | None
-    timestamp: float
     retrieval_type: str  # "full" or "search"
 
 
@@ -2040,7 +2039,6 @@ class CompressionStore:
             items_retrieved=items_retrieved,
             total_items=total_items,
             tool_name=tool_name,
-            timestamp=time.time(),
             retrieval_type=retrieval_type,
         )
 

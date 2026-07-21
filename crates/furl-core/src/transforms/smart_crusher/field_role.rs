@@ -76,13 +76,6 @@ pub enum FieldRole {
     Content,
 }
 
-impl FieldRole {
-    /// Is this field excluded from the stable-projection hash?
-    pub fn is_excluded(self) -> bool {
-        matches!(self, FieldRole::VaryingIdentity)
-    }
-}
-
 /// Classify one field from its stats + a value sample.
 ///
 /// `sample` is an order-preserving sample of the field's values (typically

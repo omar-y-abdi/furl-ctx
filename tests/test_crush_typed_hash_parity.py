@@ -308,20 +308,17 @@ def test_crush_dropped_refs_carry_row_drop_and_opaque(crusher: SmartCrusher) -> 
             assert len(payload.encode()) == d.byte_size
 
 
-def test_smart_crush_content_typed_is_byte_identical_and_carries_refs(
+def test_smart_crush_content_typed_carries_refs_covering_the_scrape(
     crusher: SmartCrusher,
 ) -> None:
-    """The typed sibling renders byte-identically to the deprecated
-    3-tuple method and carries the refs the 3-tuple forces back onto the
-    scrape."""
+    """The typed sibling surfaces every recovery ref the rendered output's
+    text scrape would otherwise have to reconstruct: row-drops match the
+    scrape exactly and the opaque hashes in the render are a subset of the
+    typed opaque refs."""
     doc = {"payload": _blob(7), "rows": _dict_case(2)}
     content = json.dumps(doc, ensure_ascii=False)
 
-    crushed, was_modified, info, refs = crusher._rust.smart_crush_content_typed(content, "", 1.0)
-    old_crushed, old_was_modified, old_info = crusher._rust.smart_crush_content(content, "", 1.0)
-    assert (crushed, was_modified, info) == (old_crushed, old_was_modified, old_info), (
-        "typed sibling must be byte-identical on the shared tuple elements"
-    )
+    crushed, _was_modified, _info, refs = crusher._rust.smart_crush_content_typed(content, "", 1.0)
 
     row_drop, _index_keys, opaque = _typed_by_kind(list(refs))
     assert row_drop == _scrape_row_drop_only(crushed)
@@ -329,17 +326,15 @@ def test_smart_crush_content_typed_is_byte_identical_and_carries_refs(
     assert opaque, "fixture must exercise the opaque substitution"
 
 
-def test_compact_document_json_typed_is_byte_identical_and_carries_refs(
+def test_compact_document_json_typed_carries_opaque_refs(
     crusher: SmartCrusher,
 ) -> None:
-    """Same contract for the document walker: identical JSON out, plus
-    the typed opaque refs of every substitution the walk shipped."""
+    """The document walker's typed sibling surfaces the opaque refs of
+    every substitution the walk shipped — each resolvable in the CCR store
+    and covering the hashes scraped from the rendered JSON."""
     doc = json.dumps({"summary": "ok", "payload": _blob(11)}, ensure_ascii=False)
 
     compacted, refs = crusher._rust.compact_document_json_typed(doc)
-    assert compacted == crusher._rust.compact_document_json(doc), (
-        "typed sibling must produce byte-identical compacted JSON"
-    )
     _row_drop, _index_keys, opaque = _typed_by_kind(list(refs))
     assert opaque, "fixture must exercise the opaque substitution"
     assert _scrape_opaque_hashes(compacted) <= opaque

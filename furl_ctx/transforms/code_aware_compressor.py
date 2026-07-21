@@ -99,11 +99,6 @@ def _warn_missing_dep_once() -> None:
         )
 
 
-def is_tree_sitter_available() -> bool:
-    """True if the optional ``[code]`` extra (tree-sitter grammars) is installed."""
-    return _check_tree_sitter_available()
-
-
 def _get_parser(language: str) -> Any:
     """Return a **thread-local** ``tree_sitter.Parser`` for *language*.
 
@@ -436,8 +431,6 @@ class CodeAwareConfig:
     """Configuration for AST-verified code compression.
 
     Attributes:
-        preserve_imports: Always keep import statements.
-        preserve_type_annotations: Keep type hints and annotations.
         docstring_mode: How to handle docstrings.
         target_compression_rate: Target compression ratio (0.2 = keep 20%).
         max_body_lines: Hard cap on kept lines per function body.
@@ -454,8 +447,6 @@ class CodeAwareConfig:
             without a recovery plane is silent loss.
     """
 
-    preserve_imports: bool = True
-    preserve_type_annotations: bool = True
     docstring_mode: DocstringMode = DocstringMode.FIRST_LINE
 
     target_compression_rate: float = 0.2
@@ -485,13 +476,8 @@ class CodeCompressionResult:
         compression_ratio: Shipped chars / original chars (1.0 on
             passthrough).
         language: Detected or specified language.
-        language_confidence: Confidence in language detection.
-        preserved_imports: Number of import statements preserved.
-        preserved_signatures: Number of function definitions preserved.
-        compressed_bodies: Number of function bodies actually truncated.
         syntax_valid: Whether the shipped output parses.
         cache_key: CCR store key backing the marker (None on passthrough).
-        symbol_scores: Normalized importance per symbol (short names).
     """
 
     compressed: str
@@ -501,15 +487,9 @@ class CodeCompressionResult:
     compression_ratio: float
 
     language: CodeLanguage = CodeLanguage.UNKNOWN
-    language_confidence: float = 0.0
-
-    preserved_imports: int = 0
-    preserved_signatures: int = 0
-    compressed_bodies: int = 0
 
     syntax_valid: bool = True
     cache_key: str | None = None
-    symbol_scores: dict[str, float] = field(default_factory=dict)
 
     @property
     def lines_saved(self) -> int:
@@ -595,21 +575,19 @@ class CodeAwareCompressor:
             _warn_missing_dep_once()
             return self._passthrough(content)
 
-        detected, confidence = self._resolve_language(content, language)
+        detected, _confidence = self._resolve_language(content, language)
         if detected is CodeLanguage.UNKNOWN:
             return self._passthrough(content)
 
         if not self.config.enable_ccr:
             # No recovery plane → a truncating render would be silent loss.
-            return self._passthrough(content, detected, confidence)
+            return self._passthrough(content, detected)
 
         try:
-            compressed_code, structure, symbol_scores = self._compress_with_ast(
-                content, detected, context
-            )
+            compressed_code = self._compress_with_ast(content, detected, context)
         except Exception as e:
             logger.warning("code_aware: AST compression failed (%s); passing through", e)
-            return self._passthrough(content, detected, confidence)
+            return self._passthrough(content, detected)
 
         # Build the shipped render: code + Shape-H marker as a line comment.
         cache_key = hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest()[:24]
@@ -625,14 +603,14 @@ class CodeAwareCompressor:
         # Savings gates (cheap, before the verification parse).
         ratio = len(shipped) / max(len(content), 1)
         if ratio >= self.config.max_shippable_ratio:
-            return self._passthrough(content, detected, confidence)
+            return self._passthrough(content, detected)
         if ratio < self.config.min_shippable_ratio:
             logger.warning(
                 "code_aware: render implausibly small (ratio=%.3f) for %s; passing through",
                 ratio,
                 detected.value,
             )
-            return self._passthrough(content, detected, confidence)
+            return self._passthrough(content, detected)
 
         # Syntax gate: the FINAL shipped bytes must parse cleanly.
         if not self._verify_syntax(shipped, detected):
@@ -641,11 +619,11 @@ class CodeAwareCompressor:
                 detected.value,
                 original_lines,
             )
-            return self._passthrough(content, detected, confidence)
+            return self._passthrough(content, detected)
 
         # CCR gate: full original persisted under the marker's hash, or veto.
         if not self._persist_to_python_ccr(content, shipped, cache_key):
-            return self._passthrough(content, detected, confidence)
+            return self._passthrough(content, detected)
 
         return CodeCompressionResult(
             compressed=shipped,
@@ -654,13 +632,8 @@ class CodeAwareCompressor:
             compressed_line_count=compressed_lines,
             compression_ratio=ratio,
             language=detected,
-            language_confidence=confidence,
-            preserved_imports=len(structure.imports),
-            preserved_signatures=len(structure.function_signatures),
-            compressed_bodies=compressed_code.count("lines omitted"),
             syntax_valid=True,
             cache_key=cache_key,
-            symbol_scores=symbol_scores,
         )
 
     # ─── Language resolution ────────────────────────────────────────────
@@ -686,9 +659,7 @@ class CodeAwareCompressor:
 
     @staticmethod
     def _passthrough(
-        content: str,
-        language: CodeLanguage = CodeLanguage.UNKNOWN,
-        confidence: float = 0.0,
+        content: str, language: CodeLanguage = CodeLanguage.UNKNOWN
     ) -> CodeCompressionResult:
         """Identity result: the original bytes ship, no marker, no store row."""
         n_lines = len(content.splitlines())
@@ -699,7 +670,6 @@ class CodeAwareCompressor:
             compressed_line_count=n_lines,
             compression_ratio=1.0,
             language=language,
-            language_confidence=confidence,
             syntax_valid=True,
             cache_key=None,
         )
@@ -937,14 +907,14 @@ class CodeAwareCompressor:
         code: str,
         language: CodeLanguage,
         context: str,
-    ) -> tuple[str, CodeStructure, dict[str, float]]:
+    ) -> str:
         """Compress *code* using AST parsing with symbol importance analysis.
 
         Thread-safe: all mutable state is passed through parameters, not
         stored on self.
 
         Returns:
-            Tuple of (compressed code, extracted structure, symbol scores).
+            The assembled compressed-code render.
         """
         parser = _get_parser(language.value)
         tree = parser.parse(bytes(code, "utf-8"))
@@ -961,17 +931,7 @@ class CodeAwareCompressor:
         )
 
         # Assemble compressed code
-        compressed = self._assemble_compressed(structure)
-
-        # Expose scores with short names for the public API
-        symbol_scores: dict[str, float] = {}
-        if analysis.scores:
-            for qname, score in analysis.scores.items():
-                short = analysis.bare_names.get(qname, qname)
-                if short not in symbol_scores or score > symbol_scores[short]:
-                    symbol_scores[short] = score
-
-        return compressed, structure, symbol_scores
+        return self._assemble_compressed(structure)
 
     # ─── Structure extraction (data-driven, all languages) ──────────────
 
@@ -1588,5 +1548,4 @@ __all__ = [
     "CodeLanguage",
     "DocstringMode",
     "detect_language",
-    "is_tree_sitter_available",
 ]

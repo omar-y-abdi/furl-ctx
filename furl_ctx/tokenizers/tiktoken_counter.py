@@ -294,9 +294,9 @@ class TiktokenCounter(BaseTokenizer):
         The encoding is resolved EAGERLY here — with a hard deadline
         (see `_load_encoding_bounded`) — so a load failure or a stalled
         vocab download surfaces at construction, where
-        ``TokenizerRegistry.get()`` degrades the call to the estimation
+        ``get_tokenizer()`` degrades the call to the estimation
         fallback WITHOUT caching the failure (COR-40c: the next
-        ``get()`` retries the real tokenizer). Lazy loading deferred
+        ``get_tokenizer()`` retries the real tokenizer). Lazy loading deferred
         failures to the first ``count_text`` — after the registry had
         already cached this instance as a success — and put an
         unbounded network wait on compress()'s hot path.

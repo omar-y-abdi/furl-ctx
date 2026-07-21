@@ -63,7 +63,7 @@ Two layers of binding now exist:
 
 2. Standalone ``test_producer_driven_*`` tests (bottom of this file) drive the
    REAL producer through the engine end-to-end — ``ContentRouter().compress``
-   for shapes A / B / C, ``DiffCompressor.compress_with_stats`` for shape G —
+   for shapes A / B / C, ``DiffCompressor.compress`` for shape G —
    then extract via the REAL owned patterns and recover byte-exact from
    the engine's store. Together with E/F's real render functions, that makes
    shapes A, B, C, E, F, G genuinely producer→consumer bound: a producer that
@@ -850,7 +850,7 @@ def test_producer_driven_C_opaque_blob_binds_to_production_consumer() -> None:
 
 
 def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> None:
-    """Shape G: the REAL ``DiffCompressor.compress_with_stats`` emits
+    """Shape G: the REAL ``DiffCompressor.compress`` emits
     ``[N lines compressed to M. Retrieve full diff: hash=H]``; the production
     consumer surfaces the 24-hex hash (via the generic-bracket fallback) and
     the Python CCR store resolves the original diff byte-exact.
@@ -872,7 +872,7 @@ def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> 
             f"+added line number {i} with some content" for i in range(200)
         )
         compressor = DiffCompressor(DiffCompressorConfig(enable_ccr=True, min_lines_for_ccr=10))
-        result, _stats = compressor.compress_with_stats(diff)
+        result = compressor.compress(diff)
         assert result.cache_key is not None, (
             "diff CCR did not fire (cache_key is None). "
             "A 200-line diff with min_lines_for_ccr=10 must emit a cache_key; "

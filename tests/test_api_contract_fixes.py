@@ -182,12 +182,14 @@ def test_router_rejects_stale_or_unread_kwargs(stale_kwarg: str) -> None:
 
 
 def test_simulate_still_consumes_record_metrics() -> None:
-    """simulate() passes record_metrics to apply(), which must keep popping it."""
+    """apply(record_metrics=False) must keep popping the flag (the old
+    simulate() path)."""
     from furl_ctx.transforms import TransformPipeline
 
-    result = TransformPipeline().simulate(
+    result = TransformPipeline().apply(
         [{"role": "user", "content": "hello there"}],
         model="gpt-4o",
+        record_metrics=False,
         model_limit=200000,
     )
     assert result.messages

@@ -296,19 +296,6 @@ def _ordered_ccr_hashes(messages: list[dict[str, Any]]) -> list[str]:
     return hashes_in_text("\n".join(parts))
 
 
-def _net_tokens_if_retrieved(saved_tokens: int, retrieval_cost_tokens: int) -> int:
-    """Signed net token change if an offloaded blob is retrieved back.
-
-    ``saved_tokens`` is what the offload removed from context; ``retrieval_cost_tokens``
-    is what a retrieval pays back. The two are INDEPENDENT inputs, computed
-    separately by the caller, so the result is a real economic comparison, not a
-    restatement of either one: a negative result means the round trip costs more
-    than the offload saved (a net loss), a positive result means it is still
-    ahead. Total and pure.
-    """
-    return saved_tokens - retrieval_cost_tokens
-
-
 def _detect_opaque_offloads(
     compressed_messages: list[dict[str, Any]],
     input_messages: list[dict[str, Any]],
@@ -361,7 +348,12 @@ def _detect_opaque_offloads(
             # their difference is the round-trip economics.
             saved = offloaded_tokens - preview_tokens
             retrieval_cost = offloaded_tokens + _CCR_RETRIEVE_OVERHEAD_TOKENS
-            net = _net_tokens_if_retrieved(saved, retrieval_cost)
+            # Signed net token change if this offloaded blob is retrieved back:
+            # the two terms are INDEPENDENT inputs, so their difference is a
+            # real economic comparison, not a restatement of either one. A
+            # negative result means the round trip costs more than the
+            # offload saved; a positive result means it is still ahead.
+            net = saved - retrieval_cost
             offloads.append(
                 OpaqueOffload(
                     hash=ccr_hash,

@@ -37,8 +37,7 @@ from typing import Any
 
 from ..config import CacheAlignerConfig, CachePrefixMetrics, TransformResult
 from ..tokenizer import Tokenizer
-from ..tokenizers import EstimatingTokenCounter
-from ..utils import compute_short_hash, concat_text_parts, deep_copy_messages
+from ..utils import compute_short_hash, concat_text_parts
 from .base import Transform
 
 logger = logging.getLogger(__name__)
@@ -266,8 +265,8 @@ class CacheAligner(Transform):
         Invariant: ``result.messages`` IS the input ``messages`` list — the
         detector never rewrites the prompt, so no isolation copy is taken
         here (PERF-1). The pipeline already deep-copies at its entry
-        boundary; direct callers wanting an isolated list use the public
-        :func:`align_for_cache` wrapper, which keeps the copy.
+        boundary; direct callers wanting an isolated list should copy the
+        input themselves (e.g. via ``deep_copy_messages``) before calling.
 
         Optional kwarg ``previous_prefix_hash``: the prior turn's
         ``cache_metrics.stable_prefix_hash``. When supplied, the result's
@@ -359,48 +358,3 @@ class CacheAligner(Transform):
         )
         result.markers_inserted.append(f"stable_prefix_hash:{stable_hash}")
         return result
-
-    def get_alignment_score(self, messages: list[dict[str, Any]]) -> float:
-        """Compute cache alignment score (0-100).
-
-        Higher score means fewer detected volatile patterns. Penalty is a
-        flat 10 points per finding, clamped to [0, 100]. This is a
-        coarse signal for dashboards — it does not change behavior.
-        """
-        score = 100.0
-        for msg in messages:
-            if msg.get("role") != "system":
-                continue
-            content = concat_text_parts(msg.get("content", ""))
-            if not content:
-                continue
-            findings = detect_volatile_content(content)
-            score -= len(findings) * 10
-        return max(0.0, min(100.0, score))
-
-
-def align_for_cache(
-    messages: list[dict[str, Any]],
-    config: CacheAlignerConfig | None = None,
-) -> tuple[list[dict[str, Any]], str]:
-    """Convenience wrapper that runs detection and returns the unchanged messages.
-
-    Kept as a stable public API; the second tuple element is the stable
-    prefix hash for callers that want to track cache prefix drift. The
-    returned list is a deep copy — direct callers keep an isolated list
-    they can mutate freely (``CacheAligner.apply`` itself returns the
-    input list unchanged, PERF-1).
-    """
-    cfg = config or CacheAlignerConfig()
-    aligner = CacheAligner(cfg)
-    tokenizer = Tokenizer(EstimatingTokenCounter())
-
-    result = aligner.apply(messages, tokenizer)
-
-    stable_hash = ""
-    for marker in result.markers_inserted:
-        if marker.startswith("stable_prefix_hash:"):
-            stable_hash = marker.split(":", 1)[1]
-            break
-
-    return deep_copy_messages(result.messages), stable_hash

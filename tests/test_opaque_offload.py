@@ -32,7 +32,6 @@ from furl_ctx.cache.compression_store import get_compression_store, reset_compre
 from furl_ctx.compress import (
     _CCR_RETRIEVE_OVERHEAD_TOKENS,
     _detect_opaque_offloads,
-    _net_tokens_if_retrieved,
 )
 
 BENCH_MODEL = "gpt-4o"
@@ -87,16 +86,6 @@ def test_opaque_code_offload_is_surfaced_in_typed_field():
     # The marker replaced the bulk: far more moved to the store than kept inline.
     assert offload.offloaded_tokens > offload.preview_tokens > 0
     assert offload.offloaded_tokens > 10_000  # the ~41k-token code payload
-
-
-def test_net_tokens_if_retrieved_is_real_economics_not_a_tautology():
-    # Two INDEPENDENT terms, so the sign flips with the inputs. This is a real
-    # economic comparison, not a restatement of preview_tokens: a synthetic
-    # net-positive input and a net-negative input each produce their own sign.
-    assert _net_tokens_if_retrieved(saved_tokens=99, retrieval_cost_tokens=1) == 98
-    assert _net_tokens_if_retrieved(saved_tokens=1, retrieval_cost_tokens=100) == -99
-    assert (_net_tokens_if_retrieved(99, 1) < 0) is False  # net-positive
-    assert (_net_tokens_if_retrieved(1, 100) < 0) is True  # net-negative
 
 
 def test_opaque_offload_reports_net_negative_round_trip():

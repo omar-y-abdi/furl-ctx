@@ -136,12 +136,8 @@ class TestNoiseElision:
         assert "[noise hunk elided: frontend/package-lock.json (+1/-1)]" in result.compressed
         assert '"1.0.1"' not in result.compressed
 
-    def test_sidecar_stats_expose_noise_counter(self):
-        result, stats = DiffCompressor(_cfg(drop_noise_hunks=True)).compress_with_stats(
-            _mixed_noise_diff()
-        )
-        assert stats.noise_hunks_elided == 3
-        assert stats.hunks_total == stats.hunks_kept + stats.hunks_dropped
+    def test_noise_elision_counts_toward_hunks_removed(self):
+        result = DiffCompressor(_cfg(drop_noise_hunks=True)).compress(_mixed_noise_diff())
         assert result.hunks_removed == 3
 
 

@@ -8,20 +8,19 @@ multiple backends:
 3. Estimation - Fallback for unknown models
 
 Usage:
-    from furl_ctx.tokenizers import TokenizerRegistry, get_tokenizer
+    from furl_ctx.tokenizers import get_tokenizer, register_tokenizer
 
     # Auto-detect tokenizer from model name
     tokenizer = get_tokenizer("gpt-4o")
     tokens = tokenizer.count_text("Hello, world!")
 
     # Register custom tokenizer
-    TokenizerRegistry.register("my-model", my_tokenizer)
+    register_tokenizer("my-model", my_tokenizer)
 """
 
 from .base import BaseTokenizer, TokenCounter
 from .estimator import EstimatingTokenCounter
 from .registry import (
-    TokenizerRegistry,
     get_tokenizer,
     list_supported_models,
     register_tokenizer,
@@ -30,7 +29,6 @@ from .tiktoken_counter import TiktokenCounter
 
 __all__ = [
     # Registry
-    "TokenizerRegistry",
     "get_tokenizer",
     "register_tokenizer",
     "list_supported_models",

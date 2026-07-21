@@ -21,7 +21,6 @@ use super::crusher::{CrushArrayResult, SmartCrusher};
 use super::crushers::{compute_k_split, crush_number_array, crush_object, crush_string_array};
 use super::persist::ccr_sentinel_map;
 use super::route::Routed;
-use super::traits::CrushEvent;
 use super::types::{CrushResult, DroppedRef};
 
 impl SmartCrusher {
@@ -42,7 +41,6 @@ impl SmartCrusher {
     /// - `strategy`: combined strategy info from all crushed arrays
     ///   (or `"passthrough"`).
     pub fn crush(&self, content: &str, query: &str, bias: f64) -> CrushResult {
-        let start = std::time::Instant::now();
         // Collect the typed recovery refs alongside the rendered output.
         // `smart_crush_content_collecting` threads a per-call sink through
         // the recursive walk so EVERY reduction — row-drops and opaque
@@ -62,25 +60,6 @@ impl SmartCrusher {
         } else {
             info
         };
-
-        // Fire one event per top-level crush. Cheap when no observers
-        // are configured (`for o in &[]` is a single null-pointer
-        // check); cheap when only `TracingObserver` is configured if
-        // the subscriber filters `debug` out (the default in
-        // production). Custom observers — audit logs, Loop training
-        // stream, metrics — pay whatever they pay.
-        if !self.observers.is_empty() {
-            let event = CrushEvent {
-                strategy: strategy.clone(),
-                input_bytes: content.len(),
-                output_bytes: compressed.len(),
-                elapsed_ns: start.elapsed().as_nanos() as u64,
-                was_modified,
-            };
-            for observer in &self.observers {
-                observer.on_event(&event);
-            }
-        }
 
         CrushResult {
             compressed,

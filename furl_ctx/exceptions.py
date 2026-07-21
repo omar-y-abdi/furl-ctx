@@ -19,8 +19,6 @@ and were removed in the API-1 prune.
 
 from __future__ import annotations
 
-from typing import Any
-
 
 class FurlError(Exception):
     """Base exception for all Furl errors.
@@ -30,14 +28,3 @@ class FurlError(Exception):
     working. No current API raises it — see the module docstring for the
     fail-open contract.
     """
-
-    def __init__(self, message: str, details: dict[str, Any] | None = None):
-        super().__init__(message)
-        self.message = message
-        self.details = details or {}
-
-    def __str__(self) -> str:
-        if self.details:
-            detail_str = ", ".join(f"{k}={v}" for k, v in self.details.items())
-            return f"{self.message} ({detail_str})"
-        return self.message

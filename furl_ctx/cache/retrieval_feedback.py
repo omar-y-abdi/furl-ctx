@@ -60,7 +60,6 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 # Sliding window and thresholds. 600 s spans a retrieval burst within an
 # agentic session while decaying well before the session ends; 3 retrievals
@@ -292,24 +291,6 @@ class RetrievalFeedback:
         if count == 0:
             return NEUTRAL_HINTS
         return FeedbackHints(retrievals_in_window=count)
-
-    def get_stats(self) -> dict[str, Any]:
-        """Snapshot for observability/tests: shape count and in-window totals."""
-        now = self._clock()
-        cutoff = now - self._window_seconds
-        with self._lock:
-            per_shape = {
-                f"{shape.tool or '<any>'}:{shape.content_type or '<unknown>'}": sum(
-                    1 for ts in events if ts > cutoff
-                )
-                for shape, events in self._events.items()
-            }
-        return {
-            "window_seconds": self._window_seconds,
-            "shapes_tracked": len(per_shape),
-            "events_in_window": sum(per_shape.values()),
-            "per_shape": per_shape,
-        }
 
     def clear(self) -> None:
         """Drop all recorded signals. Mainly for testing."""

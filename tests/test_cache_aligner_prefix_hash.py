@@ -11,11 +11,9 @@ Fix: length-prefix-frame each message's bytes before hashing so the
 serialization is injective. Test the PROPERTY (collision pair now differs,
 determinism, prefix_changed flips), not a brittle hash literal.
 
-#6: ``align_for_cache`` returns the minimal ``(messages, hash)`` tuple. The
-detection warnings are NOT discarded — they are surfaced via ``logger.warning``
-and via the exported ``CacheAligner.apply().warnings``. This locks that
-contract (warnings reach both channels even though the convenience wrapper
-keeps its declared 2-tuple shape).
+#6: detection warnings are NOT discarded — they are surfaced via
+``logger.warning`` and via the exported ``CacheAligner.apply().warnings``.
+This locks that contract.
 
 Compression-neutral: CacheAligner never rewrites messages (transforms_applied
 is always empty).
@@ -28,7 +26,7 @@ import logging
 from furl_ctx.config import CacheAlignerConfig
 from furl_ctx.tokenizer import Tokenizer
 from furl_ctx.tokenizers import EstimatingTokenCounter
-from furl_ctx.transforms.cache_aligner import CacheAligner, align_for_cache
+from furl_ctx.transforms.cache_aligner import CacheAligner
 
 
 def _aligner(enabled: bool = True) -> CacheAligner:
@@ -125,11 +123,3 @@ def test_warnings_are_logged(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="furl_ctx.transforms.cache_aligner"):
         _aligner().apply([_sys(_VOLATILE)], _tok())
     assert any("volatile" in rec.getMessage().lower() for rec in caplog.records)
-
-
-def test_align_for_cache_keeps_two_tuple_contract() -> None:
-    # The convenience wrapper preserves its declared (messages, hash) shape; the
-    # warnings live on the class path / log, not in this tuple.
-    messages, stable_hash = align_for_cache([_sys(_VOLATILE)])
-    assert isinstance(messages, list)
-    assert isinstance(stable_hash, str) and stable_hash

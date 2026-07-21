@@ -52,4 +52,4 @@ def test_with_compaction_format_accepts_every_supported_name() -> None:
 
 def test_compact_document_json_invalid_json_raises_valueerror(crusher) -> None:
     with pytest.raises(ValueError, match="doc_json must be JSON"):
-        crusher.compact_document_json("{broken")
+        crusher.compact_document_json_typed("{broken")

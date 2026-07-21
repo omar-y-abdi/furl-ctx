@@ -68,16 +68,6 @@ impl DocumentCompactor {
         Self::default()
     }
 
-    pub fn with_formatter(mut self, formatter: Box<dyn Formatter>) -> Self {
-        self.formatter = formatter;
-        self
-    }
-
-    pub fn with_config(mut self, config: CompactConfig) -> Self {
-        self.config = config;
-        self
-    }
-
     /// Wire a CCR store so opaque-blob substitutions — on BOTH the
     /// `walk_string` path and the `walk_array` → `compact` →
     /// `cell_from_value` path — stash the original under the marker hash.

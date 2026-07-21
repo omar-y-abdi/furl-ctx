@@ -211,17 +211,6 @@ pub struct LogCompressionResult {
     pub stats: BTreeMap<String, u64>,
 }
 
-impl LogCompressionResult {
-    pub fn tokens_saved_estimate(&self) -> i64 {
-        let chars_saved = self.original.len() as i64 - self.compressed.len() as i64;
-        chars_saved.max(0) / 4
-    }
-    pub fn lines_omitted(&self) -> usize {
-        self.original_line_count
-            .saturating_sub(self.compressed_line_count)
-    }
-}
-
 /// Sidecar diagnostics not returned by the parity-equal API.
 #[derive(Debug, Clone, Default)]
 pub struct LogCompressorStats {
