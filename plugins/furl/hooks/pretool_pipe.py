@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Furl PreToolUse hook (ON BY DEFAULT — disable with FURL_PRETOOL_PIPE=0): the
 real-savings compression path that does NOT depend on PostToolUse
-``updatedToolOutput`` (silently dropped by Claude Code >=2.1.163 —
-anthropics/claude-code#68951).
+``updatedToolOutput`` being applied at all. Claude Code >=2.1.163, the floor
+tracked as ``MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT`` in
+``furl_ctx/host_version.py``, schema-validates that field and APPLIES a
+correctly shape-mirrored replacement, dropping only ones that fail
+validation; see ``compress_tool_output.py`` and anthropics/claude-code#68951.
+This pipe's justification is independent of that fact: it banks savings
+before the tool result even exists rather than after, it is the only
+compression path active on hosts below that version floor, and it covers
+output shapes ``compress_tool_output.py``'s mirroring cannot reproduce.
 
 Unless disabled, this rewrites a ``Bash`` command so its STDOUT is piped through
 the Furl compressor (``pipe_compress.py``) BEFORE it becomes the tool result —
