@@ -170,17 +170,6 @@ impl SmartCrusherBuilder {
         self.with_ccr_store(Arc::new(InMemoryCcrStore::new()))
     }
 
-    /// Set the tokenizer used by the `MinTokens` routing policy to size
-    /// the lossless-vs-lossy renderings. When not set, `build` installs
-    /// a `gpt-4o` tiktoken counter (see [`DEFAULT_ROUTING_TOKENIZER_MODEL`]).
-    /// The CHOICE only depends on the relative ranking of the two
-    /// renders, so any consistent tokenizer is correct; tiktoken is the
-    /// honest, deterministic default.
-    pub fn with_tokenizer(mut self, tokenizer: Box<dyn crate::tokenizer::Tokenizer>) -> Self {
-        self.tokenizer = Some(tokenizer);
-        self
-    }
-
     /// Construct the `SmartCrusher`. If `with_scorer` was not called,
     /// falls back to `HybridScorer::default()` so a builder with no
     /// other customization still produces a working crusher.

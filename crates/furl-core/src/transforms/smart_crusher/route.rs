@@ -702,7 +702,6 @@ impl SmartCrusher {
         // un-sampleable, not merely signal-free.
         if analysis.recommended_strategy == CompressionStrategy::Skip
             && allow_skip_override
-            && self.config.crush_unique_entities_when_recoverable
             && self.ccr_store.is_some()
             && skip_reason_is_no_signal(&analysis)
         {

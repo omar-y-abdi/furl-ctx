@@ -172,30 +172,6 @@ pub struct SmartCrusherConfig {
     /// even a CCR-recoverable one. The recovery invariant is trivially
     /// preserved: it constrains drops, and this mode has none.
     pub lossless_only: bool,
-    /// Entropy-floor crushability override. When `true` (default) AND a
-    /// CCR store is configured, `crush_array_lossy` ignores the
-    /// analyzer's no-signal SKIP verdict on near-unique data
-    /// (`unique_entities_no_signal` / `medium_uniqueness_no_signal`) and
-    /// crushes anyway — recoverably, via the surfaced `<<ccr:HASH>>`
-    /// pointer.
-    ///
-    /// Why it exists: that SKIP was written for permanent-loss drops
-    /// ("no signal tells us which distinct row matters → keep them all
-    /// visible"). Under the CCR recovery invariant the premise is gone
-    /// (every dropped row is retrievable), and the SKIP gate is
-    /// NON-DETERMINISTIC on near-unique data — whether a random integer
-    /// column trips a >2σ anomaly is a per-seed coin-flip, flipping the
-    /// SAME shape between ~34% and ~94% reduction. The override makes the
-    /// recoverable render exist DETERMINISTICALLY (it still must win the
-    /// `MinTokens` token race to actually ship).
-    ///
-    /// Set `false` for the byte-faithful live-zone dispatcher, whose
-    /// CCR marker injection is owned by its own store layer
-    /// (`maybe_inject_ccr_marker`); there the crusher must not change its
-    /// drop behavior based on its internal store. No Python-parity
-    /// counterpart — Rust-side dispatch only; additive default-`true`
-    /// so existing `compress()` output gains the fix.
-    pub crush_unique_entities_when_recoverable: bool,
 }
 
 impl Default for SmartCrusherConfig {
@@ -217,7 +193,6 @@ impl Default for SmartCrusherConfig {
             advertise_retrieval_tool: true,
             routing_policy: RoutingPolicy::MinTokens,
             lossless_only: false,
-            crush_unique_entities_when_recoverable: true,
         }
     }
 }
@@ -248,10 +223,6 @@ mod tests {
         // Strict lossless-or-passthrough mode is OFF by default —
         // current (lossy-recoverable) behavior unchanged.
         assert!(!c.lossless_only);
-        // Entropy-floor override on by default (recoverable aggressive
-        // crush on near-unique data); the byte-faithful live-zone
-        // dispatcher opts out explicitly.
-        assert!(c.crush_unique_entities_when_recoverable);
     }
 
     #[test]

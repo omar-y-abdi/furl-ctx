@@ -36,8 +36,6 @@ class DiffCompressorConfig:
     max_context_lines: int = 2
     max_hunks_per_file: int = 10
     max_files: int = 20
-    always_keep_additions: bool = True
-    always_keep_deletions: bool = True
     enable_ccr: bool = True
     min_lines_for_ccr: int = 50
     #: Elide noise hunks before compression: lockfile churn
@@ -109,8 +107,6 @@ class DiffCompressor:
                 max_context_lines=cfg.max_context_lines,
                 max_hunks_per_file=cfg.max_hunks_per_file,
                 max_files=cfg.max_files,
-                always_keep_additions=cfg.always_keep_additions,
-                always_keep_deletions=cfg.always_keep_deletions,
                 enable_ccr=cfg.enable_ccr,
                 min_lines_for_ccr=cfg.min_lines_for_ccr,
                 drop_noise_hunks=cfg.drop_noise_hunks,
@@ -176,32 +172,3 @@ class DiffCompressor:
             hunks_removed=0,
             cache_key=None,
         )
-
-    def compress_with_stats(
-        self, content: str, context: str = ""
-    ) -> tuple[DiffCompressionResult, Any]:
-        """Sidecar API exposing the Rust-only `DiffCompressorStats` struct
-        (per-file hunk drops, context lines trimmed, file_mode normalizations,
-        etc.) alongside the result. Stats is the raw PyO3 wrapper — no
-        Python equivalent to mirror to. Typed as `Any` because the PyO3
-        class has no Python type stub.
-        """
-        r, stats = self._rust.compress_with_stats(content, context)
-        if r.cache_key is not None and not self._persist_to_python_ccr(
-            content, r.compressed, r.cache_key
-        ):
-            # CCR store vetoed → serve the original (no dangling marker);
-            # `stats` still describes what the Rust pass computed.
-            return self._passthrough_result(content, r), stats
-        result = DiffCompressionResult(
-            compressed=r.compressed,
-            original_line_count=r.original_line_count,
-            compressed_line_count=r.compressed_line_count,
-            files_affected=r.files_affected,
-            additions=r.additions,
-            deletions=r.deletions,
-            hunks_kept=r.hunks_kept,
-            hunks_removed=r.hunks_removed,
-            cache_key=r.cache_key,
-        )
-        return result, stats
