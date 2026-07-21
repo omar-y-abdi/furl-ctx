@@ -1190,6 +1190,7 @@ class FurlMCPServer:
                 "tool_name": o.tool_name,
                 "offloaded_tokens": o.offloaded_tokens,
                 "preview_tokens": o.preview_tokens,
+                "net_tokens_if_retrieved": o.net_tokens_if_retrieved,
                 "net_negative_on_retrieval": o.net_negative_on_retrieval,
             }
             for o in result.opaque_offloads

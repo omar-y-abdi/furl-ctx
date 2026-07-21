@@ -12,8 +12,11 @@ hooks spawn a fresh subprocess per tool call, so per-call logging explodes into
 spam (see the #137 ledger row and the ANTHROPIC_O200K_PROXY_NOTE module comment
 that removed the last stderr-warning attempt for exactly this reason).
 
-Granular per-row offload (logs/search: ``smart_crusher_row_drop``) stays cheap
-to retrieve and is NOT flagged.
+Granular per-row offload stays cheap to retrieve and is NOT flagged. The
+discriminator is ``compression_strategy == "ccr_offload"``, not any single
+granular name; granular drops carry one of several other strategy values, such
+as ``smart_crusher_row_drop`` (what logs and search produce here) or
+``smart_crusher_compact_document``.
 """
 
 from __future__ import annotations
@@ -25,7 +28,12 @@ from pathlib import Path
 import pytest
 
 from furl_ctx import CompressResult, OpaqueOffload, compress
-from furl_ctx.cache.compression_store import reset_compression_store
+from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
+from furl_ctx.compress import (
+    _CCR_RETRIEVE_OVERHEAD_TOKENS,
+    _detect_opaque_offloads,
+    _net_tokens_if_retrieved,
+)
 
 BENCH_MODEL = "gpt-4o"
 
@@ -81,11 +89,57 @@ def test_opaque_code_offload_is_surfaced_in_typed_field():
     assert offload.offloaded_tokens > 10_000  # the ~41k-token code payload
 
 
+def test_net_tokens_if_retrieved_is_real_economics_not_a_tautology():
+    # Two INDEPENDENT terms, so the sign flips with the inputs. This is a real
+    # economic comparison, not a restatement of preview_tokens: a synthetic
+    # net-positive input and a net-negative input each produce their own sign.
+    assert _net_tokens_if_retrieved(saved_tokens=99, retrieval_cost_tokens=1) == 98
+    assert _net_tokens_if_retrieved(saved_tokens=1, retrieval_cost_tokens=100) == -99
+    assert (_net_tokens_if_retrieved(99, 1) < 0) is False  # net-positive
+    assert (_net_tokens_if_retrieved(1, 100) < 0) is True  # net-negative
+
+
 def test_opaque_offload_reports_net_negative_round_trip():
     result = compress(_code_snapshot_messages(), model=BENCH_MODEL)
     offload = result.opaque_offloads[0]
-    # Retrieving the whole blob back costs more than the offload saved.
+    # net_tokens_if_retrieved is the real economics: what the offload saved
+    # (offloaded - preview) minus what retrieval pays back (offloaded + overhead).
+    # Pinned to the derivation so a regression to the old preview_tokens > 0
+    # tautology, which never priced retrieval, is caught.
+    saved = offload.offloaded_tokens - offload.preview_tokens
+    retrieval_cost = offload.offloaded_tokens + _CCR_RETRIEVE_OVERHEAD_TOKENS
+    assert offload.net_tokens_if_retrieved == saved - retrieval_cost
+    assert offload.net_tokens_if_retrieved < 0  # this fixture is a net loss
+    # The boolean is DERIVED from the signed net, never computed independently.
+    assert offload.net_negative_on_retrieval == (offload.net_tokens_if_retrieved < 0)
     assert offload.net_negative_on_retrieval is True
+
+
+def test_zero_preview_offload_is_still_net_negative():
+    # A whole-blob offload whose preview is 0 tokens is STILL net-negative on
+    # retrieval: you pay the whole blob plus a call to get anything back. The old
+    # tautology offloaded_tokens > offloaded_tokens - preview_tokens reduces to
+    # preview_tokens > 0 and mislabels this exact case as net-positive (False);
+    # the real economics flags it net-negative (True).
+    store = get_compression_store()
+    ccr_hash = "abc123abc123abc123abc123"
+    store.store(
+        original="x" * 5000,
+        compressed="",
+        original_tokens=100,
+        compressed_tokens=0,
+        compression_strategy="ccr_offload",
+        explicit_hash=ccr_hash,
+    )
+    offloads = _detect_opaque_offloads(
+        [{"role": "tool", "content": f"summary <<ccr:{ccr_hash}>>"}], []
+    )
+    assert len(offloads) == 1
+    off = offloads[0]
+    assert off.preview_tokens == 0
+    # (100 - 0) - (100 + 12) = -12
+    assert off.net_tokens_if_retrieved == -_CCR_RETRIEVE_OVERHEAD_TOKENS
+    assert off.net_negative_on_retrieval is True
 
 
 def test_granular_row_offload_is_not_flagged_opaque():
@@ -141,6 +195,7 @@ def test_mcp_furl_compress_surfaces_opaque_offload(monkeypatch):
                 tool_name="Bash",
                 offloaded_tokens=41005,
                 preview_tokens=1601,
+                net_tokens_if_retrieved=-1613,
                 net_negative_on_retrieval=True,
             )
         ],
@@ -159,5 +214,6 @@ def test_mcp_furl_compress_surfaces_opaque_offload(monkeypatch):
     entry = out["opaque_offloads"][0]
     assert entry["hash"] == "abc123abc123"
     assert entry["offloaded_tokens"] == 41005
+    assert entry["net_tokens_if_retrieved"] == -1613
     assert entry["net_negative_on_retrieval"] is True
     assert "round trip" in out["note"].lower()

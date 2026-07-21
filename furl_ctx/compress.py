@@ -93,6 +93,12 @@ _FROZEN_WARN_FRACTION = 0.9
 # handles the "tool" subset). Used by the frozen-prefix conflict detector.
 _TOOL_OUTPUT_ROLES = frozenset({"tool", "function"})
 
+# Per-retrieve token overhead used to price a CCR round trip: the tool name
+# plus the hash argument a retrieve call spends, conservative. Matches the
+# verify harness's RETRIEVE_CALL_OVERHEAD_TOKENS so opaque_offloads economics
+# and the effective-savings benchmark price a round trip the same way.
+_CCR_RETRIEVE_OVERHEAD_TOKENS = 12
+
 
 @dataclass
 class CompressConfig:
@@ -163,16 +169,18 @@ class OpaqueOffload:
     """A whole-blob CCR offload the compressor could not structurally shrink.
 
     When no transform can compress a piece of content, the router moves the
-    entire blob to the CCR store behind a marker
-    (``compression_strategy == "ccr_offload"``) rather than applying a
-    reversible in-place transform. The marker's raw "savings" are almost
-    entirely opaque offload: the bytes are in the store, not gone. Retrieving
-    the content back returns the ENTIRE payload, so a retrieval round trip
-    costs MORE than never compressing this content
+    entire blob to the CCR store behind a marker rather than applying a
+    reversible in-place transform. The discriminator is the store entry's
+    ``compression_strategy == "ccr_offload"``: that is the whole-blob fallback,
+    as opposed to a granular per-row drop whose strategy is one of several other
+    values such as ``smart_crusher_row_drop`` or ``smart_crusher_compact_document``.
+    The marker's raw "savings" are almost entirely opaque offload: the bytes are
+    in the store, not gone. Retrieving the content back returns the ENTIRE
+    payload, so a retrieval round trip costs MORE than the offload saved
     (``net_negative_on_retrieval``). Source code is the canonical trigger: it
-    does not compress structurally, so it reliably lands on this path. This is
-    distinct from a granular per-row drop (``smart_crusher_row_drop``), where a
-    caller retrieves only the rows it needs and stays net-positive.
+    does not compress structurally, so it reliably lands on this path. A granular
+    per-row drop is different: a caller retrieves only the rows it needs and
+    stays net-positive, so it is not reported here.
 
     Read this off ``CompressResult.opaque_offloads`` at whatever cadence your
     layer can afford. It is deliberately NOT a per-call log line: Furl's hooks
@@ -183,17 +191,24 @@ class OpaqueOffload:
         hash: CCR recovery hash, also present in ``CompressResult.ccr_hashes``.
         tool_name: Originating tool for the offloaded content (Furl's
             ``content_kind``), or None when unattributed.
-        offloaded_tokens: Tokens moved to the store; the cost of retrieving the
-            blob back.
+        offloaded_tokens: Tokens moved to the store; the whole payload a
+            retrieval brings back.
         preview_tokens: Tokens of the visible summary/preview left inline.
-        net_negative_on_retrieval: True when retrieving the blob back costs more
-            than the offload saved (always the case for a whole-blob offload).
+        net_tokens_if_retrieved: Signed net token change if the blob is
+            retrieved back: what the offload saved
+            (``offloaded_tokens - preview_tokens``) minus what retrieval pays
+            back (``offloaded_tokens`` plus a per-call overhead). Negative means
+            the round trip costs more than the offload saved.
+        net_negative_on_retrieval: Derived, ``net_tokens_if_retrieved < 0``.
+            True for a whole-blob offload, since retrieval always brings back the
+            whole payload while the preview it saved is smaller.
     """
 
     hash: str
     tool_name: str | None
     offloaded_tokens: int
     preview_tokens: int
+    net_tokens_if_retrieved: int
     net_negative_on_retrieval: bool
 
 
@@ -281,6 +296,19 @@ def _ordered_ccr_hashes(messages: list[dict[str, Any]]) -> list[str]:
     return hashes_in_text("\n".join(parts))
 
 
+def _net_tokens_if_retrieved(saved_tokens: int, retrieval_cost_tokens: int) -> int:
+    """Signed net token change if an offloaded blob is retrieved back.
+
+    ``saved_tokens`` is what the offload removed from context; ``retrieval_cost_tokens``
+    is what a retrieval pays back. The two are INDEPENDENT inputs, computed
+    separately by the caller, so the result is a real economic comparison, not a
+    restatement of either one: a negative result means the round trip costs more
+    than the offload saved (a net loss), a positive result means it is still
+    ahead. Total and pure.
+    """
+    return saved_tokens - retrieval_cost_tokens
+
+
 def _detect_opaque_offloads(
     compressed_messages: list[dict[str, Any]],
     input_messages: list[dict[str, Any]],
@@ -288,16 +316,18 @@ def _detect_opaque_offloads(
     """Opaque whole-blob CCR offloads THIS compression created.
 
     An offload is opaque when the router could not structurally shrink the
-    content and stored the whole blob under a marker
-    (``compression_strategy == CCR_OFFLOAD``): retrieving it returns the entire
-    payload, so the round trip is net-negative. Granular per-row drops
-    (``smart_crusher_row_drop``) are cheap to retrieve and excluded. Hashes the
-    INPUT already carried (previous turns' markers) are excluded so only
-    offloads created now are reported.
+    content and stored the whole blob under a marker, identified by the store
+    entry's ``compression_strategy == CCR_OFFLOAD``. Retrieving it returns the
+    entire payload, so the round trip is net-negative. Granular per-row drops
+    carry a different strategy (one of several, such as ``smart_crusher_row_drop``
+    or ``smart_crusher_compact_document``) and are cheap to retrieve, so they are
+    excluded. Hashes the INPUT already carried (previous turns' markers) are
+    excluded so only offloads created now are reported.
 
     Pure metadata lookups — no original content is fetched. Never raises: a
-    diagnostic must not break a successful compression. Returns first-seen
-    order, matching ``ccr_hashes``.
+    diagnostic must not break a successful compression, and a single malformed
+    store entry is skipped, not fatal. Returns first-seen order, matching
+    ``ccr_hashes``.
     """
     surfaced = _ordered_ccr_hashes(compressed_messages)
     if not surfaced:
@@ -317,27 +347,34 @@ def _detect_opaque_offloads(
     for ccr_hash in surfaced:
         if ccr_hash in pre_existing:
             continue
+        # The whole per-hash body is guarded: a lookup failure OR a malformed
+        # entry (e.g. a non-numeric token value) must skip that entry, never
+        # turn a successful compression into a fail-open no-op.
         try:
             meta = store.get_metadata(ccr_hash)
-        except Exception:  # noqa: BLE001 - one bad lookup must not drop the rest
-            logger.debug("opaque-offload metadata lookup failed (non-fatal)", exc_info=True)
-            continue
-        if not meta or meta.get("compression_strategy") != opaque_strategy:
-            continue
-        offloaded_tokens = int(meta.get("original_tokens") or 0)
-        preview_tokens = int(meta.get("compressed_tokens") or 0)
-        # Retrieval returns the entire payload, so the round trip pays back
-        # offloaded_tokens; the offload only removed offloaded - preview.
-        saved = offloaded_tokens - preview_tokens
-        offloads.append(
-            OpaqueOffload(
-                hash=ccr_hash,
-                tool_name=meta.get("tool_name"),
-                offloaded_tokens=offloaded_tokens,
-                preview_tokens=preview_tokens,
-                net_negative_on_retrieval=offloaded_tokens > saved,
+            if not meta or meta.get("compression_strategy") != opaque_strategy:
+                continue
+            offloaded_tokens = int(meta.get("original_tokens") or 0)
+            preview_tokens = int(meta.get("compressed_tokens") or 0)
+            # Independently-computed terms: what the offload saved vs what a
+            # retrieval pays back (the whole blob plus one call). The sign of
+            # their difference is the round-trip economics.
+            saved = offloaded_tokens - preview_tokens
+            retrieval_cost = offloaded_tokens + _CCR_RETRIEVE_OVERHEAD_TOKENS
+            net = _net_tokens_if_retrieved(saved, retrieval_cost)
+            offloads.append(
+                OpaqueOffload(
+                    hash=ccr_hash,
+                    tool_name=meta.get("tool_name"),
+                    offloaded_tokens=offloaded_tokens,
+                    preview_tokens=preview_tokens,
+                    net_tokens_if_retrieved=net,
+                    net_negative_on_retrieval=net < 0,
+                )
             )
-        )
+        except Exception:  # noqa: BLE001 - a malformed entry is skipped, not fatal
+            logger.debug("opaque-offload entry skipped (non-fatal)", exc_info=True)
+            continue
     return offloads
 
 
@@ -979,6 +1016,19 @@ def compress(
                 )
             )
 
+        # T9: surface opaque whole-blob CCR offloads as a typed field the caller
+        # reads at its own cadence, a marker replacing content that nothing could
+        # structurally shrink whose retrieval round trip is net-negative. Runs
+        # INSIDE the request-scoped CCR store binding, so a namespaced call reads
+        # its own store. Guarded here as well as internally: this is an
+        # observation-only diagnostic, so a failure computing it must never
+        # revert a successful compression to the fail-open no-op path.
+        try:
+            opaque_offloads = _detect_opaque_offloads(compressed_messages, messages)
+        except Exception:  # noqa: BLE001 - the diagnostic must never break a success
+            logger.debug("opaque-offload detection failed (non-fatal)", exc_info=True)
+            opaque_offloads = []
+
         return CompressResult(
             messages=compressed_messages,
             tokens_before=tokens_before,
@@ -990,12 +1040,7 @@ def compress(
             # dropped here; plumb them through alongside the compress()-level
             # frozen-prefix diagnostics so callers can actually see them.
             warnings=[*compress_warnings, *result.warnings],
-            # T9: surface opaque whole-blob CCR offloads as a typed field the
-            # caller reads at its own cadence — a marker replacing content that
-            # nothing could structurally shrink whose retrieval round trip is
-            # net-negative. Runs INSIDE the request-scoped CCR store binding, so
-            # a namespaced call reads its own store. Never a per-call log line.
-            opaque_offloads=_detect_opaque_offloads(compressed_messages, messages),
+            opaque_offloads=opaque_offloads,
         )
 
     except (KeyboardInterrupt, SystemExit):
