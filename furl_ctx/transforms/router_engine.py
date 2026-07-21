@@ -52,7 +52,7 @@ import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from ..config import (
     DEFAULT_EXCLUDE_TOOLS,
@@ -88,13 +88,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from .base import CompressionObserver
-    from .code_aware_compressor import CodeAwareCompressor
     from .content_router import ContentRouter, ContentRouterConfig
-    from .diff_compressor import DiffCompressor
-    from .log_compressor import LogCompressor
-    from .search_compressor import SearchCompressor
-    from .smart_crusher import SmartCrusher
-    from .text_crusher import TextCrusher
 
 # CCR-offload fallback shape. Trigger: content at least _OFFLOAD_MIN_CHARS
 # whose final ratio is >= _OFFLOAD_TRIGGER_RATIO (nothing meaningfully
@@ -304,70 +298,6 @@ class RouterCompressionResult:
             )
 
 
-class RouterHooks(Protocol):
-    """The facade surface the engine calls back through (TYPE-3).
-
-    The router passes ITSELF per call. Routing every former ``self.<method>``
-    lookup through this protocol keeps instance and class-level monkeypatches
-    on ``ContentRouter`` biting — the facade delegators re-enter the engine.
-    """
-
-    _observer: CompressionObserver | None
-
-    def _determine_strategy(self, content: str) -> CompressionStrategy: ...
-
-    def _strategy_from_detection(self, detection: Any) -> CompressionStrategy: ...
-
-    def _strategy_from_detection_type(self, content_type: ContentType) -> CompressionStrategy: ...
-
-    def _content_type_from_strategy(self, strategy: CompressionStrategy) -> ContentType: ...
-
-    def _compress_mixed(
-        self,
-        content: str,
-        context: str,
-        question: str | None = ...,
-        bias: float = ...,
-        *,
-        token_counter: Callable[[str], int] | None = ...,
-    ) -> RouterCompressionResult: ...
-
-    def _compress_pure(
-        self,
-        content: str,
-        strategy: CompressionStrategy,
-        context: str,
-        question: str | None = ...,
-        bias: float = ...,
-        *,
-        token_counter: Callable[[str], int] | None = ...,
-    ) -> RouterCompressionResult: ...
-
-    def _apply_strategy_to_content(
-        self,
-        content: str,
-        strategy: CompressionStrategy,
-        context: str,
-        language: str | None = ...,
-        question: str | None = ...,
-        bias: float = ...,
-        *,
-        token_counter: Callable[[str], int] | None = ...,
-    ) -> tuple[str, int, list[str]]: ...
-
-    def _get_smart_crusher(self) -> SmartCrusher | None: ...
-
-    def _get_search_compressor(self) -> SearchCompressor | None: ...
-
-    def _get_log_compressor(self) -> LogCompressor | None: ...
-
-    def _get_diff_compressor(self) -> DiffCompressor | None: ...
-
-    def _get_text_crusher(self) -> TextCrusher | None: ...
-
-    def _get_code_aware_compressor(self) -> CodeAwareCompressor | None: ...
-
-
 class ContentCompressionEngine:
     """Compresses one string through the optimal strategy chain.
 
@@ -411,7 +341,7 @@ class ContentCompressionEngine:
         *,
         token_counter: Callable[[str], int] | None = None,
         detection: DetectionResult | None = None,
-        hooks: RouterHooks,
+        hooks: ContentRouter,
     ) -> RouterCompressionResult:
         """Compress content using optimal strategy based on content detection.
 
@@ -656,7 +586,7 @@ class ContentCompressionEngine:
         prior: RouterCompressionResult,
         token_counter: Callable[[str], int] | None = None,
         *,
-        hooks: RouterHooks,
+        hooks: ContentRouter,
     ) -> RouterCompressionResult | None:
         """Store *content* byte-exact in the CCR compression store and ship
         an identity preview + ``{"_ccr_dropped": "<<ccr:HASH>>"}`` sentinel +
@@ -1183,7 +1113,7 @@ class ContentCompressionEngine:
         self,
         content: str,
         *,
-        hooks: RouterHooks,
+        hooks: ContentRouter,
         detection: DetectionResult | None = None,
     ) -> CompressionStrategy:
         """Determine the compression strategy from content analysis.
@@ -1212,7 +1142,7 @@ class ContentCompressionEngine:
         bias: float = 1.0,
         *,
         token_counter: Callable[[str], int] | None = None,
-        hooks: RouterHooks,
+        hooks: ContentRouter,
     ) -> RouterCompressionResult:
         """Compress mixed content by splitting and routing sections.
 
@@ -1317,7 +1247,7 @@ class ContentCompressionEngine:
         bias: float = 1.0,
         *,
         token_counter: Callable[[str], int] | None = None,
-        hooks: RouterHooks,
+        hooks: ContentRouter,
     ) -> RouterCompressionResult:
         """Compress pure (non-mixed) content."""
         original_tokens = (token_counter or _cr()._word_count)(content)
@@ -1356,7 +1286,7 @@ class ContentCompressionEngine:
         bias: float = 1.0,
         *,
         token_counter: Callable[[str], int] | None = None,
-        hooks: RouterHooks,
+        hooks: ContentRouter,
     ) -> tuple[str, int, list[str]]:
         """Apply a compression strategy to content via the owned dispatcher.
 

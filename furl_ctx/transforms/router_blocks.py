@@ -37,12 +37,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from .router_cache import CacheDisposition, CacheKey, Recompute, ServeCached, ServeOriginal
 from .router_message_policy import (
-    FeedbackHintsLike,
-    MessagePolicyConfig,
     _is_retrieval_tool,
     _is_unstructured_error_output,
     _looks_like_ccr_output,
@@ -52,45 +50,16 @@ if TYPE_CHECKING:
     # Annotation-only: the walker passes compression results through to the
     # injected store gate and reads their ratio/strategy fields; the class
     # itself lives in content_router (which imports THIS module at runtime).
-    from .content_router import RouterCompressionResult
+    from ..cache.retrieval_feedback import FeedbackHints
+    from .content_router import ContentRouterConfig, RouterCompressionResult
 
 
-class BlockCompressFn(Protocol):
-    """Call shape of the injected ``ContentRouter.compress`` (the fakes the
-    test suites install accept the same keywords)."""
-
-    def __call__(
-        self,
-        content: str,
-        *,
-        context: str,
-        bias: float,
-        token_counter: Callable[[str], int] | None,
-    ) -> RouterCompressionResult: ...
-
-
-class LookupDispositionFn(Protocol):
-    """Call shape of the injected ``ContentRouter._lookup_cached_disposition``."""
-
-    def __call__(
-        self,
-        content_key: CacheKey,
-        context: str,
-        min_ratio: float,
-        route_counts: dict[str, int] | None,
-    ) -> CacheDisposition: ...
-
-
-class StoreDispositionFn(Protocol):
-    """Call shape of the injected ``ContentRouter._store_disposition``."""
-
-    def __call__(
-        self,
-        content_key: CacheKey,
-        result: RouterCompressionResult,
-        min_ratio: float,
-        route_counts: dict[str, int] | None,
-    ) -> bool: ...
+# Injected-callable shapes (keyword-arg precision intentionally elided —
+# ``Callable[...]`` over single-implementer Protocols): the router facade's
+# ``compress`` / ``_lookup_cached_disposition`` / ``_store_disposition``.
+BlockCompressFn = Callable[..., "RouterCompressionResult"]
+LookupDispositionFn = Callable[..., CacheDisposition]
+StoreDispositionFn = Callable[..., bool]
 
 
 class ContentBlockWalker:
@@ -102,7 +71,7 @@ class ContentBlockWalker:
     :meth:`process_content_blocks` on each call.
     """
 
-    def __init__(self, config: MessagePolicyConfig) -> None:
+    def __init__(self, config: ContentRouterConfig) -> None:
         self.config = config
 
     def process_content_blocks(
@@ -129,7 +98,7 @@ class ContentBlockWalker:
         store_disposition: StoreDispositionFn,
         compress_fn: BlockCompressFn,
         get_tool_bias: Callable[[str], float],
-        get_feedback_hints: Callable[..., FeedbackHintsLike],
+        get_feedback_hints: Callable[..., FeedbackHints],
         result_cache_key: Callable[[str, float], CacheKey],
     ) -> dict[str, Any]:
         """Process content blocks (Anthropic format) for compression.
@@ -490,7 +459,7 @@ class ContentBlockWalker:
         lookup_disposition: LookupDispositionFn,
         store_disposition: StoreDispositionFn,
         compress_fn: BlockCompressFn,
-        get_feedback_hints: Callable[..., FeedbackHintsLike],
+        get_feedback_hints: Callable[..., FeedbackHints],
         result_cache_key: Callable[[str, float], CacheKey],
     ) -> tuple[dict[str, Any], bool]:
         """Compress the inner ``type=="text"`` parts of a nested ``tool_result``

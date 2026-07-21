@@ -107,7 +107,7 @@ def test_record_metrics_false_never_reaches_transforms_via_simulate() -> None:
     spy = _SpyTransform()
     pipeline = TransformPipeline(transforms=[spy])
 
-    pipeline.simulate(_messages(), _MODEL, model_limit=_MODEL_LIMIT)
+    pipeline.apply(_messages(), _MODEL, record_metrics=False, model_limit=_MODEL_LIMIT)
 
     assert spy.apply_kwargs, "spy transform was never applied"
     for kw in spy.apply_kwargs + spy.should_apply_kwargs:
@@ -122,8 +122,8 @@ def test_simulate_matches_apply_output() -> None:
     applied = TransformPipeline(transforms=[_SpyTransform()]).apply(
         messages, _MODEL, model_limit=_MODEL_LIMIT
     )
-    simulated = TransformPipeline(transforms=[_SpyTransform()]).simulate(
-        messages, _MODEL, model_limit=_MODEL_LIMIT
+    simulated = TransformPipeline(transforms=[_SpyTransform()]).apply(
+        messages, _MODEL, record_metrics=False, model_limit=_MODEL_LIMIT
     )
 
     assert simulated.messages == applied.messages
@@ -140,8 +140,8 @@ def test_simulate_does_not_mutate_caller_messages() -> None:
     messages = _messages()
     snapshot = [dict(m) for m in messages]
 
-    TransformPipeline(transforms=[_SpyTransform()]).simulate(
-        messages, _MODEL, model_limit=_MODEL_LIMIT
+    TransformPipeline(transforms=[_SpyTransform()]).apply(
+        messages, _MODEL, record_metrics=False, model_limit=_MODEL_LIMIT
     )
 
     assert messages == snapshot

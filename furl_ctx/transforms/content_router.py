@@ -296,8 +296,6 @@ class ContentRouterConfig:
             ``lossless_only``).
         enable_log_compressor: Enable build/test log compression.
         enable_text_crusher: Enable deterministic prose compression.
-        mixed_content_threshold: Min distinct types to consider "mixed".
-        min_section_tokens: Minimum tokens for a section to compress.
         fallback_strategy: Strategy when no compressor matches.
         skip_user_messages: Never compress user messages (they're the subject).
         protect_recent_code: Don't compress CODE in the last N messages
@@ -367,10 +365,6 @@ class ContentRouterConfig:
     # (COR-37-honest; engine-internal verification reads opt out). No
     # telemetry, no disk ledger.
     enable_retrieval_feedback: bool = False
-
-    # Routing preferences
-    mixed_content_threshold: int = 2  # Min types to consider mixed
-    min_section_tokens: int = 20  # Min tokens to compress a section
 
     # Fallback: unknown content types pass through unchanged (every current
     # ContentType has an explicit strategy mapping, so this is a safety net).

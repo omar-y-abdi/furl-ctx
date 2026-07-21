@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from .csv_ingest import compress_tabular_csv, sniff_csv
 from .envelope_ingest import compress_envelope, sniff_envelope
@@ -50,24 +50,12 @@ from .router_policy import CompressionStrategy
 
 if TYPE_CHECKING:
     from .code_aware_compressor import CodeAwareCompressor
+    from .content_router import ContentRouterConfig
     from .diff_compressor import DiffCompressor
     from .log_compressor import LogCompressor
     from .search_compressor import SearchCompressor
     from .smart_crusher import SmartCrusher
     from .text_crusher import TextCrusher
-
-
-class DispatchConfig(Protocol):
-    """The config gate fields the dispatcher reads (a structural subset of
-    ``ContentRouterConfig``)."""
-
-    enable_smart_crusher: bool
-    enable_search_compressor: bool
-    enable_log_template: bool
-    enable_log_compressor: bool
-    enable_text_crusher: bool
-    enable_code_aware: bool
-    lossless_only: bool
 
 
 def _word_count(text: str) -> int:
@@ -86,7 +74,7 @@ class StrategyDispatcher:
 
     def __init__(
         self,
-        config: DispatchConfig,
+        config: ContentRouterConfig,
         *,
         logger: logging.Logger,
         log_router_debug: Callable[..., None],

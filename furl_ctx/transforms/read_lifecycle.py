@@ -92,12 +92,8 @@ class ReadLifecycleResult:
     """Output of lifecycle management pass."""
 
     messages: list[dict[str, Any]]
-    reads_total: int = 0
     reads_stale: int = 0
     reads_superseded: int = 0
-    reads_fresh: int = 0
-    bytes_before: int = 0
-    bytes_after: int = 0
     transforms_applied: list[str] = field(default_factory=list)
     ccr_hashes: list[str] = field(default_factory=list)
 
@@ -348,17 +344,11 @@ class ReadLifecycleManager:
         }
 
         if not replacements:
-            return ReadLifecycleResult(
-                messages=messages,
-                reads_total=len(classifications),
-                reads_fresh=len(classifications),
-            )
+            return ReadLifecycleResult(messages=messages)
 
         result_messages: list[dict[str, Any]] = []
         transforms: list[str] = []
         ccr_hashes: list[str] = []
-        bytes_before = 0
-        bytes_after = 0
         counts = {ReadState.FRESH: 0, ReadState.STALE: 0, ReadState.SUPERSEDED: 0}
 
         for c in classifications:
@@ -379,8 +369,6 @@ class ReadLifecycleManager:
                         transforms.append(_format_read_lifecycle_transform(classification))
                         if ccr_hash:
                             ccr_hashes.append(ccr_hash)
-                        bytes_before += len(content.encode("utf-8"))
-                        bytes_after += len(marker.encode("utf-8"))
                         continue
 
             # Anthropic format: content blocks list
@@ -396,12 +384,8 @@ class ReadLifecycleManager:
 
         return ReadLifecycleResult(
             messages=result_messages,
-            reads_total=len(classifications),
             reads_stale=counts[ReadState.STALE],
             reads_superseded=counts[ReadState.SUPERSEDED],
-            reads_fresh=counts[ReadState.FRESH],
-            bytes_before=bytes_before,
-            bytes_after=bytes_after,
             transforms_applied=transforms,
             ccr_hashes=ccr_hashes,
         )

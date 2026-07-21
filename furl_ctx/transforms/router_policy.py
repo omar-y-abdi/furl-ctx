@@ -23,9 +23,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import Enum
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from .content_detector import ContentType, DetectionResult
+
+if TYPE_CHECKING:
+    # Annotation-only (no runtime cycle — ``content_router`` imports THIS
+    # module for ``CompressionStrategy``): the concrete config the pure policy
+    # functions read.
+    from .content_router import ContentRouterConfig
 
 
 class CompressionStrategy(Enum):
@@ -44,22 +50,8 @@ class CompressionStrategy(Enum):
     CCR_OFFLOAD = "ccr_offload"
 
 
-class StrategyPolicyConfig(Protocol):
-    """The config fields the strategy-mapping policy reads."""
-
-    fallback_strategy: CompressionStrategy
-    enable_code_aware: bool
-
-
-class RatioPolicyConfig(Protocol):
-    """The config fields the adaptive-ratio policy reads."""
-
-    min_ratio_relaxed: float
-    min_ratio_aggressive: float
-
-
 def strategy_from_detection(
-    config: StrategyPolicyConfig, detection: DetectionResult
+    config: ContentRouterConfig, detection: DetectionResult
 ) -> CompressionStrategy:
     """Get strategy from content detection result.
 
@@ -82,7 +74,7 @@ def strategy_from_detection(
     return mapping.get(detection.content_type, config.fallback_strategy)
 
 
-def _source_code_strategy(config: StrategyPolicyConfig) -> CompressionStrategy:
+def _source_code_strategy(config: ContentRouterConfig) -> CompressionStrategy:
     """SOURCE_CODE routing: PASSTHROUGH by default — code ships unmangled,
     exactly the behavior the retired AST/ML code compressors left behind.
     The opt-in CodeAwareCompressor (``enable_code_aware=True``, Engine
@@ -94,7 +86,7 @@ def _source_code_strategy(config: StrategyPolicyConfig) -> CompressionStrategy:
 
 
 def strategy_from_detection_type(
-    config: StrategyPolicyConfig, content_type: ContentType
+    config: ContentRouterConfig, content_type: ContentType
 ) -> CompressionStrategy:
     """Get strategy from ContentType enum."""
     mapping = {
@@ -123,7 +115,7 @@ def content_type_from_strategy(strategy: CompressionStrategy) -> ContentType:
     return mapping.get(strategy, ContentType.PLAIN_TEXT)
 
 
-def adaptive_min_ratio(config: RatioPolicyConfig, context_pressure: float) -> float:
+def adaptive_min_ratio(config: ContentRouterConfig, context_pressure: float) -> float:
     """Compression-acceptance threshold scaled by context pressure.
 
     A compression is accepted when ``ratio < min_ratio`` (lower ratio =
