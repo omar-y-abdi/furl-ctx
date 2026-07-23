@@ -1,6 +1,6 @@
 """RFC-4180 quote-aware round-trip fuzz tests for csv_schema_decoder.
 
-Three test families:
+Four test families:
 
 1. **Cluster-A regression** (targeted): a row containing a cell with an
    embedded newline must survive the full Rust-compact → Python-decode
@@ -26,6 +26,18 @@ Three test families:
    cells in ``json``-tagged columns of a flat table must round-trip via
    ``json.loads``.  Contract: decode byte-exact OR decline — never ship
    unverifiable bytes under the lossless claim.
+
+4. **COR-14 flatten-ambiguity guard** (dotted inner keys): the encoder's
+   nested-uniform flatten synthesizes dotted column names the wire grammar
+   never records, so shapes where the synthesized name is AMBIGUOUS about
+   the original nesting (a sibling column on a strict prefix such as
+   ``a.b`` beside ``{"a": {"b.c": ..}}``, prefix-overlapping inner keys
+   ``{"b", "b.c"}``, empty parent names, or inner keys with empty
+   dot-segments) must DECLINE the flatten — the column stays a
+   nested-object cell and the array then decodes byte-exact or fails
+   closed per COR-13, never shipping the corrupted table — while benign
+   dotted inners (``cpu.usage``) keep flattening under the documented
+   dotted-key equivalence.
 
 Note on "colons-in-keys": the CSV-schema formatter never quotes COLUMN
 NAMES — only cells (the ``kv_field_name`` quoting belongs to the
@@ -1227,4 +1239,89 @@ def test_fuzz_literal_dotted_keys_preserve_both_values() -> None:
         assert route == "lossless", (
             f"a literal dotted-key table (no synthesized collision) must stay "
             f"lossless & exact, got {route!r} for n={n}"
+        )
+
+
+# ──────────────── COR-14: flatten-ambiguity guard (dotted inner keys) ─────────
+#
+# The nested-uniform flatten synthesizes `parent.key` column names that the
+# wire grammar never records.  When the synthesized dotted name is ambiguous
+# about the original nesting, the decoded rows bind values to the WRONG paths
+# under the documented dotted-key equivalence — silently, with no CCR sentinel
+# (`{"a": {"b.c": 900}}` beside a literal `a.b` decoded as `a.b.c: 900`
+# beside a nested `a.b`, swapping which value owns `a.b.c`).  The encoder
+# must decline the flatten for exactly those shapes.  The un-flattened
+# column then stays a nested-object cell, and the array takes whichever
+# route its size/shape earns — nested-cell lossless table (decode
+# byte-exact) or fail-closed decline to verbatim/recoverable — both fully
+# asserted by `_assert_decoded_exact_or_declined`.  Against the pre-guard
+# encoder these shapes shipped a "lossless" CSV table whose decode was NOT
+# byte-exact, which is exactly what the helper's lossless-path assertion
+# rejects, so these tests are red without the guard with no route pin
+# needed.
+
+
+def test_dotted_inner_with_prefix_sibling_never_silently_corrupts() -> None:
+    """COR-14: parent with a dotted inner + sibling on a strict prefix.
+
+    `a` flattening inner `b.c` synthesizes `a.b.c` while a sibling column
+    `a.b` (object or scalar) sits on the strict prefix — the shape that
+    silently swapped value owners before the guard.
+    """
+    for n in (14, 9):
+        pair = [{"id": i, "svc": "api", "a.b": {"c": i}, "a": {"b.c": 900 + i}} for i in range(n)]
+        scalar = [{"id": i, "svc": "api", "a": {"b.c": i}, "a.b": f"s{i}"} for i in range(n)]
+        for items in (pair, scalar):
+            _assert_decoded_exact_or_declined(items)
+
+
+def test_prefix_overlapping_inner_keys_never_silently_corrupt() -> None:
+    """COR-14: inner keys {`b`, `b.c`} — nesting outcome depends on `b`'s
+    per-row VALUE keys, so the flatten must fail closed."""
+    for n in (14, 9):
+        items = [{"id": i, "svc": "api", "p": {"b": {"c": i}, "b.c": 900 + i}} for i in range(n)]
+        _assert_decoded_exact_or_declined(items)
+
+
+def test_empty_segment_names_never_silently_corrupt() -> None:
+    """COR-14: empty parent name / empty inner key / empty dot-segment.
+
+    Synthesized names like `.k`, `p.`, `p.b.` carry empty segments the
+    canonicalization keeps LITERAL at top level while the original nests
+    them — so these shapes must decline the flatten.
+    """
+    for n in (14, 9):
+        shapes = [
+            [{"id": i, "svc": "api", "": {"k": 900 + i}} for i in range(n)],
+            [{"id": i, "svc": "api", "p": {"": i, "q": 900 + i}} for i in range(n)],
+            [{"id": i, "svc": "api", "p": {"b.": i, "q": 900 + i}} for i in range(n)],
+        ]
+        for items in shapes:
+            _assert_decoded_exact_or_declined(items)
+
+
+def test_benign_dotted_inner_keys_still_flatten_value_exact() -> None:
+    """COR-14 guard must not over-decline: metrics-style dotted inners with
+    no prefix interference keep flattening (the compression win stays), and
+    deeper-extension / disjoint-branch siblings do not block it.
+
+    Decoded rows are pinned to the exact documented dotted-key form, so a
+    regression EITHER way — over-declining (nested `m` cells reappear) or
+    mis-flattening (wrong names/values) — fails this test.
+    """
+    n = 14
+    metrics = [{"id": i, "svc": "api", "m": {"cpu.usage": i, "mem.rss": 2 * i}} for i in range(n)]
+    expected_metrics = [
+        {"id": i, "svc": "api", "m.cpu.usage": i, "m.mem.rss": 2 * i} for i in range(n)
+    ]
+    siblings = [{"id": i, "a": {"b.c": i}, "a.b.c.d": 900 + i, "a.j": 30 + i} for i in range(n)]
+    expected_siblings = [{"id": i, "a.b.c": i, "a.b.c.d": 900 + i, "a.j": 30 + i} for i in range(n)]
+    for items, expected in ((metrics, expected_metrics), (siblings, expected_siblings)):
+        text = _compress_to_text(items)
+        rows = decode_csv_schema_rows(text)
+        assert rows is not None, f"expected a lossless CSV render, got: {text[:200]!r}"
+        assert not _has_ccr_sentinel(text)
+        assert {_repr(r) for r in rows} == {_repr(e) for e in expected}, (
+            f"flattened decode diverged from the documented dotted-key form.\n"
+            f"Rendered (first 300):\n{text[:300]}"
         )

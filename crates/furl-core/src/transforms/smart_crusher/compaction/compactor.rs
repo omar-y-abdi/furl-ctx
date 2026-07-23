@@ -36,6 +36,8 @@
 //!   exact, the nesting shape is not restored. `csv_schema_decoder.py`
 //!   documents the same caveat on the consumer side, and
 //!   `verify/independent_recheck.py` compares both sides un-flattened.
+//!   Shapes where even that equivalence would mis-bind a value — see
+//!   [`flatten_breaks_dotted_equivalence`] — never flatten (fail closed).
 //! - **Stringified-JSON.** Cells that classify as
 //!   [`CellClass::StringifiedJson`] become [`CellValue::Nested`] when the
 //!   parsed value is an array of objects (recursive table); otherwise
@@ -350,7 +352,12 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
 /// COR-14 contract note: the flatten is NOT recorded in the wire grammar,
 /// so the decoder cannot un-flatten — decoded rows carry the dotted
 /// column names as top-level keys. "Lossless" for a flattened table means
-/// value-exact under dotted keys, not shape-exact reconstruction.
+/// value-exact under dotted keys, not shape-exact reconstruction. Shapes
+/// where even THAT equivalence would break — an empty parent name, inner
+/// keys with empty dot-segments, prefix-overlapping inner keys, or a
+/// sibling column on a strict prefix of a synthesized dotted path — skip
+/// the flatten entirely ([`flatten_breaks_dotted_equivalence`]) and stay
+/// nested-object cells, which decode byte-exact.
 fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &CompactConfig) {
     use super::formatter::column_name_breaks_grammar;
 
@@ -392,6 +399,17 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
                 .any(|(idx, s)| idx != i && s.name == synthesized)
         });
         if collides {
+            i += 1;
+            continue;
+        }
+
+        // COR-14 fail-closed: even with no name collision, a synthesized
+        // dotted name can still be AMBIGUOUS about the original nesting
+        // (`{"a": {"b.c": 1}}` and `{"a.b": {"c": 1}}` both synthesize
+        // `a.b.c`). Where that ambiguity can bind a value to the wrong
+        // path, skip the flatten; the column stays a nested-object cell
+        // and decodes byte-exact.
+        if flatten_breaks_dotted_equivalence(&parent_name, &inner_keys, specs) {
             i += 1;
             continue;
         }
@@ -447,6 +465,73 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
 
         i += n_new;
     }
+}
+
+/// COR-14 ambiguity guard: true when flattening `parent` would break
+/// value-exactness under dotted-key canonicalization, the documented
+/// equivalence for flattened tables (`verify/independent_recheck.
+/// _unflatten_dotted`: non-dotted keys fold first, then dotted keys in
+/// sorted order, and a key stays literal when nesting would clobber
+/// existing data).
+///
+/// A dot-free, non-empty parent with dot-free inner keys is always safe:
+/// the leaf slot `out[parent][k]` cannot be reached or blocked by any
+/// other column once the synthesized-name collision check has passed, so
+/// original and decoded fold identically regardless of siblings. Four
+/// shapes break that symmetry, each reproduced as a live silent-corruption
+/// round trip before this guard existed:
+///
+/// - **empty parent name**: `{"": {"k": 1}}` synthesizes `.k`, whose
+///   leading empty segment the canonicalizer keeps LITERAL at top level,
+///   while the original folds `k` inside the `""` subtree;
+/// - **empty inner key / empty dot-segment** (`""`, `"b."`): same
+///   literal-vs-nested split (`{"p": {"": 1}}` decoded as `{"p.": 1}`);
+/// - **prefix-overlapping inner keys** (`{"b", "b.c"}`): whether the
+///   `b.c` leaf nests under sibling value `b` depends on that value's own
+///   keys row by row — data-dependent, so fail closed;
+/// - **sibling column on a strict prefix of a synthesized dotted path**
+///   (column `a.b` beside parent `a` with inner `b.c`): the original
+///   folds `b.c` inside the parent's sandboxed subtree, the decoded folds
+///   it in the global namespace where the sibling blocks the path,
+///   silently swapping which value owns `a.b.c`.
+///
+/// Siblings that EXTEND a synthesized path (`a.b.c.d`) or sit on a
+/// disjoint branch (`a.j`) fold identically on both sides and keep the
+/// flatten, so metrics-style dotted inner keys (`{"m": {"cpu.usage": 1}}`
+/// alone) still compress.
+fn flatten_breaks_dotted_equivalence(
+    parent: &str,
+    inner_keys: &[String],
+    specs: &[FieldSpec],
+) -> bool {
+    if parent.is_empty() {
+        return true;
+    }
+    if inner_keys
+        .iter()
+        .any(|k| k.is_empty() || k.split('.').any(|seg| seg.is_empty()))
+    {
+        return true;
+    }
+    if !inner_keys.iter().any(|k| k.contains('.')) {
+        return false;
+    }
+    let paths: Vec<Vec<&str>> = inner_keys.iter().map(|k| k.split('.').collect()).collect();
+    let prefix_overlap = paths.iter().enumerate().any(|(x, px)| {
+        paths
+            .iter()
+            .enumerate()
+            .any(|(y, py)| x != y && py.len() > px.len() && py[..px.len()] == px[..])
+    });
+    if prefix_overlap {
+        return true;
+    }
+    paths.iter().filter(|p| p.len() > 1).any(|path| {
+        (1..path.len()).any(|j| {
+            let prefix_name = format!("{parent}.{}", path[..j].join("."));
+            specs.iter().any(|s| s.name == prefix_name)
+        })
+    })
 }
 
 /// Stamp [`FieldSpec::const_value`] on every column whose cells are the
@@ -1381,6 +1466,155 @@ mod tests {
                     names.contains(&"m"),
                     "nested `m` object column dropped: {names:?}"
                 );
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dotted_inner_with_prefix_sibling_object_skips_flatten() {
+        // COR-14: `a` with inner `b.c` synthesizes `a.b.c` while sibling
+        // column `a.b` sits on the strict prefix `a.b` — flattening bound
+        // 900+i to the wrong owner of `a.b.c` under the documented
+        // dotted-key equivalence. Both columns must stay nested cells.
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "a.b": {"c": i}, "a": {"b.c": 900 + i}}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                assert!(
+                    !names.contains(&"a.b.c"),
+                    "ambiguous a.b.c column synthesized: {names:?}"
+                );
+                assert!(names.contains(&"a"), "nested `a` dropped: {names:?}");
+                assert!(names.contains(&"a.b"), "literal `a.b` dropped: {names:?}");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dotted_inner_with_prefix_sibling_scalar_skips_flatten() {
+        // COR-14: same prefix interference with a SCALAR sibling `a.b` —
+        // the decoded fold nests `a.b` first and keeps `a.b.c` literal,
+        // while the original folds `b.c` inside `a`'s subtree.
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "a": {"b.c": i}, "a.b": format!("s{i}")}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                assert!(
+                    !names.contains(&"a.b.c"),
+                    "ambiguous a.b.c column synthesized: {names:?}"
+                );
+                assert!(names.contains(&"a"), "nested `a` dropped: {names:?}");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefix_overlapping_inner_keys_skip_flatten() {
+        // COR-14: inners {`b`, `b.c`} — whether the `b.c` leaf nests under
+        // sibling value `b` depends on that value's own keys per row, so
+        // the flatten fails closed and `p` stays a nested cell.
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "p": {"b": {"c": i}, "b.c": 900 + i}}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                assert!(
+                    !names.iter().any(|n| n.starts_with("p.")),
+                    "prefix-overlapping inners flattened: {names:?}"
+                );
+                assert!(names.contains(&"p"), "nested `p` dropped: {names:?}");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_segment_inner_keys_skip_flatten() {
+        // COR-14: `""` and `"b."` synthesize `p.` / `p.b.` whose empty
+        // segments the canonicalizer keeps LITERAL at top level while the
+        // original folds them inside `p` — guaranteed divergence.
+        for inner in [json!({"": 1, "q": 2}), json!({"b.": 1, "q": 2})] {
+            let items: Vec<Value> = (0..4)
+                .map(|i| json!({"id": i, "p": inner.clone()}))
+                .collect();
+            match compact(&items, &cfg()) {
+                Compaction::Table { schema, .. } => {
+                    let names = schema.field_names();
+                    assert!(
+                        !names.iter().any(|n| n.starts_with("p.")),
+                        "empty-segment inner flattened: {names:?}"
+                    );
+                    assert!(names.contains(&"p"), "nested `p` dropped: {names:?}");
+                }
+                other => panic!("expected Table, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_parent_name_skips_flatten() {
+        // COR-14: parent `""` is dot-free but synthesizes `.k`, whose
+        // leading empty segment stays literal under the canonicalization
+        // while the original nests `k` under `""`.
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "": {"k": 900 + i}}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                assert!(
+                    !names.contains(&".k"),
+                    "empty parent flattened to `.k`: {names:?}"
+                );
+                assert!(names.contains(&""), "empty-name column dropped: {names:?}");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn benign_dotted_inner_keys_still_flatten() {
+        // COR-14 guard must NOT over-decline: metrics-style dotted inner
+        // keys with no prefix interference fold identically on both sides
+        // of the equivalence, so the flatten (and its compression) stays.
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "m": {"cpu.usage": i, "mem.rss": 2 * i}}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                assert!(names.contains(&"m.cpu.usage"), "got {names:?}");
+                assert!(names.contains(&"m.mem.rss"), "got {names:?}");
+                assert!(!names.contains(&"m"), "flatten declined: {names:?}");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leaf_extension_and_disjoint_siblings_keep_flatten() {
+        // COR-14 guard must NOT over-decline: a sibling EXTENDING the
+        // synthesized path (`a.b.c.d`) or on a disjoint branch (`a.j`)
+        // folds identically on both sides — only strict-prefix siblings
+        // block the flatten.
+        let items: Vec<Value> = (0..4)
+            .map(|i| json!({"id": i, "a": {"b.c": i}, "a.b.c.d": 900 + i, "a.j": 30 + i}))
+            .collect();
+        match compact(&items, &cfg()) {
+            Compaction::Table { schema, .. } => {
+                let names = schema.field_names();
+                assert!(names.contains(&"a.b.c"), "flatten declined: {names:?}");
+                assert!(names.contains(&"a.b.c.d"), "got {names:?}");
+                assert!(names.contains(&"a.j"), "got {names:?}");
+                assert!(!names.contains(&"a"), "flatten declined: {names:?}");
             }
             other => panic!("expected Table, got {other:?}"),
         }

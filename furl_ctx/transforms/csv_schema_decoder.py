@@ -15,7 +15,12 @@ flattened table is therefore **value-exact under dotted keys** — every
 value is exact; the original nesting shape is not restored. Consumers
 comparing against pre-compression originals must compare un-flattened
 (``verify/independent_recheck._unflatten_dotted`` is the reference
-canonicalization).
+canonicalization). Shapes where even that equivalence would be ambiguous
+about which path owns a value (a sibling column on a strict prefix of a
+synthesized dotted name, prefix-overlapping inner keys, empty parent
+names or dot-segments) never flatten — the encoder fails closed
+(``compactor.rs::flatten_breaks_dotted_equivalence``) and the column
+arrives here as a nested-object cell, which decodes byte-exact.
 
 Grammar decoded here (one table)::
 
