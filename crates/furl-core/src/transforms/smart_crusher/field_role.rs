@@ -57,6 +57,21 @@ pub const IDENTITY_SHAPE_FRACTION: f64 = 0.8;
 /// 0.7 mirrors the entropy gate in `detect_id_field_statistically`.
 pub const IDENTITY_ENTROPY_THRESHOLD: f64 = 0.7;
 
+/// Vowel ratio below which a whitespace-free token counts as non-linguistic
+/// (see [`looks_non_linguistic`]). Entropy alone can't tell a random token
+/// from a short word — both score near 1.0 — so this corroborates it. Swept
+/// 0.10/0.12/0.15/0.18/0.20 against a repo-filename corpus vs. random
+/// hex/base62 tokens; 0.10 gave the best precision (1/96 false positives)
+/// without losing much recall (285/300 random tokens still caught) — see PR
+/// body. ASCII vowels only: non-Latin-script tokens still misclassify, same
+/// as before this fix (not a new regression).
+pub const IDENTITY_TOKEN_VOWEL_RATIO_THRESHOLD: f64 = 0.10;
+
+/// Fraction of the sample that must look non-linguistic before the entropy
+/// fallback trusts itself. Kept separate from [`IDENTITY_SHAPE_FRACTION`]
+/// (same value today) since they gate unrelated evidence.
+pub const IDENTITY_NONLINGUISTIC_FRACTION: f64 = 0.8;
+
 /// Max values to sample per field when shape-matching. Bounds the cost to a
 /// constant per field regardless of array size. 20 mirrors the existing
 /// `values[:20]` sampling in `field_detect.rs`.
@@ -115,8 +130,7 @@ fn is_identity_shaped(stats: &FieldStats, sample: &[&Value]) -> bool {
 
 /// String identity: a clear majority of the sample matches ISO-8601,
 /// ISO-date, UUID, or a long hex run; OR the sample is high-entropy
-/// *token-like* (opaque ids — no whitespace, no natural-language
-/// structure).
+/// token-like AND non-linguistic (see [`looks_non_linguistic`]).
 fn string_is_identity(sample: &[&Value]) -> bool {
     let strs: Vec<&str> = sample.iter().filter_map(|v| v.as_str()).collect();
     if strs.is_empty() {
@@ -150,7 +164,33 @@ fn string_is_identity(sample: &[&Value]) -> bool {
         .map(|s| calculate_string_entropy(s))
         .sum::<f64>()
         / strs.len() as f64;
-    avg_entropy > IDENTITY_ENTROPY_THRESHOLD
+    if avg_entropy <= IDENTITY_ENTROPY_THRESHOLD {
+        return false;
+    }
+
+    // Entropy alone misreads short words as identity (see IDENTITY_TOKEN_
+    // VOWEL_RATIO_THRESHOLD doc); require most of the sample to also look
+    // non-linguistic.
+    let non_linguistic = strs.iter().filter(|s| looks_non_linguistic(s)).count();
+    (non_linguistic as f64 / strs.len() as f64) >= IDENTITY_NONLINGUISTIC_FRACTION
+}
+
+/// True when a token doesn't look like an ordinary word: it has a digit,
+/// no letters at all, or a vowel ratio below
+/// [`IDENTITY_TOKEN_VOWEL_RATIO_THRESHOLD`].
+fn looks_non_linguistic(s: &str) -> bool {
+    if s.bytes().any(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
+    if letters.is_empty() {
+        return true;
+    }
+    let vowels = letters
+        .iter()
+        .filter(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u'))
+        .count();
+    (vowels as f64 / letters.len() as f64) < IDENTITY_TOKEN_VOWEL_RATIO_THRESHOLD
 }
 
 /// Numeric identity: a monotone / sequential counter (mirrors the
@@ -309,6 +349,92 @@ mod tests {
         assert_eq!(classify_field(&s, &refs(&sample)), FieldRole::Content);
     }
 
+    // Real filenames from this repo: unique, no digits, entropy 0.94-1.00.
+    const FILENAME_SAMPLE: [&str; 20] = [
+        "utils.py",
+        "main.rs",
+        "index.ts",
+        "router.py",
+        "field_role.rs",
+        "planning.rs",
+        "crusher.rs",
+        "walker.rs",
+        "builder.rs",
+        "config.rs",
+        "constraints.rs",
+        "observer.rs",
+        "traits.rs",
+        "pipeline.py",
+        "registry.py",
+        "compress.py",
+        "retrieve.py",
+        "tokenizer.py",
+        "redaction.py",
+        "paths.py",
+    ];
+
+    #[test]
+    fn single_word_filenames_are_content_not_identity() {
+        let s = stats(FieldType::String, 1.0, false);
+        let sample: Vec<Value> = FILENAME_SAMPLE.iter().map(|f| json!(f)).collect();
+        assert_eq!(classify_field(&s, &refs(&sample)), FieldRole::Content);
+    }
+
+    #[test]
+    fn opaque_random_tokens_with_digits_are_still_identity() {
+        // Regression guard: genuinely opaque tokens must still classify as
+        // identity. Python random.seed(123), 12-char ascii_letters+digits
+        // x20 — 90% contain a digit.
+        let s = stats(FieldType::String, 1.0, false);
+        let sample: Vec<Value> = [
+            "drfXArg153cy",
+            "IJvv2dkivJvS",
+            "pka5BXf4Myea",
+            "uUCg5cfQjiY6",
+            "bs6BKEqE1cXt",
+            "vHZEn0MOHKZ9",
+            "uaz5XPGBRIOY",
+            "QM41FHQAxGc2",
+            "WPlU0f6FQqkv",
+            "vJz4eUDyKXvb",
+            "mLf1Oxa5wozI",
+            "GU06dOsF9WOU",
+            "oIEljICyWDca",
+            "iDmbqZwRr9BO",
+            "AagNeGwTffB5",
+            "aYIyeISOzbuq",
+            "9EcWJvAwbOOk",
+            "49AeT3RjxQpV",
+            "f04OdWHyItj6",
+            "PX6sX1yxiIvH",
+        ]
+        .iter()
+        .map(|t| json!(t))
+        .collect();
+        assert_eq!(
+            classify_field(&s, &refs(&sample)),
+            FieldRole::VaryingIdentity
+        );
+    }
+
+    #[test]
+    fn looks_non_linguistic_boundary_cases() {
+        assert!(looks_non_linguistic("abc123"), "contains a digit");
+        assert!(
+            looks_non_linguistic("bcdfg"),
+            "no vowels at all -> ratio 0.0"
+        );
+        assert!(!looks_non_linguistic("urgent"), "ordinary English word");
+        assert!(!looks_non_linguistic("main.rs"), "ordinary filename");
+        assert!(
+            looks_non_linguistic("!!!"),
+            "no alphabetic characters at all"
+        );
+        // 1/10 = 0.10 is not < 0.10; 1/11 ~= 0.0909 is.
+        assert!(!looks_non_linguistic("bcdfghjkla"), "ratio at threshold");
+        assert!(looks_non_linguistic("bcdfghjklma"), "ratio below threshold");
+    }
+
     #[test]
     fn sequential_numeric_is_identity() {
         let s = stats(FieldType::Numeric, 1.0, false);
@@ -345,6 +471,27 @@ mod tests {
             "unique english subject is content, not identity"
         );
         assert!(!exclude.contains("author"), "low-cardinality is content");
+    }
+
+    #[test]
+    fn compute_exclude_set_keeps_near_unique_filename_column() {
+        // Audit-log shape: each row names a different file, "status" is
+        // constant. Regression: "file" used to be wrongly excluded, so all
+        // 20 rows collapsed into one representative, hiding which file
+        // each row named.
+        let items: Vec<Value> = FILENAME_SAMPLE
+            .iter()
+            .map(|f| json!({"file": f, "status": "OK"}))
+            .collect();
+        let mut fs: BTreeMap<String, FieldStats> = BTreeMap::new();
+        fs.insert("file".into(), stats(FieldType::String, 1.0, false));
+        fs.insert("status".into(), stats(FieldType::String, 0.05, true));
+
+        let exclude = compute_exclude_set(&fs, &items);
+        assert!(
+            !exclude.contains("file"),
+            "distinct filenames are content, not identity noise"
+        );
     }
 
     #[test]

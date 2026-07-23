@@ -40,18 +40,50 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-21 | test rigor, release CI hardening, wave2 review sweep closure | .github/workflows/ci.yml, .github/workflows/release.yml, docs/audits/IMPROVEMENT-LEDGER.md, tests/test_bm25_dead_branch_parity.py, tests/test_bm25_scorer.py, tests/test_pretool_pipe.py, tests/test_release_manifest_tag_guard.py, tests/test_retrieve_overhead_drift_pin.py, tests/test_router_dispatch_no_savings_fallback.py | ten adversarial-review follow-ups closed in one pass, every premise re-verified against current code first: ci.yml's changes filter now covers both release-please manifest files so the tag guard test actually runs on manifest-only PRs; the manifest guard itself now rejects a silently added second package with a red-proofed assert; release.yml's PPA retry no longer sleeps after its last failed attempt; test_pretool_pipe.py's docstring now matches pretool_pipe.py's already-fixed premise; the PR #142 ledger row's mutation-sensitivity claim corrected, the forced-adoption mutation reddens two tests not one; test_router_dispatch_no_savings_fallback.py's caplog assert softened to a stable token plus logger and DEBUG level; test_bm25_dead_branch_parity.py gained a committed 468-pair golden snapshot pinning exact score bits, red-proofed against a temporary constant-IDF mutation that the pre-existing range check alone missed; test_bm25_scorer.py's UUID test now pins the uppercase-folds-to-lowercase path with an uppercase document literal; test_retrieve_overhead_drift_pin.py's docstring tightened to the AST scan's actual direct-absolute-import-only scope; and a new open candidate flags the faA2 tests' `uv run` pin against furl-ctx[mcp]==1.3.0, confirmed today against PyPI's JSON API as not yet published. One named item, a router-module undercount in the open-candidates text, was found already fixed by #142 itself and left untouched. pytest went from 2621 passed 16 skipped to 2622 passed 16 skipped; ruff check, ruff format --check, and mypy furl_ctx all clean | #146 |
 | 2026-07-21 | release CI unblock, tag-drift guard release-PR escape hatch, cyclonedx SBOM repair | tests/test_release_manifest_tag_guard.py, .github/workflows/{ci,publish}.yml, CONTRIBUTING.md | release-please release PRs failed the manifest tag-drift guard forever, since the manifest bumps ahead of its tag until merge, so a FURL_RELEASE_PR_CONTEXT escape hatch armed by ci.yml only for release-please-- head branches via a case-insensitive startsWith now skips just the tag assertion there while the guard stays armed on every other branch and on main; a committed test forces an untagged manifest and asserts the real git tag path still bites; separately the manual PyPI fallback's cyclonedx SBOM step was repaired from the dropped --outfile flag to --output-file with cyclonedx-bom pinned to the 7 major range, verified empirically against 7.3.0; CONTRIBUTING gained the pretool_pipe.py pin in its hand-sync list plus the escape-hatch note | #147 |
 | 2026-07-21 | release 1.3.2, embedded engine pin hand-sync | plugins/furl/hooks/{hooks.json,pretool_pipe.py,session_start_banner.py}, plugins/furl/.mcp.json, plugins/furl/skills/furl/SKILL.md, plugins/furl/README.md, tests/test_hook_audit_fixes.py | release-please opened the 1.3.2 release PR bumping pyproject.toml and .release-please-manifest.json, but it has no updater that can rewrite a version embedded inside a shell-command string or a prose example, so the embedded furl-ctx engine pins were hand-synced from 1.3.0 to 1.3.2 on the same branch: both command pins in hooks.json, the .mcp.json pin, the _FURL_CTX_PIN constant in pretool_pipe.py, the _ENGINE_VERSION constant in session_start_banner.py, the worked-example prose in SKILL.md and README.md, and the hardcoded engine half of the status-line assertion in test_hook_audit_fixes.py; test_plugin_version_pins.py goes green so the release can merge | #148 |
+| 2026-07-22 | correctness, compression quality, field_role.rs entropy over-exclusion | crates/furl-core/src/transforms/smart_crusher/field_role.rs | `string_is_identity`'s shape-independent entropy fallback (`avg_entropy > 0.7`, no other evidence) misclassified almost any short single-word token as identity noise, since `calculate_string_entropy` normalizes by the token's OWN alphabet size, not a language model — a 96-token corpus of real filenames/identifiers from this repo scored 0.94-1.00 average normalized entropy, all but 1 above the threshold; a build-audit-log-shaped array with a near-unique `file` column and a constant `status` column collapsed all rows into one `_dup_count` representative, hiding which file each row actually touched, with only CCR (a full round-trip) able to recover the real value. Root cause proven with a Python entropy-formula reimplementation before touching Rust. Fix: `looks_non_linguistic` requires 80% of the sampled tokens to also contain a digit or have vowel-ratio < 0.10 before the entropy signal is trusted, corroboration thresholds chosen by an empirical sweep (0.10/0.12/0.15/0.18/0.20) against the repo corpus vs synthetic random hex/base62 tokens: 0.10 cut natural-token false positives from ~100% to 1/96 while still catching 285/300 random tokens (a genuine but disclosed recall cost, not silent). The narrowing is strictly one-directional — every field still classified `VaryingIdentity` after the fix would also have been before it — so the fix cannot newly collapse a distinct-content row; it can only stop over-collapsing. New `IDENTITY_NONLINGUISTIC_FRACTION` constant kept separate from the pre-existing `IDENTITY_SHAPE_FRACTION` (both 0.8 today) so tuning one never silently retunes the other, per an independent adversarial review pass. 4 new Rust tests (filename corpus stays Content, digit-bearing random tokens stay VaryingIdentity as a regression guard, `looks_non_linguistic` unit boundaries including the exact 0.10 threshold, and a `compute_exclude_set`-level integration test), all red-proofed by temporarily reverting the corroboration check and confirming exactly the 2 targeted tests fail. Known, disclosed, pre-existing (not worsened) scope limit: the vowel check is ASCII-only, so a single CJK/Cyrillic/diacritic-only token still misclassifies exactly as it did before this fix. Non-Latin-script coverage is left as an open candidate below. Full gate green: `cargo test --workspace` 836+17+5+3+5 passed 0 failed, `cargo clippy -D warnings` and `cargo fmt --check` clean, pytest 2582 passed/19 skipped (skips are pre-existing `[code]`-extra and shallow-clone-tags gaps, unrelated), `verify.run` unchanged at `degradations=6 hash_failures=0 silent_loss=0 cache_prefix_violations=0`, `compare_baseline` 0 regressions/0 improvements (the fix's benefit isn't exercised by the existing benchmark corpus, which is why a dedicated Rust-level repro was needed) | #150 |
 
 ## Open candidates, fair game for future sessions
 
 - Audit `classify_field` / `compute_exclude_set` in
   `crates/furl-core/src/transforms/smart_crusher/field_role.rs` for
-  over-exclusion: some high-cardinality or hex CONTENT columns are ruled
-  `VaryingIdentity` and dropped from the stable-projection hash, the
-  pre-existing cause of the audit's `_dup_count:390` on a unique HTTP row.
-  The T5 display fix in PR #136 now paints such columns `<varies>`, which can
-  make an inflated count read a little more plausible, though the data stays
-  CCR-recoverable. The audit tiered this non-critical; worth a dedicated look
-  at the classifier thresholds and shape tests in a future session.
+  remaining over-exclusion in the SHAPE-based paths (`is_hex_run`,
+  `is_uuid_format`, `is_iso_date`/`is_iso_datetime`): a genuinely
+  informative 8+ hex-digit CONTENT column (e.g. a CRC32/checksum column
+  that is itself the point of the row, not noise) still shape-matches and
+  gets excluded, the pre-existing cause of the audit's `_dup_count:390` on
+  a unique HTTP row. PR #150 (2026-07-22) fixed the SEPARATE
+  shape-independent entropy-only fallback (natural short words/filenames
+  wrongly caught by raw entropy with no shape match at all) but
+  deliberately left the shape-matched paths untouched — shape matches are
+  higher-confidence signal than raw entropy, and disambiguating "hash as
+  noise" from "hash as the value under inspection" needs semantic context
+  (e.g. a paired expected/actual column) this module doesn't have. The T5
+  display fix in PR #136 now paints such columns `<varies>`, which can make
+  an inflated count read a little more plausible, though the data stays
+  CCR-recoverable. The audit tiered this non-critical; worth a dedicated
+  look at the shape-path thresholds in a future session.
+- `field_role.rs`'s `looks_non_linguistic` (added in PR #150) only
+  recognizes ASCII vowels/digits, so a single-token CJK/Cyrillic/etc. field,
+  or a Latin word whose only vowels are diacritic (French `déjà`), still
+  reads as non-linguistic and can still be wrongly excluded via the entropy
+  fallback exactly as it could before #150 — not a regression, but a
+  disclosed gap in the fix's proven scope. Extending vowel/script detection
+  to non-ASCII natural language needs its own corpus and sweep (this
+  session's sweep corpus was ASCII/English-only) rather than guessing at
+  Unicode vowel sets.
+- Dependency health follow-up from this session's exploration (not chosen,
+  see below): `cargo tree -d` shows `hashbrown` at 2 resolved versions
+  (0.14.5 via `dashmap` 6.2.1 production dep, 0.17.0 via `indexmap`/
+  `serde_json` production+dev) and `getrandom` at 2 (0.3.4 via the
+  `proptest`/`rand` dev-only chain, 0.4.2 via `tempfile` dev-only).
+  `dashmap`'s latest is `7.0.0-rc2` (pre-release) and its current 6.2.1 is
+  the newest stable; bumping to the rc to converge hashbrown is a bigger,
+  riskier call than a same-day drive-by. `Cargo.lock` also carries a
+  `wasmparser` 0.244.0 entry that `cargo tree -i wasmparser` shows as
+  unreachable from furl-core's resolved graph on this platform/target —
+  worth confirming whether that's an expected multi-target lockfile
+  artifact or a genuinely prunable stale entry, needs `cargo update`
+  reasoning a same-day session couldn't responsibly rush.
 - Capture the committed benchmark baseline on Linux CI instead of macOS so the
   perf gate compares same-OS numbers. Review finding F3 on PR 120: recall has
   a knife-edge regime at 0.2222 where a single cross-OS trial flip would false
@@ -166,6 +198,22 @@ assertions throughout. No further action needed; keeping the stale entry
 would only cost a future session the time to rediscover this.
 
 ## Notes for the maintainer
+
+- 2026-07-22 session start: PR #145 (2026-07-21, "lazy-dev deletion sweep")
+  touched a large fraction of the repo's Python and Rust source files in one
+  commit (137 files). A literal per-file 14-day exclusion check on this
+  session's Phase 0 found EVERY current `furl_ctx/**/*.py` and
+  `crates/**/*.rs` file had been touched within 14 days, entirely because of
+  that one sweep plus the following week's dense PR cadence — the naive
+  "any file touched" rule would have blocked all fresh work. Read the rule's
+  own escape hatch literally: "or go strictly deeper than what was done
+  there, never sideways repetition" — a file merely swept for unrelated
+  dead-code deletion or doc-pin sync is fair game for a genuinely different,
+  deeper problem in the same file. This session's pick (field_role.rs) was
+  touched by #145 only to delete 7 already-dead lines, unrelated to the
+  entropy-classification bug fixed here. Future sessions building the
+  exclusion set should check WHAT changed at each touched path, not just
+  THAT it changed, once a repo-wide mechanical sweep is in recent history.
 
 - `github-advanced-security` fails on essentially every PR with the same
   platform-level cause, unrelated to any diff: GitHub's own Copilot-based
