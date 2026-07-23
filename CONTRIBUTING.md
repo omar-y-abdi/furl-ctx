@@ -95,7 +95,8 @@ until they agree:
   shell command**, so hand-sync the `furl-ctx[mcp]==X.Y.Z` pins in
   `plugins/furl/hooks/hooks.json`, `plugins/furl/.mcp.json`, and `_FURL_CTX_PIN` in
   `plugins/furl/hooks/pretool_pipe.py`, the same pin in the prose
-  examples of `plugins/furl/skills/furl/SKILL.md` and `plugins/furl/README.md`, and
+  examples of `plugins/furl/skills/furl/SKILL.md`, `plugins/furl/README.md`, and the
+  repo-root `SECURITY.md` supply-chain section, and
   `_ENGINE_VERSION` in `plugins/furl/hooks/session_start_banner.py` (the engine half of
   the SessionStart status line — moved out of `hooks.json` in the T7 version-gating fix),
   to the new version on that same PR before merging.

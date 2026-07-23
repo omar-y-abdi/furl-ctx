@@ -13,12 +13,12 @@ LIBRARY version (``pyproject.toml`` ``project.version``): the ``furl-ctx[mcp]==X
 pins in the PostToolUse hook command (``hooks/hooks.json``) and the MCP server command
 (``.mcp.json``) MUST equal it, so ``uv run`` fetches a deterministic wheel instead of
 whatever stale resolution its cache happens to hold. The same pin also appears as
-worked-example PROSE in ``skills/furl/SKILL.md`` and ``plugins/furl/README.md`` — not
-inside machine-read config, so nothing else catches it going stale — and MUST equal it
-too (three stale examples slipped past release once already; see CONTRIBUTING.md
-"Releasing / version bumps"). The SessionStart status line names the engine alongside
-the plugin (``furl X.Y.Z · engine furl-ctx A.B.C``), so its engine half MUST equal it
-as well.
+worked-example PROSE in ``skills/furl/SKILL.md``, ``plugins/furl/README.md``, and the
+repo-root ``SECURITY.md`` supply-chain section — not inside machine-read config, so
+nothing else catches it going stale — and MUST equal it too (three stale examples
+slipped past release once already; see CONTRIBUTING.md "Releasing / version bumps").
+The SessionStart status line names the engine alongside the plugin
+(``furl X.Y.Z · engine furl-ctx A.B.C``), so its engine half MUST equal it as well.
 
 PLUGIN version (``plugin.json`` ``version``): the marketplace metadata + entry
 versions, the skill frontmatter, and the plugin half of the baked SessionStart
@@ -50,6 +50,7 @@ _MCP_JSON = _PLUGIN_DIR / ".mcp.json"
 _PLUGIN_JSON = _PLUGIN_DIR / ".claude-plugin" / "plugin.json"
 _SKILL_MD = _PLUGIN_DIR / "skills" / "furl" / "SKILL.md"
 _PLUGIN_README = _PLUGIN_DIR / "README.md"
+_SECURITY_MD = _ROOT / "SECURITY.md"
 _MARKETPLACE_JSON = _ROOT / ".claude-plugin" / "marketplace.json"
 
 _SEMVER = r"\d+\.\d+\.\d+"
@@ -165,6 +166,19 @@ def test_plugin_readme_prose_pins_match_pyproject_version() -> None:
     assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_PLUGIN_README}"
     assert all(pin == _pyproject_version() for pin in pins), (
         f"{_PLUGIN_README} prose pin(s) {pins} != pyproject version {_pyproject_version()!r}"
+    )
+
+
+def test_security_md_prose_pins_match_pyproject_version() -> None:
+    # SECURITY.md's supply-chain section documents the plugin's `uv run` pin twice
+    # (once as a plain example, once in the hardening-path paragraph); like the
+    # SKILL.md/README prose pins above, release-please cannot rewrite either and
+    # nothing else in the guard suite reads this file, so a stale example here was
+    # invisible to CI until this test.
+    pins = _pins_in(_read(_SECURITY_MD))
+    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_SECURITY_MD}"
+    assert all(pin == _pyproject_version() for pin in pins), (
+        f"{_SECURITY_MD} prose pin(s) {pins} != pyproject version {_pyproject_version()!r}"
     )
 
 
