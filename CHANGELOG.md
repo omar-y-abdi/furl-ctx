@@ -5,6 +5,15 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3](https://github.com/omar-y-abdi/furl-ctx/compare/v1.3.2...v1.3.3) (2026-07-24)
+
+
+### Bug Fixes
+
+* decline nested-uniform flatten when dotted names are ambiguous (COR-14) ([#157](https://github.com/omar-y-abdi/furl-ctx/issues/157)) ([642c8c7](https://github.com/omar-y-abdi/furl-ctx/commit/642c8c74b73869a139381ab00a00731af93cae0c))
+* separate fused boundaries in HTML main-content extraction ([#158](https://github.com/omar-y-abdi/furl-ctx/issues/158)) ([eca3d75](https://github.com/omar-y-abdi/furl-ctx/commit/eca3d75e95271947b6de2698217d36241b799efe))
+* stop entropy fallback misclassifying short words as identity noise ([#150](https://github.com/omar-y-abdi/furl-ctx/issues/150)) ([7a6cda4](https://github.com/omar-y-abdi/furl-ctx/commit/7a6cda4d03e0fc284da407e913cae2612e700121))
+
 ## [1.3.2](https://github.com/omar-y-abdi/furl-ctx/compare/v1.3.0...v1.3.2) (2026-07-21)
 
 
