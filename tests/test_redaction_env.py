@@ -447,10 +447,20 @@ def test_builtins_on_by_default_redacts_each_credential_shape() -> None:
 
 
 def test_builtins_redacts_private_key_block() -> None:
+    # Assert the KEY MATERIAL is gone, not just the armor. Asserting only the
+    # armor is what let a header-only pattern pass this test for months while
+    # every base64 byte of the key survived into the store. Full shape coverage
+    # (labels, PGP, JSON-escaped, truncated, over-redaction boundaries) lives in
+    # tests/test_redaction_private_key_blocks.py.
     redactor = build_default_redactor({})
     assert redactor is not None
-    header = "-----BEGIN " + "RSA PRIVATE KEY" + "-----"
-    assert header not in redactor(f"key:\n{header}\nMII...\n")
+    armor = "PRIVATE" + " KEY-----"
+    body = "MIIEowIBAAKCAQEAvR7fakeKEYmaterial0123456789abcdefghijk"
+    block = "-----BEGIN RSA " + armor + f"\n{body}\n" + "-----END RSA " + armor
+    out = redactor(f"key:\n{block}\n")
+    assert "-----BEGIN RSA " + armor not in out
+    assert body not in out
+    assert out == "key:\n[REDACTED:private-key]\n"
 
 
 @pytest.mark.parametrize("off", ["0", "false", "no", "off", "FALSE", " Off "])
