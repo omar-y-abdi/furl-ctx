@@ -116,6 +116,10 @@ columnar table is not the universal case:
 
 - A **structured JSON array of objects** compresses to a compact columnar table
   (`[N]{col:type,...}`, decoded by the MCP legend) with the full rows behind the marker.
+  If rows are dropped from the inline view the header becomes `[kept/total]` so the true
+  row count is never hidden, plus a trailing `__stats:col=min/max/sum/count` summary over
+  all original rows; nested-object columns (e.g. a trace's `args`) are compacted in place,
+  not escape-inflated.
 - A **JSON object with one dominant inner array** (e.g. a Chrome trace) leaves an
   `_ccr_summary` preview: schema, per-field value histograms, and numeric ranges.
 - **Line-oriented text** (logs, stack traces) is *not* tabled — it leaves a head+tail

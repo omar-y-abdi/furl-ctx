@@ -56,6 +56,13 @@ use crate::ccr::marker_for_opaque;
 const DICT_PREFIX: &str = "__dict:";
 const AFFIX_PREFIX: &str = "__affix:";
 const HEAD_PREFIX: &str = "__head:";
+// Row-drop numeric summary line (F4). Emitted by the router (route.rs) as a
+// trailing `__stats:col=min/max/sum/count,...` metadata line on the survivor
+// render. Reserved here like the preamble prefixes so a plain data cell that
+// would start a line with it is CSV-quoted and never mistaken for the summary
+// by the reference decoder (which skips `__stats:` lines when reconstructing
+// rows). Must stay byte-identical to `csv_schema_decoder._STATS_PREFIX`.
+const STATS_PREFIX: &str = "__stats:";
 
 // Exact-match reserved cell sentinels (NOT prefixes, unlike the markers
 // above — matched like the ditto `=`). `NULL_SENTINEL` renders a JSON
@@ -68,6 +75,31 @@ const HEAD_PREFIX: &str = "__head:";
 // match these byte-for-byte + apply the same escape rule.
 const NULL_SENTINEL: &str = "__null__";
 const MISSING_SENTINEL: &str = "__missing__";
+
+// ─────────────────── JSON-container cell envelope (F5) ───────────────────
+//
+// A `json`-tagged column whose cell is an Object/Array previously shipped
+// as CSV-quoted compact JSON — every inner `"` doubled to `""`, so the
+// column ended up LARGER than its source (report finding F5, args-heavy
+// Chrome traces). Instead, such a cell ships as a length-prefixed
+// envelope: `\x1f<codepoint_len><raw_compact_json>`. The payload is
+// verbatim `serde_json` output — NO re-escaping — so the cell is the raw
+// JSON plus a small fixed frame, never inflated by quoting.
+//
+// `\x1f` (ASCII Unit Separator) never appears unescaped in `serde_json`
+// output (control chars are `\uXXXX`-escaped), and `needs_csv_quote`
+// quotes any plain cell that contains it, so a bare leading `\x1f`
+// unambiguously opens an envelope. The length is a CODE-POINT count
+// (`chars().count()`), matching Python `len(str)` so non-ASCII payloads
+// decode at the exact boundary.
+//
+// CONTRACT: the Python reference decoder `csv_schema_decoder.py`
+// (`_ENVELOPE`) reads the marker + length and consumes exactly that many
+// code points verbatim. Its `split_unquoted` / `_split_logical_lines`
+// skip an envelope by length so its inner commas/quotes/newlines never
+// perturb the CSV row grammar. Old CSV-quoted-JSON container cells still
+// decode (backward compatible), so previously stored tables are safe.
+const JSON_ENVELOPE_MARK: char = '\u{1f}';
 
 /// Format a `Compaction` tree into bytes.
 pub trait Formatter: Send + Sync {
@@ -310,8 +342,18 @@ fn write_table(
     // constant declaration: an int constant renders as a bare integer,
     // never two integers joined by `+`. Lossless: the decoder
     // regenerates value_i = base + step*i from the row index.
+    // Row-count declaration. `[kept]{...}` when every original row is shown
+    // (the lossless tier — `kept == original_count`, byte-identical to the
+    // pre-change render). `[kept/total]{...}` when rows were dropped under
+    // budget (the survivor render), so a consumer recovers the ORIGINAL total
+    // from the inline text itself instead of only from the offload marker
+    // (report finding F4). The reference decoder reads the optional `/total`.
     out.push('[');
     out.push_str(&rows.len().to_string());
+    if rows.len() < original_count {
+        out.push('/');
+        out.push_str(&original_count.to_string());
+    }
     out.push_str("]{");
     let col_decl: Vec<String> = schema
         .fields
@@ -568,6 +610,7 @@ pub(super) fn csv_render_str(s: &str) -> String {
         || s.starts_with(DICT_PREFIX)
         || s.starts_with(AFFIX_PREFIX)
         || s.starts_with(HEAD_PREFIX)
+        || s.starts_with(STATS_PREFIX)
         || needs_csv_quote(s)
     {
         csv_quote(s)
@@ -614,11 +657,34 @@ pub(super) fn column_name_breaks_grammar(name: &str) -> bool {
 /// so they never reach this renderer on the lossless tier.
 fn format_row_cell(c: &CellValue, f: &FieldSpec) -> String {
     if f.type_tag == "json" {
-        if let CellValue::Scalar(Value::String(s)) = c {
-            return csv_quote(s);
+        match c {
+            CellValue::Scalar(Value::String(s)) => return csv_quote(s),
+            // F5: an Object/Array cell ships as a length-prefixed envelope
+            // (raw compact JSON, no quote-doubling) instead of CSV-quoted
+            // JSON, so a nested-object column is never inflated by escaping.
+            // The reference decoder reads it back via `json.loads`.
+            CellValue::Scalar(v @ (Value::Object(_) | Value::Array(_))) => {
+                return json_container_envelope(v);
+            }
+            _ => {}
         }
     }
     format_cell(c)
+}
+
+/// Render a JSON container (`Object`/`Array`) as a length-prefixed
+/// envelope `\x1f<codepoint_len><raw_compact_json>` (see
+/// [`JSON_ENVELOPE_MARK`]). The payload is verbatim `serde_json` output —
+/// no quote-doubling — so the cell is the raw JSON plus a small fixed
+/// frame. Length is a CODE-POINT count so the Python decoder consumes the
+/// exact payload on non-ASCII input.
+fn json_container_envelope(v: &Value) -> String {
+    let payload = serde_json::to_string(v).unwrap_or_default();
+    let mut out = String::with_capacity(payload.len() + 8);
+    out.push(JSON_ENVELOPE_MARK);
+    out.push_str(&payload.chars().count().to_string());
+    out.push_str(&payload);
+    out
 }
 
 fn format_cell(c: &CellValue) -> String {
@@ -668,7 +734,14 @@ fn json_scalar_to_csv(v: &Value) -> String {
 }
 
 fn needs_csv_quote(s: &str) -> bool {
-    s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r')
+    s.contains(',')
+        || s.contains('"')
+        || s.contains('\n')
+        || s.contains('\r')
+        // F5: a plain string containing the JSON-envelope marker must be
+        // quoted so a bare `\x1f` unambiguously opens an envelope (never a
+        // literal cell byte) for the decoder's length-skip.
+        || s.contains(JSON_ENVELOPE_MARK)
 }
 
 fn csv_quote(s: &str) -> String {
@@ -788,8 +861,14 @@ fn write_kv_table(
     // Unlike CSV (pre-existing exposure, kept byte-identical), KV quotes
     // pathological field names here so the declaration parses the same
     // way as the row lines below.
+    // Mirror the CSV declaration: `[kept]{...}` normally, `[kept/total]{...}`
+    // when rows were dropped, so the row count carries the original total (F4).
     out.push('[');
     out.push_str(&rows.len().to_string());
+    if rows.len() < original_count {
+        out.push('/');
+        out.push_str(&original_count.to_string());
+    }
     out.push_str("]{");
     let col_decl: Vec<String> = schema
         .fields
@@ -1062,6 +1141,85 @@ mod tests {
         assert!(with_summary.contains("__dropped:3"));
         let without = CsvSchemaFormatter::new().format(&c);
         assert!(!without.contains("__dropped"));
+    }
+
+    // ── F4 header total + F5 nested-object envelope ──
+
+    fn int_col_table(rows: usize, original_count: usize) -> Compaction {
+        Compaction::Table {
+            schema: Schema {
+                fields: vec![super::super::ir::FieldSpec {
+                    name: "x".into(),
+                    type_tag: "int".into(),
+                    nullable: false,
+                    const_value: None,
+                    encoding: None,
+                }],
+            },
+            rows: (0..rows)
+                .map(|i| Row::new(vec![CellValue::Scalar(json!(i))]))
+                .collect(),
+            original_count,
+        }
+    }
+
+    #[test]
+    fn csv_header_carries_total_when_rows_dropped() {
+        // F4: a survivor render (rows.len() < original_count) declares
+        // `[kept/total]`; an all-rows table stays byte-identical `[N]`.
+        let dropped = CsvSchemaFormatter::new().format(&int_col_table(2, 5));
+        assert!(dropped.starts_with("[2/5]{"), "got: {dropped}");
+        let full = CsvSchemaFormatter::new().format(&int_col_table(5, 5));
+        assert!(full.starts_with("[5]{"), "got: {full}");
+    }
+
+    #[test]
+    fn csv_json_container_cells_ship_as_length_prefixed_envelopes() {
+        // F5: Object/Array cells of a json column render `\x1f<len><raw_json>`
+        // — raw JSON, no CSV quote-doubling — not the old CSV-quoted form.
+        let c = Compaction::Table {
+            schema: Schema {
+                fields: vec![super::super::ir::FieldSpec {
+                    name: "cfg".into(),
+                    type_tag: "json".into(),
+                    nullable: false,
+                    const_value: None,
+                    encoding: None,
+                }],
+            },
+            rows: vec![
+                Row::new(vec![CellValue::Scalar(json!({"k": "v", "n": 2}))]),
+                Row::new(vec![CellValue::Scalar(json!([1, 2, 3]))]),
+            ],
+            original_count: 2,
+        };
+        let out = CsvSchemaFormatter::new().format(&c);
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        assert_eq!(lines[0], "[2]{cfg:json}");
+        // Object: `\x1f` + code-point length + verbatim serde JSON.
+        let payload_obj = "{\"k\":\"v\",\"n\":2}";
+        assert_eq!(
+            lines[1],
+            format!("\u{1f}{}{payload_obj}", payload_obj.chars().count())
+        );
+        let payload_arr = "[1,2,3]";
+        assert_eq!(
+            lines[2],
+            format!("\u{1f}{}{payload_arr}", payload_arr.chars().count())
+        );
+        assert!(!out.contains("\"\""), "no CSV quote-doubling: {out}");
+    }
+
+    #[test]
+    fn plain_string_containing_envelope_mark_is_csv_quoted() {
+        // A literal `\x1f` in a non-json string cell must be CSV-quoted so the
+        // decoder never misreads it as an envelope opener.
+        assert!(
+            csv_render_str("a\u{1f}b").starts_with('"'),
+            "a \\x1f-bearing string must be quoted: {}",
+            csv_render_str("a\u{1f}b")
+        );
+        assert_eq!(csv_render_str("plain"), "plain");
     }
 
     // ── Constant-column fold (CSV) ──

@@ -8,7 +8,7 @@
 //! writes, P0-4), sizes them against each other, and ships the winner —
 //! committing the lossy candidate's deferred writes iff it ships.
 
-use serde_json::Value;
+use serde_json::{Number, Value};
 
 use super::compaction::{ColumnEncoding, Compaction};
 use super::config::RoutingPolicy;
@@ -805,7 +805,13 @@ impl SmartCrusher {
         //   vs the exact bytes the JSON form would ship.
         if !dropped_summary.is_empty() {
             if let Some(stage) = &self.compaction {
-                let (mut c, mut rendered) = stage.run(&result);
+                let (mut c, _) = stage.run(&result);
+                // F4: the survivor compaction only saw the KEPT rows, so its
+                // `original_count` is the survivor count. Restore the TRUE
+                // original total (`items.len()`) so the inline `[kept/total]`
+                // header lets a consumer recover the original row count from
+                // the text itself, not only from the offload marker.
+                set_table_original_count(&mut c, items.len());
                 // review F1b: the survivor render's per-column constant folds
                 // and dictionary encodings are computed over the SURVIVOR subset
                 // only. Left alone they would assert, over the whole array, a
@@ -815,12 +821,12 @@ impl SmartCrusher {
                 // or a `__dict:` that enumerates only the categories present in
                 // the survivors while others live solely in the offloaded rows.
                 // Demote any such encoding that does NOT hold over ALL rows
-                // (checked against the full `items`), then re-render. Lossless:
-                // the IR rows keep every survivor cell, so a demoted column just
-                // renders per-row. Byte-identical when nothing is demoted.
-                if demote_subset_only_encodings(&mut c, items) {
-                    rendered = stage.formatter.format(&c);
-                }
+                // (checked against the full `items`). Lossless: the IR rows keep
+                // every survivor cell, so a demoted column just renders per-row.
+                let _ = demote_subset_only_encodings(&mut c, items);
+                // The header now carries the true total, so render from the
+                // adjusted compaction.
+                let rendered = stage.formatter.format(&c);
                 if c.is_decoder_verifiable() && !c.contains_opaque_ref() {
                     let sentinel = ccr_sentinel_map(&dropped_summary, row_index_marker.as_deref());
                     let sentinel_line = crate::util::pyjson::python_safe_json_dumps(
@@ -833,8 +839,20 @@ impl SmartCrusher {
                     let compact_len = rendered.len() + 1 + sentinel_line.len();
                     if clears_lossy_survivor_floor(json_form.len().saturating_sub(compact_len)) {
                         let kind = compaction_kind_str(&c);
-                        let rendered_with_sentinel =
-                            format!("{}\n{sentinel_line}", rendered.trim_end_matches('\n'));
+                        // F4: a whole-array numeric summary (min/max/sum/count
+                        // over ALL original rows, not just survivors) so counts
+                        // and aggregates survive the row-drop. Additive metadata
+                        // appended AFTER the savings gate (`compact_len` above
+                        // excludes it), so it never changes the ship decision;
+                        // the reference decoder skips `__stats:` lines when
+                        // reconstructing rows.
+                        let table_body = rendered.trim_end_matches('\n');
+                        let rendered_with_sentinel = match numeric_stats_line(&c, items) {
+                            Some(stats_line) => {
+                                format!("{table_body}\n{stats_line}\n{sentinel_line}")
+                            }
+                            None => format!("{table_body}\n{sentinel_line}"),
+                        };
                         // Survivor renders are gated opaque-free
                         // (`!contains_opaque_ref` above) so this collects
                         // nothing today — kept for correctness under gate
@@ -1183,6 +1201,124 @@ fn compaction_kind_str(c: &Compaction) -> &'static str {
         Compaction::Buckets { .. } => "buckets",
         Compaction::OpaqueRef { .. } => "ccr",
         Compaction::Untouched => "untouched",
+    }
+}
+
+/// F4: overwrite a [`Compaction::Table`]'s `original_count` with the TRUE
+/// original total. The survivor render compacts only the KEPT rows, so the
+/// IR count is the survivor count; the row-drop path knows the real total
+/// (`items.len()`) and restores it so the inline `[kept/total]` header
+/// carries it. A non-table compaction is left untouched.
+fn set_table_original_count(c: &mut Compaction, total: usize) {
+    if let Compaction::Table { original_count, .. } = c {
+        *original_count = total;
+    }
+}
+
+/// F4: build the whole-array numeric summary line
+/// `__stats:col=min/max/sum/count,...` for every numeric (int/float) column
+/// of a flat [`Compaction::Table`], computed over ALL `items` (kept AND
+/// dropped) so counts and aggregates survive the row-drop. Returns `None`
+/// for a non-table compaction or when no column is numeric.
+///
+/// CONTRACT: the wire prefix + `col=min/max/sum/count` shape is read by the
+/// Python reference decoder (`csv_schema_decoder._STATS_PREFIX` /
+/// `decode_stats_line`); the formatter reserves `__stats:` so no data cell
+/// starts a line with it.
+fn numeric_stats_line(c: &Compaction, items: &[Value]) -> Option<String> {
+    let schema = match c {
+        Compaction::Table { schema, .. } => schema,
+        _ => return None,
+    };
+    let mut segments: Vec<String> = Vec::new();
+    for f in &schema.fields {
+        if f.type_tag != "int" && f.type_tag != "float" {
+            continue;
+        }
+        if let Some(stats) = column_numeric_stats(items, &f.name) {
+            segments.push(format!("{}={stats}", f.name));
+        }
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(format!("__stats:{}", segments.join(",")))
+    }
+}
+
+/// Accumulate `min/max/sum/count` over every numeric value at column `name`
+/// across the FULL `items` array. Values are resolved with
+/// [`resolve_flattened`] (literal key, then dotted path) so a flattened
+/// nested column is measured against the real nested value. Integer columns
+/// sum exactly via `i128`; a float anywhere switches the sum to `f64`.
+/// Returns `None` when no numeric value is present. Rendered as
+/// `min/max/sum/count` (each a bare JSON number).
+fn column_numeric_stats(items: &[Value], name: &str) -> Option<String> {
+    let mut count: u64 = 0;
+    let mut min: Option<Number> = None;
+    let mut max: Option<Number> = None;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut int_sum: i128 = 0;
+    let mut float_sum: f64 = 0.0;
+    let mut all_int = true;
+    for item in items {
+        let Some(Value::Number(n)) = resolve_flattened(item, name) else {
+            continue;
+        };
+        let Some(x) = n.as_f64() else { continue };
+        count += 1;
+        if x < min_f {
+            min_f = x;
+            min = Some(n.clone());
+        }
+        if x > max_f {
+            max_f = x;
+            max = Some(n.clone());
+        }
+        match n.as_i64() {
+            Some(i) => int_sum += i128::from(i),
+            None => {
+                all_int = false;
+                float_sum += x;
+            }
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let sum = if all_int {
+        int_sum.to_string()
+    } else {
+        (int_sum as f64 + float_sum).to_string()
+    };
+    let min_s = min.map(|n| n.to_string()).unwrap_or_default();
+    let max_s = max.map(|n| n.to_string()).unwrap_or_default();
+    Some(format!("{min_s}/{max_s}/{sum}/{count}"))
+}
+
+#[cfg(test)]
+mod numeric_stats_tests {
+    use super::*;
+
+    #[test]
+    fn column_numeric_stats_min_max_sum_count_and_dotted() {
+        let items: Vec<Value> = (0..5)
+            .map(|i| serde_json::json!({"n": i, "nested": {"deep": i * 10}, "s": "x"}))
+            .collect();
+        // Int column 0..4 → min/max/sum/count.
+        assert_eq!(
+            column_numeric_stats(&items, "n").as_deref(),
+            Some("0/4/10/5")
+        );
+        // Dotted (flattened) path resolves the real nested value: 0,10,20,30,40.
+        assert_eq!(
+            column_numeric_stats(&items, "nested.deep").as_deref(),
+            Some("0/40/100/5")
+        );
+        // Non-numeric and absent columns contribute no stats.
+        assert_eq!(column_numeric_stats(&items, "s"), None);
+        assert_eq!(column_numeric_stats(&items, "missing"), None);
     }
 }
 
