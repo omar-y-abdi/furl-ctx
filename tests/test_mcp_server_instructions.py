@@ -245,7 +245,7 @@ def test_legend_claim_kept_total_header() -> None:
 
 
 def test_legend_claim_json_container_envelope() -> None:
-    # F5: "json cell 0x1F+len+JSON = raw object/array (no escaping)". A json
+    # F5: "json cell 0x1F+len+JSON or CSV-quoted = that object/array". A json
     # column cell led by 0x1F + a code-point length + raw JSON decodes to that
     # container. `{"a":1}` is 7 code points; `[1,2]` is 5.
     rows = decode_csv_schema_rows('[2]{cfg:json,id:int=1+1}\n\x1f7{"a":1}\n\x1f5[1,2]')

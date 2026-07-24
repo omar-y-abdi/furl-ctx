@@ -153,16 +153,24 @@ _NULL_SENTINEL = "__null__"
 _MISSING_SENTINEL = "__missing__"
 
 # JSON-container cell envelope (F5). A ``json``-tagged column's Object/Array
-# cell ships as ``\x1f<codepoint_len><raw_compact_json>`` instead of CSV-quoted
-# compact JSON, so a nested-object column is never inflated by quote-doubling.
+# cell whose compact JSON contains a ``"`` ships as
+# ``\x1f<codepoint_len><raw_compact_json>`` instead of CSV-quoted compact JSON,
+# so a nested-object column is never inflated by quote-doubling. A quote-free
+# container (e.g. a numeric array) stays CSV-quoted — the ``\x1f``+length frame
+# would only ADD bytes there (R2), and the decoder accepts both spellings.
 # ``\x1f`` (ASCII Unit Separator) never appears unescaped in ``serde_json``
-# output, and the Rust encoder CSV-quotes any plain cell containing it, so a
-# bare leading ``\x1f`` unambiguously opens an envelope. ``split_unquoted`` /
-# ``_split_logical_lines`` skip an envelope by its code-point length so the raw
-# JSON's inner commas / quotes / (absent) newlines never perturb the CSV row
-# grammar. Must stay byte-identical to the Rust ``JSON_ENVELOPE_MARK``
-# (formatter.rs). Old CSV-quoted-JSON container cells still decode (backward
-# compatible), so previously stored tables are unaffected.
+# output. An envelope is recognised ONLY at a cell boundary and only when the
+# length digits are followed by a container-opening ``{`` / ``[`` whose declared
+# span carries no raw newline (see ``_envelope_span``); a ``\x1f`` anywhere else
+# is treated as a literal byte. That guard is what keeps OLD tables decoding
+# byte-for-byte even though the old encoder never CSV-quoted a raw ``\x1f`` in a
+# plain cell (R1): a legacy ``\x1f`` mid-cell no longer over-reads, and a lying
+# or truncated length can no longer swallow the following row. ``split_unquoted``
+# / ``_split_logical_lines`` skip a recognised envelope by its code-point length
+# so the raw JSON's inner commas / quotes never perturb the CSV row grammar.
+# Must stay byte-identical to the Rust ``JSON_ENVELOPE_MARK`` (formatter.rs).
+# Old CSV-quoted-JSON container cells still decode (backward compatible), so
+# previously stored tables are unaffected.
 _ENVELOPE = "\x1f"
 
 # Row-drop numeric summary line (F4): ``__stats:col=min/max/sum/count,...``
@@ -173,21 +181,46 @@ _ENVELOPE = "\x1f"
 _STATS_PREFIX = "__stats:"
 
 
-def _envelope_bounds(s: str, i: int) -> tuple[int, int] | None:
-    """``s[i]`` opens a JSON-container envelope (``\\x1f<len><raw_json>``).
+def _envelope_span(s: str, i: int) -> tuple[int, int] | None:
+    """``s[i]`` opens a WELL-FORMED JSON-container envelope.
 
-    Return ``(payload_start, payload_end)`` — indices bounding the raw JSON
-    payload of ``len`` code points — or ``None`` when the length header is
-    malformed (no digits). Never raises; ``payload_end`` may exceed
-    ``len(s)`` for a truncated cell (Python slicing then clamps).
+    A conformant envelope (Rust ``JSON_ENVELOPE_MARK``) is ``\\x1f`` then one or
+    more ASCII digits (the payload's code-point length) then a compact-JSON
+    payload of exactly that length whose first byte opens a container (``{`` or
+    ``[``) and which — being compact JSON — carries no raw newline. On a match
+    return ``(payload_start, payload_end)``; otherwise return ``None``.
+
+    ``None`` means this ``\\x1f`` is NOT a new-format envelope but a raw byte in a
+    legacy cell (the old encoder never CSV-quoted ``\\x1f``), so the caller falls
+    back to byte-for-byte legacy handling. Every rejection below is a distinct
+    backward-compatibility guard (R1):
+
+    * no digit run                    -> a bare ``\\x1f`` is a literal byte;
+    * declared length overruns ``s``  -> truncated / lying length (would swallow
+      the rest of the row, or the NEXT row past a newline) -> legacy;
+    * first payload byte not ``{``/``[`` -> the new encoder only envelopes
+      Object/Array, so ``\\x1f<digits><other>`` is legacy data;
+    * a raw newline inside the span   -> compact JSON never contains one, so the
+      span is bogus and must not eat a real line break.
+
+    Never raises. The caller is responsible for only invoking this at a cell
+    boundary — mid-cell a ``\\x1f`` is always a literal byte.
     """
     j = i + 1
     k = j
-    while k < len(s) and s[k].isdigit():
+    n = len(s)
+    while k < n and s[k].isdigit():
         k += 1
     if k == j:
-        return None
-    return k, k + int(s[j:k])
+        return None  # no length digits -> not an envelope
+    end = k + int(s[j:k])
+    if end > n:
+        return None  # declared length overruns the input (truncated / lying)
+    if k >= n or s[k] not in "{[":
+        return None  # payload must open a JSON container
+    if "\n" in s[k:end]:
+        return None  # compact JSON never contains a raw newline -> malformed
+    return k, end
 
 
 def _days_from_civil(y: int, m: int, d: int) -> int:
@@ -312,6 +345,11 @@ def _split_logical_lines(text: str) -> list[str]:
     lines: list[str] = []
     buf: list[str] = []
     in_quotes = False
+    # A JSON-container envelope opens ONLY at a cell boundary (start of the
+    # text, or right after an unquoted ``,`` / line break). Mid-cell a ``\x1f``
+    # is a literal legacy byte, so it must not be interpreted as a length frame
+    # (R1) — otherwise an old cell like ``a\x1f9hello`` would over-read.
+    at_cell_start = True
     i = 0
     n = len(text)
     while i < n:
@@ -320,26 +358,35 @@ def _split_logical_lines(text: str) -> list[str]:
             in_quotes = not in_quotes
             buf.append(ch)
             i += 1
-        elif ch == _ENVELOPE and not in_quotes:
+            at_cell_start = False
+        elif ch == _ENVELOPE and not in_quotes and at_cell_start:
             # F5: a JSON-container envelope. Copy its whole `\x1f<len><json>`
             # span verbatim by length so the raw JSON's `"` never toggle
             # `in_quotes` (which would mis-split a LATER quoted cell's embedded
-            # newline) — the payload itself carries no newline (compact JSON).
-            bounds = _envelope_bounds(text, i)
-            if bounds is None:
+            # newline). A lying / truncated length whose span would cross this
+            # newline is rejected by `_envelope_span`, so it falls back to a
+            # literal byte and the real line break below still splits (R1).
+            span = _envelope_span(text, i)
+            if span is None:
                 buf.append(ch)
                 i += 1
             else:
-                end = bounds[1]
-                buf.append(text[i:end])
-                i = end
+                buf.append(text[i : span[1]])
+                i = span[1]
+            at_cell_start = False
         elif ch == "\n" and not in_quotes:
             lines.append("".join(buf))
             buf = []
             i += 1
+            at_cell_start = True
+        elif ch == "," and not in_quotes:
+            buf.append(ch)
+            i += 1
+            at_cell_start = True
         else:
             buf.append(ch)
             i += 1
+            at_cell_start = False
     lines.append("".join(buf))
     return lines
 
@@ -361,15 +408,18 @@ def split_unquoted(s: str) -> list[str]:
             in_quotes = not in_quotes
             buf.append(ch)
             i += 1
-        elif ch == _ENVELOPE and not in_quotes:
-            bounds = _envelope_bounds(s, i)
-            if bounds is None:
+        elif ch == _ENVELOPE and not in_quotes and not buf:
+            # `not buf` == at a cell boundary (start of cell). An envelope only
+            # opens here; a mid-cell `\x1f` (buf already holds bytes) is a
+            # literal legacy byte and falls through to the else branch, so an old
+            # cell such as `a\x1f9hello` keeps splitting on its real comma (R1).
+            span = _envelope_span(s, i)
+            if span is None:
                 buf.append(ch)
                 i += 1
             else:
-                end = bounds[1]
-                buf.append(s[i:end])
-                i = end
+                buf.append(s[i : span[1]])
+                i = span[1]
         elif ch == "," and not in_quotes:
             parts.append("".join(buf))
             buf = []
@@ -413,14 +463,16 @@ def _decode_cell(raw: str, type_tag: str) -> Any:
     # directly. Old CSV-quoted container cells still take the quoted branch
     # below (backward compatible).
     if base_tag == "json" and raw.startswith(_ENVELOPE):
-        bounds = _envelope_bounds(raw, 0)
-        if bounds is not None:
-            start, end = bounds
-            payload = raw[start:end]
+        span = _envelope_span(raw, 0)
+        # Only a cell that IS exactly one conformant envelope decodes as JSON.
+        # A legacy cell that merely starts with a raw `\x1f` fails the guard
+        # (`span is None`, or the span does not cover the whole cell) and is
+        # returned byte-for-byte — never reinterpreted as data (R1).
+        if span is not None and span[1] == len(raw):
             try:
-                return json.loads(payload)
+                return json.loads(raw[span[0] : span[1]])
             except (json.JSONDecodeError, ValueError):
-                return payload  # malformed envelope — never invent data
+                return raw  # non-conformant payload — keep raw bytes
         return raw
     if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
         text = _unquote_csv(raw)

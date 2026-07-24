@@ -1514,3 +1514,44 @@ def test_f5_old_csv_quoted_container_cell_still_decodes() -> None:
     old = '[2]{cfg:json,id:int=1+1}\n"{""a"":1}"\n"{""b"":2}"'
     rows = decode_csv_schema_rows(old)
     assert rows == [{"cfg": {"a": 1}, "id": 1}, {"cfg": {"b": 2}, "id": 2}]
+
+
+def test_f5_old_format_raw_0x1f_mid_cell_decodes_as_legacy() -> None:
+    """R1 backward-compat: the OLD encoder never CSV-quoted a raw 0x1F byte, so
+    an OLD table whose plain cell carries one mid-cell must decode EXACTLY as it
+    did before the envelope existed. 0x1F opens an envelope ONLY at a cell
+    boundary; mid-cell it is a literal byte, so the real comma still splits.
+
+    Pre-PR, ``split_unquoted("a\\x1f9hello,world")`` split on the comma into two
+    cells; the value ``a\\x1f9hello`` merely happens to look like a length frame.
+    A naive ``\\x1f``-anywhere reader would over-read past the comma into a single
+    cell and drop the row on the ``len(parts) != len(cols)`` check (silent loss).
+    """
+    # Splitter level: the mid-cell 0x1F must not be read as a `\x1f9...` frame.
+    assert split_unquoted("a\x1f9hello,world") == ["a\x1f9hello", "world"]
+    # End-to-end: the two string cells decode byte-for-byte, no dropped row.
+    rows = decode_csv_schema_rows("[1]{c1:string,c2:string}\na\x1f9hello,world")
+    assert rows == [{"c1": "a\x1f9hello", "c2": "world"}]
+
+
+def test_f5_lying_envelope_length_does_not_eat_following_row() -> None:
+    """R1: a lying / truncated envelope length is malformed. Whether its declared
+    span OVERRUNS the input or merely CROSSES the next newline, the decoder falls
+    back to legacy byte handling so the FOLLOWING row survives — never silently
+    swallowed (compact JSON carries no raw newline, so a span holding one is
+    bogus by construction).
+    """
+    # (a) Overrunning length: 99 payload code points claimed, the line ends far
+    #     sooner. The bogus envelope must not consume `plainrow`.
+    overrun = '[2]{cfg:json}\n\x1f99{"a":1}\nplainrow'
+    rows = decode_csv_schema_rows(overrun)
+    assert rows is not None and len(rows) == 2, f"overrun length ate a row: {rows}"
+    assert rows[1] == {"cfg": "plainrow"}
+    assert rows[0] == {"cfg": '\x1f99{"a":1}'}, "bogus envelope must stay a raw cell"
+
+    # (b) In-bounds length whose declared span crosses the newline into the next
+    #     row. The newline guard must reject it so the second row still survives.
+    crosser = '[2]{cfg:json}\n\x1f20{"a":1}\nplainrowplainrow'
+    rows2 = decode_csv_schema_rows(crosser)
+    assert rows2 is not None and len(rows2) == 2, f"newline-crossing length ate a row: {rows2}"
+    assert rows2[1] == {"cfg": "plainrowplainrow"}

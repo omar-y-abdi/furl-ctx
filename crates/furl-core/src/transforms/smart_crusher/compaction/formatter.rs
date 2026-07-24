@@ -659,12 +659,21 @@ fn format_row_cell(c: &CellValue, f: &FieldSpec) -> String {
     if f.type_tag == "json" {
         match c {
             CellValue::Scalar(Value::String(s)) => return csv_quote(s),
-            // F5: an Object/Array cell ships as a length-prefixed envelope
-            // (raw compact JSON, no quote-doubling) instead of CSV-quoted
-            // JSON, so a nested-object column is never inflated by escaping.
-            // The reference decoder reads it back via `json.loads`.
+            // F5: an Object/Array cell whose compact JSON carries a `"` ships as
+            // a length-prefixed envelope (raw JSON, no quote-doubling) instead of
+            // CSV-quoted JSON, so a nested-object column is never inflated by
+            // escaping. A QUOTE-FREE container (e.g. a numeric array) keeps the
+            // plain CSV-quote form: with nothing to un-double, the `\x1f`+length
+            // frame would only ADD bytes (R2). The decoder accepts both, so this
+            // is purely an encoder-side size choice; both read back via
+            // `json.loads`.
             CellValue::Scalar(v @ (Value::Object(_) | Value::Array(_))) => {
-                return json_container_envelope(v);
+                let payload = serde_json::to_string(v).unwrap_or_default();
+                return if payload.contains('"') {
+                    json_container_envelope(&payload)
+                } else {
+                    csv_quote(&payload)
+                };
             }
             _ => {}
         }
@@ -672,18 +681,18 @@ fn format_row_cell(c: &CellValue, f: &FieldSpec) -> String {
     format_cell(c)
 }
 
-/// Render a JSON container (`Object`/`Array`) as a length-prefixed
-/// envelope `\x1f<codepoint_len><raw_compact_json>` (see
+/// Frame an already-serialized compact-JSON container `payload` as a
+/// length-prefixed envelope `\x1f<codepoint_len><raw_compact_json>` (see
 /// [`JSON_ENVELOPE_MARK`]). The payload is verbatim `serde_json` output —
 /// no quote-doubling — so the cell is the raw JSON plus a small fixed
 /// frame. Length is a CODE-POINT count so the Python decoder consumes the
-/// exact payload on non-ASCII input.
-fn json_container_envelope(v: &Value) -> String {
-    let payload = serde_json::to_string(v).unwrap_or_default();
+/// exact payload on non-ASCII input. Only used when the payload contains a
+/// `"` (otherwise CSV-quoting is smaller — see [`format_row_cell`], R2).
+fn json_container_envelope(payload: &str) -> String {
     let mut out = String::with_capacity(payload.len() + 8);
     out.push(JSON_ENVELOPE_MARK);
     out.push_str(&payload.chars().count().to_string());
-    out.push_str(&payload);
+    out.push_str(payload);
     out
 }
 
@@ -1174,9 +1183,12 @@ mod tests {
     }
 
     #[test]
-    fn csv_json_container_cells_ship_as_length_prefixed_envelopes() {
-        // F5: Object/Array cells of a json column render `\x1f<len><raw_json>`
-        // — raw JSON, no CSV quote-doubling — not the old CSV-quoted form.
+    fn csv_json_container_cells_envelope_only_when_they_carry_a_quote() {
+        // F5/R2: an Object/Array cell of a json column ships as
+        // `\x1f<len><raw_json>` (raw JSON, no CSV quote-doubling) ONLY when the
+        // compact JSON carries a `"` to un-double. A quote-free container keeps
+        // the smaller plain CSV-quote form — the envelope frame would only ADD
+        // bytes. Both spellings decode back via `json.loads`.
         let c = Compaction::Table {
             schema: Schema {
                 fields: vec![super::super::ir::FieldSpec {
@@ -1188,26 +1200,41 @@ mod tests {
                 }],
             },
             rows: vec![
+                // quote-bearing object -> envelope
                 Row::new(vec![CellValue::Scalar(json!({"k": "v", "n": 2}))]),
+                // quote-free numeric array -> CSV-quoted, NOT enveloped
                 Row::new(vec![CellValue::Scalar(json!([1, 2, 3]))]),
+                // quote-bearing array -> envelope
+                Row::new(vec![CellValue::Scalar(json!([1, "a,b", 3]))]),
             ],
-            original_count: 2,
+            original_count: 3,
         };
         let out = CsvSchemaFormatter::new().format(&c);
         let lines: Vec<&str> = out.trim_end().lines().collect();
-        assert_eq!(lines[0], "[2]{cfg:json}");
-        // Object: `\x1f` + code-point length + verbatim serde JSON.
+        assert_eq!(lines[0], "[3]{cfg:json}");
+        // Object carries `"` -> envelope: `\x1f` + code-point length + verbatim JSON.
         let payload_obj = "{\"k\":\"v\",\"n\":2}";
         assert_eq!(
             lines[1],
             format!("\u{1f}{}{payload_obj}", payload_obj.chars().count())
         );
-        let payload_arr = "[1,2,3]";
+        // Quote-free array -> plain CSV-quote, no `\x1f` frame (R2).
+        assert_eq!(lines[2], "\"[1,2,3]\"");
+        assert!(
+            !lines[2].starts_with('\u{1f}'),
+            "quote-free container stays CSV-quoted: {}",
+            lines[2]
+        );
+        // Quote-bearing array -> envelope with raw `"` (never doubled).
+        let payload_arr = "[1,\"a,b\",3]";
         assert_eq!(
-            lines[2],
+            lines[3],
             format!("\u{1f}{}{payload_arr}", payload_arr.chars().count())
         );
-        assert!(!out.contains("\"\""), "no CSV quote-doubling: {out}");
+        assert!(
+            !out.contains("\"\""),
+            "a container is never CSV quote-doubled: {out}"
+        );
     }
 
     #[test]

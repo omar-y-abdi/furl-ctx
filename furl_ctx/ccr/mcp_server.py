@@ -336,7 +336,7 @@ CSV_DECODE_LEGEND = (
     "GRAMMAR: type=V constant V; int=B+S row i=B+S*i (0-based); float%k cell/10^k; "
     "string~ ISO ts then ±sec[/tz] deltas; string^ +__affix:col=P,S value=P+cell+S; "
     "string@ +__head:col=<d>h0,h1 cell 1<d>tail=h1+tail; __dict:col=v0,v1 cell indexes it; "
-    "json cell 0x1F+len+JSON = raw object/array (no escaping); "
+    "json cell 0x1F+len+JSON or CSV-quoted = that object/array; "
     "__stats:col=min/max/sum/count = whole-array numeric summary; "
     "= repeats cell above; __null__ null, __missing__ absent key, ? nullable."
 )
