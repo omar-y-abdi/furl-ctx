@@ -116,8 +116,8 @@
       "name": "search@90",
       "n_input_items": 90,
       "tokens_before": 4102,
-      "tokens_after": 336,
-      "lossless_reduction": 0.9180887372013652,
+      "tokens_after": 365,
+      "lossless_reduction": 0.9110190151145783,
       "n_present": 13,
       "n_dropped": 77,
       "n_recoverable": 77,
@@ -133,8 +133,8 @@
       "name": "repeated_logs@90",
       "n_input_items": 90,
       "tokens_before": 3621,
-      "tokens_after": 134,
-      "lossless_reduction": 0.9629936481634908,
+      "tokens_after": 171,
+      "lossless_reduction": 0.9527754763877382,
       "n_present": 4,
       "n_dropped": 86,
       "n_recoverable": 86,
@@ -143,36 +143,36 @@
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:smart_crusher:0.03"
+        "router:smart_crusher:0.04"
       ]
     },
     {
       "name": "disk@9",
       "n_input_items": 9,
       "tokens_before": 694,
-      "tokens_after": 291,
-      "lossless_reduction": 0.5806916426512968,
-      "n_present": 5,
-      "n_dropped": 4,
-      "n_recoverable": 4,
-      "lossy_drop_ratio": 0.4444444444444444,
+      "tokens_after": 347,
+      "lossless_reduction": 0.5,
+      "n_present": 9,
+      "n_dropped": 0,
+      "n_recoverable": 0,
+      "lossy_drop_ratio": 0.0,
       "information_retention": 1.0,
-      "took_lossy_path": true,
+      "took_lossy_path": false,
       "transforms": [
         "router:protected:user_message",
-        "router:smart_crusher:0.40"
+        "router:smart_crusher:0.49"
       ]
     },
     {
       "name": "multiturn@135",
       "n_input_items": 135,
       "tokens_before": 14686,
-      "tokens_after": 2141,
-      "lossless_reduction": 0.85421489854283,
-      "n_present": 40,
-      "n_dropped": 95,
-      "n_recoverable": 95,
-      "lossy_drop_ratio": 0.7037037037037037,
+      "tokens_after": 2283,
+      "lossless_reduction": 0.8445458259566935,
+      "n_present": 47,
+      "n_dropped": 88,
+      "n_recoverable": 88,
+      "lossy_drop_ratio": 0.6518518518518519,
       "information_retention": 1.0,
       "took_lossy_path": true,
       "transforms": [
@@ -183,11 +183,11 @@
         "router:protected:user_message",
         "router:protected:user_message",
         "router:protected:user_message",
-        "router:smart_crusher:0.14",
-        "router:smart_crusher:0.40",
-        "router:smart_crusher:0.41",
-        "router:mixed:0.15",
-        "router:mixed:0.15"
+        "router:smart_crusher:0.15",
+        "router:smart_crusher:0.49",
+        "router:smart_crusher:0.49",
+        "router:smart_crusher:0.15",
+        "router:smart_crusher:0.15"
       ]
     },
     {
