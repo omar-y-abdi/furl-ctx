@@ -27,6 +27,26 @@ the same per-project namespace (``FURL_CCR_PROJECT_DIR``, from CLAUDE_PROJECT_DI
 stdin ``cwd``), which resolves to a per-project ``~/.furl/ccr-ns-<hash>.sqlite3``
 in every process of the session. The legacy global ``~/.furl/ccr.sqlite3`` serves
 only when namespacing is explicitly disabled (``FURL_CCR_PROJECT_DIR=""``).
+
+Size reroute (F2) — bounding wall time under the 30 s hooks.json kill. A tool
+output whose extracted text is at least ``FURL_HOOK_MAX_COMPRESS_BYTES`` chars
+(default 5_000_000) is routed straight to the engine's fast, reversible CCR
+offload — a head/tail + ``_ccr_summary`` preview plus the byte-exact original in
+the store — instead of the super-linear crush/mixed path, and the run is tallied
+as ``hook_size_reroute`` (a real compression that emits a marker, so it rides
+alongside ``hook_compressions_applied`` rather than as a no-op). The offload is
+O(n), so this keeps the hook comfortably inside its budget on any host and gives
+the model a queryable summary + retrievable original — exactly what is useful
+from a multi-megabyte blob. Set the var to ``0`` to disable the reroute and defer
+to the engine's own 8 MiB ceiling; lower it on a slow host.
+
+What the external 30 s kill still costs. The reroute is the mitigation, not a
+cure for the one failure this hook cannot annotate: if the HOST kills the process
+at the hooks.json timeout, that is a signal delivered from outside after our last
+line of control — no stdout and no counter can be written, so a timed-out run
+leaves zero trace by construction (the observation behind F2). No in-process code
+can record a counter for its own external kill; the size reroute exists precisely
+to keep the work short enough that the kill never fires.
 """
 
 from __future__ import annotations
@@ -43,10 +63,22 @@ _MODEL_ENV = "FURL_HOOK_MODEL"
 _EXCLUDE_ENV = "FURL_HOOK_EXCLUDE_TOOLS"
 _MODE_ENV = "FURL_HOOK_MODE"
 _VERBOSE_ENV = "FURL_HOOK_VERBOSE"
+# Size reroute (F2): the hook's own knob, and the engine ceiling it lowers.
+_MAX_BYTES_ENV = "FURL_HOOK_MAX_COMPRESS_BYTES"
+_ENGINE_MAX_BYTES_ENV = "FURL_MAX_COMPRESS_BYTES"
 
 _DEFAULT_MIN_CHARS = 2000
 _DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 _CCR_MARKER = "<<ccr:"
+# Extracted-text length (chars) at/above which the hook reroutes straight to the
+# engine's fast reversible CCR offload instead of the full crush pipeline. 5 MB
+# sits above the common multi-megabyte trace slice (which still gets full
+# columnar compression) and below the engine's own 8 MiB ceiling, so it is an
+# earlier, tighter guard. Chosen from measurements: on this host the pure crush
+# path runs ~0.9 s at 2.7 MB and ~3.6 s at 8 MB, while the offload runs ~0.2-0.6 s
+# across that range; rerouting at 5 MB keeps the hook well under the 30 s kill
+# even on a host several times slower, with the 8 MiB engine ceiling as backstop.
+_DEFAULT_HOOK_MAX_BYTES = 5_000_000
 
 # Pin the durable, cross-process CCR store BEFORE furl_ctx builds it. Without this
 # the library default is an in-memory store that dies when this subprocess exits —
@@ -122,6 +154,22 @@ def _record_compression() -> None:
         cmod.bump(cstore, cmod.HOOK_COMPRESSIONS)
 
 
+def _record_size_reroute() -> None:
+    """Tally a size-triggered reroute for this run (fail-open, no-op if unset).
+
+    A distinct breadcrumb recorded ALONGSIDE the compression counter when an
+    over-threshold output was rerouted to the engine's fast CCR offload (F2), so
+    a huge blob the hook actually processed is never invisible in the store. Inert
+    on engines whose counter API predates ``HOOK_SIZE_REROUTE`` (getattr guard)."""
+    ctx = _run_counter_ctx
+    if ctx is None:
+        return
+    cmod, cstore = ctx
+    label = getattr(cmod, "HOOK_SIZE_REROUTE", None) if cmod is not None else None
+    if cmod is not None and cstore is not None and label:
+        cmod.bump(cstore, label)
+
+
 def _flag_enabled(raw: str | None) -> bool:
     """Interpret an on/off env flag. Unset or empty -> enabled (default on)."""
     if raw is None or raw.strip() == "":
@@ -155,6 +203,57 @@ def _min_chars() -> int:
     except ValueError:
         return _DEFAULT_MIN_CHARS
     return value if value > 0 else _DEFAULT_MIN_CHARS
+
+
+def _hook_max_bytes() -> int | None:
+    """Extracted-text length (chars) at/above which the hook reroutes to the
+    engine's fast CCR offload (F2). ``None`` disables the reroute.
+
+    Unset / unparsable -> ``_DEFAULT_HOOK_MAX_BYTES``. An explicit ``0`` (or
+    ``off``/``false``/``no``/``disabled``) turns the reroute OFF, deferring to the
+    engine's own 8 MiB ceiling."""
+    raw = os.environ.get(_MAX_BYTES_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_HOOK_MAX_BYTES
+    if raw.lower() in {"0", "off", "false", "no", "disabled"}:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_HOOK_MAX_BYTES
+    return value if value > 0 else None
+
+
+def _arm_size_reroute(text_len: int) -> bool:
+    """Force the engine's reversible CCR offload for an over-threshold output.
+
+    When *text_len* (chars) is at/above ``_hook_max_bytes()``, lower the engine's
+    own offload ceiling (``FURL_MAX_COMPRESS_BYTES``, read at compress time by
+    ``router_engine._huge_content_bytes``) for THIS one-shot process, so the
+    upcoming ``compress()`` takes the O(n) offload path (head/tail + ``_ccr_summary``
+    preview + byte-exact original in the CCR store) instead of the super-linear
+    crush. chars is a lower bound on UTF-8 bytes, so ``text_len >= threshold``
+    guarantees the engine (which compares bytes) offloads once its ceiling is the
+    threshold.
+
+    Precedence: an explicit LOWER engine ceiling is kept (the user asked to
+    offload even earlier); an explicit HIGHER engine ceiling is capped to the hook
+    threshold so the guard is not silently defeated. Setting the ceiling here is
+    consistent with how this hook already configures the engine via ``os.environ``
+    (the durable-store pins at import). Returns ``True`` when the reroute was
+    armed. Never raises."""
+    threshold = _hook_max_bytes()
+    if threshold is None or text_len < threshold:
+        return False
+    ceiling = threshold
+    existing = os.environ.get(_ENGINE_MAX_BYTES_ENV, "").strip()
+    if existing:
+        try:
+            ceiling = min(ceiling, int(existing))
+        except ValueError:
+            pass
+    os.environ[_ENGINE_MAX_BYTES_ENV] = str(max(1, ceiling))
+    return True
 
 
 def _extract_text(tool_response: Any) -> str | None:
@@ -631,6 +730,13 @@ def main() -> None:
             _emit(tool_response, redacted, compressed=False)
         _passthrough("below-min-chars")
 
+    # --- size reroute (F2): above the hook threshold, force the engine's fast
+    # reversible CCR offload so a huge blob can never drive the super-linear
+    # crush/mixed path past the 30 s hooks.json kill. Armed BEFORE compress() so
+    # the engine reads the lowered ceiling; the run is tallied as a distinct
+    # hook_size_reroute breadcrumb (below), NOT a no-op — it still emits a marker.
+    size_rerouted = _arm_size_reroute(len(redacted))
+
     # --- compress (returns None + a distinct reason unless it genuinely helped) ---
     # The originating tool (from the payload, already read above) rides through
     # compress() so the CCR entry it stores records content_kind (audit: hook
@@ -645,6 +751,11 @@ def main() -> None:
         if _redaction_changed_visible_output(tool_response, text, redacted):
             _emit(tool_response, redacted, compressed=False)
         _passthrough(compress_fail_reason or "no-savings")
+
+    # Record the reroute only once it PRODUCED output (compressed is not None);
+    # a failed offload that fell open to passthrough took the no-op branch above.
+    if size_rerouted:
+        _record_size_reroute()
 
     # --- optional one-line stderr annotation (FURL_HOOK_VERBOSE) ---
     if _flag_enabled(os.environ.get(_VERBOSE_ENV)):
