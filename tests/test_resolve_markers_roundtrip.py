@@ -2,18 +2,29 @@
 
 Pre-mortem audit finding T4: the public ``resolve_markers()`` API replaces
 each ``marker_patterns()`` match's SPAN (``match.start()``:``match.end()``)
-with the retrieved original content. For the bracket family (shapes G/H,
-``BRACKET_RETRIEVE_PATTERN`` / ``GENERIC_BRACKET_PATTERN``) that span already
-covers the whole marker text (open ``"["`` to close ``"]"``), so substitution
-is clean. For the double-angle family (shapes A-F, ``DOUBLE_ANGLE_PATTERN``)
-it does NOT: that pattern is built for HASH EXTRACTION, so its trailing
-delimiter only consumes ONE boundary byte after the hash. For any shape with
+with the retrieved original content. For ``BRACKET_RETRIEVE_PATTERN``
+(shape H) that span covers exactly the whole marker text (open ``"["`` to
+close ``"]"``, literal-anchored), so substitution is clean. For the
+double-angle family (shapes A-F, ``DOUBLE_ANGLE_PATTERN``) it does NOT: that
+pattern is built for HASH EXTRACTION, so its trailing delimiter only
+consumes ONE boundary byte after the hash. For any shape with
 a descriptive tail (A/B/C/E/F) the rest of the marker (e.g.
 ``"7_rows_offloaded>>"``) is left glued onto whatever replaces the head, and
 even the bare shape (D) leaves a dangling ``">"``. ``json.loads`` on the
 resolved content then raises ``JSONDecodeError`` (or, worse, silently
 reconstructs the wrong value) while ``resolve_markers`` itself reports
 success.
+
+``GENERIC_BRACKET_PATTERN`` (shape G and case-variants) had the INVERSE span
+bug, found after T4 shipped: its original lazy-dot interior
+(``\\[.*?compressed.*?hash=…``) crossed ``]``/``[`` freely, so with any
+earlier ``[`` on the same line the leftmost match STARTED at that innocent
+bracket and the substitution DELETED every byte between it and the real
+marker (``"See [ticket-42] for context [120 lines compressed to 18.
+Retrieve full diff: hash=…]"`` resolved to ``"See <recovered>"``). Fixed by
+making the interior wildcards bracket-free (``[^\\[\\]]``) so a match spans
+exactly one ``[…]`` run; pinned in the "generic-bracket substitution span"
+section below.
 
 Existing coverage never caught this because it only asserted the ORIGINAL
 marker substring was gone (e.g. ``test_namespace_symmetric_retrieve.py``'s
@@ -205,8 +216,11 @@ _BRACKET_PIN_CASES = [
 
 @pytest.mark.parametrize("ccr_hash, marker_text", _BRACKET_PIN_CASES)
 def test_bracket_family_resolves_to_exact_original_pin(ccr_hash, marker_text) -> None:
-    """Pin: the bracket family already spans its whole marker and must keep
-    restoring exactly, byte-for-byte, both before and after the T4 fix."""
+    """Pin: on ISOLATED marker text (nothing else on the line) the bracket
+    family spans its whole marker and must keep restoring exactly,
+    byte-for-byte, both before and after the T4 fix. (With an innocent
+    ``[`` earlier on the same line the generic fallback's original span was
+    NOT safe — see the "generic-bracket substitution span" section.)"""
     original = f"ORIGINAL-CONTENT-{ccr_hash}"
     get_compression_store().store(original, "compressed-placeholder", explicit_hash=ccr_hash)
 
@@ -217,6 +231,118 @@ def test_bracket_family_resolves_to_exact_original_pin(ccr_hash, marker_text) ->
         f"resolve_markers must restore the EXACT original for {marker_text!r}, "
         f"got {resolved_content!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Generic-bracket substitution span (the bracket-family sibling of T4): a
+# GENERIC_BRACKET_PATTERN match must span exactly the marker's own "[...]"
+# run, never reach back to an earlier innocent "[" on the same line. The
+# original lazy-dot interior did exactly that — leftmost-match semantics
+# anchored group(0) at the earliest "[" from which "compressed...hash=...]"
+# was reachable, and resolve_markers deleted every byte between that bracket
+# and the real marker. Shape G ("Retrieve full diff:") is the live producer
+# shape only GENERIC matches (BRACKET_RETRIEVE_PATTERN requires "Retrieve
+# more:"), so these cases pin G plus the IGNORECASE variant that also falls
+# through to GENERIC. Marker literal byte-identical to markers.rs's
+# diff_is_byte_identical pin.
+# --------------------------------------------------------------------------- #
+
+_G_HASH = "deadbeefcafedeadbeefcafe"
+_G_MARKER = f"[120 lines compressed to 18. Retrieve full diff: hash={_G_HASH}]"
+
+
+def _seed(ccr_hash: str, original: str) -> None:
+    get_compression_store().store(original, "compressed-placeholder", explicit_hash=ccr_hash)
+
+
+def test_generic_bracket_preceding_bracketed_text_is_preserved() -> None:
+    """RED on the lazy-dot pattern: the leftmost match starts at
+    ``[ticket-42]`` and the substitution deletes ``"[ticket-42] for
+    context "`` — silent loss of innocent bytes, not marker text."""
+    _seed(_G_HASH, "ORIGINAL-DIFF-BYTES")
+
+    text = f"See [ticket-42] for context {_G_MARKER} end."
+    resolved = resolve_markers([{"role": "tool", "content": text}])
+
+    assert resolved[0]["content"] == "See [ticket-42] for context ORIGINAL-DIFF-BYTES end."
+
+
+def test_generic_bracket_lone_open_bracket_before_marker_is_preserved() -> None:
+    """RED on the lazy-dot pattern: even an UNCLOSED ``[`` upstream on the
+    line anchors the match early and its trailing bytes are deleted."""
+    _seed(_G_HASH, "ORIGINAL-DIFF-BYTES")
+
+    text = f"index a[0 then {_G_MARKER}"
+    resolved = resolve_markers([{"role": "tool", "content": text}])
+
+    assert resolved[0]["content"] == "index a[0 then ORIGINAL-DIFF-BYTES"
+
+
+def test_generic_bracket_json_escaped_single_line_content_survives_byte_exact() -> None:
+    """RED on the lazy-dot pattern. In fresh engine output the shape-G marker
+    sits on its own line, but re-serialized content (a JSON-encoded tool
+    result) collapses to ONE physical line where earlier ``[`` bytes — array
+    subscripts here — precede the marker. The lazy-dot span ate
+    ``[0]\\n+a[1]\\n`` (real diff bytes); the whole prefix must survive."""
+    _seed(_G_HASH, "ORIGINAL-DIFF-BYTES")
+
+    prefix = '{"result": "diff --git a/x b/x\\n@@ -1 +1 @@\\n-a[0]\\n+a[1]\\n'
+    text = prefix + _G_MARKER + '"}'
+    resolved = resolve_markers([{"role": "tool", "content": text}])
+
+    assert resolved[0]["content"] == prefix + 'ORIGINAL-DIFF-BYTES"}'
+
+
+def test_generic_bracket_two_markers_on_one_line_preserve_text_between() -> None:
+    """RED on the lazy-dot pattern: after the first marker resolves, the scan
+    resumes and the SECOND match anchors at ``[note]`` — deleting it. Both
+    markers must resolve independently with the bracketed text intact."""
+    hash_b = "0123456789abcdef01234567"
+    marker_b = f"[40 lines compressed to 6. Retrieve full diff: hash={hash_b}]"
+    _seed(_G_HASH, "FIRST-ORIGINAL")
+    _seed(hash_b, "SECOND-ORIGINAL")
+
+    text = f"{_G_MARKER} then [note] {marker_b} done"
+    resolved = resolve_markers([{"role": "tool", "content": text}])
+
+    assert resolved[0]["content"] == "FIRST-ORIGINAL then [note] SECOND-ORIGINAL done"
+
+
+def test_generic_bracket_ignorecase_variant_with_preceding_bracket() -> None:
+    """RED on the lazy-dot pattern. An uppercase-variant bracket marker is
+    NOT matched by the case-sensitive BRACKET_RETRIEVE_PATTERN, so it falls
+    through to the IGNORECASE generic fallback — which must keep both the
+    flag (still resolves) and the exact span (``[INFO]`` survives)."""
+    _seed(_G_HASH, "ORIGINAL-DIFF-BYTES")
+
+    text = f"[INFO] done: [120 Lines COMPRESSED to 18. Retrieve full diff: hash={_G_HASH}]"
+    resolved = resolve_markers([{"role": "tool", "content": text}])
+
+    assert resolved[0]["content"] == "[INFO] done: ORIGINAL-DIFF-BYTES"
+
+
+def test_bracket_retrieve_shape_h_with_preceding_bracket_pin() -> None:
+    """Pin (green before and after): shape H is substituted by the
+    literal-anchored BRACKET_RETRIEVE_PATTERN before the generic fallback
+    ever scans, so a preceding bracket was never at risk on this shape —
+    and must stay that way if the pattern order ever changes."""
+    ccr_hash = "0011223344556677889900aa"
+    _seed(ccr_hash, "ORIGINAL-ROWS")
+
+    text = f"[job-7] output: [200 lines compressed to 30. Retrieve more: hash={ccr_hash}]"
+    resolved = resolve_markers([{"role": "tool", "content": text}])
+
+    assert resolved[0]["content"] == "[job-7] output: ORIGINAL-ROWS"
+
+
+def test_generic_bracket_unresolvable_hash_leaves_text_untouched() -> None:
+    """Pin (green before and after): a store MISS substitutes the span with
+    itself, so the text must come back byte-identical — the miss path must
+    never be the place an over-wide span starts mutating bytes."""
+    text = f"See [ticket-42] for context {_G_MARKER} end."
+    resolved = resolve_markers([{"role": "tool", "content": text}])
+
+    assert resolved[0]["content"] == text
 
 
 # --------------------------------------------------------------------------- #

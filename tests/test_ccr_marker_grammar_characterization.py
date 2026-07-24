@@ -567,6 +567,15 @@ def _equivalence_corpus() -> list[str]:
     # Generic-fallback-only string ("Retrieve full diff:" — shape G's form).
     corpus.append(f"[120 lines compressed to 12. Retrieve full diff: hash={h24}]")
 
+    # Shape G with an INNOCENT bracketed prefix on the same line — the
+    # span-safety shape (the generic fallback's interior is bracket-free so a
+    # match cannot start at the earlier "["). The extracted-hash UNION must be
+    # identical to the frozen lazy-dot literals here: the span fix changes
+    # match.group(0) (a substitution concern), never which hash surfaces.
+    corpus.append(
+        f"See [ticket-42] for context [120 lines compressed to 12. Retrieve full diff: hash={h24}]"
+    )
+
     # Bare 12-hex and 24-hex double-angle markers.
     corpus.append(f"<<ccr:{h12}>>")
     corpus.append(f"<<ccr:{h24}>>")
