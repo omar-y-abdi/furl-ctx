@@ -171,6 +171,8 @@ def _run_hook(
     managed_file_settings: dict | None = None,
     managed_dir_settings: dict | None = None,
     managed_path_override: str | None = None,
+    flag: str | None = "1",
+    env_extra: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run pretool_pipe.py hermetically: HOME, the payload cwd, and (when given)
     CLAUDE_PROJECT_DIR / CLAUDE_CONFIG_DIR / CLAUDE_CODE_MANAGED_SETTINGS_PATH are
@@ -190,7 +192,9 @@ def _run_hook(
         _write_settings(proj / ".claude" / "settings.local.json", cwd_local_settings)
     if home_settings is not None:
         _write_settings(home / ".claude" / "settings.json", home_settings)
-    env = {"HOME": str(home), "FURL_PRETOOL_PIPE": "1", "PATH": "/usr/bin:/bin"}
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
+    if flag is not None:
+        env["FURL_PRETOOL_PIPE"] = flag
     if project_dir_settings is not None:
         project_root = tmp / "project-root"
         _write_settings(project_root / ".claude" / "settings.json", project_dir_settings)
@@ -211,6 +215,8 @@ def _run_hook(
         env["CLAUDE_CODE_MANAGED_SETTINGS_PATH"] = str(managed_dir)
     if managed_path_override is not None:
         env["CLAUDE_CODE_MANAGED_SETTINGS_PATH"] = managed_path_override
+    if env_extra:
+        env.update(env_extra)
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(proj)}
     return subprocess.run(
         [sys.executable, str(_PRETOOL)],
@@ -470,3 +476,170 @@ def test_managed_settings_path_env_override_unresolvable_passes_through(tmp_path
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", "set-but-unresolvable managed override must force passthrough"
+
+
+# --- F3: _scan_bash_rules (the shared banner+gate detection) ----------------------
+# The banner reports count + scopes; the gate needs existence + doubt. Both call the
+# SAME _scan_bash_rules, so what the banner claims is exactly what the pipe enforces.
+
+
+def test_scan_reports_count_scope_and_no_doubt(tmp_path, monkeypatch) -> None:
+    _no_config_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(_pretool_mod, "_managed_settings_paths", lambda: ([], False))
+    cwd = tmp_path / "proj"
+    _write_settings(cwd / ".claude" / "settings.json", _deny("Bash(rm:*)", "Bash(curl:*)"))
+    scan = _pretool_mod._scan_bash_rules(str(cwd))
+    assert scan.rule_count == 2
+    assert scan.scopes == ("project settings",)
+    assert scan.doubt is False
+
+
+def test_scan_zero_rules_is_empty(tmp_path, monkeypatch) -> None:
+    _no_config_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(_pretool_mod, "_managed_settings_paths", lambda: ([], False))
+    scan = _pretool_mod._scan_bash_rules(str(tmp_path / "proj"))
+    assert scan == _pretool_mod.BashRuleScan(rule_count=0, scopes=(), doubt=False)
+
+
+def test_scan_doubt_on_malformed(tmp_path, monkeypatch) -> None:
+    _no_config_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(_pretool_mod, "_managed_settings_paths", lambda: ([], False))
+    cwd = tmp_path / "proj"
+    (cwd / ".claude").mkdir(parents=True)
+    (cwd / ".claude" / "settings.json").write_text("{ not json", encoding="utf-8")
+    scan = _pretool_mod._scan_bash_rules(str(cwd))
+    assert scan.doubt is True
+
+
+def test_scan_block_condition_matches_old_flat_gate(tmp_path, monkeypatch) -> None:
+    """Equivalence guard: routing the gate through _scan_bash_rules changed NO
+    decision. ``rule_count > 0 or doubt`` equals the flat _settings_paths +
+    _load_bash_rule_bodies + _has_any_bash_rule condition the gate used before."""
+    _no_config_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(_pretool_mod, "_managed_settings_paths", lambda: ([], False))
+    cwd = tmp_path / "proj"
+    _write_settings(cwd / ".claude" / "settings.json", _ask("Bash(curl:*)"))
+    scan = _pretool_mod._scan_bash_rules(str(cwd))
+    paths, path_doubt = _pretool_mod._settings_paths(str(cwd))
+    bodies, load_doubt = _pretool_mod._load_bash_rule_bodies(paths)
+    old_blocks = path_doubt or load_doubt or _pretool_mod._has_any_bash_rule(bodies)
+    new_blocks = scan.rule_count > 0 or scan.doubt
+    assert new_blocks is True and old_blocks is True
+
+
+# --- F3: FURL_PIPE_WITH_RULES conscious opt-in override ----------------------------
+
+
+@pytest.mark.parametrize("value", ["1", "true", "on", "YES", " Enabled ", "1 "])
+def test_override_predicate_true_only_for_explicit_truthy(value) -> None:
+    assert _pretool_mod._pipe_with_rules_override(value) is True
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "false", "off", "no", "garbage", "2"])
+def test_override_predicate_off_unless_explicit(value) -> None:
+    """OPT-IN: off unless explicitly truthy, so a typo never enables the risky
+    rewrite-with-rules path (the inverse posture of _pipe_disabled)."""
+    assert _pretool_mod._pipe_with_rules_override(value) is False
+
+
+def test_override_rewrites_despite_deny_rule(tmp_path) -> None:
+    """The conscious override: with FURL_PIPE_WITH_RULES set, the pipe REWRITES even
+    though a deny rule exists (a documented trade-off; no rule-present subset is
+    provably safe). Pre-fix there was no way to keep the pipe on with rules."""
+    proc = _run_hook(
+        "cat big",
+        tmp_path,
+        cwd_settings=_deny("Bash(rm:*)"),
+        env_extra={"FURL_PIPE_WITH_RULES": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "updatedInput" in proc.stdout, "override must rewrite despite a deny rule"
+
+
+def test_override_rewrites_despite_settings_doubt(tmp_path) -> None:
+    """The override bypasses the settings-doubt gate too: the user has accepted the
+    risk that unreadable settings might hide a rule the rewrite could mask."""
+    proc = _run_hook(
+        "cat big", tmp_path, cwd_settings="{ not json", env_extra={"FURL_PIPE_WITH_RULES": "1"}
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "updatedInput" in proc.stdout, "override must rewrite despite settings doubt"
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "garbage", "2"])
+def test_override_off_value_keeps_gate(value, tmp_path) -> None:
+    """Opt-IN safety end to end: a non-truthy FURL_PIPE_WITH_RULES leaves the guard
+    in force — a deny rule still forces passthrough, so a typo cannot defeat it."""
+    proc = _run_hook(
+        "cat big",
+        tmp_path,
+        cwd_settings=_deny("Bash(rm:*)"),
+        env_extra={"FURL_PIPE_WITH_RULES": value},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", f"{value!r} must NOT enable the override"
+
+
+def test_default_config_with_rules_is_silent_and_off(tmp_path) -> None:
+    """The report's exact F3 scenario: a DEFAULT configuration (FURL_PRETOOL_PIPE
+    unset, so on by default) with Bash permission rules present. The pipe must go
+    fully silent and off — empty stdout, exit 0, no rewrite — the savings feature
+    correctly disabled. This is the behavior the fix keeps; it is only made VISIBLE
+    now (the banner and the pipe_noop counter), never changed."""
+    proc = _run_hook("cat big", tmp_path, cwd_settings=_deny("Bash(rm:*)"), flag=None)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "default-on pipe with rules present must be silent and off"
+
+
+def test_record_noop_counts_dynamic_and_skips_static(monkeypatch) -> None:
+    """R1: dynamic event reasons are tallied as ``pipe_noop:<reason>``, while the two
+    STATIC reasons (permission-rules, disabled-env) are skipped WITHOUT even resolving
+    the store, so the hot path pays no furl_ctx import. A missing or empty reason
+    records nothing (guards against an accidental bare bump)."""
+    recorded: list[str] = []
+    resolves = {"n": 0}
+
+    class _SpyCounters:
+        PIPE_NOOP_PREFIX = "pipe_noop:"
+
+        @staticmethod
+        def resolve_store() -> object:
+            resolves["n"] += 1
+            return object()  # non-None so bump would run
+
+        @staticmethod
+        def bump(store: object, name: str) -> None:
+            recorded.append(name)
+
+    monkeypatch.setenv("FURL_CCR_BACKEND", "sqlite")
+    monkeypatch.setenv("FURL_CCR_PROJECT_DIR", "/tmp/furl-record-noop")
+    monkeypatch.setattr(_pretool_mod, "_counters_module", lambda: _SpyCounters)
+    monkeypatch.setattr(_pretool_mod, "_counter_ctx_resolved", False)
+    monkeypatch.setattr(_pretool_mod, "_counter_ctx_cache", None)
+
+    # STATIC reasons: skipped before the store is resolved (no furl_ctx import).
+    _pretool_mod._record_noop(_pretool_mod._NOOP_PERMISSION_RULES)
+    _pretool_mod._record_noop(_pretool_mod._NOOP_DISABLED_ENV)
+    assert resolves["n"] == 0, "static reasons must not resolve the store"
+    assert recorded == []
+
+    # DYNAMIC reasons: tallied under pipe_noop:<reason>.
+    _pretool_mod._record_noop(_pretool_mod._NOOP_ALREADY_WRAPPED)
+    _pretool_mod._record_noop(_pretool_mod._NOOP_SETTINGS_DOUBT)
+    _pretool_mod._record_noop(None)  # no reason -> nothing recorded
+    _pretool_mod._record_noop("")  # empty reason -> nothing recorded
+    assert recorded == ["pipe_noop:already-wrapped", "pipe_noop:settings-doubt"]
+
+
+def test_record_noop_never_raises_when_store_unavailable(monkeypatch) -> None:
+    """Best-effort + fail-open: if the counters module cannot be imported the record
+    is a silent no-op that never raises into the hook (a crash would block Bash). Uses
+    a DYNAMIC reason so it actually exercises the store-resolution path."""
+    monkeypatch.setattr(_pretool_mod, "_counters_module", lambda: None)
+    monkeypatch.setattr(_pretool_mod, "_counter_ctx_resolved", False)
+    monkeypatch.setattr(_pretool_mod, "_counter_ctx_cache", None)
+    _pretool_mod._record_noop(_pretool_mod._NOOP_SETTINGS_DOUBT)  # must not raise

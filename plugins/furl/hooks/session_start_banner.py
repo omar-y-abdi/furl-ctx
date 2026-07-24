@@ -26,6 +26,17 @@ unconditional wording (cannot prove it is broken, so do not claim it is; see
 furl_ctx/host_version.py's module docstring for the full rationale, which this
 mirrors). Keep these two implementations in sync by hand if the floor version
 or detection heuristic ever changes.
+
+The PreToolUse pipe clause is NOT static: it reports the pipe's LIVE status by
+running the SAME Bash-permission-rule detection the pipe itself gates on, imported
+from ``pretool_pipe`` so there is one source of truth for the detection logic. The
+banner scans the session project root while the pipe gates on each command's own cwd,
+so a subdirectory that carries its own settings can differ per command; given
+CLAUDE_PROJECT_DIR is set the banner can only over-report the pipe as active for such
+a subdir, never the dangerous inverse. When any Bash rule exists the pipe is off, and
+the banner now says so, naming the scopes and the ``FURL_PIPE_WITH_RULES`` opt-in,
+replacing the old unconditional "pipe active" line that lied whenever a rule was
+present. That detection is stdlib-only, so the banner stays dependency-free.
 """
 
 from __future__ import annotations
@@ -80,13 +91,79 @@ def _armed_clause(version: tuple[int, int, int] | None) -> str:
     return "PostToolUse compression armed"
 
 
+def _join_scopes(scopes: tuple[str, ...]) -> str:
+    """Human list of scope labels with NO round brackets (the banner systemMessage
+    is pinned AI-tell-free): 'a', 'a and b', 'a, b and c'."""
+    if not scopes:
+        return "settings"
+    if len(scopes) == 1:
+        return scopes[0]
+    return ", ".join(scopes[:-1]) + " and " + scopes[-1]
+
+
+def _pretool_pipe_clause_inner() -> str:
+    """The LIVE PreToolUse-pipe status line, built from the SAME rule detection the
+    pipe gates on, imported from ``pretool_pipe`` so banner and pipe share one
+    detection (results can differ only for a subdirectory with its own settings, since
+    the banner reads the project root). Never uses round brackets or dashes (the banner
+    is pinned AI-tell-free) and always names the ``FURL_PRETOOL_PIPE=0`` disable knob."""
+    from pretool_pipe import _pipe_disabled, _pipe_with_rules_override, _scan_bash_rules
+
+    if _pipe_disabled(os.environ.get("FURL_PRETOOL_PIPE")):
+        return "PreToolUse pipe off, FURL_PRETOOL_PIPE=0 is set"
+
+    cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    scan = _scan_bash_rules(cwd)
+    has_rules = scan.rule_count > 0
+
+    if _pipe_with_rules_override(os.environ.get("FURL_PIPE_WITH_RULES")):
+        if has_rules or scan.doubt:
+            return (
+                "PreToolUse pipe active via FURL_PIPE_WITH_RULES despite Bash "
+                "permission rules, so rewrites may change how those rules match, "
+                "set FURL_PRETOOL_PIPE=0 to disable"
+            )
+        return "PreToolUse pipe active, set FURL_PRETOOL_PIPE=0 to disable"
+
+    if has_rules:
+        word = "rule" if scan.rule_count == 1 else "rules"
+        return (
+            f"PreToolUse pipe off, {scan.rule_count} Bash permission {word} in "
+            f"{_join_scopes(scan.scopes)} could be masked by a rewrite, set "
+            "FURL_PIPE_WITH_RULES=1 to compress anyway or FURL_PRETOOL_PIPE=0 to keep it off"
+        )
+    if scan.doubt:
+        return (
+            "PreToolUse pipe off, Bash permission settings could not be read so it "
+            "stays off for safety, set FURL_PIPE_WITH_RULES=1 to override or "
+            "FURL_PRETOOL_PIPE=0 to keep it off"
+        )
+    return "PreToolUse pipe active, set FURL_PRETOOL_PIPE=0 to disable"
+
+
+def _pretool_pipe_clause() -> str:
+    """Fail-open wrapper: any problem determining the pipe status leaves ONE stderr
+    breadcrumb (user-visible, never model-visible) and returns a conservative clause,
+    so a detection error can never crash the banner or block a session start."""
+    try:
+        return _pretool_pipe_clause_inner()
+    except Exception as exc:
+        try:
+            sys.stderr.write(
+                f"furl: could not determine PreToolUse pipe status [{exc.__class__.__name__}]\n"
+            )
+        except Exception:
+            pass
+        return "PreToolUse pipe status unknown, set FURL_PRETOOL_PIPE=0 to disable"
+
+
 def main() -> None:
     if os.environ.get(_STATUS_LINE_ENV) == "0":
         return
 
     message = (
         f"furl {_PLUGIN_VERSION} · engine furl-ctx {_ENGINE_VERSION}; "
-        "PreToolUse pipe active, set FURL_PRETOOL_PIPE=0 to disable; "
+        f"{_pretool_pipe_clause()}; "
         f"{_armed_clause(_detect_version())}; "
         "store: per-project under ~/.furl; verify: furl_stats"
     )

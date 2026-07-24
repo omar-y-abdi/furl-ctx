@@ -47,7 +47,13 @@ total boundary no command shape can bypass. Unreadable settings (or a set-but-
 unresolvable config-path override) also force passthrough. Residual blindness:
 CLI `--permission-mode`/`--disallowedTools` flags, SDK `managedSettings`, and
 API-fetched remote org policy (`CLAUDE_CODE_REMOTE_SETTINGS_PATH`); if you
-restrict Bash only through those, set `FURL_PRETOOL_PIPE=0`. Known limitations
+restrict Bash only through those, set `FURL_PRETOOL_PIPE=0`. Most sessions keep at
+least one Bash rule, so the pipe is off by default for them; the SessionStart banner
+reports the live status, and the dynamic gating reasons are tallied as `pipe_noop:<reason>`
+in `furl_stats`, while the static rules-present state is shown by the banner rather than
+counted per command. To compress Bash anyway, accepting that the rewrite may change how
+Claude Code matches your rules (no rule-present subset is provably safe), set
+`FURL_PIPE_WITH_RULES=1` — off unless explicitly set. Known limitations
 (redaction gaps on fail-open paths, heredoc edge, permission-rule visibility
 bounds): see the plugin README.
 
@@ -180,7 +186,8 @@ Set these in the plugin's `hooks/hooks.json` / `.mcp.json` env, or your shell:
 | `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tool names never to compress — exact (`Bash`) or fnmatch globs (`mcp__db__*`). Furl's own tools are always excluded. |
 | `FURL_HOOK_MODE` | `normal` | `aggressive` also compresses code in the blob and squeezes smaller outputs; `normal` keeps the default behavior. |
 | `FURL_HOOK_VERBOSE` | off | `1`/`true` prints a one-line savings summary per compression to stderr (`furl: Bash 12.4 KB -> 0.3 KB  -97%`). |
-| `FURL_PRETOOL_PIPE` | on | The PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status") runs by default. Set `0`/`false`/`off`/`no`/`disabled` (case-insensitive) to disable; unset, empty, or any other value leaves it on. Disabled is a byte-identical no-op. |
+| `FURL_PRETOOL_PIPE` | on | The PreToolUse pipe (Bash-only, real savings on today's harness — see "Current harness status") runs by default. Set `0`/`false`/`off`/`no`/`disabled` (case-insensitive) to disable; unset, empty, or any other value leaves it on. Disabled is a byte-identical no-op. When any Bash permission rule exists the pipe stays off for that session unless `FURL_PIPE_WITH_RULES` is set; the SessionStart banner reports the live status. |
+| `FURL_PIPE_WITH_RULES` | off | Conscious opt-in. When truthy (`1`/`true`/`on`/`yes`/`enabled`), the pipe rewrites Bash even when Bash permission rules exist, accepting that the rewrite may change how Claude Code matches those rules. No rule-present subset is provably safe, so it is off unless explicitly set and a typo never enables it. |
 | `FURL_STATUS_LINE` | on | Set `0` to silence the one-line `furl … · engine furl-ctx …` SessionStart status signal. Must be exported in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 | `FURL_CCR_BACKEND` | `sqlite` (set by the plugin) | CCR store backend. Must match between the hook and the `furl` server for retrieval to work. |
 | `FURL_CCR_SPILL` | `1` (set by the plugin) | Durable per-namespace spill tier. When on, a capacity-evicted entry is demoted to a per-project `ccr-ns-<hash>-spill.sqlite3` file instead of dropped, so its marker stays retrievable past the 1000-entry cap (bounded by the spill's own row cap and TTL). Set `0` to opt out. Must match between the hook and the `furl` server. |

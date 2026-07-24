@@ -415,7 +415,14 @@ cross-process and cumulative, surviving entry eviction, surfaced by `furl_stats`
 bucketed `hook_noop_reasons`. A rising `hook_compressions_applied` confirms the hook is
 both compressing and, on 2.1.163 and newer, delivering the shorter output the model reads.
 The counters are stored via `CompressionStore.increment_counter` and `get_counters` and
-read back cross-process through the durable SQLite backend.
+read back cross-process through the durable SQLite backend. The on-by-default PreToolUse
+pipe adds its own buckets to the same `store.hook_activity` block: `pipe_invocations_seen`
+/ `pipe_compressions_applied` when it compresses, and `pipe_noop:<reason>` when it declines
+a rewrite for a **dynamic** reason: `settings-doubt`, `already-wrapped`, `not-bash`, and the
+malformed-input buckets. The two **static** reasons, a permission-rule set that is present
+and an explicitly disabled pipe, are deliberately not counted per command: they fire on
+nearly every Bash call, so a durable counter would add a `furl_ctx` import to the hot path
+for no new signal, and the SessionStart banner already surfaces that state.
 
 **`FURL_PRETOOL_PIPE` — real savings on today's harness (on by default).** Unless
 explicitly disabled, a **PreToolUse** hook rewrites a `Bash` command so its stdout is piped
@@ -452,7 +459,22 @@ override env var set but unresolvable, also force passthrough. The genuine resid
 blindness is CLI `--permission-mode`/`--disallowedTools` flags, SDK `managedSettings`
 options, and API-fetched remote org policy (`CLAUDE_CODE_REMOTE_SETTINGS_PATH` /
 `remoteSettings`); if you restrict Bash only through those, set `FURL_PRETOOL_PIPE=0`
-(details in the plugin README's Known limitations).
+(details in the plugin README's Known limitations). Because most real sessions keep at
+least one Bash permission rule, the pipe is OFF by default for them — a deliberate safety
+choice, not a bug — and that gating is no longer silent: the SessionStart banner reports the
+live status, off with the rule count and scopes, on, or overridden. The banner reads the
+project-root settings, so a subdirectory with its own Bash rules may differ per command, and
+it can only over-report the pipe as active there, never the reverse. Dynamic gating reasons
+are tallied under `pipe_noop:<reason>`, see Observability counters above; the static
+rules-present state is shown by the banner rather than counted per command.
+**Conscious override — `FURL_PIPE_WITH_RULES`.** No rule-present subset is provably safe:
+the rewrite wraps the command in a subshell plus a `uv run` compressor pipe, and Claude
+Code matches permission patterns against that rewritten text, so for any rule kind the match
+can change, and proving invariance would mean reimplementing Claude Code's closed-source,
+version-dependent resolver. The boundary therefore stays total. A user who has read that
+trade-off and accepts that the rewrite may change how Claude Code matches their Bash rules
+can set `FURL_PIPE_WITH_RULES` to a truthy value (`1`/`true`/`on`/`yes`/`enabled`) to
+compress Bash anyway; it is off unless explicitly set, so a typo never enables it.
 
 ## CLI
 

@@ -18,7 +18,7 @@ compressed view unless someone knows to query for it.
 
 Automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `hookSpecificOutput.updatedToolOutput` mirrored to the originating tool's output shape, and because Claude Code 2.1.163 and newer validate that replacement against the tool's schema, the mirrored shape is honored, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. This shape-mirroring was built for upstream issue [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. The one shape still passing through uncompressed is `WebSearch`, whose whole-object result has no single text field to mirror onto.
 
-**Independent of the hook, on every version:** the MCP tools furl_compress, furl_retrieve, furl_search, furl_list, furl_stats, and furl_purge for manual compression and retrieval; durable `<<ccr:HASH>>` storage and retrieval; the observability counters below; and the `FURL_PRETOOL_PIPE` pipe, on by default, which adds Bash savings today. Below 2.1.163 the SessionStart status line and the first-run stderr note say so directly instead of claiming PostToolUse compression is active, naming the detected version — everything else on this line, including the pipe, is unaffected either way. LIBRARY.md carries the canonical harness status.
+**Independent of the hook, on every version:** the MCP tools furl_compress, furl_retrieve, furl_search, furl_list, furl_stats, and furl_purge for manual compression and retrieval; durable `<<ccr:HASH>>` storage and retrieval; the observability counters below; and the `FURL_PRETOOL_PIPE` pipe, on by default, which adds Bash savings today when you have no Bash permission rules configured, with its live on/off status shown in the SessionStart banner. Below 2.1.163 the SessionStart status line and the first-run stderr note say so directly instead of claiming PostToolUse compression is active, naming the detected version — everything else on this line, including the pipe, is unaffected either way. LIBRARY.md carries the canonical harness status.
 
 ### Observability counters
 
@@ -30,7 +30,14 @@ cumulative), surfaced by `furl_stats` under `store.hook_activity`:
 
 **How to read them:** a rising `hook_compressions_applied` alongside `hook_invocations_seen` confirms the hook is compressing matched tool outputs and the harness is honoring the shape-mirrored replacements. The first hook run per project also prints a one-line stderr heads-up. These counters are live as of this plugin release; the pinned engine, `furl-ctx` 1.2.0 and newer, ships the store counter API that populates them. A separate `store.post_tool_use_compression` block reports the detected Claude Code version and whether it can receive a replacement at all, independent of the counters above.
 Once the pipe has run, `pipe_invocations_seen` / `pipe_compressions_applied` /
-`pipe_noop_reasons` appear in the same `store.hook_activity` block.
+`pipe_noop_reasons` appear in the same `store.hook_activity` block. Declined rewrites are
+recorded too, with one split. The two **static** reasons, `permission-rules` (Bash
+permission rules present) and `disabled-env` (`FURL_PRETOOL_PIPE=0`), are **not** counted
+per command: they fire on nearly every Bash call, so counting them would add a `furl_ctx`
+import to the hot path for no new signal, and the SessionStart banner already reports that
+state. The **dynamic** event reasons, `settings-doubt` (settings unreadable),
+`already-wrapped`, `not-bash`, and the malformed-input buckets, are tallied as
+`pipe_noop:<reason>`, so a pipe that skipped a rewrite for one of those shows up here.
 
 ### `FURL_PRETOOL_PIPE` — real savings on today's harness (on by default)
 
@@ -50,8 +57,16 @@ trade-offs, up front):
   **leaves every Bash command untouched**, so your rules apply exactly as native — no
   command shape can bypass them. (`allow` counts because an allow-list makes unlisted
   commands restricted.) Unreadable or malformed settings also force passthrough. The
-  trade-off is honest: once you add any Bash permission rule, the pipe stops compressing
-  Bash for that session.
+  trade-off is honest: **most sessions keep at least one Bash rule, so the pipe is off by
+  default for them.** This is no longer silent: the SessionStart banner reports the live
+  status — off with the rule count and scopes, on, or overridden. The banner reads the
+  **project-root** settings, so a subdirectory with its own Bash rules may differ per
+  command; the banner can only over-report the pipe as active there, never the reverse. The
+  dynamic gating reasons are also visible in `furl_stats` under `pipe_noop:<reason>`; the
+  static rules-present state is shown by the banner, not counted per command. To compress
+  Bash anyway, accepting that the rewrite may change how Claude Code matches your rules, set
+  `FURL_PIPE_WITH_RULES=1` (off unless explicitly set); see Known limitations for why no
+  rule-present subset is provably safe.
 - **Latency:** ~0.3–0.5 s added per rewritten Bash call (two `uv` resolves: the shell
   gate plus the in-command compressor). The first call in a fresh environment pays a
   one-time resolve/build — seconds to tens of seconds.
@@ -107,7 +122,14 @@ the falsy path spends no `uv` resolve.
   `--permission-mode` / `--disallowedTools` flags, SDK `managedSettings` options, and
   API-fetched remote org policy (`CLAUDE_CODE_REMOTE_SETTINGS_PATH` / `remoteSettings`, a
   session-scope fetch rather than a file). (`~/.claude.json` is not read: it carries no
-  deny/ask rules, only `allowedTools`.)
+  deny/ask rules, only `allowedTools`.) **Conscious override:** to compress Bash even with
+  rules present, set `FURL_PIPE_WITH_RULES=1`. It accepts that the rewrite can change how
+  Claude Code matches your rules — the rewrite wraps the command in a subshell plus a `uv
+  run` compressor pipe, and Claude Code matches permission patterns against that rewritten
+  text, so for any rule kind the match can change, and no rule-present subset is provably
+  safe against Claude Code's closed-source, version-dependent matcher. It is off unless
+  explicitly set, so a typo never enables it, and the SessionStart banner reports when it is
+  active despite rules.
 - **Cold-start cost:** with the pipe and the PostToolUse hook both enabled, one Bash
   call can spend up to 3 `uv` resolves before caches warm.
 - **Cosmetic:** bash error messages gain a `line N:` prefix from the multi-line wrapper.
@@ -238,7 +260,8 @@ output that actually enters context.
 | `FURL_HOOK_EXCLUDE_TOOLS` | (none) | Comma-separated tools never to compress — exact or `mcp__db__*` globs. |
 | `FURL_HOOK_MODE` | `normal` | `aggressive` compresses more (code + smaller outputs). |
 | `FURL_HOOK_VERBOSE` | off | `1` prints a one-line per-compression savings summary to stderr. |
-| `FURL_PRETOOL_PIPE` | **on** | The PreToolUse pipe runs **by default** on Bash only, with real savings on today's harness, see "Current harness status". Only an explicitly falsy value, `0`/`false`/`off`/`no`/`disabled`, case-insensitive, whitespace ignored, disables it; unset, empty, or any other value leaves it on. It rewrites Bash only when there are zero readable Bash permission rules; if any deny, ask, or allow `Bash` rule exists in enterprise, project, local, or user settings, it leaves Bash untouched, see Known limitations. The gate runs via `sh -c`, a non-login shell that does not source a login profile; `uv` is resolved by appending common install directories to the inherited PATH, never by replacing it. Set `FURL_PRETOOL_PIPE=0` in the launch environment that starts Claude Code, not in a login profile, for the opt-out to take effect. |
+| `FURL_PRETOOL_PIPE` | **on** | The PreToolUse pipe runs **by default** on Bash only, with real savings on today's harness, see "Current harness status". Only an explicitly falsy value, `0`/`false`/`off`/`no`/`disabled`, case-insensitive, whitespace ignored, disables it; unset, empty, or any other value leaves it on. It rewrites Bash only when there are zero readable Bash permission rules; if any deny, ask, or allow `Bash` rule exists in enterprise, project, local, or user settings, it leaves Bash untouched, see Known limitations. The gate runs via `sh -c`, a non-login shell that does not source a login profile; `uv` is resolved by appending common install directories to the inherited PATH, never by replacing it. Set `FURL_PRETOOL_PIPE=0` in the launch environment that starts Claude Code, not in a login profile, for the opt-out to take effect. When any Bash permission rule exists the pipe stays off for that session unless `FURL_PIPE_WITH_RULES` is set; the SessionStart banner reports the live status. |
+| `FURL_PIPE_WITH_RULES` | **off** | Conscious opt-in. When truthy, `1`/`true`/`on`/`yes`/`enabled` (case-insensitive, whitespace ignored), the PreToolUse pipe rewrites Bash **even when Bash permission rules exist**, accepting that the rewrite may change how Claude Code matches those rules. No rule-present subset is provably safe against Claude Code's closed-source matcher, so this is off unless explicitly set and a typo never enables it; leave it unset to keep the total zero-rules guard. See "Known limitations". |
 | `FURL_STATUS_LINE` | on | `0` silences the one-line SessionStart status signal. Export it in the environment Claude Code launches from — the status hook runs `sh -c`, which does not source login profiles. |
 
 The full `FURL_*` reference is in [`LIBRARY.md`](../../LIBRARY.md) → "Configuration".

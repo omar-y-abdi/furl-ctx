@@ -104,3 +104,27 @@ def test_pipe_counters_named_in_observability_section() -> None:
     section = text.split("### Observability counters", 1)[1].split("### ", 1)[0]
     for name in ("pipe_invocations_seen", "pipe_compressions_applied", "pipe_noop_reasons"):
         assert name in section, f"Observability section missing {name}"
+
+
+def test_pipe_with_rules_optin_documented() -> None:
+    """F3: the FURL_PIPE_WITH_RULES conscious opt-in must be documented on every user
+    surface (README, LIBRARY, SKILL) so a user who wants Bash savings despite
+    permission rules can find the knob, and the pretool_pipe docstring must record
+    WHY no rule-present subset is provably safe (the security reasoning behind it)."""
+    for path in (_README, _LIBRARY, _SKILL):
+        assert "FURL_PIPE_WITH_RULES" in _read(path), f"{path}: FURL_PIPE_WITH_RULES undocumented"
+    src = _read(_PRETOOL)
+    assert "FURL_PIPE_WITH_RULES" in src
+    assert "provably safe" in src.lower(), "pretool_pipe must reason about the safety line"
+
+
+def test_pipe_gating_reasons_documented_in_readme() -> None:
+    """F3 observability: the README observability section must name the pipe_noop
+    bucket scheme AND document the R1 split — the dynamic reasons are counted in
+    furl_stats, while the static permission-rules state is surfaced by the banner and
+    deliberately NOT counted per command."""
+    text = _read(_README)
+    section = text.split("### Observability counters", 1)[1].split("### ", 1)[0]
+    assert "pipe_noop:" in section
+    assert "permission-rules" in section
+    assert "static" in section.lower(), "the counted/not-counted split must be documented"
