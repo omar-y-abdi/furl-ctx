@@ -24,8 +24,14 @@ arrives here as a nested-object cell, which decodes byte-exact.
 
 Grammar decoded here (one table)::
 
-    [N]{col:type[?][=CONST],...}     declaration line
+    [kept[/total]]{col:type[?][=CONST],...}   declaration line. ``/total`` (F4)
+                                      is the ORIGINAL row count, present only on
+                                      the survivor render (rows dropped); absent
+                                      on the lossless tier where kept == total.
     <row lines>                       one CSV-escaped line per row
+    [__stats:col=min/max/sum/count,...]       optional whole-array numeric
+                                      summary (F4) over ALL original rows;
+                                      METADATA, skipped when reconstructing rows.
 
 Encodings understood:
 
@@ -72,9 +78,15 @@ Encodings understood:
   as ``head[index] + tail``. A plain data cell starting with ``__head:`` is
   CSV-quoted by the formatter, so the preamble lines are unambiguous.
 * **JSON container cells** — a ``json``-tagged column may hold object /
-  array cells, shipped as CSV-quoted compact JSON; a quoted cell in such
-  a column whose payload starts with ``{``/``[`` and parses as a JSON
-  container decodes via ``json.loads``. Unambiguous for a conformant
+  array cells. They ship as a length-prefixed envelope
+  ``\x1f<codepoint_len><raw_compact_json>`` (F5): the payload is verbatim
+  ``serde_json`` output with NO quote-doubling, so a nested-object column is
+  never inflated by escaping, and decodes via ``json.loads`` on the raw
+  payload. ``split_unquoted`` / ``_split_logical_lines`` skip an envelope by
+  its length so the inner JSON never perturbs the row grammar. Older output
+  shipped these cells as CSV-quoted compact JSON; such a quoted cell whose
+  payload starts with ``{``/``[`` and parses as a JSON container still decodes
+  via ``json.loads`` (backward compatible). Unambiguous for a conformant
   producer: the Rust compactor canonicalizes any string cell that parses
   as a JSON container (the parsed value replaces the string), so a
   container-looking STRING cell never reaches the wire, and a quoted
@@ -99,7 +111,11 @@ from typing import Any
 # DOTALL: a folded string constant may legally carry a newline inside its
 # CSV-quoted declaration value (the formatter's ``const_decl_value``), so
 # ``(.+)`` must span newlines within the header LOGICAL line.
-_HEADER_RE = re.compile(r"^\[(\d+)\]\{(.+)\}$", re.DOTALL)
+# Header: `[kept]{cols}` (lossless tier, every row shown) OR `[kept/total]{cols}`
+# (survivor render, F4) where `total` is the ORIGINAL row count before drops.
+# Group 1 = kept (body-row count); group 2 = optional original total; group 3 =
+# column declarations. Old `[N]{cols}` output has no `/total` (group 2 = None).
+_HEADER_RE = re.compile(r"^\[(\d+)(?:/(\d+))?\]\{(.+)\}$", re.DOTALL)
 _ARITH_RE = re.compile(r"^(-?\d+)\+(-?\d+)$")
 _ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$")
 _DELTA_RE = re.compile(r"^([+-]\d+)(?:/(Z|[+-]\d{2}:\d{2}))?$")
@@ -135,6 +151,87 @@ _HEAD_PREFIX = "__head:"
 # encoder ``formatter.rs`` (``NULL_SENTINEL`` / ``MISSING_SENTINEL``) exactly.
 _NULL_SENTINEL = "__null__"
 _MISSING_SENTINEL = "__missing__"
+
+# JSON-container cell envelope (F5). A ``json``-tagged column's Object/Array
+# cell whose compact JSON contains a ``"`` ships as
+# ``\x1f<codepoint_len><raw_compact_json>`` instead of CSV-quoted compact JSON,
+# so a nested-object column is never inflated by quote-doubling. A quote-free
+# container (e.g. a numeric array) stays CSV-quoted — the ``\x1f``+length frame
+# would only ADD bytes there (R2), and the decoder accepts both spellings.
+# ``\x1f`` (ASCII Unit Separator) never appears unescaped in ``serde_json``
+# output. An envelope is recognised ONLY at a cell boundary and only when the
+# length digits are followed by a container-opening ``{`` / ``[`` whose declared
+# span carries no raw newline AND ends at a cell boundary (the next unquoted char
+# is a comma, a newline, or end of input) (see ``_envelope_span``); a ``\x1f``
+# anywhere else is treated as a literal byte. That guard is what keeps OLD tables
+# decoding byte-for-byte even though the old encoder never CSV-quoted a raw
+# ``\x1f`` in a plain cell (R1): a legacy ``\x1f`` mid-cell no longer over-reads,
+# a lying or truncated length can no longer swallow the following row, and a
+# legacy value that merely looks framed but ends mid-cell stays literal.
+# ``split_unquoted``
+# / ``_split_logical_lines`` skip a recognised envelope by its code-point length
+# so the raw JSON's inner commas / quotes never perturb the CSV row grammar.
+# Must stay byte-identical to the Rust ``JSON_ENVELOPE_MARK`` (formatter.rs).
+# Old CSV-quoted-JSON container cells still decode (backward compatible), so
+# previously stored tables are unaffected.
+_ENVELOPE = "\x1f"
+
+# Row-drop numeric summary line (F4): ``__stats:col=min/max/sum/count,...``
+# appended by the router to the survivor render over ALL original rows. It is
+# METADATA, not a data row — the decoder skips it when reconstructing rows and
+# ``decode_stats_line`` parses it on demand. Must match the Rust ``STATS_PREFIX``
+# (formatter.rs) / the router's emit (route.rs).
+_STATS_PREFIX = "__stats:"
+
+
+def _envelope_span(s: str, i: int) -> tuple[int, int] | None:
+    """``s[i]`` opens a WELL-FORMED JSON-container envelope.
+
+    A conformant envelope (Rust ``JSON_ENVELOPE_MARK``) is ``\\x1f`` then one or
+    more ASCII digits (the payload's code-point length) then a compact-JSON
+    payload of exactly that length whose first byte opens a container (``{`` or
+    ``[``) and which — being compact JSON — carries no raw newline. On a match
+    return ``(payload_start, payload_end)``; otherwise return ``None``.
+
+    ``None`` means this ``\\x1f`` is NOT a new-format envelope but a raw byte in a
+    legacy cell (the old encoder never CSV-quoted ``\\x1f``), so the caller falls
+    back to byte-for-byte legacy handling. Every rejection below is a distinct
+    backward-compatibility guard (R1):
+
+    * no digit run                    -> a bare ``\\x1f`` is a literal byte;
+    * declared length overruns ``s``  -> truncated / lying length (would swallow
+      the rest of the row, or the NEXT row past a newline) -> legacy;
+    * first payload byte not ``{``/``[`` -> the new encoder only envelopes
+      Object/Array, so ``\\x1f<digits><other>`` is legacy data;
+    * a raw newline inside the span   -> compact JSON never contains one, so the
+      span is bogus and must not eat a real line break;
+    * the span does not END at a cell boundary -> the next unquoted char after the
+      payload must be a comma, a newline, or end of input. A legacy value that
+      merely LOOKS framed (``\\x1f9{}abcdef`` whose declared length reaches into
+      the following cell) ends mid-cell, so it stays a literal byte and the real
+      comma still splits the row (R1 residual). Every conformant new-encoder
+      envelope IS a whole cell, so it always ends at a boundary.
+
+    Never raises. The caller is also responsible for only invoking this at a cell
+    boundary — mid-cell a ``\\x1f`` is always a literal byte.
+    """
+    j = i + 1
+    k = j
+    n = len(s)
+    while k < n and s[k].isdigit():
+        k += 1
+    if k == j:
+        return None  # no length digits -> not an envelope
+    end = k + int(s[j:k])
+    if end > n:
+        return None  # declared length overruns the input (truncated / lying)
+    if k >= n or s[k] not in "{[":
+        return None  # payload must open a JSON container
+    if "\n" in s[k:end]:
+        return None  # compact JSON never contains a raw newline -> malformed
+    if end < n and s[end] not in ",\n":
+        return None  # span ends mid-cell -> legacy value, not a framed envelope
+    return k, end
 
 
 def _days_from_civil(y: int, m: int, d: int) -> int:
@@ -259,33 +356,88 @@ def _split_logical_lines(text: str) -> list[str]:
     lines: list[str] = []
     buf: list[str] = []
     in_quotes = False
-    for ch in text:
+    # A JSON-container envelope opens ONLY at a cell boundary (start of the
+    # text, or right after an unquoted ``,`` / line break). Mid-cell a ``\x1f``
+    # is a literal legacy byte, so it must not be interpreted as a length frame
+    # (R1) — otherwise an old cell like ``a\x1f9hello`` would over-read.
+    at_cell_start = True
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
         if ch == '"':
             in_quotes = not in_quotes
             buf.append(ch)
+            i += 1
+            at_cell_start = False
+        elif ch == _ENVELOPE and not in_quotes and at_cell_start:
+            # F5: a JSON-container envelope. Copy its whole `\x1f<len><json>`
+            # span verbatim by length so the raw JSON's `"` never toggle
+            # `in_quotes` (which would mis-split a LATER quoted cell's embedded
+            # newline). A lying / truncated length whose span would cross this
+            # newline is rejected by `_envelope_span`, so it falls back to a
+            # literal byte and the real line break below still splits (R1).
+            span = _envelope_span(text, i)
+            if span is None:
+                buf.append(ch)
+                i += 1
+            else:
+                buf.append(text[i : span[1]])
+                i = span[1]
+            at_cell_start = False
         elif ch == "\n" and not in_quotes:
             lines.append("".join(buf))
             buf = []
+            i += 1
+            at_cell_start = True
+        elif ch == "," and not in_quotes:
+            buf.append(ch)
+            i += 1
+            at_cell_start = True
         else:
             buf.append(ch)
+            i += 1
+            at_cell_start = False
     lines.append("".join(buf))
     return lines
 
 
 def split_unquoted(s: str) -> list[str]:
-    """Split on commas OUTSIDE CSV double-quoted segments."""
+    """Split on commas OUTSIDE CSV double-quoted segments.
+
+    A JSON-container envelope (``\\x1f<len><raw_json>``, F5) is consumed whole
+    by its code-point length, so the raw JSON's inner commas do not split it.
+    """
     parts: list[str] = []
     buf: list[str] = []
     in_quotes = False
-    for ch in s:
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
         if ch == '"':
             in_quotes = not in_quotes
             buf.append(ch)
+            i += 1
+        elif ch == _ENVELOPE and not in_quotes and not buf:
+            # `not buf` == at a cell boundary (start of cell). An envelope only
+            # opens here; a mid-cell `\x1f` (buf already holds bytes) is a
+            # literal legacy byte and falls through to the else branch, so an old
+            # cell such as `a\x1f9hello` keeps splitting on its real comma (R1).
+            span = _envelope_span(s, i)
+            if span is None:
+                buf.append(ch)
+                i += 1
+            else:
+                buf.append(s[i : span[1]])
+                i = span[1]
         elif ch == "," and not in_quotes:
             parts.append("".join(buf))
             buf = []
+            i += 1
         else:
             buf.append(ch)
+            i += 1
     parts.append("".join(buf))
     return parts
 
@@ -316,6 +468,23 @@ def _decode_cell(raw: str, type_tag: str) -> Any:
     raw-string fallback.
     """
     base_tag = type_tag.rstrip("?")
+    # F5: a length-prefixed JSON-container envelope (`\x1f<len><raw_json>`),
+    # emitted for Object/Array cells of a json-tagged column instead of
+    # CSV-quoted compact JSON. The payload is verbatim JSON — parse it back
+    # directly. Old CSV-quoted container cells still take the quoted branch
+    # below (backward compatible).
+    if base_tag == "json" and raw.startswith(_ENVELOPE):
+        span = _envelope_span(raw, 0)
+        # Only a cell that IS exactly one conformant envelope decodes as JSON.
+        # A legacy cell that merely starts with a raw `\x1f` fails the guard
+        # (`span is None`, or the span does not cover the whole cell) and is
+        # returned byte-for-byte — never reinterpreted as data (R1).
+        if span is not None and span[1] == len(raw):
+            try:
+                return json.loads(raw[span[0] : span[1]])
+            except (json.JSONDecodeError, ValueError):
+                return raw  # non-conformant payload — keep raw bytes
+        return raw
     if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
         text = _unquote_csv(raw)
         if base_tag == "json" and text.startswith(("{", "[")):
@@ -454,9 +623,15 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     header = _HEADER_RE.match(lines[0])
     if not header:
         return None
+    # Group 1 = KEPT (body-row) count; group 2 = optional ORIGINAL total (F4,
+    # survivor render) — carried for callers/telemetry, not needed to
+    # reconstruct rows (rows come from the body lines). `declared_count` stays
+    # the kept count: it bounds the single-var empty-line path and drives the
+    # degenerate fully-folded synthesis, which only occurs on the lossless tier
+    # where kept == total.
     declared_count = int(header.group(1))
     specs: list[ColumnSpec] = []
-    for seg in split_unquoted(header.group(2)):
+    for seg in split_unquoted(header.group(3)):
         spec = _parse_header_segment(seg)
         if spec is None:
             return None
@@ -556,6 +731,10 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     ordinal = 0  # row index for arithmetic folds — counts every row line
     for line in lines[body_start:]:
         if _is_sentinel_line(line):
+            continue
+        # F4: the whole-array numeric summary is METADATA, not a data row — skip
+        # it without advancing `ordinal` (so arith-fold row indexes stay aligned).
+        if line.startswith(_STATS_PREFIX):
             continue
         if not line:
             # An empty physical line is a REAL empty-string value ONLY when
@@ -657,6 +836,37 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
         rows.append(row)
         ordinal += 1
     return rows
+
+
+def decode_stats_line(line: str) -> dict[str, dict[str, float]] | None:
+    """Parse a `__stats:col=min/max/sum/count,...` summary line (F4).
+
+    Returns ``{col: {"min", "max", "sum", "count"}}`` for a stats line, or
+    ``None`` when *line* is not one. The summary is computed by the encoder
+    over ALL original rows (kept AND dropped), so counts and aggregates stay
+    answerable from the inline text after a row-drop. Malformed segments are
+    skipped, never invented. Column names may contain dots (flattened nested
+    columns); the split at the first ``=`` keeps them intact.
+    """
+    if not line.startswith(_STATS_PREFIX):
+        return None
+    out: dict[str, dict[str, float]] = {}
+    payload = line[len(_STATS_PREFIX) :]
+    if not payload:
+        return out
+    for seg in payload.split(","):
+        if "=" not in seg:
+            continue
+        name, stats = seg.split("=", 1)
+        parts = stats.split("/")
+        if len(parts) != 4:
+            continue
+        try:
+            mn, mx, sm, ct = (json.loads(p) for p in parts)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        out[name] = {"min": mn, "max": mx, "sum": sm, "count": ct}
+    return out
 
 
 def _decode_decimal_scaled_cell(resolved: str, scale: int) -> float | None:

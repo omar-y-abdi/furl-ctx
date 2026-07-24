@@ -68,12 +68,15 @@ from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfi
 from furl_ctx.transforms.csv_schema_decoder import (
     _split_logical_lines,  # type: ignore[attr-defined]  # private helper
     decode_csv_schema_rows,
+    decode_stats_line,
+    split_unquoted,
 )
 
 # CCR recovery helper — resolves drop sentinels in the compressed output via
 # both the Rust store and the Python compression_store.  Imported from the
 # CCR recovery invariant suite; do NOT modify that function here.
 from tests.test_ccr_recovery_invariant import _recover_from_output as _ccr_recover_from_output
+from verify.independent_recheck import _unflatten_dotted  # reference dotted-key canonicalization
 
 # Force lossless-first so the targeted regression uses the lossless path.
 # Mirrors the approach used in tests/test_lossless_column_encodings.py.
@@ -780,19 +783,25 @@ def test_json_tagged_object_and_array_cells_round_trip_byte_exact() -> None:
     """COR-13 (c): object/array cells in a ``json``-tagged column of a
     flat table must decode back to objects/arrays, not strings.
 
-    The formatter ships such cells as CSV-quoted compact JSON.  Before
-    the fix ``_decode_cell`` treated every CSV-quoted cell as a string
-    ("CSV-quoted cells are ALWAYS strings" — factually wrong for this
-    producer), silently corrupting the type of every object/array cell
-    on the lossless path.
+    F5: such cells ship as a length-prefixed envelope
+    (``\\x1f<len><raw_compact_json>``) — raw JSON with NO quote-doubling — so
+    the column is never inflated by escaping, and ``_decode_cell`` parses the
+    payload straight back with ``json.loads``. String cells in the same
+    ``json`` column stay CSV-quoted (never enveloped), pinning the boundary.
     """
     items = _make_json_mixed_rows(60)
     text = _compress_csv(items)
 
-    # The trigger shape must actually be on the wire: at least one
-    # CSV-quoted JSON object cell and one quoted JSON array cell.
-    assert '"{' in text and '"[' in text, (
-        f"expected CSV-quoted JSON container cells in the render; got:\n{text[:300]}"
+    # The trigger shape must actually be on the wire: object/array cells ship as
+    # `\x1f`-envelopes carrying UNDOUBLED quotes (raw JSON `{"`), never the old
+    # CSV-quoted, quote-doubled `"{""..."` form.
+    assert "\x1f" in text, f"expected JSON-container envelope cells; got:\n{text[:300]}"
+    assert '{"retries"' in text, f"expected raw (undoubled) JSON object payload; got:\n{text[:300]}"
+    assert '{""' not in text, (
+        f"envelope must not double-quote JSON (no escaping); got:\n{text[:300]}"
+    )
+    assert '"{' not in text, (
+        f"object cells must NOT ship as CSV-quoted compact JSON any more; got:\n{text[:300]}"
     )
 
     rows = decode_csv_schema_rows(text)
@@ -1325,3 +1334,247 @@ def test_benign_dotted_inner_keys_still_flatten_value_exact() -> None:
             f"flattened decode diverged from the documented dotted-key form.\n"
             f"Rendered (first 300):\n{text[:300]}"
         )
+
+
+# ═══════ Test #4 — F5 nested-object envelope + F4 header total / numeric stats ═
+#
+# F5: a `json`-tagged column whose cells are Objects/Arrays ships each cell as a
+# length-prefixed envelope (`\x1f<codepoint_len><raw_compact_json>`) instead of
+# CSV-quoted compact JSON, so the column is never inflated by quote-doubling.
+# F4: when rows are dropped the header carries `[kept/total]` and a trailing
+# `__stats:` line summarises every numeric column over ALL original rows. Both
+# must round-trip losslessly (value-exact under the documented dotted unflatten).
+
+
+def _csv_quote(s: str) -> str:
+    """The pre-F5 wire form of a JSON-container cell (RFC-4180 double-quoting),
+    for before/after size comparison."""
+    return '"' + s.replace('"', '""') + '"'
+
+
+def _chrome_trace_rows(n: int) -> list[dict]:
+    """`n` Chrome-trace-like events with a nested `args:{data:{...}}` object —
+    repeated shape, unique values — the real 33.8 MB-trace shape from report F5.
+    """
+    phases = ["X", "B", "E", "I"]
+    names = ["ScriptCatchup", "MajorGC", "FunctionCall", "RunTask"]
+    return [
+        {
+            "ts": 1000 + i * 137,
+            "dur": 10 + (i % 9) * 3,
+            "pid": 454,
+            "tid": 1 + (i % 3),
+            "ph": phases[i % len(phases)],
+            "name": names[i % len(names)],
+            "args": {"data": {"isolate": f"{14980140067740029991 + i}", "length": 32 + i}},
+        }
+        for i in range(n)
+    ]
+
+
+def test_f5_nested_object_envelope_round_trips_and_deflates() -> None:
+    """F5: the nested-object column round-trips losslessly and its compressed
+    footprint beats BOTH the old CSV-quoted form and its raw source footprint —
+    the escaping inflation from report F5 is gone."""
+    items = _chrome_trace_rows(30)
+    source = json.dumps(items, ensure_ascii=False)
+    text = _compress_to_text(items)
+    rows = decode_csv_schema_rows(text)
+    assert rows is not None, f"expected a lossless CSV render; got:\n{text[:200]}"
+
+    # Lossless (value-exact under the documented dotted-key unflatten).
+    assert [_unflatten_dotted(r) for r in rows] == items, "nested-object round-trip not lossless"
+
+    # No escaping: raw JSON on the wire (`\x1f` envelope), never quote-doubled.
+    assert "\x1f" in text, "expected the JSON-container envelope on the wire"
+    assert '""isolate""' not in text, "args cell must not be quote-doubled (the F5 inflation)"
+    assert '"{' not in text, "object cells must not ship as CSV-quoted compact JSON"
+
+    # `args` flattens one level to `args.data:json` (single-level flatten), whose
+    # cells are the `data` object — measure that column.
+    assert "args.data:json" in text.split("\n", 1)[0]
+    body = [ln for ln in text.split("\n")[1:] if ln and not ln.startswith(("__", "{"))]
+    new_col = sum(len(split_unquoted(ln)[0]) for ln in body)
+    data_json = [
+        json.dumps(it["args"]["data"], separators=(",", ":"), ensure_ascii=False) for it in items
+    ]
+    old_col = sum(len(_csv_quote(dj)) for dj in data_json)  # pre-F5 wire form
+    src_col = sum(
+        len('"args":' + json.dumps(it["args"], separators=(",", ":"), ensure_ascii=False))
+        for it in items
+    )
+    assert new_col < old_col, (
+        f"envelope column ({new_col} B) must be smaller than the old CSV-quoted form ({old_col} B)"
+    )
+    assert new_col <= src_col, (
+        f"enveloped column ({new_col} B) must be <= its source footprint ({src_col} B)"
+    )
+    # Whole-blob: args-heavy compression is a net win, not "near zero / negative".
+    assert len(text) < len(source), f"compressed ({len(text)}) must beat source ({len(source)})"
+
+
+def test_f5_envelope_coexists_with_embedded_newline_cells() -> None:
+    """F5: a row carrying BOTH a nested-object envelope AND a CSV-quoted cell
+    with an embedded newline/comma/quote must round-trip. This pins the
+    `_split_logical_lines` envelope-skip: the raw-JSON payload's `"` must NOT
+    corrupt the quote state used to keep a later newline cell on one logical
+    line. Unicode payloads pin the code-point length agreement."""
+    items = [
+        {
+            "id": i,
+            "note": (f'line1 {i}\nline2, with "comma"' if i % 3 == 0 else f"n{i}"),
+            "meta": {"user": f"u{i}", "tags": [i, i + 1], "loc": {"x": i, "lbl": f"café-{i} 🚀"}},
+        }
+        for i in range(40)
+    ]
+    text = _compress_to_text(items)
+    rows = decode_csv_schema_rows(text)
+    assert rows is not None, f"expected a CSV render; got:\n{text[:200]}"
+    assert "\x1f" in text, "expected nested-object envelopes (meta.tags / meta.loc)"
+    assert [_unflatten_dotted(r) for r in rows] == items, (
+        f"envelope + embedded-newline cells not lossless.\nRendered (first 400):\n{text[:400]}"
+    )
+
+
+def test_f5_envelope_adversarial_container_payloads_round_trip() -> None:
+    """F5: adversarial container payloads — empty `{}`/`[]`, deep nesting,
+    unicode keys/values, commas and quotes INSIDE the JSON — must decode
+    byte-exact through the envelope or decline to a recoverable tier."""
+    payloads: list[object] = [
+        {},
+        {"a": 1},
+        {"unicode": "café 🚀 日本語 العربية", "n": -3},
+        {"nested": {"deep": {"x": [1, 2, {"y": "z"}]}}},
+        [1, 2, 3],
+        ["a", "b,c", 'has "quote"'],
+        {"empty_arr": [], "empty_obj": {}},
+        {"comma,key": "and,comma,value", "q": 'say "hi"'},
+    ]
+    items = []
+    for i in range(64):
+        cfg = (
+            payloads[i % len(payloads)] if i % 5 != 4 else i * 7
+        )  # occasional int → mixed json col
+        items.append({"id": i, "svc": "svc-primary-eu-central-1.internal.example.com", "cfg": cfg})
+    text = _compress_to_text(items)
+    rows = decode_csv_schema_rows(text)
+    if rows is not None and not _has_ccr_sentinel(text):
+        assert rows == items, (
+            f"adversarial envelope payloads not byte-exact.\nRendered (first 400):\n{text[:400]}"
+        )
+
+
+def test_f4_survivor_header_carries_total_and_numeric_stats() -> None:
+    """F4: after a row-drop the inline header is `[kept/total]` (the ORIGINAL
+    total is recoverable from the text), a `__stats:` line carries min/max/sum/
+    count over ALL original rows, and the kept rows still decode exactly."""
+    items = _chrome_trace_rows(60)
+    result = ContentRouter(_MIN_TOKENS).compress(json.dumps(items, ensure_ascii=False))
+    text = result.compressed
+    parsed = json.loads(text)
+    text = parsed if isinstance(parsed, str) else text
+
+    m = re.match(r"^\[(\d+)/(\d+)\]\{", text)
+    assert m is not None, (
+        f"expected a [kept/total] header after row-drop; got: {text.splitlines()[0][:80]!r}"
+    )
+    kept, total = int(m.group(1)), int(m.group(2))
+    assert total == len(items), f"header total {total} != original {len(items)}"
+    assert kept < total, "the survivor render must have dropped rows"
+
+    rows = decode_csv_schema_rows(text)
+    assert rows is not None and len(rows) == kept, f"expected {kept} kept rows, got {rows}"
+    kept_unflat = {json.dumps(_unflatten_dotted(r), sort_keys=True) for r in rows}
+    originals = {json.dumps(it, sort_keys=True) for it in items}
+    assert kept_unflat <= originals, "every kept row must be a genuine original (no invented data)"
+
+    stats_lines = [ln for ln in text.split("\n") if ln.startswith("__stats:")]
+    assert stats_lines, "expected a __stats: summary line after row-drop"
+    stats = decode_stats_line(stats_lines[0])
+    assert stats is not None
+    for col in ("ts", "dur", "tid", "pid"):
+        vals = [it[col] for it in items]
+        assert stats[col] == {
+            "min": min(vals),
+            "max": max(vals),
+            "sum": sum(vals),
+            "count": len(vals),
+        }, f"{col} whole-array stats wrong: {stats.get(col)}"
+
+
+def test_f4_plain_header_without_total_still_decodes() -> None:
+    """Backward compat: the old `[N]{...}` header (no `/total`) still decodes."""
+    rows = decode_csv_schema_rows("[2]{id:int,name:string}\n1,alice\n2,bob")
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
+def test_f5_old_csv_quoted_container_cell_still_decodes() -> None:
+    """Backward compat: a previously-stored table shipped object cells as
+    CSV-quoted compact JSON; the decoder must still read them back as objects."""
+    old = '[2]{cfg:json,id:int=1+1}\n"{""a"":1}"\n"{""b"":2}"'
+    rows = decode_csv_schema_rows(old)
+    assert rows == [{"cfg": {"a": 1}, "id": 1}, {"cfg": {"b": 2}, "id": 2}]
+
+
+def test_f5_old_format_raw_0x1f_mid_cell_decodes_as_legacy() -> None:
+    """R1 backward-compat: the OLD encoder never CSV-quoted a raw 0x1F byte, so
+    an OLD table whose plain cell carries one mid-cell must decode EXACTLY as it
+    did before the envelope existed. 0x1F opens an envelope ONLY at a cell
+    boundary; mid-cell it is a literal byte, so the real comma still splits.
+
+    Pre-PR, ``split_unquoted("a\\x1f9hello,world")`` split on the comma into two
+    cells; the value ``a\\x1f9hello`` merely happens to look like a length frame.
+    A naive ``\\x1f``-anywhere reader would over-read past the comma into a single
+    cell and drop the row on the ``len(parts) != len(cols)`` check (silent loss).
+    """
+    # Splitter level: the mid-cell 0x1F must not be read as a `\x1f9...` frame.
+    assert split_unquoted("a\x1f9hello,world") == ["a\x1f9hello", "world"]
+    # End-to-end: the two string cells decode byte-for-byte, no dropped row.
+    rows = decode_csv_schema_rows("[1]{c1:string,c2:string}\na\x1f9hello,world")
+    assert rows == [{"c1": "a\x1f9hello", "c2": "world"}]
+
+
+def test_f5_lying_envelope_length_does_not_eat_following_row() -> None:
+    """R1: a lying / truncated envelope length is malformed. Whether its declared
+    span OVERRUNS the input or merely CROSSES the next newline, the decoder falls
+    back to legacy byte handling so the FOLLOWING row survives — never silently
+    swallowed (compact JSON carries no raw newline, so a span holding one is
+    bogus by construction).
+    """
+    # (a) Overrunning length: 99 payload code points claimed, the line ends far
+    #     sooner. The bogus envelope must not consume `plainrow`.
+    overrun = '[2]{cfg:json}\n\x1f99{"a":1}\nplainrow'
+    rows = decode_csv_schema_rows(overrun)
+    assert rows is not None and len(rows) == 2, f"overrun length ate a row: {rows}"
+    assert rows[1] == {"cfg": "plainrow"}
+    assert rows[0] == {"cfg": '\x1f99{"a":1}'}, "bogus envelope must stay a raw cell"
+
+    # (b) In-bounds length whose declared span crosses the newline into the next
+    #     row. The newline guard must reject it so the second row still survives.
+    crosser = '[2]{cfg:json}\n\x1f20{"a":1}\nplainrowplainrow'
+    rows2 = decode_csv_schema_rows(crosser)
+    assert rows2 is not None and len(rows2) == 2, f"newline-crossing length ate a row: {rows2}"
+    assert rows2[1] == {"cfg": "plainrowplainrow"}
+
+
+def test_f5_legacy_0x1f_value_spanning_to_comma_is_not_an_envelope() -> None:
+    """R1 residual: a LEGACY string value that begins with 0x1F + digits + a
+    container opener whose declared length REACHES the following comma is still
+    legacy data. A recognised envelope span must END at a cell boundary — the
+    next unquoted char is a comma, a newline, or end of input — so a span that
+    ends mid-cell keeps the 0x1F literal and the real comma still splits the row.
+    Before this guard the span consumed the comma and the row was silently
+    dropped on the column-count check.
+    """
+    # `\x1f9{}abcdef` claims 9 payload code points, reaching the comma; the span
+    # would end mid-`world`, so it is NOT an envelope — the comma still splits.
+    assert split_unquoted("\x1f9{}abcdef,world") == ["\x1f9{}abcdef", "world"]
+    rows = decode_csv_schema_rows("[1]{c1:string,c2:string}\n\x1f9{}abcdef,world")
+    assert rows == [{"c1": "\x1f9{}abcdef", "c2": "world"}]
+
+    # A second review shape: `\x1f12{aaaaaaaa}` reaching the comma likewise.
+    assert split_unquoted("\x1f12{aaaaaaaa},tail") == ["\x1f12{aaaaaaaa}", "tail"]
+
+    # Control: a span that ends WITHIN the cell already decoded fine and still
+    # does — the leading 0x1F stays literal, the real comma splits, no row lost.
+    assert split_unquoted("\x1f3{}zzzz,world") == ["\x1f3{}zzzz", "world"]

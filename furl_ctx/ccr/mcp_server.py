@@ -324,7 +324,8 @@ CSV_DECODE_LEGEND = (
     #    head+tail with a marker, NOT tabled — so an agent reasoning from this
     #    grammar never assumes a log was tabled when it was actually offloaded.
     "Furl tables a structured JSON array of objects — read one before you reason. "
-    "Header `[N]{col:type,...}` = N rows; later lines give each row's non-constant columns as CSV. "
+    "Header `[N]{col:type,...}` = N rows (`[kept/total]` when rows dropped: total=original count); "
+    "later lines give each row's non-constant columns as CSV. "
     "Line-oriented text (logs, traces) is NOT tabled — it ships head+tail + a `<<ccr:HASH>>` marker: "
     "content offloaded, not lost; furl_retrieve it first — never guess dropped data. "
     # 2) One worked micro-example — a JSON-array ROW (not a raw log line):
@@ -335,6 +336,8 @@ CSV_DECODE_LEGEND = (
     "GRAMMAR: type=V constant V; int=B+S row i=B+S*i (0-based); float%k cell/10^k; "
     "string~ ISO ts then ±sec[/tz] deltas; string^ +__affix:col=P,S value=P+cell+S; "
     "string@ +__head:col=<d>h0,h1 cell 1<d>tail=h1+tail; __dict:col=v0,v1 cell indexes it; "
+    "json cell 0x1F+len+JSON or CSV-quoted = that object/array; "
+    "__stats:col=min/max/sum/count = whole-array numeric summary; "
     "= repeats cell above; __null__ null, __missing__ absent key, ? nullable."
 )
 

@@ -28,7 +28,10 @@ from furl_ctx.ccr.mcp_server import (  # noqa: E402
     FurlMCPServer,
     _legend_enabled,
 )
-from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows  # noqa: E402
+from furl_ctx.transforms.csv_schema_decoder import (  # noqa: E402
+    decode_csv_schema_rows,
+    decode_stats_line,
+)
 
 # ─── Flag plumbing ───────────────────────────────────────────────────────────
 
@@ -101,6 +104,9 @@ def test_legend_names_every_shipped_encoding() -> None:
         "string@",  # head-dict fold
         "__head:",
         "__dict:",  # dictionary column
+        "0x1F+len+JSON",  # F5: JSON-container envelope
+        "__stats:",  # F4: whole-array numeric summary
+        "[kept/total]",  # F4: header carries the original total when rows dropped
         "__null__",  # null sentinel
         "__missing__",  # missing-key sentinel
         "<<ccr:HASH>>",  # recovery marker
@@ -132,11 +138,13 @@ def test_legend_stays_within_token_budget() -> None:
     # (which actually measured ~248, not the "~190" an older comment claimed).
     # Naming the INPUT SHAPE each output comes from (JSON array -> table;
     # line-oriented text -> head+tail + marker) — the grammar-truth fix that
-    # stops an agent assuming a log was tabled when it was offloaded — costs
-    # ~25 tokens, so the cap is 280. Still a tight bloat guard.
+    # stops an agent assuming a log was tabled when it was offloaded — cost
+    # ~25 tokens. F4 (the `[kept/total]` header + `__stats:` numeric summary)
+    # and F5 (the `0x1F`-envelope raw-JSON cell) add ~74 tokens of genuinely new
+    # decode grammar, so the cap is 330 (measured ~322). Still a tight guard.
     tiktoken = pytest.importorskip("tiktoken")
     enc = tiktoken.get_encoding("o200k_base")
-    assert len(enc.encode(CSV_DECODE_LEGEND)) <= 280
+    assert len(enc.encode(CSV_DECODE_LEGEND)) <= 330
 
 
 def test_legend_names_input_shape_for_each_output() -> None:
@@ -227,3 +235,28 @@ def test_legend_claim_null_missing_and_nullable() -> None:
     # "__null__ null, __missing__ absent key, ? nullable".
     rows = decode_csv_schema_rows("[3]{v:string?}\n__null__\n__missing__\nreal")
     assert rows == [{"v": None}, {}, {"v": "real"}]
+
+
+def test_legend_claim_kept_total_header() -> None:
+    # F4: "`[kept/total]` when rows dropped: total = original count". The body
+    # carries the KEPT rows; the total is metadata (recoverable from the text).
+    rows = decode_csv_schema_rows("[2/9]{name:string}\nalice\nbob")
+    assert rows == [{"name": "alice"}, {"name": "bob"}]
+
+
+def test_legend_claim_json_container_envelope() -> None:
+    # F5: "json cell 0x1F+len+JSON or CSV-quoted = that object/array". A json
+    # column cell led by 0x1F + a code-point length + raw JSON decodes to that
+    # container. `{"a":1}` is 7 code points; `[1,2]` is 5.
+    rows = decode_csv_schema_rows('[2]{cfg:json,id:int=1+1}\n\x1f7{"a":1}\n\x1f5[1,2]')
+    assert rows == [{"cfg": {"a": 1}, "id": 1}, {"cfg": [1, 2], "id": 2}]
+
+
+def test_legend_claim_stats_line_is_metadata() -> None:
+    # F4: "__stats:col=min/max/sum/count = whole-array numeric summary". The
+    # line is METADATA — skipped when reconstructing rows, parseable on demand.
+    text = "[1/3]{n:int}\n5\n__stats:n=1/9/15/3"
+    assert decode_csv_schema_rows(text) == [{"n": 5}]  # stats line not a row
+    assert decode_stats_line("__stats:n=1/9/15/3") == {
+        "n": {"min": 1, "max": 9, "sum": 15, "count": 3}
+    }
