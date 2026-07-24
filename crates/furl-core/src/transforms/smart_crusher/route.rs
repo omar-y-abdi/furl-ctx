@@ -841,10 +841,15 @@ impl SmartCrusher {
                         let kind = compaction_kind_str(&c);
                         // F4: a whole-array numeric summary (min/max/sum/count
                         // over ALL original rows, not just survivors) so counts
-                        // and aggregates survive the row-drop. Additive metadata
-                        // appended AFTER the savings gate (`compact_len` above
-                        // excludes it), so it never changes the ship decision;
-                        // the reference decoder skips `__stats:` lines when
+                        // and aggregates survive the row-drop. Appended AFTER the
+                        // survivor-vs-JSON savings-floor gate (`compact_len` above
+                        // excludes it), so it never changes THAT gate's decision.
+                        // It IS part of the final shipped render, though, so its
+                        // token weight DOES count in the outer lossy-vs-lossless
+                        // `MinTokens` race (via `render_token_count`): a heavy
+                        // stats line can tip a small array to its all-rows lossless
+                        // render — that is exactly what flips disk@9 today. The
+                        // reference decoder skips `__stats:` lines when
                         // reconstructing rows.
                         let table_body = rendered.trim_end_matches('\n');
                         let rendered_with_sentinel = match numeric_stats_line(&c, items) {
@@ -1216,10 +1221,24 @@ fn set_table_original_count(c: &mut Compaction, total: usize) {
 }
 
 /// F4: build the whole-array numeric summary line
-/// `__stats:col=min/max/sum/count,...` for every numeric (int/float) column
-/// of a flat [`Compaction::Table`], computed over ALL `items` (kept AND
-/// dropped) so counts and aggregates survive the row-drop. Returns `None`
-/// for a non-table compaction or when no column is numeric.
+/// `__stats:col=min/max/sum/count,...` for every NON-CONSTANT numeric
+/// (int/float) column of a flat [`Compaction::Table`], computed over ALL
+/// `items` (kept AND dropped) so counts and aggregates survive the row-drop.
+/// Returns `None` for a non-table compaction or when no non-constant numeric
+/// column is present (so the caller emits no `__stats:` line at all — the
+/// stats line is only worth its bytes when a dropped-row aggregate cannot be
+/// read straight off the header).
+///
+/// A constant-folded column is DELIBERATELY skipped (dead-weight trim): it
+/// already declares `name:type=V` in the `[kept/total]{...}` header, so its
+/// whole-array `min = max = V`, `sum = count * V` and `count = total` all
+/// follow from that value and the header's original total — a stats segment
+/// for it would be pure waste. `demote_subset_only_encodings` runs first (see
+/// the caller) and clears any const fold that does NOT hold over every row, so
+/// a `const_value` that survives to here is universal over all `items` and the
+/// derivation is exact. Arithmetic/positional folds (`ArithInt` etc.) keep
+/// `const_value = None` and are NOT skipped: their survivor-render fold only
+/// describes the shown rows, so their whole-array aggregates are not derivable.
 ///
 /// CONTRACT: the wire prefix + `col=min/max/sum/count` shape is read by the
 /// Python reference decoder (`csv_schema_decoder._STATS_PREFIX` /
@@ -1233,6 +1252,12 @@ fn numeric_stats_line(c: &Compaction, items: &[Value]) -> Option<String> {
     let mut segments: Vec<String> = Vec::new();
     for f in &schema.fields {
         if f.type_tag != "int" && f.type_tag != "float" {
+            continue;
+        }
+        // Dead-weight trim: a constant-folded column already carries `=V` in
+        // the header, so its min/max/sum/count are all derivable from V and the
+        // original total — emitting a stats segment for it is pure waste.
+        if f.const_value.is_some() {
             continue;
         }
         if let Some(stats) = column_numeric_stats(items, &f.name) {
@@ -1319,6 +1344,65 @@ mod numeric_stats_tests {
         // Non-numeric and absent columns contribute no stats.
         assert_eq!(column_numeric_stats(&items, "s"), None);
         assert_eq!(column_numeric_stats(&items, "missing"), None);
+    }
+
+    #[test]
+    fn numeric_stats_line_skips_constant_columns() {
+        use super::super::compaction::ir::{CellValue, FieldSpec, Row, Schema};
+        use serde_json::json;
+
+        let field = |name: &str, tag: &str, konst: Option<Value>| FieldSpec {
+            name: name.into(),
+            type_tag: tag.into(),
+            nullable: false,
+            const_value: konst,
+            encoding: None,
+        };
+        // Two int columns: `k` is a universal constant (=64, already declared in
+        // the header), `v` varies row to row; `s` is non-numeric. The stats line
+        // must carry ONLY `v` — the constant `k`'s min/max/sum/count are all
+        // derivable from its header value, so a segment for it is pure waste.
+        let items: Vec<Value> = (0..3)
+            .map(|i| json!({"k": 64, "v": (i + 1) * 10, "s": "x"}))
+            .collect();
+        let table = Compaction::Table {
+            schema: Schema {
+                fields: vec![
+                    field("k", "int", Some(json!(64))),
+                    field("v", "int", None),
+                    field("s", "string", None),
+                ],
+            },
+            rows: vec![Row::new(vec![
+                CellValue::Scalar(json!(64)),
+                CellValue::Scalar(json!(10)),
+                CellValue::Scalar(json!("x")),
+            ])],
+            original_count: 3,
+        };
+        let line =
+            numeric_stats_line(&table, &items).expect("a non-constant numeric column remains");
+        assert_eq!(line, "__stats:v=10/30/60/3");
+        assert!(
+            !line.contains("k="),
+            "constant column must be omitted: {line}"
+        );
+
+        // 2b: a table whose ONLY numeric column is constant yields NO stats line.
+        let all_const = Compaction::Table {
+            schema: Schema {
+                fields: vec![
+                    field("k", "int", Some(json!(64))),
+                    field("s", "string", None),
+                ],
+            },
+            rows: vec![Row::new(vec![
+                CellValue::Scalar(json!(64)),
+                CellValue::Scalar(json!("x")),
+            ])],
+            original_count: 3,
+        };
+        assert_eq!(numeric_stats_line(&all_const, &items), None);
     }
 }
 

@@ -1342,8 +1342,10 @@ def test_benign_dotted_inner_keys_still_flatten_value_exact() -> None:
 # length-prefixed envelope (`\x1f<codepoint_len><raw_compact_json>`) instead of
 # CSV-quoted compact JSON, so the column is never inflated by quote-doubling.
 # F4: when rows are dropped the header carries `[kept/total]` and a trailing
-# `__stats:` line summarises every numeric column over ALL original rows. Both
-# must round-trip losslessly (value-exact under the documented dotted unflatten).
+# `__stats:` line summarises every NON-CONSTANT numeric column over ALL original
+# rows (a constant column already declares `=V` in the header, so its aggregates
+# are derivable and it is omitted). Both must round-trip losslessly (value-exact
+# under the documented dotted unflatten).
 
 
 def _csv_quote(s: str) -> str:
@@ -1492,7 +1494,10 @@ def test_f4_survivor_header_carries_total_and_numeric_stats() -> None:
     assert stats_lines, "expected a __stats: summary line after row-drop"
     stats = decode_stats_line(stats_lines[0])
     assert stats is not None
-    for col in ("ts", "dur", "tid", "pid"):
+    # `pid` is CONSTANT (454 in every row) -> declared `pid:int=454` in the
+    # header, so its min/max/sum/count are derivable and the stats line omits it
+    # (dead-weight trim). The varying numeric columns still carry whole-array stats.
+    for col in ("ts", "dur", "tid"):
         vals = [it[col] for it in items]
         assert stats[col] == {
             "min": min(vals),
@@ -1500,6 +1505,9 @@ def test_f4_survivor_header_carries_total_and_numeric_stats() -> None:
             "sum": sum(vals),
             "count": len(vals),
         }, f"{col} whole-array stats wrong: {stats.get(col)}"
+    assert "pid" not in stats, (
+        f"constant column pid must be omitted from stats (derivable from its header =V): {stats}"
+    )
 
 
 def test_f4_plain_header_without_total_still_decodes() -> None:
