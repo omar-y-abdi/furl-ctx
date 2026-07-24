@@ -161,11 +161,14 @@ _MISSING_SENTINEL = "__missing__"
 # ``\x1f`` (ASCII Unit Separator) never appears unescaped in ``serde_json``
 # output. An envelope is recognised ONLY at a cell boundary and only when the
 # length digits are followed by a container-opening ``{`` / ``[`` whose declared
-# span carries no raw newline (see ``_envelope_span``); a ``\x1f`` anywhere else
-# is treated as a literal byte. That guard is what keeps OLD tables decoding
-# byte-for-byte even though the old encoder never CSV-quoted a raw ``\x1f`` in a
-# plain cell (R1): a legacy ``\x1f`` mid-cell no longer over-reads, and a lying
-# or truncated length can no longer swallow the following row. ``split_unquoted``
+# span carries no raw newline AND ends at a cell boundary (the next unquoted char
+# is a comma, a newline, or end of input) (see ``_envelope_span``); a ``\x1f``
+# anywhere else is treated as a literal byte. That guard is what keeps OLD tables
+# decoding byte-for-byte even though the old encoder never CSV-quoted a raw
+# ``\x1f`` in a plain cell (R1): a legacy ``\x1f`` mid-cell no longer over-reads,
+# a lying or truncated length can no longer swallow the following row, and a
+# legacy value that merely looks framed but ends mid-cell stays literal.
+# ``split_unquoted``
 # / ``_split_logical_lines`` skip a recognised envelope by its code-point length
 # so the raw JSON's inner commas / quotes never perturb the CSV row grammar.
 # Must stay byte-identical to the Rust ``JSON_ENVELOPE_MARK`` (formatter.rs).
@@ -201,9 +204,15 @@ def _envelope_span(s: str, i: int) -> tuple[int, int] | None:
     * first payload byte not ``{``/``[`` -> the new encoder only envelopes
       Object/Array, so ``\\x1f<digits><other>`` is legacy data;
     * a raw newline inside the span   -> compact JSON never contains one, so the
-      span is bogus and must not eat a real line break.
+      span is bogus and must not eat a real line break;
+    * the span does not END at a cell boundary -> the next unquoted char after the
+      payload must be a comma, a newline, or end of input. A legacy value that
+      merely LOOKS framed (``\\x1f9{}abcdef`` whose declared length reaches into
+      the following cell) ends mid-cell, so it stays a literal byte and the real
+      comma still splits the row (R1 residual). Every conformant new-encoder
+      envelope IS a whole cell, so it always ends at a boundary.
 
-    Never raises. The caller is responsible for only invoking this at a cell
+    Never raises. The caller is also responsible for only invoking this at a cell
     boundary — mid-cell a ``\\x1f`` is always a literal byte.
     """
     j = i + 1
@@ -220,6 +229,8 @@ def _envelope_span(s: str, i: int) -> tuple[int, int] | None:
         return None  # payload must open a JSON container
     if "\n" in s[k:end]:
         return None  # compact JSON never contains a raw newline -> malformed
+    if end < n and s[end] not in ",\n":
+        return None  # span ends mid-cell -> legacy value, not a framed envelope
     return k, end
 
 

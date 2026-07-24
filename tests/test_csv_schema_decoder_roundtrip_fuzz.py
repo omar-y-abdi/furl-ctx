@@ -1555,3 +1555,26 @@ def test_f5_lying_envelope_length_does_not_eat_following_row() -> None:
     rows2 = decode_csv_schema_rows(crosser)
     assert rows2 is not None and len(rows2) == 2, f"newline-crossing length ate a row: {rows2}"
     assert rows2[1] == {"cfg": "plainrowplainrow"}
+
+
+def test_f5_legacy_0x1f_value_spanning_to_comma_is_not_an_envelope() -> None:
+    """R1 residual: a LEGACY string value that begins with 0x1F + digits + a
+    container opener whose declared length REACHES the following comma is still
+    legacy data. A recognised envelope span must END at a cell boundary — the
+    next unquoted char is a comma, a newline, or end of input — so a span that
+    ends mid-cell keeps the 0x1F literal and the real comma still splits the row.
+    Before this guard the span consumed the comma and the row was silently
+    dropped on the column-count check.
+    """
+    # `\x1f9{}abcdef` claims 9 payload code points, reaching the comma; the span
+    # would end mid-`world`, so it is NOT an envelope — the comma still splits.
+    assert split_unquoted("\x1f9{}abcdef,world") == ["\x1f9{}abcdef", "world"]
+    rows = decode_csv_schema_rows("[1]{c1:string,c2:string}\n\x1f9{}abcdef,world")
+    assert rows == [{"c1": "\x1f9{}abcdef", "c2": "world"}]
+
+    # A second review shape: `\x1f12{aaaaaaaa}` reaching the comma likewise.
+    assert split_unquoted("\x1f12{aaaaaaaa},tail") == ["\x1f12{aaaaaaaa}", "tail"]
+
+    # Control: a span that ends WITHIN the cell already decoded fine and still
+    # does — the leading 0x1F stays literal, the real comma splits, no row lost.
+    assert split_unquoted("\x1f3{}zzzz,world") == ["\x1f3{}zzzz", "world"]
