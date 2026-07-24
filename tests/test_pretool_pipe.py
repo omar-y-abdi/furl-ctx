@@ -557,3 +557,69 @@ def test_pipe_compress_redacts_builtin_credentials_when_no_savings() -> None:
 
     assert aws_key not in out, f"AWS access key leaked verbatim through the pipe: {out!r}"
     assert "[REDACTED:aws-access-key]" in out
+
+
+# --- F3: gating observability (pipe_noop counters land in the shared store) --------
+
+
+def test_gating_records_pipe_noop_counter(tmp_path) -> None:
+    """The report's F3 observability, end to end: a rules-gated passthrough records
+    ``pipe_noop:permission-rules`` into the SAME per-project store ``furl_stats``
+    reads, so a silently-off pipe becomes visible. Also pins the passthrough is
+    byte-silent (empty stdout) with rules present."""
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"deny": ["Bash(rm:*)"]}}), encoding="utf-8"
+    )
+    ws = tmp_path / "ws"
+    env = {
+        **os.environ,
+        "FURL_PRETOOL_PIPE": "1",
+        "HOME": str(tmp_path / "home"),
+        "FURL_CCR_BACKEND": "sqlite",
+        "FURL_WORKSPACE_DIR": str(ws),
+        "FURL_CCR_PROJECT_DIR": str(proj),
+    }
+    for _v in (
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
+        "FURL_PIPE_WITH_RULES",
+    ):
+        env.pop(_v, None)
+    payload = json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "cat big"}, "cwd": str(proj)}
+    )
+    proc = subprocess.run(
+        [sys.executable, str(_PRETOOL)], input=payload, capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "rules present -> passthrough, no rewrite"
+
+    # Read the counter back from the SAME namespaced store the hook wrote to.
+    prev = {k: os.environ.get(k) for k in ("FURL_WORKSPACE_DIR", "FURL_CCR_PROJECT_DIR")}
+    os.environ["FURL_WORKSPACE_DIR"] = str(ws)
+    os.environ["FURL_CCR_PROJECT_DIR"] = str(proj)
+    try:
+        from furl_ctx.cache.backends.sqlite import SqliteBackend
+        from furl_ctx.cache.compression_store import (
+            CompressionStore,
+            _ccr_namespace_db_path,
+            _namespace_key,
+        )
+
+        key = _namespace_key(None, None)
+        assert key is not None
+        store = CompressionStore(backend=SqliteBackend(db_path=_ccr_namespace_db_path(key)))
+        try:
+            counters = store.get_counters()
+        finally:
+            store.close()
+        assert counters.get("pipe_noop:permission-rules", 0) >= 1, counters
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

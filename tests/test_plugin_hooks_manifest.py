@@ -57,6 +57,20 @@ _VERSION_ENV_VARS = ("CLAUDE_CODE_EXECPATH", "AI_AGENT")
 _ABOVE_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-212_agent"}
 _BELOW_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-100_agent"}
 
+# Hermetic scope for the SessionStart banner subprocess. The banner now reports the
+# PreToolUse pipe's LIVE status by reading Bash permission rules from the same scopes
+# the pipe gates on (HOME/.claude, CLAUDE_PROJECT_DIR, the cwd, managed settings), so
+# these must be rule-free fresh dirs with the config-path env vars unset — otherwise
+# a developer's real ~/.claude Bash rules would flip the banner to its "pipe off"
+# wording and make the default-wording pins below machine-dependent.
+_BANNER_EMPTY_HOME = tempfile.mkdtemp(prefix="furl-manifest-banner-home-")
+_BANNER_EMPTY_CWD = tempfile.mkdtemp(prefix="furl-manifest-banner-cwd-")
+_BANNER_CONFIG_ENV_VARS = (
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
+)
+
 # The library version the PostToolUse `uv run --with` command pins to. Derived from
 # pyproject so the expected command below never rots, and so a pin that drifts from the
 # shipped library version fails here as well as in test_plugin_version_pins.py.
@@ -133,13 +147,18 @@ def _run_session_start(env_extra: dict[str, str] | None = None) -> subprocess.Co
     command line from hooks.json, with CLAUDE_PLUGIN_ROOT set (Claude Code sets
     it for every hook subprocess) so ``${CLAUDE_PLUGIN_ROOT}/hooks/...`` resolves.
     Scrubs the T7 version-detection env vars first so results never depend on
-    whatever Claude Code version, if any, is actually running the test suite."""
+    whatever Claude Code version, if any, is actually running the test suite.
+
+    Also runs hermetically for the banner's new PreToolUse-pipe status: a rule-free
+    HOME and cwd, with the permission-config path vars unset, so the banner resolves
+    to its default "pipe active" wording regardless of the developer's real
+    ~/.claude Bash rules (the OFF/doubt/override wordings are pinned separately)."""
     command = _load()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    env = {"CLAUDE_PLUGIN_ROOT": str(_PLUGIN_DIR)}
+    env = {"CLAUDE_PLUGIN_ROOT": str(_PLUGIN_DIR), "HOME": _BANNER_EMPTY_HOME}
     if env_extra:
         env.update(env_extra)
     full_env = dict(os.environ)
-    for var in _VERSION_ENV_VARS:
+    for var in (*_VERSION_ENV_VARS, *_BANNER_CONFIG_ENV_VARS):
         full_env.pop(var, None)
     full_env.update(env)
     return subprocess.run(
@@ -147,6 +166,7 @@ def _run_session_start(env_extra: dict[str, str] | None = None) -> subprocess.Co
         capture_output=True,
         text=True,
         env=full_env,
+        cwd=_BANNER_EMPTY_CWD,
     )
 
 
@@ -433,3 +453,116 @@ def test_session_start_unknown_version_preserves_armed_claim() -> None:
     assert proc.returncode == 0, proc.stderr
     message = json.loads(proc.stdout)["systemMessage"]
     assert "PostToolUse compression armed" in message
+
+
+# --- F3: the banner reports the pipe's LIVE, rule-aware status --------------------
+# The old banner printed an unconditional "PreToolUse pipe active" that LIED whenever
+# a Bash permission rule existed (the pipe gates itself off then). These pins run the
+# real banner hermetically against settings on disk, so the clause is deterministic,
+# and prove it now tells the truth: OFF with rules / doubt, ON with none, and the
+# conscious FURL_PIPE_WITH_RULES override reported as such. It shares the pipe's own
+# detection (imported from pretool_pipe), so what it says is what the pipe enforces.
+
+
+def _no_ai_tells(text: str) -> bool:
+    """No em-dash, en-dash, or round brackets — the banner systemMessage rule."""
+    return not any(ch in text for ch in ("—", "–", "(", ")"))
+
+
+def _banner_message(
+    *,
+    home_settings: dict[str, Any] | str | None = None,
+    cwd_settings: dict[str, Any] | None = None,
+    env_extra: dict[str, str] | None = None,
+    above_floor: bool = True,
+) -> str:
+    """Render the SessionStart banner systemMessage hermetically, with HOME/.claude
+    and the cwd carrying exactly the given Bash-permission settings and every
+    config-path env var scrubbed, so the PreToolUse-pipe clause is deterministic."""
+    home = Path(tempfile.mkdtemp(prefix="furl-banner-home-"))
+    work = Path(tempfile.mkdtemp(prefix="furl-banner-cwd-"))
+    if home_settings is not None:
+        (home / ".claude").mkdir(parents=True, exist_ok=True)
+        text = home_settings if isinstance(home_settings, str) else json.dumps(home_settings)
+        (home / ".claude" / "settings.json").write_text(text, encoding="utf-8")
+    if cwd_settings is not None:
+        (work / ".claude").mkdir(parents=True, exist_ok=True)
+        (work / ".claude" / "settings.json").write_text(json.dumps(cwd_settings), encoding="utf-8")
+    command = _load()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    env = {
+        "CLAUDE_PLUGIN_ROOT": str(_PLUGIN_DIR),
+        "HOME": str(home),
+        "AI_AGENT": (_ABOVE_FLOOR_ENV if above_floor else _BELOW_FLOOR_ENV)["AI_AGENT"],
+    }
+    if env_extra:
+        env.update(env_extra)
+    full_env = dict(os.environ)
+    for var in (*_VERSION_ENV_VARS, *_BANNER_CONFIG_ENV_VARS):
+        full_env.pop(var, None)
+    full_env.update(env)
+    proc = subprocess.run(
+        ["/bin/sh", "-c", command], capture_output=True, text=True, env=full_env, cwd=str(work)
+    )
+    assert proc.returncode == 0, proc.stderr
+    message = str(json.loads(proc.stdout)["systemMessage"])
+    # Every path stays AI-tell-free and keeps the version prefix + disable knob.
+    assert _no_ai_tells(message), f"banner has an AI tell: {message!r}"
+    assert message.startswith(f"furl {_LIB_VERSION} · engine furl-ctx {_LIB_VERSION}")
+    assert "FURL_PRETOOL_PIPE=0" in message
+    assert "furl_stats" in message
+    return message
+
+
+def test_banner_pipe_off_names_rule_count_scope_and_optin() -> None:
+    """One user-scope Bash deny rule: pipe OFF, and the banner says so, naming the
+    count, the scope, and the FURL_PIPE_WITH_RULES opt-in — never 'pipe active'."""
+    msg = _banner_message(home_settings={"permissions": {"deny": ["Bash(rm:*)"]}})
+    assert "PreToolUse pipe active" not in msg
+    assert "PreToolUse pipe off" in msg
+    assert "1 Bash permission rule in user settings" in msg
+    assert "FURL_PIPE_WITH_RULES=1" in msg
+
+
+def test_banner_pipe_off_counts_multiple_rules_and_scopes() -> None:
+    """Count is the total across deny/ask/allow; allow counts too (allowlist posture)."""
+    msg = _banner_message(
+        home_settings={
+            "permissions": {"deny": ["Bash(rm:*)", "Bash(curl:*)"], "allow": ["Bash(ls:*)"]}
+        }
+    )
+    assert "3 Bash permission rules in user settings" in msg
+
+
+def test_banner_pipe_off_on_settings_doubt() -> None:
+    """Unreadable settings are doubt: the pipe stays off for safety and the banner
+    reports that honestly instead of claiming active."""
+    msg = _banner_message(home_settings="{ definitely not json")
+    assert "PreToolUse pipe active" not in msg
+    assert "could not be read" in msg
+
+
+def test_banner_override_reported_with_tradeoff() -> None:
+    """FURL_PIPE_WITH_RULES: the pipe rewrites despite rules, and the banner reports
+    the conscious override plus its trade-off, not a bare 'active'."""
+    msg = _banner_message(
+        home_settings={"permissions": {"deny": ["Bash(rm:*)"]}},
+        env_extra={"FURL_PIPE_WITH_RULES": "1"},
+    )
+    assert "active via FURL_PIPE_WITH_RULES" in msg
+    assert "may change how those rules match" in msg
+
+
+def test_banner_pipe_off_when_explicitly_disabled() -> None:
+    msg = _banner_message(
+        home_settings={"permissions": {"deny": ["Bash(rm:*)"]}},
+        env_extra={"FURL_PRETOOL_PIPE": "0"},
+    )
+    assert "PreToolUse pipe off, FURL_PRETOOL_PIPE=0 is set" in msg
+
+
+def test_banner_pipe_active_when_zero_rules() -> None:
+    """The savings case: zero readable Bash rules -> the banner claims the pipe
+    active, matching the pipe's own zero-rules rewrite behavior."""
+    msg = _banner_message(home_settings={"permissions": {"deny": [], "ask": [], "allow": []}})
+    assert "PreToolUse pipe active" in msg
+    assert "pipe off" not in msg

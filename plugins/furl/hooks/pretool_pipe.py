@@ -57,6 +57,32 @@ cannot see CLI flags (``--permission-mode``, ``--disallowedTools``), SDK
 fetch, not a normal file). Users relying on those for Bash restrictions should
 set ``FURL_PRETOOL_PIPE=0`` (documented in the plugin README).
 
+CONSCIOUS OVERRIDE (``FURL_PIPE_WITH_RULES``): the zero-rules invariant costs the
+savings for the many users who keep even one Bash permission rule — the pipe then
+does nothing on every Bash call. A safe subset that keeps it on WITH rules present
+was investigated and rejected: the rewrite wraps the command in a comment, a
+``$(mktemp)`` substitution, a subshell, and a ``uv run`` compressor pipe, and Claude
+Code matches permission patterns against that REWRITTEN text, not the original. For
+ANY rule kind — allow, deny, or ask — the rewrite can change which rule matches: the
+governed verb is buried inside a subshell, a new ``python3``/``uv`` sub-command
+appears, and the substitution/pipe shape can trip the auto-mode obfuscation
+classifier. Proving match-invariance would mean reimplementing Claude Code's
+closed-source, version-dependent resolver exactly, so NO subset is provably safe and
+the total invariant stands. A user who has read this trade-off and accepts that the
+rewrite may change how their Bash rules match may set ``FURL_PIPE_WITH_RULES`` to an
+explicit truthy value (1/true/on/yes/enabled) to rewrite anyway; it is OFF unless
+explicitly set, so a typo never enables it, and it bypasses BOTH the rule gate and
+the settings-doubt gate.
+
+OBSERVABILITY (the gating decision was invisible before): every passthrough now
+records WHY into the shared per-project CCR store via ``_furl_ccr_counters`` — a
+``pipe_noop:<reason>`` counter (``permission-rules``, ``settings-doubt``,
+``disabled-env``, ``not-bash``, ``already-wrapped``, and the malformed-input
+buckets) — so ``furl_stats`` shows a rules-gated pipe instead of silent nothing, and
+the SessionStart banner reports the same live status from the same detection. The
+counter write is best-effort and fail-open, never changes the hook's stdout or exit,
+and is resolved lazily so the rewrite path adds no furl_ctx import.
+
 Contract (PreToolUse):
   stdin  : JSON {tool_name, tool_input:{command, ...}, cwd, ...}
   stdout : to REWRITE, emit {"hookSpecificOutput": {"hookEventName":
@@ -82,6 +108,7 @@ import os
 import shlex
 import sys
 from pathlib import Path
+from typing import Any, NamedTuple
 
 # The engine pin MUST match hooks.json's command pins (a test asserts this) so
 # the compressor resolves the SAME furl-ctx the rest of the plugin uses.
@@ -111,6 +138,30 @@ _DISABLE_VALUES = frozenset({"0", "false", "off", "no", "disabled"})
 # identically even for values with INTERNAL whitespace (review-84 F1).
 _WS_REMOVE = str.maketrans("", "", " \t\n\r\f\v")
 
+# CONSCIOUS OVERRIDE (opt-IN, OFF unless explicitly set). A truthy value rewrites
+# Bash EVEN WHEN permission rules exist. No rule-present subset is provably safe
+# (see the module docstring), so this is a documented conscious trade-off, never a
+# default. Truthy-only so a typo cannot silently enable the risky path; the truthy
+# set mirrors the plugin's other truthy flags (compress_tool_output._flag_enabled).
+_WITH_RULES_ENV = "FURL_PIPE_WITH_RULES"
+_WITH_RULES_TRUE_VALUES = frozenset({"1", "true", "on", "yes", "enabled"})
+
+# Gating no-op reasons, recorded into furl_stats as ``pipe_noop:<reason>`` (via the
+# shared ``PIPE_NOOP_PREFIX``). Named constants, not scattered string literals, so
+# the tests and the banner reference one source of truth.
+_NOOP_DISABLED_ENV = "disabled-env"
+_NOOP_BAD_STDIN = "bad-stdin"
+_NOOP_EMPTY_STDIN = "empty-stdin"
+_NOOP_BAD_JSON = "bad-json"
+_NOOP_NON_DICT_PAYLOAD = "non-dict-payload"
+_NOOP_NOT_BASH = "not-bash"
+_NOOP_BAD_TOOL_INPUT = "bad-tool-input"
+_NOOP_NO_COMMAND = "no-command"
+_NOOP_ALREADY_WRAPPED = "already-wrapped"
+_NOOP_PERMISSION_RULES = "permission-rules"
+_NOOP_SETTINGS_DOUBT = "settings-doubt"
+_NOOP_EMIT_ERROR = "emit-error"
+
 
 def _pipe_disabled(raw: str | None) -> bool:
     """SMART DEFAULT (v10, user-approved): the pipe runs UNLESS explicitly
@@ -127,8 +178,91 @@ def _pipe_disabled(raw: str | None) -> bool:
     return raw.translate(_WS_REMOVE).lower() in _DISABLE_VALUES
 
 
-def _passthrough() -> None:
-    """Emit nothing and succeed: the original command runs unchanged."""
+def _pipe_with_rules_override(raw: str | None) -> bool:
+    """``FURL_PIPE_WITH_RULES``: True ONLY for an explicit truthy value
+    (1/true/on/yes/enabled, case-insensitive, ALL ASCII whitespace removed). Unset,
+    empty, falsy, and unknown values return False — this is an OPT-IN (off unless
+    explicitly set), the inverse posture of ``_pipe_disabled``, so a typo never
+    enables the risky rewrite-with-rules path. When True the pipe rewrites Bash even
+    though permission rules exist or settings are unreadable; the user has accepted
+    the trade-off in the module docstring that the rewrite may change how Claude
+    Code matches their Bash permission rules."""
+    if raw is None:
+        return False
+    return raw.translate(_WS_REMOVE).lower() in _WITH_RULES_TRUE_VALUES
+
+
+# --- gating observability (best-effort, fail-open) --------------------------------
+# Every passthrough records WHY into the shared per-project CCR store so ``furl_stats``
+# surfaces a rules-gated pipe instead of the silent nothing the report flagged (F3).
+# The store is resolved LAZILY on the first record, so the rewrite/savings path never
+# imports furl_ctx: the ~0.1s furl_ctx import behind ``resolve_store`` is paid only
+# when the pipe PASSES a command through, never when it rewrites one. In production a
+# falsy ``FURL_PRETOOL_PIPE`` is filtered by the hooks.json shell gate before this
+# script runs, so a disabled pipe pays nothing here either.
+_counter_ctx_cache: tuple[Any, Any] | None = None
+_counter_ctx_resolved = False
+
+
+def _counters_module() -> Any:
+    """Lazily import the sibling counter helper; None when unavailable (fail-open),
+    so counting degrades to a no-op instead of ever raising into the hook."""
+    try:
+        import _furl_ccr_counters
+
+        return _furl_ccr_counters
+    except Exception:
+        return None
+
+
+def _counter_ctx() -> tuple[Any, Any]:
+    """``(counters_module, store)`` resolved once per process, memoized. Pins the
+    durable sqlite backend and the per-project namespace (``CLAUDE_PROJECT_DIR`` —
+    the standard hook env — else the cwd) so the tally lands in the SAME store
+    ``furl_stats`` reads, identical namespacing to compress_tool_output.py and
+    pipe_compress.py. ``setdefault`` keeps any user override intact."""
+    global _counter_ctx_cache, _counter_ctx_resolved
+    if not _counter_ctx_resolved:
+        _counter_ctx_resolved = True
+        cmod = _counters_module()
+        store = None
+        if cmod is not None:
+            os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
+            os.environ.setdefault(
+                "FURL_CCR_PROJECT_DIR",
+                os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd(),
+            )
+            store = cmod.resolve_store()
+        _counter_ctx_cache = (cmod, store)
+    return _counter_ctx_cache
+
+
+def _record_noop(reason: str | None) -> None:
+    """Tally one ``pipe_noop:<reason>`` bucket, best-effort. A counter problem may
+    never break the hook — a crash here would block the user's Bash — but it is NOT
+    swallowed silently: an unexpected failure leaves ONE stderr breadcrumb (surfaced
+    to the user, never to the model) and continues. ``bump``/``resolve_store`` are
+    themselves fail-open, so this except is defensive belt-and-suspenders."""
+    if not reason:
+        return
+    try:
+        cmod, store = _counter_ctx()
+        if cmod is not None and store is not None:
+            cmod.bump(store, cmod.PIPE_NOOP_PREFIX + reason)
+    except Exception as exc:
+        try:
+            sys.stderr.write(
+                f"furl-pipe: could not record pipe_noop:{reason} [{exc.__class__.__name__}]\n"
+            )
+        except Exception:
+            pass
+
+
+def _passthrough(reason: str | None = None) -> None:
+    """Emit nothing and succeed: the original command runs unchanged. Records the
+    gating *reason* (why the pipe declined this command) so ``furl_stats`` is no
+    longer left guessing — the whole point of the report's F3 fix."""
+    _record_noop(reason)
     sys.exit(0)
 
 
@@ -195,9 +329,22 @@ def _managed_settings_paths() -> tuple[list[Path], bool]:
     return _managed_dir_paths(base.parent, base.name), False
 
 
-def _settings_paths(cwd: str) -> tuple[tuple[Path, ...], bool]:
-    """``(paths, doubt)`` — every permission-rule source this hook can see, across
-    the scopes Claude Code ACTUALLY uses (relocations included).
+# Human-readable scope labels for the SessionStart banner's OFF message and
+# ``_scan_bash_rules``. Kept short and free of round brackets / dashes because the
+# banner systemMessage they end up in is pinned AI-tell-free (test_hook_audit_fixes).
+_SCOPE_MANAGED = "enterprise managed settings"
+_SCOPE_PROJECT = "project settings"
+_SCOPE_USER = "user settings"
+
+
+def _settings_path_groups(cwd: str) -> tuple[tuple[tuple[str, tuple[Path, ...]], ...], bool]:
+    """``(scope_groups, managed_doubt)`` — permission-rule sources grouped BY the
+    scope Claude Code loads them from, so a caller can report WHICH scope carried a
+    rule. ``_settings_paths`` flattens this; ``_scan_bash_rules`` keeps the labels.
+    ONE shared path-discovery implementation, so the pipe gate and the banner cannot
+    drift on what they read.
+
+    Scopes across everything Claude Code ACTUALLY uses (relocations included):
 
     * enterprise managed settings (``_managed_settings_paths`` — per-OS default or
       the ``$CLAUDE_CODE_MANAGED_SETTINGS_PATH`` override; the only ``doubt`` source);
@@ -228,10 +375,29 @@ def _settings_paths(cwd: str) -> tuple[tuple[Path, ...], bool]:
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if config_dir and Path(config_dir) not in user_scopes:
         user_scopes.append(Path(config_dir))
-    scopes = [*project_scopes, *user_scopes]
-    scoped = [scope / name for scope in scopes for name in ("settings.json", "settings.local.json")]
+
+    def _scoped(dirs: list[Path]) -> tuple[Path, ...]:
+        return tuple(
+            scope / name for scope in dirs for name in ("settings.json", "settings.local.json")
+        )
+
     managed_paths, managed_doubt = _managed_settings_paths()
-    return (*managed_paths, *scoped), managed_doubt
+    groups: tuple[tuple[str, tuple[Path, ...]], ...] = (
+        (_SCOPE_MANAGED, tuple(managed_paths)),
+        (_SCOPE_PROJECT, _scoped(project_scopes)),
+        (_SCOPE_USER, _scoped(user_scopes)),
+    )
+    return groups, managed_doubt
+
+
+def _settings_paths(cwd: str) -> tuple[tuple[Path, ...], bool]:
+    """``(paths, doubt)`` — flat view of every permission-rule source, preserving
+    the historical order (managed, then project, then user). A thin flatten over
+    ``_settings_path_groups`` so there is exactly ONE path-discovery implementation
+    behind both this and ``_scan_bash_rules``."""
+    groups, managed_doubt = _settings_path_groups(cwd)
+    flat = tuple(path for _label, paths in groups for path in paths)
+    return flat, managed_doubt
 
 
 def _bash_bodies_from_entries(entries: object) -> tuple[list[str | None], bool]:
@@ -322,6 +488,46 @@ def _has_any_bash_rule(bodies: list[str | None]) -> bool:
     while ``bool([None])`` is True — a recognizable rule must count as present
     even when its body could not be parsed."""
     return bool(bodies)
+
+
+class BashRuleScan(NamedTuple):
+    """Result of scanning every readable settings scope for Bash permission rules.
+
+    * ``rule_count`` — total readable Bash rules found (deny/ask/allow, any scope).
+    * ``scopes`` — human labels of the scopes that carried at least one rule.
+    * ``doubt`` — a source EXISTS but could not be read or parsed, so the true rule
+      set is unknowable.
+
+    Either ``rule_count > 0`` or ``doubt`` means the pipe must NOT rewrite (unless
+    the conscious ``FURL_PIPE_WITH_RULES`` override is set). This is the exact signal
+    both the pipe gate and the SessionStart banner consume, so what the banner
+    reports is precisely what the pipe enforces."""
+
+    rule_count: int
+    scopes: tuple[str, ...]
+    doubt: bool
+
+
+def _scan_bash_rules(cwd: str) -> BashRuleScan:
+    """Scan every settings scope for Bash permission rules, keeping per-scope
+    attribution. The single detection the pipe gate (existence + doubt) and the
+    banner (count + scopes) both call, built on the same ``_settings_path_groups``
+    discovery and ``_load_bash_rule_bodies`` reader so the two cannot drift.
+
+    Equivalent to the flat ``_settings_paths`` + ``_load_bash_rule_bodies`` +
+    ``_has_any_bash_rule`` pipeline the gate used before: ``rule_count > 0`` iff
+    ``_has_any_bash_rule`` was True, and ``doubt`` is the same OR of path and load
+    doubt — just grouped so the count and scope attribution survive for the banner."""
+    groups, doubt = _settings_path_groups(cwd)
+    total = 0
+    scopes_with_rules: list[str] = []
+    for label, paths in groups:
+        bodies, load_doubt = _load_bash_rule_bodies(paths)
+        doubt = doubt or load_doubt
+        if _has_any_bash_rule(bodies):
+            total += len(bodies)
+            scopes_with_rules.append(label)
+    return BashRuleScan(rule_count=total, scopes=tuple(scopes_with_rules), doubt=doubt)
 
 
 def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
@@ -415,52 +621,59 @@ def _project_dir(payload: dict) -> str:
 
 
 def main() -> None:
-    # Opt-OUT gate FIRST (S1 smart default): an explicitly disabled pipe is a
-    # byte-identical no-op — we never even parse stdin, zero added latency.
+    # Opt-OUT gate FIRST (S1 smart default). In production the hooks.json shell gate
+    # already skips a falsy FURL_PRETOOL_PIPE before this script is even spawned, so
+    # this python mirror is defense-in-depth; when it IS reached (direct invocation)
+    # it records the reason like every other passthrough.
     if _pipe_disabled(os.environ.get(_ENABLE_ENV)):
-        _passthrough()
+        _passthrough(_NOOP_DISABLED_ENV)
 
     try:
         raw = sys.stdin.read()
     except Exception:
-        _passthrough()
+        _passthrough(_NOOP_BAD_STDIN)
     if not raw.strip():
-        _passthrough()
+        _passthrough(_NOOP_EMPTY_STDIN)
     try:
         payload = json.loads(raw)
     except Exception:
-        _passthrough()
+        _passthrough(_NOOP_BAD_JSON)
     if not isinstance(payload, dict):
-        _passthrough()
+        _passthrough(_NOOP_NON_DICT_PAYLOAD)
 
     # Bash only (the matcher is Bash; double-check so a mis-scoped registration
     # can never rewrite another tool's input).
     if payload.get("tool_name") != "Bash":
-        _passthrough()
+        _passthrough(_NOOP_NOT_BASH)
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
-        _passthrough()
+        _passthrough(_NOOP_BAD_TOOL_INPUT)
     command = tool_input.get("command")
     if not isinstance(command, str) or not command.strip():
-        _passthrough()
+        _passthrough(_NOOP_NO_COMMAND)
 
     # Loop guard: never double-wrap a command we (any plugin version) rewrote —
     # matches the stable "# furl-pipe" prefix, not one marker spelling.
     if _PIPE_GUARD in command:
-        _passthrough()
+        _passthrough(_NOOP_ALREADY_WRAPPED)
 
     # SECURITY GUARD (provably-safe, total): rewrite ONLY when ZERO readable Bash
-    # permission rules exist. If ANY Bash rule (deny/ask/allow) is present — or
-    # settings are unreadable/malformed (doubt) — pass through so the original
-    # command runs and CC's rules apply exactly as native. No per-verb analysis,
-    # so no command shape can mask a rule.
-    raw_cwd = payload.get("cwd")
-    guard_cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else os.getcwd()
-    paths, path_doubt = _settings_paths(guard_cwd)
-    bodies, load_doubt = _load_bash_rule_bodies(paths)
-    if path_doubt or load_doubt or _has_any_bash_rule(bodies):
-        _passthrough()
+    # permission rules exist and settings are fully readable — UNLESS the user set
+    # the conscious FURL_PIPE_WITH_RULES override (see the module docstring: no
+    # rule-present subset is provably safe). The override short-circuits the scan
+    # entirely, so an opted-in user pays no settings I/O either; without it, ANY
+    # Bash rule (deny/ask/allow) or unreadable settings (doubt) forces passthrough,
+    # so CC's rules apply exactly as native and no command shape can mask a rule. The
+    # concrete-rule reason wins the label over doubt when both hold — more actionable.
+    if not _pipe_with_rules_override(os.environ.get(_WITH_RULES_ENV)):
+        raw_cwd = payload.get("cwd")
+        guard_cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else os.getcwd()
+        scan = _scan_bash_rules(guard_cwd)
+        if scan.rule_count > 0:
+            _passthrough(_NOOP_PERMISSION_RULES)
+        if scan.doubt:
+            _passthrough(_NOOP_SETTINGS_DOUBT)
 
     compressor = str(Path(__file__).resolve().parent / "pipe_compress.py")
     rewritten = _rewrite_command(command, _project_dir(payload), compressor)
@@ -474,16 +687,25 @@ def main() -> None:
     try:
         sys.stdout.write(json.dumps(output))
     except Exception:
-        _passthrough()
+        _passthrough(_NOOP_EMIT_ERROR)
     sys.exit(0)
 
 
 if __name__ == "__main__":
-    # Last-resort guard: no uncaught exception may reach the host — fail open to
-    # the original command (emit nothing, exit 0).
+    # Last-resort guard: no uncaught exception may reach the host — fail open to the
+    # original command (emit nothing, exit 0). Not silent: leave one stderr
+    # breadcrumb (user-visible, never model-visible) so an unexpected failure is
+    # diagnosable, per the repo's no-silent-swallow doctrine.
     try:
         main()
     except SystemExit:
         raise
-    except BaseException:
+    except BaseException as exc:
+        try:
+            sys.stderr.write(
+                f"furl-pipe: unexpected error, command passed through unchanged "
+                f"[{exc.__class__.__name__}]\n"
+            )
+        except Exception:
+            pass
         sys.exit(0)
