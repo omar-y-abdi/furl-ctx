@@ -1197,9 +1197,13 @@ class ContentCompressionEngine:
 
             # Preserve code fence markers. The fence bytes SHIP, so they are
             # counted AFTER wrapping (COR-30) — counting the bare section
-            # undercounted fenced output and overstated savings.
-            if section.is_code_fence and section.language:
-                compressed_content = f"```{section.language}\n{compressed_content}\n```"
+            # undercounted fenced output and overstated savings. A bare
+            # ``` fence carries language="" (never None for a fenced
+            # section — see split_into_sections), so the f-string below
+            # reproduces the original bare fence instead of fabricating a
+            # language tag the input never had.
+            if section.is_code_fence:
+                compressed_content = f"```{section.language or ''}\n{compressed_content}\n```"
                 compressed_tokens = count(compressed_content)
 
             compressed_sections.append(compressed_content)
