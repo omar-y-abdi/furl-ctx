@@ -49,8 +49,9 @@ CLI `--permission-mode`/`--disallowedTools` flags, SDK `managedSettings`, and
 API-fetched remote org policy (`CLAUDE_CODE_REMOTE_SETTINGS_PATH`); if you
 restrict Bash only through those, set `FURL_PRETOOL_PIPE=0`. Most sessions keep at
 least one Bash rule, so the pipe is off by default for them; the SessionStart banner
-reports the live status and each gated passthrough is tallied as `pipe_noop:<reason>`
-in `furl_stats`. To compress Bash anyway, accepting that the rewrite may change how
+reports the live status, and the dynamic gating reasons are tallied as `pipe_noop:<reason>`
+in `furl_stats`, while the static rules-present state is shown by the banner rather than
+counted per command. To compress Bash anyway, accepting that the rewrite may change how
 Claude Code matches your rules (no rule-present subset is provably safe), set
 `FURL_PIPE_WITH_RULES=1` — off unless explicitly set. Known limitations
 (redaction gaps on fail-open paths, heredoc edge, permission-rule visibility

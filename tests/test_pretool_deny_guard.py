@@ -595,18 +595,21 @@ def test_default_config_with_rules_is_silent_and_off(tmp_path) -> None:
     assert proc.stdout == "", "default-on pipe with rules present must be silent and off"
 
 
-def test_record_noop_bumps_prefixed_reason(monkeypatch) -> None:
-    """Unit: every passthrough reason is tallied as ``pipe_noop:<reason>`` via the
-    shared counters module — the durable observability the report's F3 asked for.
-    A missing reason records nothing (guards against an accidental bare bump)."""
+def test_record_noop_counts_dynamic_and_skips_static(monkeypatch) -> None:
+    """R1: dynamic event reasons are tallied as ``pipe_noop:<reason>``, while the two
+    STATIC reasons (permission-rules, disabled-env) are skipped WITHOUT even resolving
+    the store, so the hot path pays no furl_ctx import. A missing or empty reason
+    records nothing (guards against an accidental bare bump)."""
     recorded: list[str] = []
+    resolves = {"n": 0}
 
-    class _FakeCounters:
+    class _SpyCounters:
         PIPE_NOOP_PREFIX = "pipe_noop:"
 
         @staticmethod
         def resolve_store() -> object:
-            return object()  # non-None so bump runs
+            resolves["n"] += 1
+            return object()  # non-None so bump would run
 
         @staticmethod
         def bump(store: object, name: str) -> None:
@@ -614,19 +617,29 @@ def test_record_noop_bumps_prefixed_reason(monkeypatch) -> None:
 
     monkeypatch.setenv("FURL_CCR_BACKEND", "sqlite")
     monkeypatch.setenv("FURL_CCR_PROJECT_DIR", "/tmp/furl-record-noop")
-    monkeypatch.setattr(_pretool_mod, "_counters_module", lambda: _FakeCounters)
+    monkeypatch.setattr(_pretool_mod, "_counters_module", lambda: _SpyCounters)
     monkeypatch.setattr(_pretool_mod, "_counter_ctx_resolved", False)
     monkeypatch.setattr(_pretool_mod, "_counter_ctx_cache", None)
-    _pretool_mod._record_noop("permission-rules")
+
+    # STATIC reasons: skipped before the store is resolved (no furl_ctx import).
+    _pretool_mod._record_noop(_pretool_mod._NOOP_PERMISSION_RULES)
+    _pretool_mod._record_noop(_pretool_mod._NOOP_DISABLED_ENV)
+    assert resolves["n"] == 0, "static reasons must not resolve the store"
+    assert recorded == []
+
+    # DYNAMIC reasons: tallied under pipe_noop:<reason>.
+    _pretool_mod._record_noop(_pretool_mod._NOOP_ALREADY_WRAPPED)
+    _pretool_mod._record_noop(_pretool_mod._NOOP_SETTINGS_DOUBT)
     _pretool_mod._record_noop(None)  # no reason -> nothing recorded
     _pretool_mod._record_noop("")  # empty reason -> nothing recorded
-    assert recorded == ["pipe_noop:permission-rules"]
+    assert recorded == ["pipe_noop:already-wrapped", "pipe_noop:settings-doubt"]
 
 
 def test_record_noop_never_raises_when_store_unavailable(monkeypatch) -> None:
     """Best-effort + fail-open: if the counters module cannot be imported the record
-    is a silent no-op that never raises into the hook (a crash would block Bash)."""
+    is a silent no-op that never raises into the hook (a crash would block Bash). Uses
+    a DYNAMIC reason so it actually exercises the store-resolution path."""
     monkeypatch.setattr(_pretool_mod, "_counters_module", lambda: None)
     monkeypatch.setattr(_pretool_mod, "_counter_ctx_resolved", False)
     monkeypatch.setattr(_pretool_mod, "_counter_ctx_cache", None)
-    _pretool_mod._record_noop("permission-rules")  # must not raise
+    _pretool_mod._record_noop(_pretool_mod._NOOP_SETTINGS_DOUBT)  # must not raise

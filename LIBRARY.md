@@ -417,9 +417,12 @@ both compressing and, on 2.1.163 and newer, delivering the shorter output the mo
 The counters are stored via `CompressionStore.increment_counter` and `get_counters` and
 read back cross-process through the durable SQLite backend. The on-by-default PreToolUse
 pipe adds its own buckets to the same `store.hook_activity` block: `pipe_invocations_seen`
-/ `pipe_compressions_applied` when it compresses, and `pipe_noop:<reason>` (e.g.
-`permission-rules`, `settings-doubt`, `already-wrapped`, `disabled-env`) when it declines a
-rewrite, so a rules-gated pipe is visible in `furl_stats` rather than silently doing nothing.
+/ `pipe_compressions_applied` when it compresses, and `pipe_noop:<reason>` when it declines
+a rewrite for a **dynamic** reason: `settings-doubt`, `already-wrapped`, `not-bash`, and the
+malformed-input buckets. The two **static** reasons, a permission-rule set that is present
+and an explicitly disabled pipe, are deliberately not counted per command: they fire on
+nearly every Bash call, so a durable counter would add a `furl_ctx` import to the hot path
+for no new signal, and the SessionStart banner already surfaces that state.
 
 **`FURL_PRETOOL_PIPE` — real savings on today's harness (on by default).** Unless
 explicitly disabled, a **PreToolUse** hook rewrites a `Bash` command so its stdout is piped
@@ -459,8 +462,11 @@ options, and API-fetched remote org policy (`CLAUDE_CODE_REMOTE_SETTINGS_PATH` /
 (details in the plugin README's Known limitations). Because most real sessions keep at
 least one Bash permission rule, the pipe is OFF by default for them — a deliberate safety
 choice, not a bug — and that gating is no longer silent: the SessionStart banner reports the
-live status (off with the rule count and scopes, on, or overridden), and each gated
-passthrough is tallied under `pipe_noop:<reason>` (see Observability counters above).
+live status, off with the rule count and scopes, on, or overridden. The banner reads the
+project-root settings, so a subdirectory with its own Bash rules may differ per command, and
+it can only over-report the pipe as active there, never the reverse. Dynamic gating reasons
+are tallied under `pipe_noop:<reason>`, see Observability counters above; the static
+rules-present state is shown by the banner rather than counted per command.
 **Conscious override — `FURL_PIPE_WITH_RULES`.** No rule-present subset is provably safe:
 the rewrite wraps the command in a subshell plus a `uv run` compressor pipe, and Claude
 Code matches permission patterns against that rewritten text, so for any rule kind the match

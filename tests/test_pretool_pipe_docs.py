@@ -119,10 +119,12 @@ def test_pipe_with_rules_optin_documented() -> None:
 
 
 def test_pipe_gating_reasons_documented_in_readme() -> None:
-    """F3 observability: the README observability section must name the gating-reason
-    bucket scheme so a user knows a rules-gated pipe surfaces in furl_stats rather
-    than as silent nothing."""
+    """F3 observability: the README observability section must name the pipe_noop
+    bucket scheme AND document the R1 split — the dynamic reasons are counted in
+    furl_stats, while the static permission-rules state is surfaced by the banner and
+    deliberately NOT counted per command."""
     text = _read(_README)
     section = text.split("### Observability counters", 1)[1].split("### ", 1)[0]
     assert "pipe_noop:" in section
     assert "permission-rules" in section
+    assert "static" in section.lower(), "the counted/not-counted split must be documented"

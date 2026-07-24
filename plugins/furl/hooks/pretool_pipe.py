@@ -74,14 +74,21 @@ explicit truthy value (1/true/on/yes/enabled) to rewrite anyway; it is OFF unles
 explicitly set, so a typo never enables it, and it bypasses BOTH the rule gate and
 the settings-doubt gate.
 
-OBSERVABILITY (the gating decision was invisible before): every passthrough now
-records WHY into the shared per-project CCR store via ``_furl_ccr_counters`` — a
-``pipe_noop:<reason>`` counter (``permission-rules``, ``settings-doubt``,
-``disabled-env``, ``not-bash``, ``already-wrapped``, and the malformed-input
-buckets) — so ``furl_stats`` shows a rules-gated pipe instead of silent nothing, and
-the SessionStart banner reports the same live status from the same detection. The
-counter write is best-effort and fail-open, never changes the hook's stdout or exit,
-and is resolved lazily so the rewrite path adds no furl_ctx import.
+OBSERVABILITY (the gating decision was invisible before): a declined rewrite now
+records WHY, with one deliberate split. The two STATIC reasons — a permission-rule
+set that is present, and an explicitly disabled pipe — are NOT counted per command:
+they fire on nearly every Bash call, and a durable counter there would tax the hot
+path with a ~0.1s furl_ctx import for no new signal, since the banner already reports
+that state once and on-demand stats recompute it live. The DYNAMIC event reasons —
+``settings-doubt``, ``already-wrapped``, ``not-bash``, emit errors, and the
+malformed-input buckets — ARE tallied into the shared per-project CCR store via
+``_furl_ccr_counters`` as ``pipe_noop:<reason>`` and surfaced by ``furl_stats``;
+those are rare, so their counter cost is negligible. The write is best-effort and
+fail-open, never changes the hook's stdout or exit, and resolves the store lazily so
+the rewrite path adds no furl_ctx import. The banner and the pipe gate share ONE
+detection, so the banner's project-root status reflects the same rule reading the
+pipe enforces; their results can differ only for a subdirectory that carries its own
+settings.
 
 Contract (PreToolUse):
   stdin  : JSON {tool_name, tool_input:{command, ...}, cwd, ...}
@@ -162,6 +169,14 @@ _NOOP_PERMISSION_RULES = "permission-rules"
 _NOOP_SETTINGS_DOUBT = "settings-doubt"
 _NOOP_EMIT_ERROR = "emit-error"
 
+# STATIC reasons NOT counted per command. Both reflect session-static state that
+# fires on nearly every Bash call: a permission-rule set that is present, or an
+# explicitly disabled pipe. A durable counter there would tax the hot path with a
+# ~0.1s furl_ctx import for no new signal — the SessionStart banner reports that
+# state once and on-demand stats recompute it live. Every OTHER (dynamic, event)
+# reason is counted; those are rare, so their counter cost is negligible.
+_UNCOUNTED_REASONS = frozenset({_NOOP_PERMISSION_RULES, _NOOP_DISABLED_ENV})
+
 
 def _pipe_disabled(raw: str | None) -> bool:
     """SMART DEFAULT (v10, user-approved): the pipe runs UNLESS explicitly
@@ -217,10 +232,13 @@ def _counters_module() -> Any:
 
 def _counter_ctx() -> tuple[Any, Any]:
     """``(counters_module, store)`` resolved once per process, memoized. Pins the
-    durable sqlite backend and the per-project namespace (``CLAUDE_PROJECT_DIR`` —
-    the standard hook env — else the cwd) so the tally lands in the SAME store
-    ``furl_stats`` reads, identical namespacing to compress_tool_output.py and
-    pipe_compress.py. ``setdefault`` keeps any user override intact."""
+    durable sqlite backend and resolves the per-project store. ``main`` sets
+    ``FURL_CCR_PROJECT_DIR`` from ``_project_dir(payload)`` before any counted
+    passthrough, so the tally lands in the SAME per-project namespace the rewrite
+    path bakes and ``furl_stats`` reads. The ``CLAUDE_PROJECT_DIR``-or-cwd
+    ``setdefault`` here is only the fallback for the rare pre-payload passthroughs
+    (bad stdin / JSON) where no payload cwd exists yet; ``setdefault`` keeps the
+    value ``main`` already set, and any user override, intact."""
     global _counter_ctx_cache, _counter_ctx_resolved
     if not _counter_ctx_resolved:
         _counter_ctx_resolved = True
@@ -238,12 +256,15 @@ def _counter_ctx() -> tuple[Any, Any]:
 
 
 def _record_noop(reason: str | None) -> None:
-    """Tally one ``pipe_noop:<reason>`` bucket, best-effort. A counter problem may
-    never break the hook — a crash here would block the user's Bash — but it is NOT
-    swallowed silently: an unexpected failure leaves ONE stderr breadcrumb (surfaced
-    to the user, never to the model) and continues. ``bump``/``resolve_store`` are
-    themselves fail-open, so this except is defensive belt-and-suspenders."""
-    if not reason:
+    """Tally one ``pipe_noop:<reason>`` bucket, best-effort. Skips the two STATIC
+    reasons (``_UNCOUNTED_REASONS``) BEFORE the store is even resolved, so the hot
+    permission-rules / disabled-env path pays NO furl_ctx import; those states are
+    surfaced once by the banner instead. A counter problem may never break the hook —
+    a crash here would block the user's Bash — but it is NOT swallowed silently: an
+    unexpected failure leaves ONE stderr breadcrumb (surfaced to the user, never to
+    the model) and continues. ``bump``/``resolve_store`` are themselves fail-open, so
+    this except is defensive belt-and-suspenders."""
+    if not reason or reason in _UNCOUNTED_REASONS:
         return
     try:
         cmod, store = _counter_ctx()
@@ -341,8 +362,8 @@ def _settings_path_groups(cwd: str) -> tuple[tuple[tuple[str, tuple[Path, ...]],
     """``(scope_groups, managed_doubt)`` — permission-rule sources grouped BY the
     scope Claude Code loads them from, so a caller can report WHICH scope carried a
     rule. ``_settings_paths`` flattens this; ``_scan_bash_rules`` keeps the labels.
-    ONE shared path-discovery implementation, so the pipe gate and the banner cannot
-    drift on what they read.
+    ONE shared path-discovery implementation behind both the pipe gate and the banner,
+    so they share a single detection of what to read.
 
     Scopes across everything Claude Code ACTUALLY uses (relocations included):
 
@@ -512,7 +533,10 @@ def _scan_bash_rules(cwd: str) -> BashRuleScan:
     """Scan every settings scope for Bash permission rules, keeping per-scope
     attribution. The single detection the pipe gate (existence + doubt) and the
     banner (count + scopes) both call, built on the same ``_settings_path_groups``
-    discovery and ``_load_bash_rule_bodies`` reader so the two cannot drift.
+    discovery and ``_load_bash_rule_bodies`` reader so they share one implementation.
+    The gate scans the per-command payload cwd and the banner the session project
+    root, so their results can differ for a subdirectory with its own settings, but
+    the detection LOGIC is identical.
 
     Equivalent to the flat ``_settings_paths`` + ``_load_bash_rule_bodies`` +
     ``_has_any_bash_rule`` pipeline the gate used before: ``rule_count > 0`` iff
@@ -640,6 +664,12 @@ def main() -> None:
         _passthrough(_NOOP_BAD_JSON)
     if not isinstance(payload, dict):
         _passthrough(_NOOP_NON_DICT_PAYLOAD)
+
+    # Namespace the gating counters to the SAME per-project store the rewrite path
+    # bakes and furl_stats reads: derive it from the payload the way _project_dir and
+    # compress_tool_output.py do (CLAUDE_PROJECT_DIR, else the payload cwd, else
+    # getcwd), NOT the hook's own getcwd, which can differ from the payload cwd (R2).
+    os.environ.setdefault("FURL_CCR_PROJECT_DIR", _project_dir(payload))
 
     # Bash only (the matcher is Bash; double-check so a mis-scoped registration
     # can never rewrite another tool's input).

@@ -29,9 +29,12 @@ or detection heuristic ever changes.
 
 The PreToolUse pipe clause is NOT static: it reports the pipe's LIVE status by
 running the SAME Bash-permission-rule detection the pipe itself gates on, imported
-from ``pretool_pipe`` so there is one source of truth and the banner's claim and the
-pipe's behavior cannot drift. When any Bash rule exists the pipe is off, and the
-banner now says so, naming the scopes and the ``FURL_PIPE_WITH_RULES`` opt-in,
+from ``pretool_pipe`` so there is one source of truth for the detection logic. The
+banner scans the session project root while the pipe gates on each command's own cwd,
+so a subdirectory that carries its own settings can differ per command; given
+CLAUDE_PROJECT_DIR is set the banner can only over-report the pipe as active for such
+a subdir, never the dangerous inverse. When any Bash rule exists the pipe is off, and
+the banner now says so, naming the scopes and the ``FURL_PIPE_WITH_RULES`` opt-in,
 replacing the old unconditional "pipe active" line that lied whenever a rule was
 present. That detection is stdlib-only, so the banner stays dependency-free.
 """
@@ -100,9 +103,10 @@ def _join_scopes(scopes: tuple[str, ...]) -> str:
 
 def _pretool_pipe_clause_inner() -> str:
     """The LIVE PreToolUse-pipe status line, built from the SAME rule detection the
-    pipe gates on, imported from ``pretool_pipe`` so banner and pipe cannot drift.
-    Never uses round brackets or dashes (the banner is pinned AI-tell-free) and
-    always names the ``FURL_PRETOOL_PIPE=0`` disable knob."""
+    pipe gates on, imported from ``pretool_pipe`` so banner and pipe share one
+    detection (results can differ only for a subdirectory with its own settings, since
+    the banner reads the project root). Never uses round brackets or dashes (the banner
+    is pinned AI-tell-free) and always names the ``FURL_PRETOOL_PIPE=0`` disable knob."""
     from pretool_pipe import _pipe_disabled, _pipe_with_rules_override, _scan_bash_rules
 
     if _pipe_disabled(os.environ.get("FURL_PRETOOL_PIPE")):

@@ -559,45 +559,13 @@ def test_pipe_compress_redacts_builtin_credentials_when_no_savings() -> None:
     assert "[REDACTED:aws-access-key]" in out
 
 
-# --- F3: gating observability (pipe_noop counters land in the shared store) --------
+# --- F3: gating observability (dynamic pipe_noop counters land in the shared store) -
 
 
-def test_gating_records_pipe_noop_counter(tmp_path) -> None:
-    """The report's F3 observability, end to end: a rules-gated passthrough records
-    ``pipe_noop:permission-rules`` into the SAME per-project store ``furl_stats``
-    reads, so a silently-off pipe becomes visible. Also pins the passthrough is
-    byte-silent (empty stdout) with rules present."""
-    proj = tmp_path / "proj"
-    (proj / ".claude").mkdir(parents=True)
-    (proj / ".claude" / "settings.json").write_text(
-        json.dumps({"permissions": {"deny": ["Bash(rm:*)"]}}), encoding="utf-8"
-    )
-    ws = tmp_path / "ws"
-    env = {
-        **os.environ,
-        "FURL_PRETOOL_PIPE": "1",
-        "HOME": str(tmp_path / "home"),
-        "FURL_CCR_BACKEND": "sqlite",
-        "FURL_WORKSPACE_DIR": str(ws),
-        "FURL_CCR_PROJECT_DIR": str(proj),
-    }
-    for _v in (
-        "CLAUDE_PROJECT_DIR",
-        "CLAUDE_CONFIG_DIR",
-        "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
-        "FURL_PIPE_WITH_RULES",
-    ):
-        env.pop(_v, None)
-    payload = json.dumps(
-        {"tool_name": "Bash", "tool_input": {"command": "cat big"}, "cwd": str(proj)}
-    )
-    proc = subprocess.run(
-        [sys.executable, str(_PRETOOL)], input=payload, capture_output=True, text=True, env=env
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == "", "rules present -> passthrough, no rewrite"
-
-    # Read the counter back from the SAME namespaced store the hook wrote to.
+def _read_store_counters(ws: Path, proj: Path) -> dict:
+    """Open the SAME per-project namespaced store the hook wrote to and return its
+    counters, mirroring furl_stats' namespace resolution (FURL_WORKSPACE_DIR +
+    FURL_CCR_PROJECT_DIR)."""
     prev = {k: os.environ.get(k) for k in ("FURL_WORKSPACE_DIR", "FURL_CCR_PROJECT_DIR")}
     os.environ["FURL_WORKSPACE_DIR"] = str(ws)
     os.environ["FURL_CCR_PROJECT_DIR"] = str(proj)
@@ -613,13 +581,125 @@ def test_gating_records_pipe_noop_counter(tmp_path) -> None:
         assert key is not None
         store = CompressionStore(backend=SqliteBackend(db_path=_ccr_namespace_db_path(key)))
         try:
-            counters = store.get_counters()
+            return dict(store.get_counters())
         finally:
             store.close()
-        assert counters.get("pipe_noop:permission-rules", 0) >= 1, counters
     finally:
         for k, v in prev.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def _hook_env(tmp_path, ws, **extra) -> dict:
+    env = {
+        **os.environ,
+        "FURL_PRETOOL_PIPE": "1",
+        "HOME": str(tmp_path / "home"),
+        "FURL_CCR_BACKEND": "sqlite",
+        "FURL_WORKSPACE_DIR": str(ws),
+        **extra,
+    }
+    for _v in (
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
+        "FURL_PIPE_WITH_RULES",
+    ):
+        env.pop(_v, None)
+    return env
+
+
+def test_dynamic_reason_counter_namespaces_by_payload_cwd(tmp_path) -> None:
+    """R1 + R2, end to end: a DYNAMIC passthrough reason (already-wrapped) is tallied
+    as ``pipe_noop:already-wrapped``, and it lands in the namespace derived from the
+    PAYLOAD cwd, matching the rewrite path and what furl_stats reads, NOT the hook's
+    own getcwd. Proven by running the hook from a different cwd with
+    CLAUDE_PROJECT_DIR unset and FURL_CCR_PROJECT_DIR unset: pre-R2 the counter would
+    have landed under the hook cwd namespace instead."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    other = tmp_path / "other-cwd"
+    other.mkdir()
+    ws = tmp_path / "ws"
+    env = _hook_env(tmp_path, ws)
+    env.pop("FURL_CCR_PROJECT_DIR", None)  # let the hook derive it from the payload cwd
+    # An already-wrapped command is a DYNAMIC passthrough (counted) and needs no rules.
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "# furl-pipe (x)\necho hi"},
+            "cwd": str(proj),
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, str(_PRETOOL)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(other),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "already-wrapped -> passthrough"
+    assert _read_store_counters(ws, proj).get("pipe_noop:already-wrapped", 0) >= 1, (
+        "counter must land in the payload-cwd namespace"
+    )
+    assert _read_store_counters(ws, other).get("pipe_noop:already-wrapped", 0) == 0, (
+        "counter must NOT land in the hook-cwd namespace (R2)"
+    )
+
+
+def test_permission_rules_passthrough_writes_no_counter(tmp_path) -> None:
+    """R1: the hot STATIC permission-rules passthrough writes NO durable counter even
+    when the store works, so furl_stats is not taxed per Bash command; the banner
+    surfaces that static state instead. Passthrough stays byte-silent."""
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"deny": ["Bash(rm:*)"]}}), encoding="utf-8"
+    )
+    ws = tmp_path / "ws"
+    env = _hook_env(tmp_path, ws, FURL_CCR_PROJECT_DIR=str(proj))
+    payload = json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "cat big"}, "cwd": str(proj)}
+    )
+    proc = subprocess.run(
+        [sys.executable, str(_PRETOOL)], input=payload, capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "rules present -> passthrough, no rewrite"
+    counters = _read_store_counters(ws, proj)
+    assert counters.get("pipe_noop:permission-rules", 0) == 0, (
+        f"permission-rules must not be counted per command: {counters}"
+    )
+
+
+def test_permission_rules_passthrough_is_furl_ctx_free(tmp_path) -> None:
+    """R1: with furl_ctx made unimportable AND a deny rule present, the hot
+    permission-rules passthrough must still exit 0 with empty stdout, and must NOT
+    even import furl_ctx. The poisoned furl_ctx touches a sentinel on import before
+    raising, so an untouched sentinel proves the static path never resolved the store
+    (no ~0.1s furl_ctx import on the hot path)."""
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"deny": ["Bash(rm:*)"]}}), encoding="utf-8"
+    )
+    sentinel = tmp_path / "furl_ctx_was_imported"
+    poison = tmp_path / "site"
+    (poison / "furl_ctx").mkdir(parents=True)
+    (poison / "furl_ctx" / "__init__.py").write_text(
+        f"open({str(sentinel)!r}, 'w').close()\nraise ImportError('poison')\n", encoding="utf-8"
+    )
+    env = _hook_env(tmp_path, tmp_path / "ws", PYTHONPATH=str(poison))
+    payload = json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "cat big"}, "cwd": str(proj)}
+    )
+    proc = subprocess.run(
+        [sys.executable, str(_PRETOOL)], input=payload, capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", "permission-rules passthrough must work with furl_ctx gone"
+    assert not sentinel.exists(), "the permission-rules hot path must not import furl_ctx"

@@ -30,11 +30,14 @@ cumulative), surfaced by `furl_stats` under `store.hook_activity`:
 
 **How to read them:** a rising `hook_compressions_applied` alongside `hook_invocations_seen` confirms the hook is compressing matched tool outputs and the harness is honoring the shape-mirrored replacements. The first hook run per project also prints a one-line stderr heads-up. These counters are live as of this plugin release; the pinned engine, `furl-ctx` 1.2.0 and newer, ships the store counter API that populates them. A separate `store.post_tool_use_compression` block reports the detected Claude Code version and whether it can receive a replacement at all, independent of the counters above.
 Once the pipe has run, `pipe_invocations_seen` / `pipe_compressions_applied` /
-`pipe_noop_reasons` appear in the same `store.hook_activity` block. The gating decision is
-recorded too: each time the pipe declines to rewrite it tallies a `pipe_noop:<reason>`
-bucket — `permission-rules` (Bash permission rules present), `settings-doubt` (settings
-unreadable), `already-wrapped`, `disabled-env`, and the malformed-input buckets — so a pipe
-that is silently off because you have Bash rules shows up here instead of as nothing.
+`pipe_noop_reasons` appear in the same `store.hook_activity` block. Declined rewrites are
+recorded too, with one split. The two **static** reasons, `permission-rules` (Bash
+permission rules present) and `disabled-env` (`FURL_PRETOOL_PIPE=0`), are **not** counted
+per command: they fire on nearly every Bash call, so counting them would add a `furl_ctx`
+import to the hot path for no new signal, and the SessionStart banner already reports that
+state. The **dynamic** event reasons, `settings-doubt` (settings unreadable),
+`already-wrapped`, `not-bash`, and the malformed-input buckets, are tallied as
+`pipe_noop:<reason>`, so a pipe that skipped a rewrite for one of those shows up here.
 
 ### `FURL_PRETOOL_PIPE` — real savings on today's harness (on by default)
 
@@ -55,10 +58,13 @@ trade-offs, up front):
   command shape can bypass them. (`allow` counts because an allow-list makes unlisted
   commands restricted.) Unreadable or malformed settings also force passthrough. The
   trade-off is honest: **most sessions keep at least one Bash rule, so the pipe is off by
-  default for them.** This is no longer silent — the SessionStart banner reports the live
-  status (off with the rule count and scopes, on, or overridden), and each gated
-  passthrough is tallied under `furl_stats` as `pipe_noop:<reason>`. To compress Bash
-  anyway, accepting that the rewrite may change how Claude Code matches your rules, set
+  default for them.** This is no longer silent: the SessionStart banner reports the live
+  status — off with the rule count and scopes, on, or overridden. The banner reads the
+  **project-root** settings, so a subdirectory with its own Bash rules may differ per
+  command; the banner can only over-report the pipe as active there, never the reverse. The
+  dynamic gating reasons are also visible in `furl_stats` under `pipe_noop:<reason>`; the
+  static rules-present state is shown by the banner, not counted per command. To compress
+  Bash anyway, accepting that the rewrite may change how Claude Code matches your rules, set
   `FURL_PIPE_WITH_RULES=1` (off unless explicitly set); see Known limitations for why no
   rule-present subset is provably safe.
 - **Latency:** ~0.3–0.5 s added per rewritten Bash call (two `uv` resolves: the shell
