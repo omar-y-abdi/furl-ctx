@@ -1,9 +1,10 @@
 """F-beta1 pins: the CCR marker scan is DoS-bounded (audit R1#13).
 
-``GENERIC_BRACKET_PATTERN`` carries two lazy ``.*?`` wildcards and used to run via
-a plain backtracking ``re`` finditer over agent/tool text up to the 10 MiB read
-cap. That scan is quadratic-or-worse on adversarial input and un-interruptible on
-the MCP worker thread. It now routes through ``finditer_within_budget`` and
+``GENERIC_BRACKET_PATTERN`` carries two lazy interior wildcards (bracket-free
+classes since the span-safety fix; ``.*?`` at the time of this audit) and used
+to run via a plain backtracking ``re`` finditer over agent/tool text up to the
+10 MiB read cap. That scan is quadratic-or-worse on adversarial input and
+un-interruptible on the MCP worker thread. It now routes through ``finditer_within_budget`` and
 ``sub_within_budget``, which use RE2's linear-time automaton. These pins lock:
 
 1. an adversarial bracket-marker input near the cap completes well under a

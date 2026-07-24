@@ -47,8 +47,112 @@ last 30 days, nor a module a merged PR touched in the last 14 days.
 | 2026-07-23 | CI hardening, docs truth, plugin version-pin guard gap | tests/test_plugin_version_pins.py, CONTRIBUTING.md | resolves the 2026-07-21 open candidate below: SECURITY.md's supply-chain section carries two `furl-ctx[mcp]==X.Y.Z` prose pins that neither `tests/test_plugin_version_pins.py` nor CONTRIBUTING.md's "Releasing / version bumps" hand-sync list covered, the exact blind spot that nearly let the 1.3.2 release ship stale 1.3.0 pins in SECURITY.md until a manual grep caught it. Proof before the fix: temporarily drifted both SECURITY.md pins to `9.9.9` and ran the full pin-guard suite (and separately the full pytest suite) — 100% green, confirming the drift was invisible end to end. Fix: a new `test_security_md_prose_pins_match_pyproject_version` test (mirrors the existing SKILL.md/README.md prose-pin tests, reusing the same `_pins_in`/regex helpers) plus a `SECURITY.md` line item added to CONTRIBUTING's hand-sync list and the module docstring's file inventory. Red-proofed on the identical `9.9.9` mutation post-fix: the new test alone failed with an exact-diff assertion (`['9.9.9', '9.9.9'] != '1.3.2'`), then reverted and reconfirmed 11/11 green. Full gate: `cargo test --workspace` (30 tests) and `cargo clippy -D warnings`/`cargo fmt --check` clean (no Rust touched); `ruff check`/`ruff format --check` clean; `mypy furl_ctx` 0 errors; `pytest tests/ -q` 2583 passed, 19 skipped (pre-existing, unrelated — the Rust extension was rebuilt via `maturin develop --release` first, since it was stale relative to HEAD exactly as the 2026-07-21 session note warned a future session to check); `verify.run` unchanged at `default_params_confirmed=True degradations=6 hash_failures=0 silent_loss=0 cache_prefix_violations=0`; `compare_baseline` 0 regressions/0 improvements (test-and-docs-only change, no compression path touched). Runner-up candidates from this session's Phase 1 recorded below | #155 |
 | 2026-07-24 | correctness, MIXED-path fictitious fence language | furl_ctx/transforms/router_split.py, furl_ctx/transforms/router_engine.py, tests/test_router_split_bare_fence_language.py | resolves the 2026-07-23 open candidate below: a bare ` ``` ` fence recorded `language = match.group(1) or "unknown"`, and `_compress_mixed`'s reassembly guard `if section.is_code_fence and section.language:` was then unconditionally true (`"unknown"` is truthy), so once any section in a MIXED-routed message changed, the reassembled output shipped a fabricated ```` ```unknown ```` tag the source never contained. Reproduced live pre-fix via `ContentRouter().compress()` on a bare fence beside an 80-row compressible JSON array. Fix: `split_into_sections` now records `""` for a bare fence (never `"unknown"`), and the reassembly guard fires unconditionally on `section.is_code_fence`, reassembling `f"```{section.language or ''}\n...\n```"` — an empty language reproduces the original bare fence exactly, a real tag (e.g. `python`) is unaffected. Traced the one downstream consumer of the hint, `code_aware_compressor._resolve_language`: it already documents "code-fence tags like `bash` or `unknown`" falling back to auto-detection, and its own `CodeLanguage.UNKNOWN` enum member meant `"unknown"` was excluded from the early-return anyway, so this opt-in path's behavior is unchanged before/after, confirmed by reading the code rather than assumed. 5 new tests in `tests/test_router_split_bare_fence_language.py` (split-level empty-vs-tagged language, `_compress_mixed`-level reassembly for both cases, and the live end-to-end repro); red-proofed by reverting both production lines and confirming exactly the 3 bug-covering tests fail (the 2 tagged-fence tests, unaffected by the bug, stay green), then restored. Full gate green: pytest 2631→2636 passed/19 skipped (no Rust touched, so cargo test/clippy/fmt unaffected by the diff but re-run clean regardless); `verify.run` unchanged at `degradations=6 hash_failures=0 silent_loss=0 cache_prefix_violations=0`; `compare_baseline` 0 regressions/0 improvements (no benchmark corpus routes a bare fence through MIXED). Deliberately not done, per the candidate's own scoping note: the `"\n\n".join` blank-line normalization and the synthesized closing fence for an unterminated code block remain separately lossy-but-recoverable (COR-30 already returns verbatim passthrough when no section changes); whether that reassembly path deserves its own whole-content CCR marker is left as a follow-up, not folded into this fix. Phase 0 note: the session's `_core.abi3.so` was again stale (Jul 18 build vs 4 later Rust-touching merges through #157/#158) and was rebuilt via `maturin develop --release --extras dev,mcp` before baselining | #159 |
 
+| 2026-07-24 | correctness, resolve_markers generic-bracket substitution span (T4 sibling) | furl_ctx/ccr/marker_grammar.py, tests/test_resolve_markers_roundtrip.py, tests/test_ccr_marker_grammar_characterization.py, tests/test_marker_scan_budget.py | `GENERIC_BRACKET_PATTERN`'s lazy-dot interior (`\[.*?compressed.*?hash=HEX24\]`) crossed `]`/`[`, so with ANY earlier `[` on the same physical line the leftmost match started at that innocent bracket, `match.group(0)` covered far more than the marker, and the public `resolve_markers` (the only substitution consumer, via `sub_within_budget`) silently DELETED every byte between the innocent bracket and the real marker — reproduced deterministically twice: `"See [ticket-42] for context [120 lines compressed to 18. Retrieve full diff: hash=…]"` resolved to `"See ORIGINAL…"` with `"[ticket-42] for context "` gone, and a JSON-escaped single-line tool result lost real diff bytes (`[0]\n+a[1]\n`). Shape G (diff, `Retrieve full diff:`) is the live producer shape only the generic fallback substitutes (shape H is consumed first by the literal-anchored `BRACKET_RETRIEVE_PATTERN`, which is span-exact by construction); IGNORECASE variants fall through to it too. Oracle: `substitution_patterns()`'s own docstring ("match.group(0) spans the marker's COMPLETE text") plus the T4/#131 contract; the docstring's "already span their whole marker" claim for GENERIC was provably false and both it and the roundtrip module docstring carried the same wrong belief — corrected in the same diff. Fix: interior wildcards became bracket-free classes (`[^\[\]]*?`), so a match spans exactly one `[…]` run; extraction (`hashes_in_text`, CcrMirror, purge cascade, benchmarks/metrics) is hash-level and unchanged for every real marker (all producer interiors are bracket-free), pinned by the characterization union corpus plus a new bracket-crossing corpus entry; the RE2 twin recompiles from the same source so scan-budget parity holds (6/6 with re2 installed); the residual `re` backtrack surface strictly shrinks (failed starts abort at the first bracket). The one deliberate narrowing: a bracket-CROSSING pseudo-marker (tokens spread across separate `[…]` runs) no longer extracts a hash — no producer emits such a shape and false-positive extraction was itself a purge/mirror hazard. 5 new tests red-proofed against the exact lazy-dot revert (each failing with the deletion signature; the 2 pins and all 14 pre-existing tests stayed green) plus 2 boundary pins (shape-H ordering, store-miss no-mutation). Full gate green: cargo 843+17+5+3+5, pytest 2636→2643 passed/19 skipped, `verify.run` unchanged at `degradations=6 hash_failures=0 silent_loss=0 cache_prefix_violations=0`, compare_baseline 0 regressions 0 improvements. Phase 0 note: `_core.abi3.so` was again stale (Jul 18 build vs Rust merges through #157) and was rebuilt via `maturin develop --release --extras dev,mcp` before baselining | #160 |
+
 ## Open candidates, fair game for future sessions
 
+- 2026-07-24 (span-safety session hunt, EXECUTED proof by a review agent —
+  strongest runner-up): the built-in `private-key` redactor
+  (`furl_ctx/redaction.py:85`) matches ONLY the `-----BEGIN … PRIVATE
+  KEY-----` header line, so the base64 KEY MATERIAL survives into the
+  compressed content and the CCR store while `[REDACTED:private-key]`
+  gives false assurance; the module's contract says "no secret bytes
+  survive" and the existing test
+  (`test_redaction_env.py::test_builtins_redacts_private_key_block`)
+  asserts only the header's absence with a truncated placeholder body, so
+  it is blind to the leak. Fix needs a bounded block match up to the
+  matching `-----END … PRIVATE KEY-----` (mind multiline + ReDoS bounds
+  and the fail-closed contract). Same hunt found two lower-severity
+  redaction defects: `openai-key` (`\bsk-[A-Za-z0-9_\-]{20,}`)
+  false-positives on benign hyphenated slugs (`sk-database-connection-…`)
+  and the mangling is baked into the STORED original (permanent wrong
+  bytes on retrieve — arguably worse than the miss); `gcp-api-key`'s
+  trailing `\b` misses keys whose 35th char is `-` at EOL/space.
+- 2026-07-24 (span-safety session hunt, executed two-pass repro): diff
+  outputs have NO idempotent re-pass protection, two stacked causes.
+  (1) `router_message_policy._RETRIEVE_HINT_PATTERN` pins
+  `Retrieve (?:more|original): hash=` — shape H (log/search/text) and
+  shape I, but NOT shape G's `Retrieve full diff: hash=` phrase, so even
+  a marker-bearing compressed diff is never `AlreadyCompressed`-pinned
+  (one-line static proof: `_looks_like_ccr_output(shape_G_text)` is
+  False, True for the H twin). (2) Below the CCR ratio gate
+  (`compressed_lines >= 0.8 * original_lines`) `diff_compressor.rs` trims
+  context and emits NO marker at all, leaving nothing for the pin to see.
+  Live two-pass repro through `compress()`: a 3-file synthetic diff went
+  4123→3498 tokens on pass 1 with zero markers, then pass 2 re-compressed
+  the already-compressed diff 3498→410 tokens via a whole-blob
+  `_ccr_dropped` offload (bytes mutated again, prefix cache busted,
+  visible content nearly emptied), while the shape-H search control was
+  byte-identical on pass 2 (`already_compressed` pin worked). Any
+  library/MCP caller that re-runs `compress()` over a conversation each
+  turn hits this on every diff-bearing tool output. Candidate fix: add
+  `full diff` to the hint alternation (one line) and decide what
+  idempotency the below-gate trim path deserves (a marker, or a
+  no-second-pass guard).
+- 2026-07-24 (span-safety session hunt, diff/search compressor sweep):
+  `diff_compressor.rs` parse gaps that silently discard bytes with no
+  stats and no marker — chmod-only file sections (`old mode`/`new mode`
+  lines) and `index …` lines match NO parser branch and vanish from the
+  re-emitted diff (a pure permission change becomes an empty file
+  section; zero test coverage for either line kind). Related but
+  DOCUMENTED-deliberate (owner Q7, "surfaced via observability"): every
+  `new file mode NNNNNN`/`deleted file mode NNNNNN` re-emits as hardcoded
+  `100644` and `Binary files a/… and b/… differ` collapses to bare
+  `Binary files differ` — but the justifying observability is FALSE in
+  prod because `DiffCompressor::compress` discards
+  `compress_with_stats(...).1` at the PyO3 boundary
+  (`file_mode_normalizations`/`binary_files_simplified` never reach
+  Python), and below the ratio gate there is no marker either, so an
+  executable/symlink/submodule mode bit (100755/120000/160000) is
+  unrecoverable. Fixing the chmod-line drop is a clean silent-loss win;
+  reopening Q7's normalization needs the owner's intent honored (fix the
+  observability, or the justification text).
+- 2026-07-24 (span-safety session hunt, search compressor):
+  `parse_search_results` drops grep shapes with no summary line and no
+  stats surfaced in prod — `Binary file X matches` notices (no `:N:`) and
+  filenames matching `-<digits>[-:]` prefixes (the zero-length-path guard
+  at `search_compressor.rs:765` rejects a file literally named
+  `-2-notes.py`); separately `select_matches` drops WHOLE FILES past
+  `max_files`/global budget with no `[… and N more …]` acknowledgment
+  (per-file cap drops do get one). All recoverable only when the
+  input-wide CCR marker fires (`count >= min_matches_for_ccr` AND ratio
+  < 0.8).
+- 2026-07-24 (span-safety session hunt, cache layer sweep): three
+  lower-tier finds, none with a live prod trigger today. (a)
+  `SqliteBackend`'s startup + opportunistic purges hardcode `time.time()`
+  in `_PURGE_EXPIRED_SQL` instead of the store's injectable `now_fn`
+  (sqlite.py:621/651) — a fake-clock store over the durable backend loses
+  LIVE entries after 64 puts (both tiers, since a durable write drops the
+  in-memory shadow); production default clocks coincide, no test covers
+  fake-clock+sqlite. (b) `cache_aligner.py:287` `continue`s over the
+  frozen prefix, so volatile-content detection no-ops in the standard
+  cache_control-on-last-message idiom — the exact case the detector
+  exists for; detector-only, metrics unaffected. (c) `_row_to_entry`
+  decode runs OUTSIDE `_run`'s fail-open containment
+  (sqlite.py:303/425/465), so a malformed row raises out of Protocol
+  methods, violating the class's "never raises" docstring — needs
+  external tampering/schema drift to trigger.
+- 2026-07-24 (span-safety session hunt, text/tag sweep): (a)
+  `tag_protector.rs:301` fallback placeholder prefix is returned WITHOUT
+  the `text.contains` collision check the default+salted branches have —
+  ~17 crafted magic substrings break the restore round-trip (documented
+  bug-fix-#5 invariant), CCR-recoverable inside text_crusher, untested
+  branch. (b) The PyO3 `protect_tags`/`restore_tags` bindings discard
+  `ProtectStats` and signal discard-wrap loss only via `tracing` (no
+  subscriber in a Python process) — also zero in-repo callers/tests:
+  candidates for deletion-with-proof or stats-surfacing. (c) Both
+  modules' proptests are ASCII-only; the byte-slicing safety argument is
+  hand-verified but untested against multibyte input, while sibling
+  modules pin UTF-8 boundaries explicitly.
+- 2026-07-24 (span-safety session hunt, CLI/retrieve): (a) `furl` CLI
+  never `sys.stdout.reconfigure(encoding="utf-8", newline="")`, so on
+  Windows piped output gets `\r\n` translation + codepage mangling,
+  breaking retrieve's "byte-identical" contract there (Linux is saved by
+  PEP-540); reasoned, not executed (no Windows box). (b)
+  `retrieve()`/CLI discard `FilteredContent.note` and
+  `lines_skipped_over_cap`, so a regex filter that skipped a >10k-char
+  line (where a genuine match may hide) reports nothing to the caller —
+  the MCP handler surfaces the same note properly.
 - 2026-07-23 (HTML session runner-up, verified live): the MIXED path
   injects a fictitious fence language with no recovery marker.
   `router_split.py:90` stores `language = match.group(1) or "unknown"`, so a

@@ -151,8 +151,26 @@ BRACKET_RETRIEVE_PATTERN: re.Pattern = re.compile(
 
 # Shape G (and any other bracket marker carrying a 24-hex hash) — generic
 # fallback. One group (the hash). IGNORECASE is on THIS pattern only.
+#
+# Span safety (the bracket-family sibling of the T4 fix): the interior
+# wildcards are BRACKET-FREE classes (``[^\[\]]``), not the original lazy
+# dots (``\[.*?compressed.*?hash=…``). ``.`` crossed ``]`` and ``[`` freely,
+# so with any earlier ``[`` on the same line the leftmost match STARTED at
+# that innocent bracket, ``match.group(0)`` covered far more than the
+# marker, and a substitution consumer (``resolve_markers``) deleted every
+# byte between the innocent bracket and the real marker. Proven:
+# ``"See [ticket-42] for context [120 lines compressed to 18. Retrieve full
+# diff: hash=…]"`` resolved to ``"See <original>"`` — the bytes
+# ``"[ticket-42] for context "`` silently gone. Bracket-free interiors make
+# a match span exactly ONE ``[…]`` run — the marker itself — because a
+# candidate start at an earlier ``[`` now dies at the next bracket instead
+# of reaching through it. Every real bracket marker (shape G/H and the
+# retired dead pattern #2 alike) has a bracket-free interior, so the HASH a
+# match extracts is unchanged — pinned by the characterization corpus — and
+# the residual ``re`` engine's backtrack surface only shrinks (a failed
+# start aborts at the first bracket instead of scanning to end-of-line).
 GENERIC_BRACKET_PATTERN: re.Pattern = re.compile(
-    rf"\[.*?compressed.*?hash=({HEX_CLASS}{{24}})\]", re.IGNORECASE
+    rf"\[[^\[\]]*?compressed[^\[\]]*?hash=({HEX_CLASS}{{24}})\]", re.IGNORECASE
 )
 
 # Shapes A/B/C/D/E/F — the ``<<ccr:HASH<delim>...>>`` double-angle family.
@@ -247,16 +265,19 @@ def marker_patterns() -> list[re.Pattern]:
 
 def substitution_patterns() -> list[re.Pattern]:
     """The ordered pattern list for marker SUBSTITUTION (``resolve_markers``):
-    every entry's ``match.group(0)`` spans the marker's COMPLETE text, so
-    splicing the resolved content in for that exact span never leaves a
-    fragment of the marker behind (T4).
+    every entry's ``match.group(0)`` spans the marker's COMPLETE text — and
+    nothing more — so splicing the resolved content in for that exact span
+    never leaves a fragment of the marker behind (T4) and never deletes
+    innocent bytes around it.
 
-    :data:`BRACKET_RETRIEVE_PATTERN` and :data:`GENERIC_BRACKET_PATTERN`
-    already span their whole marker (opening ``"["`` to closing ``"]"``) and
-    are reused as-is. The double-angle family uses
-    :data:`DOUBLE_ANGLE_FULL_PATTERN` instead of :data:`DOUBLE_ANGLE_PATTERN`
-    — see its docstring for why the extraction-oriented pattern is unsafe
-    here.
+    :data:`BRACKET_RETRIEVE_PATTERN` is literal-anchored (``[`` then digits)
+    so its span is exact by construction and it is reused as-is.
+    :data:`GENERIC_BRACKET_PATTERN` is span-exact because its interior
+    wildcards are bracket-free — see the span-safety note on the constant for
+    the leftward over-match its original lazy-dot form allowed. The
+    double-angle family uses :data:`DOUBLE_ANGLE_FULL_PATTERN` instead of
+    :data:`DOUBLE_ANGLE_PATTERN` — see its docstring for why the
+    extraction-oriented pattern is unsafe here.
     """
     return [
         BRACKET_RETRIEVE_PATTERN,
@@ -277,13 +298,17 @@ def hash_of_match(match: re.Match[str]) -> str:
 # --------------------------------------------------------------------------- #
 # Bounded marker scanning (marker-scan DoS).
 #
-# ``GENERIC_BRACKET_PATTERN`` carries two lazy ``.*?`` wildcards and runs over
+# ``GENERIC_BRACKET_PATTERN`` carries two lazy interior wildcards (bracket-free
+# classes since the span-safety fix; originally ``.*?``) and runs over
 # agent/tool-produced text up to the MCP server's 10 MiB read cap. Under
 # CPython's backtracking ``re`` engine that scan is quadratic-or-worse on
-# adversarial input: many ``[`` starts, each forcing a long forward scan for
-# ``compressed`` then ``hash=``. On the MCP worker thread no SIGALRM watchdog
-# can fire, so a wedged scan is a process-wide freeze, the same DoS class
-# ``regex_budget`` closed for agent-supplied filters.
+# adversarial input: many ``[`` starts, each forcing a forward scan for
+# ``compressed`` then ``hash=`` (the bracket-free classes shorten each failed
+# scan — it now aborts at the next bracket — but many-``compressed``-tokens
+# input inside one bracket-free run still backtracks quadratically). On the
+# MCP worker thread no SIGALRM watchdog can fire, so a wedged scan is a
+# process-wide freeze, the same DoS class ``regex_budget`` closed for
+# agent-supplied filters.
 #
 # The bound is RE2 (``google-re2``, shipped by the ``mcp`` extra): it matches
 # with an automaton in LINEAR time, so the pathological class does not exist for
