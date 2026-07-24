@@ -12,6 +12,7 @@ back into ``content_router`` introduces no import cycle.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -49,6 +50,34 @@ def _starts_json_block(line: str) -> bool:
     return line.strip().startswith(("[", "{")) and not _CHECKLIST_ITEM_RE.match(line)
 
 
+def _is_single_json_value(content: str) -> bool:
+    """True when *content* is EXACTLY one well-formed JSON array or object.
+
+    The cheap structural check that gates ``is_mixed_content`` (F2): a string
+    that parses as a single JSON value is pure structured content and must never
+    be classified MIXED — it belongs on the JSON path (SmartCrusher), not the
+    char-by-char mixed splitter.
+
+    Cheap-guarded so it never slows the common case: ``json.loads`` is attempted
+    ONLY when the stripped content both opens and closes with a matching bracket
+    pair (``[...]`` or ``{...}``). Genuinely mixed text (prose, a ``` fence, a
+    log, a diff, a JSON array followed by trailing prose) fails that byte check
+    and never pays the parse. A parse failure (truncated / not-actually-JSON)
+    falls through to the heuristic indicators. Total and side-effect-free.
+    """
+    stripped = content.strip()
+    if len(stripped) < 2:
+        return False
+    first, last = stripped[0], stripped[-1]
+    if not ((first == "[" and last == "]") or (first == "{" and last == "}")):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(parsed, (list, dict))
+
+
 def is_mixed_content(content: str) -> bool:
     """Detect if content contains multiple distinct types.
 
@@ -58,6 +87,17 @@ def is_mixed_content(content: str) -> bool:
     Returns:
         True if content appears to be mixed (multiple types).
     """
+    # Structural short-circuit (F2): one whole JSON value is never "mixed".
+    # A single-line ``jq -c`` array whose string VALUES contain prose (event
+    # names, sentences, URLs) tripped the unanchored ``_PROSE_PATTERN`` scanning
+    # INSIDE those values (``has_prose``) plus ``has_json_blocks`` — 2 indicators
+    # = MIXED — so a pure array took the slow char-by-char ``_extract_json_block``
+    # splitter instead of routing straight to SmartCrusher. The cheap structural
+    # check comes first so the prose heuristic never looks inside a pure JSON
+    # value's strings.
+    if _is_single_json_value(content):
+        return False
+
     indicators = {
         "has_code_fences": bool(_CODE_FENCE_PATTERN.search(content)),
         "has_json_blocks": bool(_JSON_BLOCK_START.search(content)),

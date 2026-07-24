@@ -29,6 +29,15 @@ from typing import Any
 HOOK_INVOCATIONS = "hook_invocations_seen"
 HOOK_COMPRESSIONS = "hook_compressions_applied"
 HOOK_NOOP_PREFIX = "hook_noop:"
+# A distinct, TRUTHFUL label (not a hook_noop: bucket, because it DOES produce
+# output) recorded when the PostToolUse hook reroutes an over-threshold tool
+# output straight to the engine's fast reversible CCR offload instead of the
+# full crush pipeline (F2). It rides ALONGSIDE HOOK_COMPRESSIONS (the reroute is
+# still a real, marker-emitting compression) so the invocations == compressions +
+# noop invariant holds; this counter is the extra breadcrumb proving a huge blob
+# was seen and handled, so the pre-fix "external 30 s kill leaves zero trace"
+# silence can never recur for an input the hook actually processed.
+HOOK_SIZE_REROUTE = "hook_size_reroute"
 
 # Opt-in PreToolUse pipe compressor (pipe_compress.py) — its own tally, kept
 # separate so it never muddies the PostToolUse #68951 signal above.
