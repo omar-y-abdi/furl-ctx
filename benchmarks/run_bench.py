@@ -45,9 +45,6 @@ from benchmarks.needle_recall import (
 )
 
 HERE = Path(__file__).resolve().parent
-# Committed baseline files — these are the floor.  Default run NEVER writes here.
-RESULTS_JSON = HERE / "baseline_results.json"
-BASELINE_MD = HERE / "BASELINE.md"
 DATA_DIR = HERE / "data"
 
 # Default out-dir for normal (non-re-baselining) runs.

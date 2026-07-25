@@ -4,8 +4,11 @@ Each corpus builder returns: (corpus_str, corpus_meta, source_label).
 Each GT function returns: dict with keys "anomaly", "locality", "aggregate",
 each being a dict with "description" and the deterministic answers.
 
-All corpora are deterministic: generated ones use a fixed seed (SEED=42),
-real ones are read from fixed paths and produce consistent GT by parsing.
+All corpora are deterministic: generated ones use a fixed seed (SEED=42), real
+ones are read from REPO-RELATIVE paths and produce consistent GT by parsing.
+Repo-relative is a hard requirement: a builder keyed to an absolute path outside
+the repo (there used to be one pointing into a developer's ~/Downloads) raises
+FileNotFoundError on every other machine and breaks the whole eval.
 """
 
 from __future__ import annotations
@@ -16,72 +19,12 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TRACE_PATH = Path("/Users/k/Downloads/Trace-20260602T162358.json")
 SOURCE_FILE_PATH = REPO_ROOT / "furl_ctx" / "compress.py"
 SEED = 42
 
 
 # ---------------------------------------------------------------------------
-# Corpus 1: chrome_trace_full
-# ---------------------------------------------------------------------------
-
-
-def build_chrome_trace_full() -> tuple[str, dict, str]:
-    """Full 33MB Chrome DevTools trace (offload path — above 8MB size-guard)."""
-    if not TRACE_PATH.exists():
-        raise FileNotFoundError(f"Chrome trace not found: {TRACE_PATH}")
-    corpus_str = TRACE_PATH.read_text(encoding="utf-8")
-    return corpus_str, {"path": str(TRACE_PATH)}, f"path:{TRACE_PATH}"
-
-
-def gt_chrome_trace_full(corpus_str: str, _meta: dict) -> dict:
-    """GT computed from full 140k-event trace.
-
-    anomaly:   all DroppedFrame event timestamps.
-    locality:  5 events around the MIDDLE DroppedFrame (not head/tail).
-    aggregate: per-name event histogram top-10 over all events.
-    """
-    data = json.loads(corpus_str)
-    events = data["traceEvents"]
-
-    dropped = [e for e in events if e.get("name") == "DroppedFrame"]
-    dropped_ts = sorted(e["ts"] for e in dropped if "ts" in e)
-
-    mid_idx = len(dropped) // 2
-    mid_event = dropped[mid_idx]
-    mid_pos = next(i for i, e in enumerate(events) if e is mid_event)
-    ws, we = max(0, mid_pos - 2), min(len(events), mid_pos + 3)
-    locality_ts = [e.get("ts") for e in events[ws:we] if "ts" in e]
-
-    name_counts: dict[str, int] = {}
-    for e in events:
-        n = e.get("name", "")
-        name_counts[n] = name_counts.get(n, 0) + 1
-    top10 = sorted(name_counts.items(), key=lambda x: -x[1])[:10]
-
-    return {
-        "anomaly": {
-            "description": "All DroppedFrame event timestamps (full corpus)",
-            "count": len(dropped_ts),
-            "sample_ts": dropped_ts[:5],
-            "total_dropped_frames": len(dropped),
-        },
-        "locality": {
-            "description": f"5 events around middle DroppedFrame (index {mid_pos} of {len(events)})",
-            "anchor_ts": mid_event.get("ts"),
-            "anchor_name": mid_event.get("name"),
-            "window_ts": locality_ts,
-        },
-        "aggregate": {
-            "description": "Per-name event histogram top-10 over all 140k events",
-            "total_events": len(events),
-            "top10_names": [{"name": n, "count": c} for n, c in top10],
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Corpus 3: app_log
+# Corpus 1: app_log
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +183,7 @@ def gt_app_log(corpus_str: str, corpus_meta: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Corpus 4: source_file
+# Corpus 2: source_file
 # ---------------------------------------------------------------------------
 
 
@@ -289,7 +232,7 @@ def gt_source_file(corpus_str: str, _meta: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Corpus 5: json_api
+# Corpus 3: json_api
 # ---------------------------------------------------------------------------
 
 
@@ -367,7 +310,7 @@ def gt_json_api(corpus_str: str, corpus_meta: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Corpus 6: stacktrace
+# Corpus 4: stacktrace
 # ---------------------------------------------------------------------------
 
 
@@ -502,7 +445,6 @@ def gt_stacktrace(corpus_str: str, corpus_meta: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 CORPUS_BUILDERS = [
-    ("chrome_trace_full", build_chrome_trace_full, gt_chrome_trace_full),
     ("app_log", build_app_log, gt_app_log),
     ("source_file", build_source_file, gt_source_file),
     ("json_api", build_json_api, gt_json_api),

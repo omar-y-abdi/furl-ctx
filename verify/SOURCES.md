@@ -14,6 +14,31 @@ No real row is replayed verbatim as a test payload.
 
 Captured: 2026-06-13 (UTC). Platform: macOS (darwin 24.6.0).
 
+## Which captures are still on disk (read this before the tables)
+
+`verify/generators.py` loads exactly four files from `verify/data/`:
+`slugify_gitlog.raw.txt`, `slugify_index.js`, `isplainobj_index.js`, and
+`threejs_devtools_package-lock.json` (plus `heldout/data/express_rg.raw.jsonl`).
+Those five are committed and live.
+
+The other three captures listed below — `github_commits_slugify.json` (source 3),
+`npm_registry_slugify.json` (source 4), and `macos_install.log.txt` (source 6) —
+were read by NO code in the repo, and have been **removed from the tree** as dead
+weight (~300 KB). Source 4 and source 6 were only ever provenance references
+("additional real JSON-API dump", "real-log reference"); source 3's vocabulary
+contribution is described below in the `logs` bullet, but the generator in fact
+seeds only from `slugify_gitlog.raw.txt`.
+
+They are not lost: recover any of them from git history at the commit *before*
+this branch's removal, e.g.
+
+    git show HEAD:verify/data/github_commits_slugify.json
+
+The provenance tables below are **kept intact and unedited** as the record of
+exactly what was fetched for this verification run. A row describing a file that
+is no longer in the tree is a historical citation, not a promise that the file is
+on disk. `REPORT.md` — the findings this data produced — is unchanged.
+
 ## Real external (freshly cloned / fetched over the network)
 
 | # | Source | Type | Exact citation | Used for | File |

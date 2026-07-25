@@ -66,6 +66,19 @@ jobs:
               - '.release-please-config.json'
               - 'tests/**'
               - 'scripts/**'
+              # Test-collection and harness inputs. `conftest.py` configures the
+              # whole pytest run (fixtures, collection, markers), so a PR that
+              # edits ONLY it used to leave code=='false' and short-circuit all
+              # four `test` shards to green without executing a single test —
+              # a change to how every test runs, validated by nothing.
+              # `verify/` and `benchmarks/` are linted by the `lint` job and are
+              # the compression-floor harnesses; `Makefile` drives the local and
+              # CI entry points. Listing them only makes the heavy steps run MORE
+              # often, never less, so it cannot re-create the #15/#32/#56 deadlock.
+              - 'conftest.py'
+              - 'verify/**'
+              - 'benchmarks/**'
+              - 'Makefile'
               # Conclusion of the required checks (lint/build-wheel/test) no
               # longer depends on this filter: those jobs ALWAYS run and short-
               # circuit their heavy steps when code=='false' (step-level `if`

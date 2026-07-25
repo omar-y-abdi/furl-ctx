@@ -327,7 +327,6 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gut); }
 .rt-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 .rt-result { white-space: pre-wrap; word-break: break-word; font-size: .78rem; line-height: 1.55; color: var(--ink); }
 .rt-result .rt-lnum { color: var(--accent-deep); }
-.rt-result .rt-hit { color: var(--accent); font-weight: 700; }
 
 /* ---- How it works ------------------------------------------------------- */
 .how { padding-top: clamp(40px, 6vw, 76px); padding-bottom: clamp(20px, 3vw, 34px); }

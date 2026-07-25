@@ -30,7 +30,6 @@ import hashlib
 import json
 import random
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -603,13 +602,3 @@ def plant_needles(case: Case, seed: int, k: int = 3) -> Case:
         needle_indices=tuple(needle_indices),
         meta={"needle_markers": list(needles)},
     )
-
-
-# Registry of generator builders keyed by family.
-GENERATORS: dict[str, Callable[[int, int, str], Case]] = {
-    "logs": gen_logs,
-    "search": gen_search,
-    "code": gen_code,
-    "multiturn": gen_multiturn,
-    "disk": gen_disk,
-}
