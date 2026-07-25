@@ -129,6 +129,29 @@ dev = [
     # construction; tests/test_security_suite_requires_re2.py turns its absence
     # into a hard failure rather than a silent skip.
     "furl-ctx[re2]",
+    # The MCP feature suites — 30 test files, every one gated on
+    # pytest.importorskip("mcp") — only EXECUTE when the `mcp` SDK is importable.
+    # Because that guard fires during COLLECTION, a gated module's tests are not
+    # even counted: measured on this tree, dropping the SDK moves the suite from
+    # 2836 passed to 2482 passed / 34 skipped — 354 tests STOP RUNNING, only 34
+    # surface as skips, the other ~320 vanish from the totals, and nothing turns
+    # red. The SDK was previously carried only by remembering to also install
+    # `[mcp]`. Pull it into `dev` — exactly as re2 was decoupled above — so every
+    # test install carries the whole furl_ctx.ccr.mcp_server contract's coverage
+    # by construction; tests/test_optional_suites_not_silently_disarmed.py turns
+    # its absence into a hard failure rather than a silent skip.
+    "furl-ctx[mcp]",
+    # The AST code-aware suite (tests/test_code_aware_compressor.py, 16 tests
+    # gated on find_spec("tree_sitter_language_pack")) SILENTLY SKIPS without the
+    # `code` extra (measured: 2836 passed → 2820 passed / 16 skipped, 0 red). The
+    # CI test job installs `[dev,mcp]` with NO `code` (see .github/workflows/
+    # ci.yml), so those 16 were skipping in CI — a live gap. Pulling `[code]`
+    # into `dev` makes the grammar pack present by construction in every test
+    # install, INCLUDING CI's `[dev,mcp]`, which now transitively carries
+    # tree-sitter so the suite runs there too. This adds the ~50MB pack to
+    # TEST/DEV installs only — core stays lean (end users still opt in via
+    # `[code]`/`[all]`). Same guard file as mcp above.
+    "furl-ctx[code]",
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
