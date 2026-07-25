@@ -20,7 +20,17 @@ but pretty-printed, so **not** byte-identical to the source; when byte fidelity
 matters (hashing, diffing, signature checks) pass `raw: true` on a row-select and
 each matched row returns byte-identical to its source bytes, the rows rejoined with
 fresh array punctuation, so each row is exact while the whole blob is not one
-contiguous slice. Nothing is lost, but a one-off anomaly
+contiguous slice.
+
+**What actually decides byte-exactness is the offload route, not text-vs-JSON.** Content the
+router crushes structurally (columnar and tabular arrays) is stored as canonical `json.dumps`,
+so a full `furl_retrieve` returns canonical bytes — byte-identical only when your input was
+already canonical. Content offloaded whole-blob (plain text, or JSON too irregular to crush) is
+stored verbatim and returns byte-exact. One consequence on the crush path: the hash keys the
+*canonical* form, so two byte-different inputs that canonicalize the same collapse to one stored
+entry — on the crush path the hash is a semantic identifier, on the whole-blob path a byte one.
+
+Nothing is lost, but a one-off anomaly
 buried in otherwise-repetitive data will not appear in the compressed
 view unless you query for it. Trust a compressed summary for the shape of the data, not
 for surfacing an anomaly you were not already looking for.

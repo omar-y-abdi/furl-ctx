@@ -35,7 +35,7 @@ Match the tier to your content. Repetitive machine output lands high, in the 90s
 on lossless reduction. Genuinely unique text lands in the 0-54% band. The lossless
 recovery guarantee holds at every tier.
 
-## Honest, tier-aware results (STRICT lossless + REAL granular-retrieval cost)
+## Honest, tier-aware results (STRICT lossless + REAL whole-blob retrieval cost)
 
 **Sources (re-runnable, default params, real gpt-4o tiktoken, 6 fixed seeds/case, cold CCR per case):**
 - `verify/` — first independent verification (slugify/is-plain-obj),
@@ -100,41 +100,51 @@ the audits):
   headline at ~900 turns (84–97%). The dev figure was size/entropy-cherry-
   picked; report it as a ceiling.
 
-### Effective savings UNDER RETRIEVAL — REAL granular-chunk cost model
+### Effective savings UNDER RETRIEVAL — whole-blob cost model
 
-Compression that is recovered is only a win if recovery is cheap. The
-audit's leniency #2 charged a *proportional slice* of the offloaded blob,
-but pre-granular retrieval was **whole-blob**: one `<<ccr:HASH>>` retrieve
-returned every dropped row, so the FIRST needed row cost the entire
-payload and effective savings could go **NEGATIVE** (cost MORE than the
-uncompressed original). Frontier A's granular per-row offload (commit
-`cbf16a85`) fixes the engine; the harness now models the **real** cost —
-retrieving `k = ceil(r · n_dropped)` rows charges only the `k` largest
-actual per-row chunks, resolved through the engine's own `ccr_get`
-(identical to `tests/test_ccr_proportional_retrieval.py`).
+Compression that is recovered is only a win if recovery is cheap, and an earlier
+version of this section got that cost wrong in a way worth recording. It published an
+OLD -> NEW table claiming the engine "stays net-positive at every fraction (~+40-68%)"
+through a **granular per-row** retrieval model — charging only the `k` largest per-row
+chunks for a partial read. That model measured a retrieval **no production caller can
+perform**: those per-row chunks were resolved through the engine's own store, never the
+store the model actually reads — the same Rust-store-not-production confusion that made
+the `#rows` feature look real. The granular per-row offload was removed (F8/#168): there
+are no per-row chunks to retrieve, so the "+40-68%" figures described an operation that
+no longer exists and never worked on the model's path.
 
-Effective savings = `1 − (compressed + retrieved) / raw`, mean over 6
-seeds, real gpt-4o tokens. **OLD** = the whole-blob model (any retrieval =
-full payload); **NEW** = the granular per-chunk model on the same cases:
+The current model is **whole-blob**: a row-drop stores the whole array behind one
+`<<ccr:HASH>>` marker, so retrieving any dropped row pulls the entire payload back.
+`verify/measure.py::effective_savings` was corrected to charge that (PR #172). Effective
+savings = `1 - (compressed + retrieved) / raw`, mean over 6 seeds, real gpt-4o tokens,
+for the five row-dropping families:
 
-| case (tier) | raw reduction (0% retr.) | @25% OLD → NEW | @50% OLD → NEW |
-|---|---:|---|---|
-| logs@90 high | 80.9% | **−7.5% → +62.2%** | **−9.1% → +43.8%** |
-| logs@90 genuine | 80.5% | +5.6% → **+68.7%** | +3.2% → **+44.3%** |
-| search@90 high | 93.4% | +1.2% → **+66.1%** | −2.7% → **+41.0%** |
-| disk@90 genuine | ~94.5% | +4.9% → **+68.2%** | +2.4% → **+43.9%** |
+| family | raw reduction (eff@0) | effective @25% | effective @50% |
+|---|---:|---:|---:|
+| disk | 83.3% | **-1.3%** | **-4.2%** |
+| logs | 92.0% | +4.8% | +2.3% |
+| multiturn | 78.3% | **-6.4%** | **-9.6%** |
+| repeated_logs | 97.6% | +11.9% | +8.8% |
+| search | 95.6% | +7.4% | +0.7% |
 
-So under realistic partial retrieval the engine **stays net-positive at
-every fraction** (≈+40–68% @25%, ≈+40–44% @50%) instead of collapsing
-below zero. Cases where nothing is offloaded (multiturn@90, disk@9, small
-payloads) have **zero retrieval cost** — effective savings equal the raw
-reduction at every fraction. (`verify/measure.py::effective_savings`
-+ `per_row_chunk_tokens`; OLD/NEW recomputed on the same seeds.)
+So under realistic partial retrieval, effective savings at 25% and 50% run from about
+**-9.6% to +11.9%** by family and go **NEGATIVE for disk and multiturn** — not the
+"+40-68% at every fraction" the removed model reported.
+
+**Caveat — the most important line in this section:** `effective_savings` as computed
+today does **not** charge for opaque whole-blob offload. It charges only for dropped
+rows (`k = ceil(r * n_dropped_rows)`), so any family with **zero** dropped rows reports
+effective savings equal to raw reduction regardless of what a retrieval actually costs.
+The `code` family is exactly that case — fully offloaded, no rows dropped — so it is
+**excluded from the table above** and measured honestly in the subsection below.
 
 #### The `code` fixture is the opposite case: opaque whole-blob offload, net-negative on retrieval
 
-The table above covers granular per-row offload, where retrieving a fraction
-pulls only the rows needed. Source code cannot be folded that way. When the
+The corrected table above covers the five families that **row-drop**, where the
+whole-blob retrieval cost is charged. Source code is the true opposite: it cannot be
+folded into rows at all, so it row-drops nothing — and because the cost model charges
+only for dropped rows, it would read as flatly net-positive there. Its honest cost is
+measured separately here. When the
 router cannot structurally shrink content it moves the whole blob to the CCR
 store behind one marker with no granular row index, so retrieving any of it
 pulls the entire payload back. The README `code` row is exactly this shape: the
@@ -144,8 +154,9 @@ committed `benchmarks/data/code.raw.json` fixture of 7 real repo source files.
 |---|---:|---:|---:|---:|
 | `code`, opaque whole-blob offload | 95.9% | **-4.1%** | **-4.2%** | **-4.1%** |
 
-Measured fresh on this engine (harness removed; see git history for
-`benchmarks/code_roundtrip.py`), gpt-4o tokens, the same 12 token per-call
+This is a **historical** measurement: its harness, `benchmarks/code_roundtrip.py`, has
+since been removed (see git history), so the figure cannot be re-derived or refreshed by
+anyone — it is recorded here, not reproducible. gpt-4o tokens, the same 12-token per-call
 overhead as the table above. The 95.9 percent
 is a marker saving, not a token saving: `compress()` moved 41005 of 41025 tokens
 into the store and left a 1601 token summary, so retrieving the code back to use
