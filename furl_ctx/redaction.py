@@ -68,21 +68,84 @@ FURL_REDACT_BUILTINS_ENV = "FURL_REDACT_BUILTINS"
 
 _MARKER_PREFIX = "[REDACTED:"
 
+# ── PEM/OpenSSH private-key blocks ──────────────────────────────────────────
+#
+# The WHOLE block goes — armor AND the base64 key material between it. Matching
+# only the ``-----BEGIN … PRIVATE KEY-----`` armor line left every byte of the
+# actual secret in the compressed content and in the CCR store while
+# ``[REDACTED:private-key]`` asserted the opposite; the armor is the ANCHOR, not
+# the credential. This mirrors ``compression_store._PEM_PRIVATE_KEY_RE``, which
+# has always taken the whole block on the (narrower) retrieval-log surface.
+#
+# ``[A-Z0-9 ]*`` before ``PRIVATE KEY`` admits every label in the wild — bare
+# PKCS#8, ``RSA``/``EC``/``DSA``/``OPENSSH``, and ``ENCRYPTED`` — and the
+# optional `` BLOCK`` suffix admits PGP, whose real armor is ``BEGIN PGP PRIVATE
+# KEY BLOCK-----`` (the old alternation listed ``PGP `` but could never match it,
+# because it expected ``PGP PRIVATE KEY-----``). Public material (``BEGIN
+# CERTIFICATE``, ``BEGIN PUBLIC KEY``) has no ``PRIVATE KEY`` and never matches.
+_PEM_ARMOR_BEGIN = r"-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+_PEM_ARMOR_END = r"-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+
+# Block interior. ``(?:[^-]|-(?!----))`` is "any char that does not start a
+# 5-hyphen armor run", which is both CORRECT (a base64 body and the RFC-1421
+# ``Proc-Type``/``DEK-Info`` headers of an encrypted traditional PEM contain no
+# ``-----``) and the reason this pattern is cheap on adversarial input: a scan
+# launched from a BOGUS armor cannot run past the next armor, so total work stays
+# linear in the payload instead of (armor count x bound). A plain ``[\s\S]*?``
+# interior costs 12 s on 310 KB of packed bare armors; this costs 5 ms. It spans
+# real newlines and the two-char ``\n`` escapes of a JSON-embedded key alike. The
+# 100k bound is belt-and-braces on top of that guard: ~30x a 4096-bit RSA PEM.
+# A block that somehow exceeds it falls to the truncated branch below, which
+# still takes the armor and the body's base64 runs — less than the whole block,
+# not nothing. Pinned by ``test_block_body_bound_falls_back_to_truncated_branch``.
+_PEM_BLOCK_BODY = r"(?:[^-]|-(?!----)){0,100000}"
+
+# Truncated-block fallback. Tool output is routinely cut mid-payload — that is
+# why this library exists — and a block whose ``-----END`` never arrived would
+# otherwise match NOTHING, losing even the header marker the old pattern gave.
+# So: armor plus any run of base64 lines hanging off it.
+#
+# The FIRST run's separator is optional (review F-1): a body that abuts the armor
+# with no separator at all, or with only a space or a tab, is a real shape once
+# newlines have been stripped (single-line env-var keys) and it leaked while every
+# run required a leading newline. Later runs still require one, so multi-line
+# precision is untouched. Separators are real newlines or the two-char ``\n``
+# escapes of a JSON-embedded key.
+#
+# The ``{16,}`` floor keeps it off prose — an English word beside an armor is far
+# short of 16 unbroken base64 characters — so the branch redacts key material,
+# not the paragraph that happens to follow. The one disclosed cost of the F-1
+# widening: prose abutting the armor with NO separator whose first word is 16+
+# unbroken alphanumerics is eaten, at most that one run.
+#
+# Both bounds below are deliberate and pinned. Past 2048 runs the rest of the
+# body survives; that is ~128 KB of base64, far beyond any real key.
+_PEM_TRUNCATED_BODY = (
+    r"(?:[ \t]*[A-Za-z0-9+/=]{16,})?"
+    r"(?:(?:\\n|[\r\n])+[ \t]*[A-Za-z0-9+/=]{16,}){0,2048}"
+)
+
+_PEM_PRIVATE_KEY_PATTERN = (
+    f"{_PEM_ARMOR_BEGIN}{_PEM_BLOCK_BODY}{_PEM_ARMOR_END}|{_PEM_ARMOR_BEGIN}{_PEM_TRUNCATED_BODY}"
+)
+
 # High-precision built-in credential patterns, applied BY DEFAULT before any
 # content is compressed or stored (audit Crit-4 / B3). Tool output routinely
 # contains secrets and the store keeps originals for the TTL, so the safe default
 # is to scrub the unambiguous credential shapes preventively rather than rely on
 # the operator to configure ``FURL_REDACT_PATTERNS`` after the fact. Each pattern
-# is deliberately SPECIFIC — a fixed vendor prefix plus a length/charset tail — so
-# it does not fire on ordinary logs, code, or prose: byte-exactness for
-# non-secret content is unchanged, and only a genuine credential is masked. The
+# is deliberately SPECIFIC — a fixed vendor prefix plus a length/charset tail, or
+# (for a private key) a delimited block — so it does not fire on ordinary logs,
+# code, or prose: byte-exactness for non-secret content is unchanged, and only a
+# genuine credential is masked. Each also spans the WHOLE secret, never just the
+# token that identifies it, or the marker would assert a scrub it did not do. The
 # ``(name, regex)`` pairs render as ``[REDACTED:<name>]`` (fixed length per type,
 # so the span never leaks the secret's length). Disable with
 # ``FURL_REDACT_BUILTINS=0``; add site-specific shapes with
 # ``FURL_REDACT_PATTERNS`` (both compose).
 _DEFAULT_CREDENTIAL_PATTERNS: tuple[tuple[str, str], ...] = (
-    # PEM/OpenSSH private-key block headers (the key material follows the header).
-    ("private-key", r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"),
+    # PEM/OpenSSH private-key blocks — armor AND key material (see above).
+    ("private-key", _PEM_PRIVATE_KEY_PATTERN),
     # AWS access-key id (AKIA/ASIA + 16 upper-alnum).
     ("aws-access-key", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     # Google API key (AIza + 35 url-safe chars).

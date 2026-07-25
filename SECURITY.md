@@ -82,7 +82,10 @@ means:
   Crit-4), a set of high-confidence credential patterns — private keys, AWS access
   keys (`AKIA`/`ASIA`), GCP/OpenAI/GitHub/Slack tokens, and JWTs — is scrubbed from
   the stored original **before** it is compressed or written to disk, on every store
-  path (the PostToolUse hook and every MCP store). Opt out with
+  path (the PostToolUse hook and every MCP store). A private key is scrubbed as a
+  WHOLE block — the `-----BEGIN … PRIVATE KEY-----` armor **and** the base64 key
+  material it introduces, across PEM/OpenSSH/PGP labels, JSON-embedded keys, and
+  blocks the tool cut off before their `-----END` line. Opt out with
   `FURL_REDACT_BUILTINS=0`. But the built-ins are deliberately narrow, so a secret
   with no recognizable prefix or key name (a bare high-entropy token, a
   custom-format credential) still lands verbatim and stays retrievable for the
