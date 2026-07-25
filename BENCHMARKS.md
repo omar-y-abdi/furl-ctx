@@ -113,14 +113,18 @@ the `#rows` feature look real. The granular per-row offload was removed (F8/#168
 are no per-row chunks to retrieve, so the "+40-68%" figures described an operation that
 no longer exists and never worked on the model's path.
 
-The current model is **whole-blob**: a row-drop stores the whole array behind one
-`<<ccr:HASH>>` marker, so retrieving any dropped row pulls the entire payload back.
-`verify/measure.py::effective_savings` was corrected to charge that (PR #172). Effective
-savings = `1 - (compressed + retrieved) / raw`, mean over 6 seeds, real gpt-4o tokens,
-for the five row-dropping families:
+The current model is **whole-blob**: every offload — a row-drop's dropped array, a
+cross-message dedup blob, or an opaque code blob — stores its payload behind one
+`<<ccr:HASH>>` marker with no granular row index, so retrieving any of it pulls the
+entire payload back. `verify/measure.py::effective_savings` charges that whole payload at
+any non-zero retrieval rate. PR #172 first charged it for row drops; the zero-drop gap
+described below the table was closed after — the charge now gates on `r > 0`, not on
+`k = ceil(r * n_dropped_rows) > 0`. Effective savings = `1 - (compressed + retrieved) /
+raw`, mean over 6 seeds, real gpt-4o tokens, all six families:
 
 | family | raw reduction (eff@0) | effective @25% | effective @50% |
 |---|---:|---:|---:|
+| code | 15.2% | **+10.2%** | **+10.2%** |
 | disk | 83.3% | **-1.3%** | **-4.2%** |
 | logs | 92.0% | +4.8% | +2.3% |
 | multiturn | 78.3% | **-6.4%** | **-9.6%** |
@@ -131,40 +135,66 @@ So under realistic partial retrieval, effective savings at 25% and 50% run from 
 **-9.6% to +11.9%** by family and go **NEGATIVE for disk and multiturn** — not the
 "+40-68% at every fraction" the removed model reported.
 
-**Caveat — the most important line in this section:** `effective_savings` as computed
-today does **not** charge for opaque whole-blob offload. It charges only for dropped
-rows (`k = ceil(r * n_dropped_rows)`), so any family with **zero** dropped rows reports
-effective savings equal to raw reduction regardless of what a retrieval actually costs.
-The `code` family is exactly that case — fully offloaded, no rows dropped — so it is
-**excluded from the table above** and measured honestly in the subsection below.
+The `code` row's per-family mean (15.2% → 10.2%) averages a tier split, because verify's
+`gen_code` builds N separate real source files, not one blob: at the `low` tier the
+identical files cross-message dedup (raw **69.3%** at `code@30 low`; retrieving the two
+unique blobs is cheap, so it stays net-positive at **+62.7%**), while `medium`/`high` are
+near-unique and pass through at 0%. The one cell that offloads a near-whole payload yet
+drops no rows — `code@7 low` — goes **negative** (+22.0% → **-1.5%** at 25%).
 
-#### The `code` fixture is the opposite case: opaque whole-blob offload, net-negative on retrieval
+**Correcting the record:** an earlier version of this section carried a caveat stating the
+`code` family was "fully offloaded, no rows dropped" and read flat because
+`effective_savings` did not charge opaque whole-blob offload. That named the wrong
+mechanism. `verify/run.py`'s `gen_code` produces **no opaque offload at all**
+(`opaque_offloads == []` at every tier); `code` read flat because of **cross-message
+dedup** at the low tier — a zero-drop offload the old `k = ceil(r * n_dropped_rows) > 0`
+gate charged nothing. The opaque whole-blob path is in fact exercised **nowhere** in
+`verify/run.py`; the only figure for it is the removed harness in the subsection below.
+`effective_savings` now charges the offloaded payload at any `r > 0`. That single
+`recovered`-based charge is complete because of one invariant: every offload is emitted
+behind a `{"_ccr_dropped": "<<ccr:HASH>>"}` sentinel, so the retrieved payload lands in
+`recovered` for all of them. That key is a cross-module contract with **three** emitters,
+one per offload path — `smart_crusher/persist.rs::ccr_sentinel_map` (Rust row drop),
+`cross_message_dedup.py::duplicate_sentinel` / `::near_duplicate_rendering`, and
+`router_engine.py::_ccr_offload` (opaque whole blob) — read back by `smart_crusher.py` and
+`csv_schema_decoder.py`. All three are pinned by real `compress()` calls in
+`tests/test_effective_savings_offload_cost.py`, so a bare-marker offload on any path fails
+loudly instead of being priced at zero. A zero-drop family can no longer report a
+retrieval it never priced.
 
-The corrected table above covers the five families that **row-drop**, where the
-whole-blob retrieval cost is charged. Source code is the true opposite: it cannot be
-folded into rows at all, so it row-drops nothing — and because the cost model charges
-only for dropped rows, it would read as flatly net-positive there. Its honest cost is
-measured separately here. When the
-router cannot structurally shrink content it moves the whole blob to the CCR
-store behind one marker with no granular row index, so retrieving any of it
-pulls the entire payload back. The README `code` row is exactly this shape: the
-committed `benchmarks/data/code.raw.json` fixture of 7 real repo source files.
+#### Cross-check: the single-blob `code` fixture and the removed harness
+
+The table's `code` row measures verify's `gen_code` (N separate real source files). An
+older, separate fixture measured the opposite extreme: the committed
+`benchmarks/data/code.raw.json` — 7 real repo files concatenated into ONE ~41k-token blob
+the router cannot structurally shrink, so it offloads the whole blob behind one marker.
+Retrieving any of it pulls the entire payload back.
 
 | fixture | raw marker reduction | effective @25% | effective @50% | one full retrieval |
 |---|---:|---:|---:|---:|
-| `code`, opaque whole-blob offload | 95.9% | **-4.1%** | **-4.2%** | **-4.1%** |
+| `code`, opaque whole-blob (historical, `benchmarks/code_roundtrip.py`, removed) | 95.9% | **-4.1%** | **-4.2%** | **-4.1%** |
+| `code`, same blob through the corrected `effective_savings` | 95.9% | **-4.0%** | **-4.0%** | **-4.0%** |
 
-This is a **historical** measurement: its harness, `benchmarks/code_roundtrip.py`, has
-since been removed (see git history), so the figure cannot be re-derived or refreshed by
-anyone — it is recorded here, not reproducible. gpt-4o tokens, the same 12-token per-call
-overhead as the table above. The 95.9 percent
-is a marker saving, not a token saving: `compress()` moved 41005 of 41025 tokens
-into the store and left a 1601 token summary, so retrieving the code back to use
-it costs more than never compressing it at all. This is why the front-page
-`code` row leads with a raw reduction that does not survive a round trip.
-`compress()` now flags this on the result as a structured `opaque_offloads`
-entry, and the MCP `furl_compress` response carries the same field, so a caller
-sees the round trip is net-negative before paying for it.
+The historical row is from `benchmarks/code_roundtrip.py`, since removed (see git history),
+so it cannot be refreshed by its own harness. The second row is **independent
+corroboration**: feeding the committed `code.raw.json` blob through the corrected
+`effective_savings` (whole payload charged at any `r > 0`) reproduces it — 95.9% raw,
+**-4.0%** at 25% retrieval — within rounding of the retired harness's -4.1%. gpt-4o tokens,
+the same 12-token per-call overhead as the table above. The 95.9 percent is a marker
+saving, not a token saving: `compress()` moved 41005 of 41025 tokens into the store and
+left a ~1601-token summary, so retrieving the code back costs more than never compressing
+it. This blob shape is why the front-page `code` row leads with a raw reduction that does
+not survive a round trip.
+
+The two `code` numbers do not conflict: the table row (+10.2% at 25%) is verify's
+multi-file `gen_code`, which dedups identical files at the low tier and passes near-unique
+files through — cheap or free to retrieve — while the single opaque blob here is
+net-negative. Same family name, different fixtures. `compress()` flags the opaque case on
+the result as a structured `opaque_offloads` entry (a net-negative round trip), and the MCP
+`furl_compress` response carries the same field, so a caller sees the cost before paying
+it. `effective_savings` does not read that field — it reaches the same conclusion by
+charging the sentinel-backed payload the offload leaves in `recovered`, which for this blob
+is the same bytes.
 
 ### What is genuinely guaranteed (holds at EVERY tier)
 
