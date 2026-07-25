@@ -1,10 +1,8 @@
 """Git diff output compressor — Rust-backed via PyO3.
 
-The Python implementation has been retired (Stage 3b, 2026-04-25). All
-diff compression now goes through `furl_ctx._core.DiffCompressor` (built
-from `crates/furl-py`). The byte-equality of the two implementations
-was verified against 27 recorded fixtures before the Python source was
-removed; the Rust crate has its own test coverage in `crates/furl-core/`.
+All diff compression goes through `furl_ctx._core.DiffCompressor` (built
+from `crates/furl-py`); the Rust crate has its own test coverage in
+`crates/furl-core/`.
 
 This module retains the public surface — `DiffCompressorConfig`,
 `DiffCompressionResult`, `DiffCompressor` — so existing call sites
@@ -78,8 +76,7 @@ class DiffCompressionResult:
 class DiffCompressor:
     """Rust-backed `DiffCompressor` (via PyO3 / `furl_ctx._core`).
 
-    Same `__init__` and `compress` shape as the retired Python class —
-    drop-in replacement. Returns Python `DiffCompressionResult` dataclass
+    Returns Python `DiffCompressionResult` dataclass
     instances so call sites that destructure with `asdict()` or read the
     `@property` fields work unchanged.
     """

@@ -18,11 +18,9 @@ class CompressionStoreBackend(Protocol):
     """Protocol for CompressionStore storage backends.
 
     This protocol defines the minimal interface for pluggable storage
-    backends — exactly the operations ``CompressionStore`` calls
-    (ARCH-10: ``keys()``/``exists()`` were required but never called by
-    the store and are no longer part of the contract; implementations
-    may still offer them as extras). Implementations can use any storage
-    mechanism: memory, SQLite, Redis, etc.
+    backends — exactly the operations ``CompressionStore`` calls;
+    implementations may still offer extras beyond it. Implementations
+    can use any storage mechanism: memory, SQLite, Redis, etc.
 
     Design Principles:
     - Simple CRUD operations only

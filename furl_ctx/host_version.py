@@ -13,7 +13,6 @@ can produce a compressed replacement but Claude Code never shows it to the
 model, so callers that assert "compression is armed/active" without checking
 the running version are making a claim they cannot back up.
 
-Investigated for this fix (see the PR description for the full writeup):
 Claude Code's hooks documentation does not expose the running version anywhere
 in a hook's stdin JSON payload, and there is no documented, version-stable
 environment variable carrying it either — ``CLAUDECODE=1`` is a bare presence

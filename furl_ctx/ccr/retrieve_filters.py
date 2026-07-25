@@ -372,8 +372,7 @@ def _parse_select(arguments: dict[str, Any], *, fields_present: bool) -> _Select
     (``fields_present``): a select without an explicit ``limit`` defaults to
     :data:`_DEFAULT_SELECT_LIMIT`, while a ``fields`` projection stays unbounded
     unless a ``limit`` is given. A ``limit`` with neither a ``select_field`` nor
-    ``fields`` (nothing to bound) is a truthful ``FilterError`` — no longer the
-    old "select_field is required" message that misdescribed the real constraint.
+    ``fields`` (nothing to bound) is a truthful ``FilterError``.
     """
     field_raw = arguments.get("select_field")
     equals_present = "select_equals" in arguments

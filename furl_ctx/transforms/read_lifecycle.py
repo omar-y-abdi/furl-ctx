@@ -169,8 +169,7 @@ class ReadLifecycleManager:
         """Build tool_call_id → :class:`_ToolCallMeta` in one pass.
 
         Scans assistant messages for tool calls, extracting name, file_path,
-        read range AND the containing message index (ARCH-9 — the index used
-        to be re-derived by a per-tool-call rescan of all messages). Handles
+        read range AND the containing message index (ARCH-9). Handles
         both OpenAI and Anthropic formats.
         """
         metadata: dict[str, _ToolCallMeta] = {}

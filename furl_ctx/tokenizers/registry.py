@@ -3,7 +3,7 @@
 Provides automatic tokenizer selection based on model name with
 support for multiple backends and custom tokenizers.
 
-The registry is module-level state + functions (SIMP-11): ``get_tokenizer``,
+The registry is module-level state + functions: ``get_tokenizer``,
 ``register_tokenizer``, and ``list_supported_models`` are the public API.
 """
 
@@ -23,9 +23,7 @@ logger = logging.getLogger(__name__)
 # Order matters - more specific patterns first
 # Models that match no pattern here fall back to the "estimation" backend
 # (EstimatingTokenCounter). This includes Llama/Mistral/Qwen and other open
-# models: their HuggingFace/Mistral tokenizer backends were removed
-# (tiktoken-only), and estimation is exactly what their missing-dependency
-# fallback produced before the removal.
+# models.
 #
 # Rust mirror + known divergences (ARCH-6): the Rust registry
 # (crates/furl-core/src/tokenizer/registry.rs) mirrors this pattern →

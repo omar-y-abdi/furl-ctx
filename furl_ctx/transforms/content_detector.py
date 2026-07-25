@@ -373,7 +373,7 @@ def _try_detect_code(content: str) -> DetectionResult | None:
         return None
 
     # ``any`` short-circuits on the first hit: one increment per language per
-    # line, and the same pattern-match count as the old inner ``break``.
+    # line.
     language_scores = Counter(
         lang
         for line in lines
@@ -385,7 +385,7 @@ def _try_detect_code(content: str) -> DetectionResult | None:
         return None
 
     # Find best matching language. ``most_common`` breaks ties toward the
-    # first-inserted language, matching the old ``max``.
+    # first-inserted language.
     best_lang, best_score = language_scores.most_common(1)[0]
 
     # Need at least 3 pattern matches to be confident

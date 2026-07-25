@@ -1,12 +1,10 @@
-"""AST-verified, CCR-backed code compression (Engine P2-12) — OPT-IN.
+"""AST-verified, CCR-backed code compression — OPT-IN.
 
-Restored from the archived pre-excision module (``archive/headroom/
-transforms/code_compressor.py``) as a gated capability: tree-sitter parses
+A gated capability: tree-sitter parses
 source code into an AST, function bodies are truncated statement-by-
 statement under a relevance-weighted line budget, and the render ships
 ONLY if it still parses and the FULL ORIGINAL is retrievable behind the
-emitted marker. This is distinct from the retired ast-grep code path
-(owner decision Q3) — different engine, different guarantees.
+emitted marker.
 
 Gating (default behavior unchanged):
 

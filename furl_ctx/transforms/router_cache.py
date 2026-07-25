@@ -1,6 +1,5 @@
 """Two-tier compression result cache for the ContentRouter.
 
-Extracted from ``content_router.py`` as a focused, self-contained module.
 ``CompressionCache`` has no dependency on ``ContentRouter`` — it is a
 plain in-process dict cache keyed by an opaque hashable value the CALLER
 builds. The router builds ``(hash(content), len(content), runtime, bias)``
@@ -20,8 +19,7 @@ expired key both passed the non-None check and both ``del``'d, a live
 counter, and the metric counters — is guarded by a single ``threading.Lock``,
 and expiry evictions use atomic ``pop(key, None)`` (never ``del``), so an
 entry that vanishes is a no-op rather than a crash. Because the metric
-counters are only ever updated under the lock, ``stats`` is exact — the
-benign lost-increment races of the lock-free design are gone.
+counters are only ever updated under the lock, ``stats`` is exact.
 
 MEMORY BOUND (PERF-11): TTL eviction alone is lazy per key, which would let
 unique content — the common case for tool outputs, inserted once and never
@@ -141,8 +139,7 @@ class CompressionCache:
         self._ttl_seconds = ttl_seconds
         self._max_entries = max_entries
         self._insertions_since_sweep = 0
-        # Metrics — updated under the lock, so they are exact (not the
-        # benignly-racy best-effort counters of the old lock-free design).
+        # Metrics — updated under the lock, so they are exact.
         self._hits = 0
         self._misses = 0
         self._skip_hits = 0

@@ -22,10 +22,6 @@ class CacheAlignerConfig:
 
 
 # Default tools to exclude from compression (local file/code tools)
-# Read: Returns exact file content needed for Edit tool's old_string matching.
-#   Compressing would break the edit workflow.
-# Glob: Returns compact file path lists used for navigation. Low token count,
-#   not worth compressing.
 # Tool outputs that are reference data and must NOT be compressed.
 # Read/Glob/Grep contain exact file contents/search results the agent needs for edits.
 # Write/Edit record what changes were made — compressing them causes duplicate/conflicting edits.
@@ -109,9 +105,7 @@ class CompressionProfile:
     (aggressive).
 
     ``bias`` is the ONLY field: the consumer (``ContentRouter._get_tool_bias``)
-    reads nothing else. The historical ``min_k``/``max_k`` fields were unread —
-    the real keep-floor lives in the Rust adaptive sizer (API-14; the
-    "conservative" preset's ``min_k=5`` promise did nothing).
+    reads nothing else. The real keep-floor lives in the Rust adaptive sizer.
     """
 
     bias: float = 1.0  # 0.7=aggressive, 1.0=moderate, 1.5=conservative
@@ -186,11 +180,10 @@ class CCRConfig:
 class FurlConfig:
     """Main configuration for FurlClient.
 
-    (API-14: the ``ccr: CCRConfig`` field had zero readers and was
-    deleted — the live retrieval-advertisement flags are
+    The live retrieval-advertisement flags are
     ``ContentRouterConfig.ccr_*`` via ``compressor_registry``; pass a
     ``CCRConfig`` to ``SmartCrusher(ccr_config=...)`` directly when
-    constructing one by hand.)
+    constructing one by hand.
     """
 
     cache_aligner: CacheAlignerConfig = field(default_factory=CacheAlignerConfig)

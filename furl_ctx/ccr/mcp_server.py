@@ -17,7 +17,6 @@ Usage:
 
     # Register with an MCP host, e.g. Claude Code:
     #   claude mcp add furl -- python -m furl_ctx.ccr.mcp_server
-    # (there is no ``furl`` console script — the module IS the entry point)
 
 Compression and retrieval happen locally in this process via the shared
 CCR compression store.
@@ -487,9 +486,7 @@ _READ_ENABLED = os.environ.get("FURL_MCP_READ", "off").lower().strip() in (
 # wire-byte change to any table render — the grammar characterization
 # suites stay untouched — at an amortized conversation-scope cost of ~250
 # o200k tokens. This is owner-approved alternative (b) of
-# QUESTIONS-FOR-USER.md item 15; the original once-per-conversation carrier
-# (``CCRToolInjector.inject_system_instructions``) was excised in SIMP-4,
-# leaving server-level instructions as the out-of-band channel.
+# QUESTIONS-FOR-USER.md item 15.
 #
 # Agent-first ordering (a fresh agent must decode this cold): a 3-part
 # plain-English summary (what the table format IS, what a ``<<ccr:HASH>>``
@@ -808,8 +805,6 @@ class SessionStats:
         """Record a furl_read cache hit WITHOUT touching compression totals.
 
         A hit avoids re-emitting the file body; it does not compress anything.
-        The old behavior booked it via ``record_compression`` — inflating the
-        compression totals with fictional savings (COR-36).
         """
         self.cache_hits += 1
         avoided = max(0, tokens_avoided)
@@ -1129,7 +1124,7 @@ class FurlMCPServer:
         ``MCP_SESSION_TTL``): the pipeline run inside ``_compress_content``
         persists dropped rows under the marker hash embedded in the
         compressed text WITHOUT an explicit ttl, and under the store's stock
-        default (1800 s since Engine P0-3; 300 s when this fix landed) those
+        default (1800 s since Engine P0-3) those
         rows expired mid-session while the wrapper hash (stored with the
         session TTL) advertised session persistence. Sharing the session TTL
         as the store default keeps both retrieval surfaces alive for the same
@@ -1191,7 +1186,7 @@ class FurlMCPServer:
         the original unchanged with zero savings — the original is NOT stored by
         default, since a stored copy identical to what the caller already holds
         just burns a retrieval cap slot (finding 9). ``persist=True`` forces the
-        store anyway (the pre-F9 always-store behavior). A no-op emits no
+        store anyway. A no-op emits no
         ``<<ccr:...>>`` markers, so skipping the store can never orphan one. Only
         the unfiltered path can no-op; ``persist`` has no effect once section
         ``patterns`` are supplied (that path always stores its eligible runs).
@@ -1811,8 +1806,6 @@ class FurlMCPServer:
         return result
 
     def _setup_handlers(self) -> None:
-        """Register all MCP tool handlers."""
-
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
             tools = [
@@ -2285,7 +2278,6 @@ class FurlMCPServer:
         self.route_call_tool = call_tool
 
     async def _handle_compress(self, arguments: dict[str, Any]) -> list[TextContent]:
-        """Handle furl_compress tool call."""
         content = arguments.get("content")
         file_path = arguments.get("file_path")
 
@@ -2383,7 +2375,6 @@ class FurlMCPServer:
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     async def _handle_retrieve(self, arguments: dict[str, Any]) -> list[TextContent]:
-        """Handle furl_retrieve tool call."""
         query = arguments.get("query")
         # Parameter-error treatment for a non-string query — the caller's
         # mistake, not an internal failure (API-15). Checked BEFORE the hash so
@@ -2424,7 +2415,7 @@ class FurlMCPServer:
                     len(response_text),
                 )
                 return [TextContent(type="text", text=response_text)]
-            # No hash and no query: unchanged from before this feature — a bare
+            # No hash and no query: a bare
             # retrieve needs a target. Kept byte-identical (the cross-store
             # search route is discoverable via the tool schema, not this error).
             return _err("hash parameter is required")
@@ -2507,7 +2498,6 @@ class FurlMCPServer:
         return [TextContent(type="text", text=response_text)]
 
     async def _handle_stats(self) -> list[TextContent]:
-        """Handle furl_stats tool call."""
         # PERF-16: store.get_stats() and _read_shared_events() (an flock'd file
         # read) are synchronous I/O — build the aggregate off the event loop.
         stats = await asyncio.to_thread(self._compute_stats)

@@ -290,9 +290,6 @@ def is_wildcard(token: object) -> bool:
     return token is _WILDCARD_TOKEN
 
 
-# Keep `field`/`replace` imported-and-used signal honest for linters: `_Cluster`
-# uses `field` default; `replace` is part of the immutable-update vocabulary
-# exposed for the encoder's convenience when it needs a template copy.
 __all__ = [
     "PREFIX_TREE_DEPTH",
     "SIMILARITY_THRESHOLD",

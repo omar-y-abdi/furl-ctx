@@ -23,7 +23,7 @@ from __future__ import annotations
 
 # --- Wire section framing ----------------------------------------------------
 
-# The wire begins with a version tag line so wave-3b integration (and any future
+# The wire begins with a version tag line so integration (and any future
 # format revision) can hard-fail fast on an unknown grammar rather than silently
 # mis-decoding.  Bump on any breaking grammar change.
 WIRE_VERSION: str = "LT1"

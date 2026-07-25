@@ -51,12 +51,11 @@ def retrieve(
     evicted under capacity, or TTL-expired — a loud, explicit miss, not a silent
     loss). *query* is optional retrieval-event context on that path.
 
-    Store resolution is SYMMETRIC with ``compress()`` (F1): when a namespace is
+    Store resolution is SYMMETRIC with ``compress()``: when a namespace is
     active — ``FURL_CCR_PROJECT_DIR`` / ``FURL_CCR_NAMESPACE``, or the same
     ``session_id``/``agent_id`` that was passed to ``compress()`` — this reads
-    the SAME isolated per-namespace store that compress call wrote to (the old
-    behavior read the global store there: a guaranteed miss). With no namespace
-    active the default path is unchanged — the request-scoped store if
+    the SAME isolated per-namespace store that compress call wrote to. With no
+    namespace active the default path is the request-scoped store if
     middleware set one, else the global singleton. Same resolution seam as
     ``ccr_export``/``ccr_import`` (``_active_ccr_store``).
 
@@ -137,9 +136,7 @@ def purge(hash: str, *, session_id: str | None = None, agent_id: str | None = No
     resolution seam ``compress()``/``ccr_export`` share: the isolated namespace
     store when one is active (``FURL_CCR_PROJECT_DIR`` / ``FURL_CCR_NAMESPACE``,
     or the ``session_id``/``agent_id`` passed at ``compress()`` time), else the
-    request-scoped/global store. (The old wording claimed
-    ``get_compression_store()`` honored the env namespace — it did not, F1: a
-    purge under a namespace silently no-opped against the global store.) A purge
+    request-scoped/global store. A purge
     only ever touches the caller's own tenant store — an entry another tenant
     stored is neither visible nor deletable here.
 
@@ -170,8 +167,8 @@ def resolve_markers(
     its original content. Unresolvable markers (window miss) are left in place;
     non-string message content is passed through untouched.
 
-    With no explicit ``store``, resolution is symmetric with ``compress()``
-    (F1): the active namespace store (``FURL_CCR_PROJECT_DIR`` /
+    With no explicit ``store``, resolution is symmetric with ``compress()``:
+    the active namespace store (``FURL_CCR_PROJECT_DIR`` /
     ``FURL_CCR_NAMESPACE``, or the same ``session_id``/``agent_id`` passed to
     ``compress()``) when one is active, else the request-scoped/global store —
     so markers a namespaced compress just emitted actually expand instead of

@@ -122,7 +122,7 @@ class TransformPipeline:
         # - JSON arrays -> SmartCrusher
         # - Plain text -> passthrough (reversible CCR offload for large
         #   uncompressible content)
-        # - Code -> passthrough (ships unmangled; AST compressor retired)
+        # - Code -> passthrough (ships unmangled)
         # - Logs -> LogCompressor
         # - Search results -> SearchCompressor
         transforms.append(ContentRouter())
@@ -215,7 +215,7 @@ class TransformPipeline:
         # CompressConfig.min_tokens_to_compress) and direct
         # TransformPipeline.apply(**kwargs) callers (who omit it). Built from the
         # loose kwargs bag with ONE unified default (250), so direct callers and
-        # compress() callers agree; previously direct callers silently got 50.
+        # compress() callers agree.
         # Placed back into kwargs under "compress_request" so the existing
         # should_apply / transform.apply forwarding threads it explicitly to
         # transforms (ContentRouter reads min_tokens from it), while the public

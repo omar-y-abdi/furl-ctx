@@ -52,7 +52,7 @@ def _read_input_tolerant(path: str) -> tuple[str, str | None]:
 
     Returns ``(text, warning_or_None)``. A binary or otherwise undecodable file
     OR stdin yields a replacement-decoded string plus a warning, so
-    ``furl compress`` on binary input degrades gracefully (audit High-7 / A7) —
+    ``furl compress`` on binary input degrades gracefully —
     a clean warning and pass-through, never a raw ``UnicodeDecodeError``
     traceback — and the file-arg and stdin paths behave identically. Reads the
     raw bytes (``sys.stdin.buffer`` for stdin, binary ``open`` for a file); a
@@ -93,7 +93,7 @@ def _cmd_compress(args: argparse.Namespace) -> int:
                     "compressed": compressed,
                     "tokens_before": result.tokens_before,
                     "tokens_after": result.tokens_after,
-                    # Crit-2: the headline number is VISIBLE-TOKEN reduction (how
+                    # The headline number is VISIBLE-TOKEN reduction (how
                     # much the model no longer sees), which INCLUDES CCR-offloaded
                     # content — hidden but byte-retrievable, not lossless byte
                     # compression. Labeled explicitly so a high number on
@@ -161,7 +161,7 @@ def _resolve_active_profile() -> dict[str, str]:
     """The effective CCR profile for THIS run — backend, TTL, store scope, and
     the compress floor — read from the already-resolved environment.
 
-    High-8: each surface (library / CLI / plugin) ships different CCR defaults
+    Each surface (library / CLI / plugin) ships different CCR defaults
     on purpose (the library stays in-memory + 30 min; the CLI opts into durable
     sqlite + 24 h; the plugin pins per-project sqlite). That divergence silently
     surprised users, so every ``furl`` run now surfaces the profile it is
@@ -181,7 +181,7 @@ def _resolve_active_profile() -> dict[str, str]:
 
 
 def _profile_banner_enabled() -> bool:
-    """Whether to emit the one-line profile banner (High-8). Default ON;
+    """Whether to emit the one-line profile banner. Default ON;
     ``FURL_PROFILE_BANNER=0`` (or false/no/off/disabled) silences it so clean
     pipelines stay quiet."""
     raw = os.environ.get("FURL_PROFILE_BANNER", "1").strip().lower()
@@ -210,7 +210,7 @@ def _invalid_hash_message(hash_value: str) -> str | None:
     """Return an error string iff *hash_value* is not a syntactically valid CCR
     hash (12 or 24 lowercase-hex), else ``None``.
 
-    Med-11: the MCP ``furl_retrieve`` / ``furl_purge`` handlers reject a
+    The MCP ``furl_retrieve`` / ``furl_purge`` handlers reject a
     malformed hash up front via ``marker_grammar.is_valid_ccr_hash``; the CLI
     used to pass any string straight to the store and report a generic MISS,
     conflating "you typed a bad hash" with "that hash expired or was evicted".
@@ -229,7 +229,7 @@ def _ccr_store_search_target() -> tuple[str, bool]:
 
     Introspects the SAME store the library ``retrieve`` consults —
     ``_active_ccr_store(None, None)``, the resolution seam ``compress()``/
-    ``retrieve()`` share (F2): the isolated per-namespace store when one is
+    ``retrieve()`` share: the isolated per-namespace store when one is
     active (``FURL_CCR_PROJECT_DIR`` / ``FURL_CCR_NAMESPACE``), else the
     request-scoped/global singleton — already initialized by the retrieve
     attempt that just missed. Under a namespace the miss therefore names the
@@ -267,7 +267,7 @@ def _cmd_retrieve(args: argparse.Namespace) -> int:
     from furl_ctx import retrieve
 
     # Reject a malformed hash up front with the SAME guard/message the MCP
-    # server uses (Med-11), so "you typed a bad hash" (exit 2, usage error) is
+    # server uses, so "you typed a bad hash" (exit 2, usage error) is
     # never silently reported as an expired/evicted MISS (exit 1).
     hash_error = _invalid_hash_message(args.hash)
     if hash_error is not None:
@@ -312,7 +312,7 @@ def _cmd_retrieve(args: argparse.Namespace) -> int:
 def _cmd_purge(args: argparse.Namespace) -> int:
     from furl_ctx import purge
 
-    # Same up-front hash-format guard as retrieve / the MCP server (Med-11).
+    # Same up-front hash-format guard as retrieve / the MCP server.
     hash_error = _invalid_hash_message(args.hash)
     if hash_error is not None:
         sys.stderr.write(f"furl: {hash_error}\n")
@@ -360,7 +360,7 @@ _RETRIEVE_FLAGS = (
 def _redacted_list_preview(original: str, redactor: Any) -> str:
     """The leading, credential-redacted window of *original* for ``furl list``.
 
-    Same discipline as :func:`_redacted_search_preview` (RG4): slice-before-redact
+    Same discipline as :func:`_redacted_search_preview`: slice-before-redact
     with a margin, so the O(N^2)-on-long-hex-runs credential regexes never see the
     whole original, and a secret straddling the 80-char display edge is still seen
     whole and masked before truncation. Total: never raises — a redactor error
@@ -425,7 +425,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     The CLI twin of the ``furl_list`` MCP tool: inspect what originals the store
     is holding (hash, age, size, kind, a short credential-redacted preview) so a
     lost ``<<ccr:HASH>>`` marker can be recovered by eye, then retrieved by hash.
-    The preview is redacted exactly like ``furl search``'s (RG4): the store holds
+    The preview is redacted exactly like ``furl search``'s: the store holds
     whatever the agent compressed, so a listing must not print a secret back out.
     """
     import time
@@ -510,7 +510,7 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
     The CLI twin of the ``furl_stats`` MCP tool, scoped to what the CLI can
     honestly report: the live, cross-process store figures (``get_stats``, which
-    also prunes expired rows) plus the resolved profile (High-8) so the numbers
+    also prunes expired rows) plus the resolved profile so the numbers
     are never read against the wrong backend/TTL.
     """
     from furl_ctx.cache.compression_store import _active_ccr_store
@@ -632,7 +632,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         "(context hidden, not lossless compression; originals stay CCR-retrievable)\n"
     )
     # The needle-recall gate runs an extra benchmark grid, so it is opt-in via
-    # --recall (the flag now conveys a real choice, not a mandatory no-op).
+    # --recall.
     if args.recall:
         recall = _engine_needle_recall()
         if recall < 0:
@@ -679,7 +679,7 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for name, passed, detail in checks:
         sys.stdout.write(f"[{'OK' if passed else 'FAIL'}] {name}: {detail}\n")
 
-    # High-8: the resolved CCR profile this install will use, so `doctor` answers
+    # The resolved CCR profile this install will use, so `doctor` answers
     # "which backend/TTL/scope am I actually on?" — the surface-specific defaults
     # that otherwise surprise users.
     profile = _resolve_active_profile()
@@ -721,7 +721,7 @@ def main(argv: list[str] | None = None) -> int:
     # is always respected.
     os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
 
-    # TTL parity with the Claude Code plugin (round-6 evaluator finding): the
+    # TTL parity with the Claude Code plugin: the
     # library's 30-minute default made CLI-stored originals die mid-session
     # while the plugin's hook and MCP tools (FURL_CCR_TTL_SECONDS=86400, set
     # by hooks/compress_tool_output.py and .mcp.json) kept theirs for 24 h.
@@ -852,7 +852,7 @@ def main(argv: list[str] | None = None) -> int:
     p_purge.add_argument("hash")
     p_purge.set_defaults(func=_cmd_purge)
 
-    # CLI parity with the MCP tools (Med-11): list / search / stats over the same
+    # CLI parity with the MCP tools: list / search / stats over the same
     # store `furl compress` writes to and `furl retrieve` reads from.
     p_list = sub.add_parser("list", help="list stored CCR entries, newest first")
     p_list.add_argument(
@@ -893,7 +893,7 @@ def main(argv: list[str] | None = None) -> int:
     p_mcp.set_defaults(func=_cmd_mcp)
 
     args = parser.parse_args(argv)
-    # High-8: surface the active CCR profile (backend/TTL/scope) on every run so
+    # Surface the active CCR profile (backend/TTL/scope) on every run so
     # a surface's non-obvious defaults never silently surprise the user. STDERR
     # only (stdout stays pure compressed output); opt out with FURL_PROFILE_BANNER=0.
     _emit_profile_banner()

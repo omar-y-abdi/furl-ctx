@@ -32,8 +32,7 @@ explicitly:
 get_compression_store`` DEFERRED inside the method: content_router imports this
 module at top level, so hoisting it would risk a load-time cycle
 (content_router -> router_ccr_mirror -> ... -> content_router).
-``extract_ccr_hashes`` imports only the leaf ``marker_grammar`` (no cycle) and
-no longer touches smart_crusher at all.
+``extract_ccr_hashes`` imports only the leaf ``marker_grammar`` (no cycle).
 """
 
 from __future__ import annotations

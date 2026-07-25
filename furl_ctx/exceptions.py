@@ -10,11 +10,7 @@ Furl's real error contract does not use typed exceptions today:
 
 ``FurlError`` is kept as the RESERVED base for future typed errors so
 embedders can write ``except FurlError`` today and stay forward-compatible;
-no current API raises it. The eight subclasses this module used to define
-(``ConfigurationError``, ``ProviderError``, ``StorageError``,
-``CompressionError``, ``TokenizationError``, ``CacheError``,
-``ValidationError``, ``TransformError``) were raised nowhere in the package
-and were removed in the API-1 prune.
+no current API raises it.
 """
 
 from __future__ import annotations

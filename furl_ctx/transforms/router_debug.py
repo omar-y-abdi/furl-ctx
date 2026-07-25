@@ -1,6 +1,6 @@
 """Debug-introspection helpers for the content router (pure functions).
 
-Extracted from ``content_router.py`` (§4.1 S1) as a pure move. Everything here
+Everything here
 is a side-effect-free function of its arguments except
 :func:`_log_router_debug`, whose only effect is emitting one DEBUG record.
 

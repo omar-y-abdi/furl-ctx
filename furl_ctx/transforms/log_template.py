@@ -74,7 +74,7 @@ class LogTemplateEncoding:
 
     ``wire`` is the complete, self-describing serialisation understood by
     :func:`furl_ctx.transforms.log_template_decoder.decode`.  The stats are
-    informational (for the router / diagnostics in wave 3b) and are NOT required
+    informational (for the router / diagnostics) and are NOT required
     to decode.
     """
 

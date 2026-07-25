@@ -1,10 +1,10 @@
 """Content-level compression engine for the content router.
 
-Extracted from ``content_router.py`` (§4.1 S5). :class:`ContentCompressionEngine`
+:class:`ContentCompressionEngine`
 owns compressing ONE string: strategy determination, the pure/mixed paths, the
 per-strategy dispatch (via the owned :class:`StrategyDispatcher` +
 :class:`CompressorRegistry`), the empty-output guard, the reversible CCR-offload
-fallback, and the observer plumbing (the TOIN successor — one
+fallback, and the observer plumbing (one
 ``record_compression`` per routing decision). That class has zero message/dict
 knowledge and is stateless per call. The engine's result types
 (:class:`RoutingDecision` / :class:`RouterCompressionResult`) live here and are
@@ -40,8 +40,8 @@ Two injection planes keep every existing monkeypatch biting:
   ``content_router`` module globals
   (``monkeypatch.setattr(content_router_module, "is_mixed_content", ...)``);
   a module-level ``from .content_router import is_mixed_content`` here would
-  leave those patches silently non-biting (the §4.1 design hole, called out
-  in the plan). The function-local import also breaks the load-time cycle:
+  leave those patches silently non-biting. The function-local import also
+  breaks the load-time cycle:
   ``content_router`` imports this module at top level.
 """
 
@@ -322,8 +322,7 @@ class ContentCompressionEngine:
         # ``_apply_strategy_to_content`` delegator, so monkeypatching those
         # router methods still takes effect. Only the lifetime-stable deps
         # (config + the module-level debug helpers/logger) ride the
-        # constructor — resolved once here, exactly when the router used to
-        # resolve them in its own ``__init__``.
+        # constructor — resolved once here.
         cr = _cr()
         self._dispatcher = StrategyDispatcher(
             config,
@@ -345,7 +344,7 @@ class ContentCompressionEngine:
     ) -> RouterCompressionResult:
         """Compress content using optimal strategy based on content detection.
 
-        The body of ``ContentRouter.compress`` (a pure move); see the facade
+        The body of ``ContentRouter.compress``; see the facade
         docstring for the public contract. ``hooks`` is the router facade —
         strategy selection and the pure/mixed paths resolve through it.
 
@@ -1015,8 +1014,7 @@ class ContentCompressionEngine:
         live secret.
         """
         # ``islice`` pulls exactly _OFFLOAD_ERROR_LINES_MAX matches then stops,
-        # so no line past the last surfaced one is ever scanned — same
-        # short-circuit (and same regex-call count) as the old ``break``.
+        # so no line past the last surfaced one is ever scanned.
         return list(
             islice(
                 (
@@ -1379,10 +1377,9 @@ def run_router_passes(
         min_tokens = compress_request.min_tokens_to_compress
     else:
         # Raw ContentRouter.apply() (no pipeline boundary, e.g. low-level
-        # tests): preserve the historical direct-caller floor of 50. This
-        # path is behavior-identical to before — the worker-options pinning
-        # test compresses 122-token fixtures through it and depends on the
-        # 50 floor letting compression happen.
+        # tests): preserve the historical direct-caller floor of 50. The
+        # worker-options pinning test compresses 122-token fixtures through
+        # it and depends on the 50 floor letting compression happen.
         min_tokens = kwargs.get("min_tokens_to_compress", 50)
     # Cache-safety knobs for content-block (Anthropic-format) handling:
     compress_assistant_text_blocks = kwargs.get(
@@ -1655,7 +1652,7 @@ def run_router_passes(
                 )
 
     # --- Pass 2/3: parallel compression of all cache-miss messages,
-    # merged back in message order (extracted executor — §4.1 S6).
+    # merged back in message order.
     if pending_tasks:
         hooks._compress_pending(
             pending_tasks,

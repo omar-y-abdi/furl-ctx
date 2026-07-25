@@ -1,6 +1,6 @@
 """Mixed-content detection and splitting for the ContentRouter.
 
-Extracted verbatim from ``content_router.py``. These are pure, module-level
+These are pure, module-level
 functions over strings — no dependency on ``ContentRouter`` or its runtime
 state. The orchestration method ``_compress_mixed`` stays on the router; only
 the pure split helpers and their supporting data live here.

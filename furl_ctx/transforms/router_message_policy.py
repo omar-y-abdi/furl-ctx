@@ -1,8 +1,8 @@
 """Message-level routing policy for the content router (Pass-1 gate chain).
 
-Extracted from ``content_router.py`` (§4.1 S3). Owns WHAT happens to one
+Owns WHAT happens to one
 message — the :class:`MessageDisposition` ADT and :func:`classify_message`,
-the verbatim move of ``apply()``'s Pass-1 protection-gate chain (minus the
+``apply()``'s Pass-1 protection-gate chain (minus the
 cache lookup, which stays on the router facade) — plus the message-shape
 helpers ``build_tool_name_map`` / ``get_tool_bias`` / ``detect_analysis_intent``
 and the classification predicates they lean on.
@@ -500,8 +500,7 @@ def detect_analysis_intent(
 
     Looks at the most recent user message for genuine analysis verbs,
     matched on word boundaries against ``_ANALYSIS_INTENT_PATTERN``
-    (COR-16 — the old substring scan over a broader set tripped on
-    e.g. "fix" in "prefix" and left SOURCE_CODE ~never compressed).
+    (COR-16).
     Both plain-string and block-format user content are scanned (text
     parts concatenated — COR-53). The matched keyword is DEBUG-logged
     so over-breadth stays visible.

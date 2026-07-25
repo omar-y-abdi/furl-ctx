@@ -373,9 +373,7 @@ def _detect_opaque_offloads(
 def _compute_frozen_message_count(messages: list[dict[str, Any]]) -> int:
     """Return the frozen-prefix message count for a list of Anthropic messages.
 
-    The authoritative frozen-count implementation (the former Rust
-    ``cache_control::compute_frozen_count`` was orphaned — no PyO3 binding, no
-    caller — and was removed in the standalone excise):
+    The authoritative frozen-count implementation:
 
     - Walk ``messages[i].content[*]``; for each block (dict) that has a
       top-level ``cache_control`` key, record ``i`` as the highest marker index.
@@ -981,8 +979,7 @@ def compress(
         ratio = tokens_saved / tokens_before if tokens_before > 0 else 0.0
 
         # Post-compress hook — fires on EVERY success-path completion, zero
-        # savings included, so subclasses see the negative class too (API-2;
-        # subclasses that assumed savings>0 now also receive zero-events).
+        # savings included, so subclasses see the negative class too (API-2).
         # ``ccr_hashes`` carries the recovery pointers newly surfaced by this
         # compression. Fail-open failures (the except path below) do not
         # emit an event — no compression happened.
@@ -1026,9 +1023,9 @@ def compress(
             tokens_saved=tokens_saved,
             compression_ratio=ratio,
             transforms_applied=result.transforms_applied,
-            # Transform warnings (TransformResult.warnings) were previously
-            # dropped here; plumb them through alongside the compress()-level
-            # frozen-prefix diagnostics so callers can actually see them.
+            # Transform warnings (TransformResult.warnings) are plumbed through
+            # alongside the compress()-level frozen-prefix diagnostics so
+            # callers can actually see them.
             warnings=[*compress_warnings, *result.warnings],
             opaque_offloads=opaque_offloads,
         )

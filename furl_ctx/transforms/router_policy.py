@@ -1,6 +1,6 @@
 """Pure routing-policy mappings for the ContentRouter.
 
-Extracted from ``content_router.py``. Everything here is a pure function of
+Everything here is a pure function of
 its arguments — config thresholds + a content/strategy value — with no access
 to router runtime state, the result cache, or thread-locals.
 
@@ -75,8 +75,7 @@ def strategy_from_detection(
 
 
 def _source_code_strategy(config: ContentRouterConfig) -> CompressionStrategy:
-    """SOURCE_CODE routing: PASSTHROUGH by default — code ships unmangled,
-    exactly the behavior the retired AST/ML code compressors left behind.
+    """SOURCE_CODE routing: PASSTHROUGH by default — code ships unmangled.
     The opt-in CodeAwareCompressor (``enable_code_aware=True``, Engine
     P2-12) claims the arm instead; its dispatch arm applies the
     ``lossless_only`` gate."""

@@ -11,8 +11,8 @@ Recoverability invariant (mirrors ``cross_message_dedup._persist_original``
 and the fail-safe SmartCrusher gets by raising): the store write must
 succeed DURABLY BEFORE the CCR marker ships — with the durable backend a
 write that only reached the volatile fallback (degraded / lost the lock
-race) is a veto too (``require_durable=True`` → ``DurableWriteError``,
-audit #3), not a false success. On ``False`` the caller serves the ORIGINAL
+race) is a veto too (``require_durable=True`` → ``DurableWriteError``),
+not a false success. On ``False`` the caller serves the ORIGINAL
 uncompressed content (no marker), so a dropped hunk / line / match /
 segment / body is never signalled-but-unrecoverable. The veto behavior is
 pinned by ``tests/test_ccr_persist_failure_vetoes.py`` and
@@ -48,7 +48,7 @@ def persist_to_python_ccr(
             find the entry.
         compression_strategy: Route attribution for the entry (a
             ``CompressionStrategy`` value, e.g. ``"diff"``), feeding the
-            shape-keyed retrieval-feedback loop (Engine P2-13).
+            shape-keyed retrieval-feedback loop.
         logger: The CALLER's module logger, so failure logs keep their
             per-compressor attribution.
 
@@ -67,7 +67,7 @@ def persist_to_python_ccr(
         # require_durable: with a durable backend a write that only reached the
         # volatile fallback (degraded / lost the lock race) raises
         # DurableWriteError — caught below and vetoed, so a marker never ships
-        # for an original that dies with the process (audit #3).
+        # for an original that dies with the process.
         store.store(
             original,
             compressed,

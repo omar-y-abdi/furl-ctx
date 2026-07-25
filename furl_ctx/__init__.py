@@ -63,10 +63,8 @@ from .retrieve import purge, resolve_markers, retrieve
 # ``compress_to`` is bound the same way (its submodule would otherwise shadow it).
 
 __all__ = [
-    # Exceptions — the reserved base class only. The eight subclasses this
-    # package used to export were raised NOWHERE (decorative API) and were
-    # removed in the API-1 prune; compress() fails open (``result.error``)
-    # and raises TypeError for unknown kwargs.
+    # Exceptions — the reserved base class only. compress() fails open
+    # (``result.error``) and raises TypeError for unknown kwargs.
     "FurlError",
     # Config
     "FurlConfig",
@@ -121,11 +119,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "FurlError": ("furl_ctx.exceptions", "FurlError"),
     # Config
     "FurlConfig": ("furl_ctx.config", "FurlConfig"),
-    # API-14: the LIVE engine config class. The top-level export used to
-    # point at a second, incompatible ``config.SmartCrusherConfig`` whose
-    # own defaults crashed the engine (TypeError: unexpected keyword
-    # argument 'relevance'); that class was deleted and this now names
-    # the class ``SmartCrusher(config=...)`` actually accepts.
+    # The engine config class ``SmartCrusher(config=...)`` actually accepts.
     "SmartCrusherConfig": ("furl_ctx.transforms.smart_crusher", "SmartCrusherConfig"),
     "CacheAlignerConfig": ("furl_ctx.config", "CacheAlignerConfig"),
     # Data models

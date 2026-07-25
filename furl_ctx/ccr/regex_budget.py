@@ -35,8 +35,7 @@ Engine strategy (in order)
 
 Why the residual is closed at INGRESS (review B1)
 -------------------------------------------------
-The residual is not merely "a slow match", which is how an earlier revision of
-this docstring framed it. Because CPython's ``sre`` holds the GIL for the whole
+The residual is not merely "a slow match". Because CPython's ``sre`` holds the GIL for the whole
 match, a wedged worker thread starves the ENTIRE asyncio event loop: measured on
 the MCP server, 1 event-loop tick during a 1.48 s match where a healthy loop
 ticks ~30. Every session served by the process freezes until the match ends, and

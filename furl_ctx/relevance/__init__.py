@@ -12,9 +12,8 @@ Available scorers:
    - Good for exact UUIDs, IDs, specific terms
    - May miss semantic matches ("errors" won't match "failed")
 
-The semantic/embedding scorers were retired with the public SDK surface; the
-live compression core scores items via the Rust HybridScorer, and only
-``BM25Scorer`` remains as the Python keyword scorer (used by the CCR store's
+The live compression core scores items via the Rust HybridScorer, and
+``BM25Scorer`` is the Python keyword scorer (used by the CCR store's
 search path).
 
 Example usage:

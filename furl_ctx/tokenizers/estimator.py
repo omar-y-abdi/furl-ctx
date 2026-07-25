@@ -13,7 +13,7 @@ from contextlib import suppress
 
 from .base import BaseTokenizer
 
-# PERF-14: ratio detection and special-pattern overhead scanning operate on
+# Ratio detection and special-pattern overhead scanning operate on
 # a bounded PREFIX SAMPLE of the text. Auto-mode previously json.loads-parsed
 # multi-MB strings and regex-scanned the full text on EVERY count_text call
 # just to pick 3.2 vs 4.0 chars/token — on large tool outputs the "cheap
@@ -124,10 +124,8 @@ class EstimatingTokenCounter(BaseTokenizer):
     def _detect_ratio(self, text: str) -> float:
         """Detect optimal chars-per-token ratio based on content.
 
-        Detection runs on a ``_DETECTION_SAMPLE_CHARS`` prefix sample
-        (PERF-14): a multi-MB tool output was previously fully
-        ``json.loads``-parsed and regex-scanned per call just to pick the
-        ratio. Texts at or under the sample size keep the exact historical
+        Detection runs on a ``_DETECTION_SAMPLE_CHARS`` prefix sample.
+        Texts at or under the sample size keep the exact historical
         behavior (the sample IS the text); larger JSON candidates classify
         via a structural-density heuristic on the prefix, since a truncated
         prefix never parses.
@@ -158,7 +156,7 @@ class EstimatingTokenCounter(BaseTokenizer):
 
     @staticmethod
     def _sample_is_json_like(sample: str) -> bool:
-        """Structural-density JSON check for a prefix sample (PERF-14).
+        """Structural-density JSON check for a prefix sample.
 
         Used only when the full text exceeds the sample window, so
         ``json.loads`` on the (truncated) prefix cannot decide. Counts the
@@ -175,9 +173,7 @@ class EstimatingTokenCounter(BaseTokenizer):
 
         URLs and UUIDs often tokenize into more tokens than
         character count would suggest. The scan is bounded to the same
-        ``_DETECTION_SAMPLE_CHARS`` prefix sample as ratio detection
-        (PERF-14) — two full-text regex passes per count_text call were
-        the other half of the multi-MB auto-mode cost. The overhead is a
+        ``_DETECTION_SAMPLE_CHARS`` prefix sample as ratio detection. The overhead is a
         small correction term on top of the length-based estimate; for
         texts at or under the sample size the behavior is exactly the
         historical one.

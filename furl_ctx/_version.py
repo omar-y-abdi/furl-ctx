@@ -1,11 +1,9 @@
-"""Package version metadata — lazy, subprocess-free (PERF-13 / API-8).
+"""Package version metadata — lazy, subprocess-free.
 
 ``__version__`` resolves through PEP 562 module ``__getattr__`` on FIRST
 access, never at import: the old eager path spawned ``git tag`` + ``git
 log`` subprocesses (~90 ms) on every ``import furl_ctx`` in a checkout and
-made imports non-hermetic. The git-derived "next release" computation moved
-out of the package entirely (``scripts/release_version.py`` — CI-only
-tooling that no longer ships in the wheel); the runtime version is now
+made imports non-hermetic. The runtime version is
 always the installed distribution metadata via ``importlib.metadata``, with
 ``"unknown"`` as the not-installed fallback.
 """
