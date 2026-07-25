@@ -120,14 +120,20 @@ def test_B_eviction_scoped_to_own_backend(tmp_path) -> None:
     its OWN backend + cap + eviction heap, so oldest-first eviction can never
     reach across the boundary.
     """
-    store_a = CompressionStore(max_entries=1, backend=SqliteBackend(db_path=tmp_path / "a.sqlite3"))
-    store_b = CompressionStore(max_entries=1, backend=SqliteBackend(db_path=tmp_path / "b.sqlite3"))
+    # Cap is 2 (the store's documented floor since F8/R2; a 1-entry store is
+    # rejected because it would evict a columnar unit's own parent), so a THIRD
+    # insert into A is what forces A to shed its oldest — still proving eviction
+    # fired and stayed inside A's own backend.
+    store_a = CompressionStore(max_entries=2, backend=SqliteBackend(db_path=tmp_path / "a.sqlite3"))
+    store_b = CompressionStore(max_entries=2, backend=SqliteBackend(db_path=tmp_path / "b.sqlite3"))
     try:
         b_key = store_b.store("B keeps this", "<<ccr:b>>")
         a1 = store_a.store("A first", "<<ccr:a1>>")
         a2 = store_a.store("A second", "<<ccr:a2>>")
+        a3 = store_a.store("A third", "<<ccr:a3>>")
 
         # A evicted its OWN oldest (proves eviction actually fired) ...
+        assert store_a.retrieve(a3) is not None
         assert store_a.retrieve(a2) is not None
         assert store_a.retrieve(a1) is None
         # ... while B's entry, in a separate backend, is untouched.

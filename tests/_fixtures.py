@@ -186,6 +186,10 @@ def make_fail_open_sqlite_backend(db_path: Any) -> Any:
     scenario). Reads/counts still hit the file, so same-process retrieval
     still round-trips; only durability is lost. Canonical home (TEST-19) for
     the helper the durable-veto suites (store / read_lifecycle / MCP) share.
+
+    Covers both the plain ``set`` op and the atomic ``set_linked`` op (R5): the
+    store persists through ``set_durable_linked`` now, so intercepting only
+    ``set`` would let every write land durably and defeat the veto.
     """
     from furl_ctx.cache.backends.sqlite import SqliteBackend, _SqliteOpFailed
 
@@ -193,7 +197,7 @@ def make_fail_open_sqlite_backend(db_path: Any) -> Any:
     real_run = backend._run
 
     def failing_run(op_name: str, fn: Any) -> Any:
-        if op_name == "set":
+        if op_name in ("set", "set_linked"):
             raise _SqliteOpFailed()  # simulate busy_timeout x retries exhausted
         return real_run(op_name, fn)
 

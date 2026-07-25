@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from .. import paths as _paths
 from ..relevance.bm25 import BM25Scorer
+from .backends.base import ClearIncomingLinks, LinkMutation, LinkToParent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -368,6 +369,19 @@ class CompressionEntry:
 
     compression_strategy: str | None = None  # Strategy used for compression
 
+    # F8: non-null marks this entry as a DERIVED unit of a larger logical
+    # compression — a per-row chunk offloaded by a columnar row-drop, keyed by
+    # its own content hash. This field is the cheap "is a chunk" FLAG that keeps
+    # the entry out of the logical cap count (one columnar compress is ONE logical
+    # unit, not 1 + N chunks); its value is a parent hash, but a chunk shared by
+    # two drops of an identical row has MORE than one parent, so the authoritative
+    # parent set lives in the backend derived-link table, not here (R1). ``None``
+    # marks a PRIMARY entry: a normal compression, or the whole-blob parent
+    # itself. Chunks are cascade-deleted when their LAST live parent is evicted or
+    # purged, so a session's real retrieval headroom matches the nominal cap
+    # instead of burning several slots per structured output.
+    derived_of: str | None = None
+
     # Access tracking
     retrieval_count: int = 0
     search_queries: list[str] = field(default_factory=list)
@@ -509,6 +523,18 @@ class CompressionStore:
         # Import here to avoid circular imports
         from .backends import InMemoryBackend
 
+        # F8 R2: the derived-cap logic needs room for at least a parent plus the
+        # eviction pass that runs BEFORE each insert. At max_entries=1 a columnar
+        # unit's first chunk write would evict its own just-stored parent and
+        # orphan the chunk. A one-entry store is degenerate anyway (it can hold no
+        # logical unit that offloads), so reject it loudly rather than silently
+        # mis-evict. Real deployments use 1000; no caller passes below 2.
+        if max_entries < 2:
+            raise ValueError(
+                f"max_entries must be at least 2, got {max_entries!r} — a 1-entry store "
+                f"would evict a columnar unit's own parent on its first chunk write"
+            )
+
         self._backend: CompressionStoreBackend = backend or InMemoryBackend()
         self._spill: CompressionStoreBackend | None = spill
         self._lock = threading.Lock()
@@ -560,6 +586,7 @@ class CompressionStore:
         compression_strategy: str | None = None,
         ttl: int | None = None,
         explicit_hash: str | None = None,
+        derived_of: str | None = None,
         require_durable: bool = False,
     ) -> str:
         """Store compressed content and return hash for retrieval.
@@ -585,6 +612,23 @@ class CompressionStore:
                 string, raises ``ValueError``. The marker hash and the
                 store key MUST match — otherwise a ``furl_retrieve`` of the
                 marker hash misses even though the data is present.
+            derived_of: Parent hash when this entry is a DERIVED unit of a
+                larger logical compression — a per-row chunk offloaded by a
+                columnar row-drop (F8). Validated as hex like ``explicit_hash``.
+                It flags the entry as a chunk (so the cap excludes it) and names
+                ONE referencing parent; because chunks are content-addressed, an
+                identical row from two columnar drops is ONE chunk referenced by
+                TWO parents, so the authoritative parent set lives in the backend
+                derived-link table, not this single field. A derived entry does
+                NOT count against ``max_entries`` (one columnar compress is ONE
+                logical unit) and is cascade-deleted only when its LAST live
+                parent is capacity-evicted or purged — one parent's cascade
+                leaves a chunk that another live parent still references. ``None``
+                (the default) marks a PRIMARY entry — a normal compression or the
+                parent itself — so any workload that never passes this is
+                byte-identical to before. A derived write NEVER demotes an
+                existing PRIMARY entry of the same key (content-collision
+                safety): once primary, always primary.
             require_durable: When True and the configured backend is durable
                 (exposes ``set_durable``), raise ``DurableWriteError`` if the
                 write only reached the volatile fallback (backend degraded or
@@ -670,6 +714,15 @@ class CompressionStore:
             # unchanged.
             hash_key = hashlib.sha256(original.encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
+        # F8: validate the parent link as hex, loud on a bad key — a derived
+        # entry that named a malformed parent could never be cascade-cleaned
+        # with that parent, so reject it rather than silently store an
+        # unlinkable orphan (mirrors the explicit_hash contract above).
+        if derived_of is not None:
+            if not derived_of or not all(c in "0123456789abcdefABCDEF" for c in derived_of):
+                raise ValueError(f"derived_of must be a non-empty hex string, got {derived_of!r}")
+            derived_of = derived_of.lower()
+
         entry = CompressionEntry(
             hash=hash_key,
             original_content=original,
@@ -684,10 +737,18 @@ class CompressionStore:
             created_at=self._now(),
             ttl=ttl if ttl is not None else self._default_ttl,
             compression_strategy=compression_strategy,
+            derived_of=derived_of,
         )
 
         durable = False
         collision_dropped = False
+        # R5/R6-1: the edge mutation this persist must land ATOMICALLY with the
+        # entry upsert. It is decided STATELESSLY from the entry alone below — a
+        # derived write links to its parent; EVERY primary write clears its incoming
+        # edges — so it never depends on a read of the pre-state that a concurrent
+        # cross-process writer of the same hash could stale. Defaulted to the primary
+        # decision here so the require_durable retry below the lock can replay it.
+        link: LinkMutation = ClearIncomingLinks()
         with self._lock:
             self._evict_if_needed()
 
@@ -732,11 +793,36 @@ class CompressionStore:
                         "Duplicate store for hash=%s, updating entry",
                         hash_key,
                     )
+                    # F8 once-primary-always-primary: a DERIVED write must never
+                    # demote an existing PRIMARY entry of the same key. Content is
+                    # deduped, so a per-row chunk can (astronomically rarely)
+                    # collide with content a normal compression already stored as
+                    # primary; keeping it primary means it stays counted against
+                    # the cap and is never cascade-deleted with a parent — the
+                    # conservative, no-loss choice. Promotion (a primary write over
+                    # a derived entry) keeps the primary; its stale parent edges are
+                    # dropped by the unconditional clear EVERY primary write carries
+                    # (R6-1), not by a special case here, so a later cascade of the
+                    # former parent cannot delete this now-primary live entry (N1).
+                    if existing.derived_of is None and entry.derived_of is not None:
+                        entry = replace(entry, derived_of=None)
                     # Mark old heap entry as stale since we're replacing
                     self._stale_heap_entries += 1
 
             if not collision_dropped:
-                durable = self._persist_and_report_durability(hash_key, entry)
+                # R5/R6-1: the entry upsert and its derived-edge mutation now land
+                # in ONE atomic backend op, so ``derived_of`` and the edge table can
+                # never disagree on disk. A derived write links to its parent; EVERY
+                # primary write clears its incoming edges unconditionally — a
+                # stateless decision that never reads pre-state, so a concurrent
+                # cross-process derived write of the same hash cannot leave a live
+                # primary carrying a stale edge (R6-1). The once-primary guard above
+                # already cleared derived_of when this key is an existing primary, so
+                # a primary is never linked as a chunk. The edge, not the single
+                # derived_of field, is what lets a chunk shared by two parents
+                # survive the cascade of one of them and die only with the LAST.
+                link = self._link_mutation_for(entry)
+                durable = self._persist_and_report_durability(hash_key, entry, link)
                 # Add to eviction heap for O(log n) eviction
                 heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
 
@@ -763,7 +849,7 @@ class CompressionStore:
         # capped-backoff budget (sleeps OUTSIDE the lock) so everyday two-session
         # contention lands durably instead of spuriously vetoing.
         if require_durable and not durable:
-            durable = self._retry_durable_persist(hash_key, entry)
+            durable = self._retry_durable_persist(hash_key, entry, link)
 
         # Durability veto (audit #3), raised OUTSIDE the lock, only once the whole
         # retry budget is spent. The entry stays in the volatile tier so
@@ -788,32 +874,50 @@ class CompressionStore:
             )
         return hash_key
 
-    def _persist_and_report_durability(self, hash_key: str, entry: CompressionEntry) -> bool:
-        """Write ``entry`` and report whether it reached a DURABLE backend.
+    @staticmethod
+    def _link_mutation_for(entry: CompressionEntry) -> LinkMutation:
+        """The edge mutation that MUST land atomically with this entry's upsert
+        (F8, R5, R6-1). STATELESS: decided from the entry alone, never from a read
+        of the pre-state. A derived write links to its parent; EVERY primary write
+        clears its incoming edges unconditionally — a primary owns none by
+        definition, so clearing is the invariant, and doing it WITHOUT consulting
+        pre-state is what closes the cross-process stale-read window: a concurrent
+        derived write of the same hash cannot leave this primary carrying a stale
+        edge."""
+        if entry.derived_of is not None:
+            return LinkToParent(entry.derived_of)
+        return ClearIncomingLinks()
 
-        A backend that distinguishes durable from volatile writes exposes
-        ``set_durable`` (the ``SqliteBackend`` does); its bool is returned
-        verbatim. A backend without it (the in-memory default) is treated as
-        durability-satisfied — the operator chose volatile storage, so
-        ``require_durable`` has nothing to veto. Must be called with the store
-        lock held.
+    def _persist_and_report_durability(
+        self, hash_key: str, entry: CompressionEntry, link: LinkMutation
+    ) -> bool:
+        """Write ``entry`` AND apply ``link`` in ONE atomic backend op, and report
+        whether it reached a DURABLE backend.
+
+        ``set_durable_linked`` is a REQUIRED backend method (R6): it commits the
+        entry upsert and the ``link`` edge mutation together, so ``derived_of`` and
+        the edge table can never be observed disagreeing on disk (F8, R5). Its bool
+        is returned verbatim — ``True`` durable, ``False`` volatile-only, which the
+        require_durable caller then vetoes. There is deliberately NO fallback to a
+        hand-paired entry-then-edge path: that separate-transaction seam is the
+        exact defect this whole series removed, so a backend lacking the method
+        fails fast and visibly at this call rather than silently degrading to a
+        non-atomic two-step write. Must be called with the store lock held.
         """
-        set_durable = getattr(self._backend, "set_durable", None)
-        if set_durable is not None:
-            return bool(set_durable(hash_key, entry))
-        self._backend.set(hash_key, entry)
-        return True
+        return bool(self._backend.set_durable_linked(hash_key, entry, link))
 
-    def _retry_durable_persist(self, hash_key: str, entry: CompressionEntry) -> bool:
+    def _retry_durable_persist(
+        self, hash_key: str, entry: CompressionEntry, link: LinkMutation
+    ) -> bool:
         """Re-attempt the durable persist under a bounded, capped-backoff budget.
 
         Returns ``True`` as soon as a re-attempt lands the row durably (the
         contention cleared), else ``False`` after ``durable_retry_attempts``
         tries — the caller then vetoes. Backoff sleeps happen OUTSIDE the store
         lock; each persist re-acquires it (the ``_persist_and_report_durability``
-        contract). Re-persisting the same ``(hash_key, entry)`` is idempotent —
-        the heap already holds the key and the backend upserts — so a healed
-        retry never double-counts.
+        contract). Re-persisting the same ``(hash_key, entry, link)`` is idempotent
+        — the heap already holds the key, the backend upserts, and the edge op is
+        INSERT OR IGNORE / DELETE — so a healed retry never double-applies.
         """
         for attempt in range(1, self._durable_retry_attempts + 1):
             backoff = min(
@@ -823,7 +927,7 @@ class CompressionStore:
             if backoff > 0:
                 time.sleep(backoff)
             with self._lock:
-                if self._persist_and_report_durability(hash_key, entry):
+                if self._persist_and_report_durability(hash_key, entry, link):
                     return True
         return False
 
@@ -1585,8 +1689,17 @@ class CompressionStore:
             # Include backend stats
             backend_stats = self._backend.get_stats()
 
+            # F8: split the raw entry count into LOGICAL (primary) vs DERIVED
+            # (per-row chunks). The cap is enforced on the logical count, so
+            # ``logical_entry_count`` vs ``max_entries`` is the real retrieval
+            # headroom; ``derived_entry_count`` is the excluded chunk overhead.
+            total_entries = self._backend.count()
+            derived_entries = self._backend.derived_count()
+
             return {
-                "entry_count": self._backend.count(),
+                "entry_count": total_entries,
+                "logical_entry_count": total_entries - derived_entries,
+                "derived_entry_count": derived_entries,
                 "max_entries": self._max_entries,
                 "default_ttl_seconds": self._default_ttl,
                 "total_original_tokens": total_original_tokens,
@@ -1773,6 +1886,23 @@ class CompressionStore:
         top_deleted = self.delete(hash_key)
         deleted: list[str] = []
         skipped: list[str] = []
+        # F8 R1: cascade the top hash's DERIVED per-row chunks. A columnar
+        # row-drop offloads each dropped row as its own chunk keyed off this
+        # parent; purging the parent must remove those copies too, or a caller who
+        # purged sensitive rows would leave per-row copies independently
+        # retrievable (the B3 purge-completeness principle). A chunk that a SECOND
+        # live parent still references (an identical dropped row shared by two
+        # drops) must survive for that parent, so ``_delete_derived_children``
+        # deletes only the chunks THIS parent alone owns and returns them; they
+        # land in ``nested_deleted`` for the purge read-back (RG6), while shared
+        # survivors stay retrievable through their other parent. Run under the lock
+        # as one sub-step; the top hash was already deleted above.
+        with self._lock:
+            derived_deleted = self._delete_derived_children(hash_key)
+        for child_hash in derived_deleted:
+            if child_hash not in visited:
+                visited.add(child_hash)
+                deleted.append(child_hash)
         for nested_hash in nested:
             if nested_hash in visited:
                 continue
@@ -1924,11 +2054,99 @@ class CompressionStore:
         # (mirrors the primary-hit copy in ``retrieve``).
         return replace(entry, search_queries=list(entry.search_queries))
 
+    def _logical_entry_count(self) -> int:
+        """Live-entry count the cap is enforced on: PRIMARY entries only (F8).
+
+        Total backend entries minus DERIVED units (the per-row chunks a columnar
+        row-drop offloads), so one structured compression is ONE logical unit
+        against ``max_entries`` instead of ``1 + N`` chunks. With no derived
+        entries — every existing test and every non-columnar path —
+        ``derived_count()`` is 0 and this equals ``count()``, so eviction is
+        byte-identical to before. Must be called with the lock held.
+        """
+        return self._backend.count() - self._backend.derived_count()
+
+    def _has_live_derived_parent(self, child_hash: str) -> bool:
+        """Whether any LIVE entry still references *child_hash* as a derived chunk
+        (F8 R1). MUST be called with the lock held. The parent being cascaded is
+        excluded by LIVENESS, not by unlinking: the caller deletes the parent's
+        entry before this cascade sub-step, so ``get(parent)`` below returns None and
+        the dead parent does not count itself as a referent (R6-3).
+
+        This is the derived-chunk analogue of ``_is_co_referenced`` for
+        marker-nested blobs (RG3): a chunk shared by two columnar drops of an
+        identical row is owned by BOTH parents, so the cascade of one must leave
+        it for the other. Liveness matches ``exists``: present in the backend and
+        not expired. Stale edges to already-dead parents are correctly ignored.
+        """
+        now = self._now()
+        for parent in self._backend.derived_parents_of(child_hash):
+            entry = self._backend.get(parent)
+            if entry is not None and not entry.is_expired(now):
+                return True
+        return False
+
+    def _delete_derived_children(self, parent_hash: str) -> list[str]:
+        """Delete the DERIVED chunks *parent_hash* alone owns; return those
+        actually deleted (F8 R1).
+
+        MUST be called with the lock held — it touches the backend, the derived
+        links, and the spill directly, on BOTH the capacity-eviction path and the
+        purge path (the purge takes the lock for this sub-step). Reuses the same
+        single-key delete discipline as every other in-store removal: primary
+        backend plus durable spill, with a stale-heap bump per primary hit so the
+        eviction heap cleans up the dangling tuple.
+
+        SHARED-CHUNK RULE (R1): a chunk is content-addressed, so two drops of an
+        identical row share ONE chunk under TWO parents. The parent's own entry is
+        already deleted by the caller, so the survival check excludes it by
+        LIVENESS; this deletes only chunks with NO surviving LIVE parent, and a
+        chunk another live parent still owns is left intact and removed only when
+        the LAST parent dies here or by TTL. Each deleted chunk is unlinked only
+        AFTER its delete is confirmed (R6-3), so a failed delete never strands a
+        live chunk with its edges gone. Chunks are leaf entries, never parents, so
+        this is one level, no recursion.
+        """
+        children = self._backend.children_of(parent_hash)
+        deleted: list[str] = []
+        for child_hash in children:
+            # The parent's ENTRY was already deleted by the caller (eviction and
+            # purge both remove the primary before this sub-step), so the survival
+            # check excludes this parent by LIVENESS. That is why no up-front
+            # unlink_parent is needed — and R6-3 removes it: dropping the parent edge
+            # before the child delete was confirmed stranded a LIVE derived chunk (a
+            # failed delete leaves the chunk, but its parent edge is already gone) —
+            # invisible to the cap and never cascaded.
+            if self._has_live_derived_parent(child_hash):
+                continue  # a co-owning live parent keeps the shared chunk alive
+            if self._backend.delete(child_hash):
+                self._stale_heap_entries += 1
+                deleted.append(child_hash)
+                # Drop the chunk's edges only now that its entry is CONFIRMED gone,
+                # so the edge mutation never outruns the entry delete and a failed
+                # delete can never leave a live chunk edge-orphaned (R6-3). A child
+                # already absent (delete returned False) leaves at most a
+                # child-absent edge, which the on-open orphan sweep (R5-2) reaps.
+                self._backend.unlink_child(child_hash)
+            if self._spill is not None:
+                try:
+                    self._spill.delete(child_hash)
+                except Exception as exc:  # noqa: BLE001 — fail-open, logged below
+                    logger.warning("CCR spill delete of derived child failed (non-fatal): %s", exc)
+        return deleted
+
     def _evict_if_needed(self) -> None:
         """Evict old entries if at capacity. Must be called with lock held.
 
         Uses a heap for O(log n) eviction instead of O(n) scan.
         CRITICAL FIX: Track and clean stale heap entries to prevent memory leak.
+
+        F8: the cap counts LOGICAL entries — ``count()`` minus DERIVED per-row
+        chunks — and only PRIMARY entries are eviction targets. A derived chunk
+        popped from the heap is skipped (it lives and dies with its parent, never
+        independently cap-evicted); evicting a PRIMARY parent cascade-deletes its
+        derived children so capacity is freed as one logical unit and no
+        retrievable orphan chunks are left behind.
         """
         # First, remove expired entries
         self._clean_expired()
@@ -1960,7 +2178,7 @@ class CompressionStore:
         # every subsequent pop removes one, so the loop terminates in
         # O(live entries).
         rebuilt_since_progress = False
-        while self._backend.count() >= self._max_entries:
+        while self._logical_entry_count() >= self._max_entries:
             if not self._eviction_heap:
                 if rebuilt_since_progress:
                     break  # already rebuilt with no live entries to evict — give up
@@ -1972,22 +2190,34 @@ class CompressionStore:
 
             created_at, hash_key = heapq.heappop(self._eviction_heap)
             entry = self._backend.get(hash_key)
-            if entry is not None and entry.created_at == created_at:
-                # Real oldest entry — evict it. Q10 spill tier: demote the
-                # (still-live: ``_clean_expired`` ran above) entry to the durable
-                # spill BEFORE dropping it from the primary, so the marker stays
-                # resolvable past this eviction. The primary delete is
-                # unconditional — capacity MUST be freed even if the spill write
-                # fails (best-effort), or this loop would not make progress.
-                self._spill_evicted(hash_key, entry)
-                self._backend.delete(hash_key)
-                rebuilt_since_progress = False  # made progress
-            else:
+            if entry is None or entry.created_at != created_at:
                 # Stale heap reference — decrement the counter. If the heap
                 # drains to nothing but ones (no real eviction) the `not heap`
                 # branch above rebuilds from the live backend.
                 if self._stale_heap_entries > 0:
                     self._stale_heap_entries -= 1
+                continue
+            if entry.derived_of is not None:
+                # F8: a DERIVED per-row chunk is NOT an independent capacity
+                # target — it lives and dies with its parent (cascade below) or
+                # its own TTL, and it does not count toward the logical cap. Drop
+                # its heap ref and move on WITHOUT counting progress; a real
+                # oldest PRIMARY is still in the heap (logical_count >= max means
+                # >= max primaries exist), so the loop reaches one and terminates.
+                # A rebuild re-adds it from the backend if it is still live.
+                continue
+            # Real oldest PRIMARY entry — evict it. Q10 spill tier: demote the
+            # (still-live: ``_clean_expired`` ran above) entry to the durable
+            # spill BEFORE dropping it from the primary, so the marker stays
+            # resolvable past this eviction. The primary delete is unconditional
+            # — capacity MUST be freed even if the spill write fails
+            # (best-effort), or this loop would not make progress. F8: cascade
+            # the parent's derived per-row chunks so capacity frees as one
+            # logical unit and no retrievable orphan chunks survive the parent.
+            self._spill_evicted(hash_key, entry)
+            self._backend.delete(hash_key)
+            self._delete_derived_children(hash_key)
+            rebuilt_since_progress = False  # made progress
 
     def _clean_expired(self) -> None:
         """Remove expired entries. Must be called with lock held.

@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ... import paths as _paths
+from .base import ClearIncomingLinks, LinkMutation, LinkToParent
 from .memory import InMemoryBackend
 
 if TYPE_CHECKING:
@@ -97,7 +98,8 @@ CREATE TABLE IF NOT EXISTS ccr_entries (
     compression_strategy BLOB,
     retrieval_count INTEGER NOT NULL,
     search_queries TEXT NOT NULL,
-    last_accessed REAL
+    last_accessed REAL,
+    derived_of BLOB
 )
 """
 
@@ -129,11 +131,50 @@ _CREATE_COUNTERS_TABLE_SQL = (
     "(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)"
 )
 
+# F8: partial index over the DERIVED-entry parent link so ``derived_count`` (the
+# logical-cap subtraction) is an indexed lookup, not a full-table scan. PARTIAL
+# (``WHERE derived_of IS NOT NULL``) so it stays tiny — the vast majority of
+# entries are PRIMARY (derived_of NULL) and never enter the index. Append-only
+# (IF NOT EXISTS): safe to add to an existing database once the ``derived_of``
+# column exists (the ALTER in ``_initialize`` runs first).
+_CREATE_DERIVED_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS ccr_entries_derived_of_idx "
+    "ON ccr_entries (derived_of) WHERE derived_of IS NOT NULL"
+)
+
+# F8 R1: the PARENT<->CHILD many-to-many for derived chunks. A per-row chunk is
+# content-addressed, so two columnar drops of an IDENTICAL row share ONE chunk
+# hash under TWO parents; a single derived_of column cannot record that, so the
+# edges live in their own tiny table. The cascade of one parent then leaves a
+# chunk another live parent still references and removes it only when the LAST
+# parent dies. The composite PRIMARY KEY makes link writes idempotent; the
+# child_hash index makes the survival check (derived_parents_of) an indexed
+# lookup. Append-only (IF NOT EXISTS): safe on an existing database.
+_CREATE_DERIVED_LINKS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS ccr_derived_links "
+    "(parent_hash BLOB NOT NULL, child_hash BLOB NOT NULL, "
+    "PRIMARY KEY (parent_hash, child_hash))"
+)
+_CREATE_DERIVED_LINKS_CHILD_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS ccr_derived_links_child_idx ON ccr_derived_links (child_hash)"
+)
+# N2 backfill: a store written by the intermediate F8 commit set ``derived_of``
+# on its chunks but never wrote link rows (the table did not exist yet). Under
+# the link-table cascade those chunks lose protection, since ``children_of``
+# returns empty for their parent. Reconstruct the parent->child edge from the
+# ``derived_of`` field for every derived entry. INSERT OR IGNORE plus the
+# composite PK make it idempotent and a no-op once edges are present, so it is
+# safe to run on every open; a fresh or already-linked store adds nothing.
+_BACKFILL_DERIVED_LINKS_SQL = (
+    "INSERT OR IGNORE INTO ccr_derived_links (parent_hash, child_hash) "
+    "SELECT derived_of, hash_key FROM ccr_entries WHERE derived_of IS NOT NULL"
+)
+
 _COLUMNS = (
     "hash_key, entry_hash, original_content, compressed_content, original_tokens, "
     "compressed_tokens, original_item_count, compressed_item_count, tool_name, "
     "tool_call_id, query_context, created_at, ttl, compression_strategy, "
-    "retrieval_count, search_queries, last_accessed"
+    "retrieval_count, search_queries, last_accessed, derived_of"
 )
 
 _UPSERT_SQL = (
@@ -337,6 +378,44 @@ class SqliteBackend:
         self._memory.delete(hash_key)
         return True
 
+    def set_durable_linked(
+        self, hash_key: str, entry: CompressionEntry, link: LinkMutation
+    ) -> bool:
+        """Atomically upsert the entry AND apply its edge mutation, reporting
+        whether it reached the DURABLE file (F8, R5).
+
+        This is the ONLY way the store persists a derived-linked entry, so on disk
+        ``derived_of`` and the edge table never disagree: the upsert and the edge
+        mutation share one ``with conn:``. Same durability contract as
+        :meth:`set_durable` — ``True`` iff it landed in SQLite, ``False`` on
+        permanent degrade or a lost lock-contention retry. On a miss BOTH the entry
+        and its edge fall to the volatile tier TOGETHER (one atomic memory op), so
+        the tiers never half-apply either, and the store vetoes a ``require_durable``
+        caller instead of returning success over a durable inconsistency.
+        """
+        if self._degraded:
+            self._memory.set_durable_linked(hash_key, entry, link)
+            return False
+        try:
+            self._run(
+                "set_linked",
+                lambda conn: self._sqlite_set_linked(conn, hash_key, entry, link),
+            )
+        except _SqliteOpFailed:
+            # Per-op fail-open: retain BOTH entry and edge in-process together so a
+            # same-process cascade still sees a consistent pair, and report the
+            # durability MISS so the marker-decision caller vetoes. The durable file
+            # keeps its PRIOR consistent state (the whole transaction rolled back),
+            # never a half-applied one.
+            self._memory.set_durable_linked(hash_key, entry, link)
+            return False
+        # Durable write landed: drop this key's stale volatile shadows, both the
+        # entry and any incoming edge a prior contended write left in the memory
+        # tier, so the merged view does not resurrect them.
+        self._memory.delete(hash_key)
+        self._memory.unlink_child(hash_key)
+        return True
+
     def delete(self, hash_key: str) -> bool:
         """Delete an entry by hash key from both tiers."""
         sqlite_deleted = False
@@ -393,6 +472,121 @@ class SqliteBackend:
         if not overlay_keys:
             return sqlite_count
         return sqlite_count + sum(1 for key in overlay_keys if not self._sqlite_has(key))
+
+    def derived_count(self) -> int:
+        """Number of DERIVED entries (``derived_of IS NOT NULL``) across both
+        tiers (F8) — the per-row chunks a columnar row-drop offloads. Uses the
+        partial ``derived_of`` index. Fail-open to the volatile tier on
+        degrade/lock-loss, same as :meth:`count`."""
+        if self._degraded:
+            return self._memory.derived_count()
+        try:
+            sqlite_derived = self._run(
+                "derived_count",
+                lambda conn: int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM ccr_entries WHERE derived_of IS NOT NULL"
+                    ).fetchone()[0]
+                ),
+            )
+        except _SqliteOpFailed:
+            return self._memory.derived_count()
+        overlay = [
+            key
+            for key, entry in self._memory.items()
+            if entry.derived_of is not None and not self._sqlite_has(key)
+        ]
+        return sqlite_derived + len(overlay)
+
+    def link_derived(self, parent_hash: str, child_hash: str) -> None:
+        """Record a PARENT->CHILD derived edge (F8, R1), idempotent via the
+        composite primary key. Durable when the file is healthy; on
+        degrade/lock-loss it falls open to the volatile tier so a same-process
+        cascade still sees the edge, matching how a volatile entry is stored."""
+        if self._degraded:
+            self._memory.link_derived(parent_hash, child_hash)
+            return
+        try:
+            self._run(
+                "link_derived",
+                lambda conn: self._sqlite_link_derived(conn, parent_hash, child_hash),
+            )
+        except _SqliteOpFailed:
+            self._memory.link_derived(parent_hash, child_hash)
+
+    def children_of(self, parent_hash: str) -> list[str]:
+        """Every derived chunk *parent_hash* owns across both tiers (F8), from the
+        link edges, for the eviction/purge cascade. Fail-open to the volatile
+        tier on degrade/lock-loss; merges the fallback overlay like :meth:`keys`."""
+        if self._degraded:
+            return self._memory.children_of(parent_hash)
+        try:
+            sqlite_children = self._run(
+                "children_of",
+                lambda conn: [
+                    _decode_text(row[0])
+                    for row in conn.execute(
+                        "SELECT child_hash FROM ccr_derived_links WHERE parent_hash = ?",
+                        (_encode_text(parent_hash),),
+                    ).fetchall()
+                ],
+            )
+        except _SqliteOpFailed:
+            return self._memory.children_of(parent_hash)
+        seen = set(sqlite_children)
+        return sqlite_children + [
+            key for key in self._memory.children_of(parent_hash) if key not in seen
+        ]
+
+    def derived_parents_of(self, child_hash: str) -> list[str]:
+        """Every parent that references derived chunk *child_hash* across both
+        tiers (F8, R1) — the candidate owner set the cascade's survival check
+        reads. Uses the child_hash index. Fail-open to the volatile tier."""
+        if self._degraded:
+            return self._memory.derived_parents_of(child_hash)
+        try:
+            sqlite_parents = self._run(
+                "derived_parents_of",
+                lambda conn: [
+                    _decode_text(row[0])
+                    for row in conn.execute(
+                        "SELECT parent_hash FROM ccr_derived_links WHERE child_hash = ?",
+                        (_encode_text(child_hash),),
+                    ).fetchall()
+                ],
+            )
+        except _SqliteOpFailed:
+            return self._memory.derived_parents_of(child_hash)
+        seen = set(sqlite_parents)
+        return sqlite_parents + [
+            key for key in self._memory.derived_parents_of(child_hash) if key not in seen
+        ]
+
+    def unlink_parent(self, parent_hash: str) -> None:
+        """Drop every derived edge owned by *parent_hash* across both tiers (F8,
+        R1). Fail-open: a failed durable delete still clears the volatile tier."""
+        if not self._degraded:
+            try:
+                self._run(
+                    "unlink_parent",
+                    lambda conn: self._sqlite_unlink_parent(conn, parent_hash),
+                )
+            except _SqliteOpFailed:
+                pass
+        self._memory.unlink_parent(parent_hash)
+
+    def unlink_child(self, child_hash: str) -> None:
+        """Drop every derived edge pointing at *child_hash* across both tiers (F8,
+        R1). Fail-open, mirroring :meth:`unlink_parent`."""
+        if not self._degraded:
+            try:
+                self._run(
+                    "unlink_child",
+                    lambda conn: self._sqlite_unlink_child(conn, child_hash),
+                )
+            except _SqliteOpFailed:
+                pass
+        self._memory.unlink_child(child_hash)
 
     def keys(self) -> list[str]:
         """All hash keys across both tiers."""
@@ -618,6 +812,73 @@ class SqliteBackend:
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_EXPIRES_INDEX_SQL)
             conn.execute(_CREATE_COUNTERS_TABLE_SQL)
+            # F8 migration: a database created before the ``derived_of`` column
+            # existed keeps its old ``ccr_entries`` (``CREATE TABLE IF NOT
+            # EXISTS`` above is a no-op on it), so add the column here. Guarded
+            # by a PRAGMA column check rather than catching "duplicate column
+            # name" so a FRESH database (column already present from the CREATE)
+            # is a clean skip, and only ADDED here (never dropped): forward AND
+            # backward compatible, since every read/write lists columns
+            # explicitly (an older furl process ignores the extra column).
+            existing_cols = {
+                str(col[1]) for col in conn.execute("PRAGMA table_info(ccr_entries)").fetchall()
+            }
+            if "derived_of" not in existing_cols:
+                try:
+                    conn.execute("ALTER TABLE ccr_entries ADD COLUMN derived_of BLOB")
+                except sqlite3.OperationalError as exc:
+                    # Race-safe: another process may have added the column between
+                    # our PRAGMA read and this ALTER (a concurrent first-open of a
+                    # pre-column shared file). A "duplicate column" error means the
+                    # column now exists — the desired end state — so it is a
+                    # success, not a failure to degrade on. Anything else re-raises.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            conn.execute(_CREATE_DERIVED_INDEX_SQL)
+            conn.execute(_CREATE_DERIVED_LINKS_TABLE_SQL)
+            conn.execute(_CREATE_DERIVED_LINKS_CHILD_INDEX_SQL)
+            # N2 backfill, M4-guarded: reconstruct link rows for derived entries
+            # that predate the link table, but ONLY when there is work to do — the
+            # link table is empty while derived rows exist. The cheap EXISTS check
+            # short-circuits the common reopen case, so an already-linked store no
+            # longer pays the O(derived-rows) insert-or-ignore scan that every new
+            # MCP process would otherwise run on open for nothing.
+            #
+            # R5-3, why the guard is safe: with the entry-plus-edge write now atomic
+            # (set_durable_linked lands the upsert and the edge in ONE transaction),
+            # NO path can create a durable derived row that lacks its edge. A crash
+            # or a contention fail-open rolls back BOTH halves together, and a
+            # degraded write puts BOTH in the volatile tier, never on the file. So
+            # the only edge-less derived rows are the pre-link-table legacy shape,
+            # where the whole ccr_derived_links table is empty and the backfill DOES
+            # run. Skipping the backfill once any edge exists therefore cannot strand
+            # a derived row. If a future change reintroduces a non-atomic derived
+            # write, this guard stops being safe and the self-heal must return.
+            links_empty = (
+                conn.execute("SELECT EXISTS(SELECT 1 FROM ccr_derived_links)").fetchone()[0] == 0
+            )
+            if links_empty:
+                has_derived = (
+                    conn.execute(
+                        "SELECT EXISTS(SELECT 1 FROM ccr_entries WHERE derived_of IS NOT NULL)"
+                    ).fetchone()[0]
+                    == 1
+                )
+                if has_derived:
+                    conn.execute(_BACKFILL_DERIVED_LINKS_SQL)
+            # R5-2: reap orphan edges whose CHILD row is absent, unconditionally on
+            # open. A derived child dropped by a plain delete or a lazy retrieve-time
+            # expiry leaves its edge behind; the expiring-set delete in
+            # _sqlite_purge_expired cannot catch an edge whose child is already gone.
+            # One bounded anti-join per process open, off every hot path, and it
+            # fires regardless of expiry, so a zero-expiry store no longer leaks
+            # orphan edges forever. CHILD-absent only: a parent-absent edge is left
+            # alone, since a former parent can return under the same content hash and
+            # nothing re-links it.
+            conn.execute(
+                "DELETE FROM ccr_derived_links WHERE NOT EXISTS "
+                "(SELECT 1 FROM ccr_entries WHERE hash_key = ccr_derived_links.child_hash)"
+            )
             purged = conn.execute(_PURGE_EXPIRED_SQL, (time.time(),)).rowcount
             row_count = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
         with self._state_lock:
@@ -625,42 +886,89 @@ class SqliteBackend:
         if purged > 0:
             logger.info("event=ccr_sqlite_startup_purge purged_rows=%d", purged)
 
+    def _sqlite_set_body(
+        self, conn: sqlite3.Connection, hash_key: str, entry: CompressionEntry
+    ) -> None:
+        """Entry upsert plus counter, opportunistic-purge, and cap-eviction
+        maintenance, ASSUMING it already runs inside a caller-owned transaction
+        (it opens no ``with conn:`` of its own). Shared by :meth:`_sqlite_set` and
+        the atomic :meth:`_sqlite_set_linked` so the linked variant lands the entry
+        and its edge in ONE transaction (F8, R5)."""
+        # Insert-vs-replace via a PK point-lookup (O(log n)) so the
+        # maintained counter stays exact within this process — far cheaper
+        # than the per-put COUNT(*) full-scan it replaces (audit #6).
+        existed = (
+            conn.execute(
+                "SELECT 1 FROM ccr_entries WHERE hash_key = ?", (_encode_text(hash_key),)
+            ).fetchone()
+            is not None
+        )
+        conn.execute(_UPSERT_SQL, _entry_to_row(hash_key, entry))
+        # Count the put only once the write is in flight inside the
+        # transaction, so lock-contention retries of the same logical put
+        # do not inflate the purge cadence.
+        with self._state_lock:
+            self._put_count += 1
+            purge_now = self._put_count % self._purge_every_n_puts == 0
+        if purge_now:
+            # Indexed opportunistic purge, then resync the counter from the
+            # shared file: corrects any drift from another process's writes
+            # this counter never saw, at 1/purge_every_n_puts the cost of the
+            # old per-put COUNT(*).
+            conn.execute(_PURGE_EXPIRED_SQL, (time.time(),))
+            resynced = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
+            with self._state_lock:
+                self._row_count = resynced
+        elif not existed:
+            with self._state_lock:
+                self._row_count += 1
+        with self._state_lock:
+            over = self._row_count - self._max_rows
+        if over > 0:
+            evicted = conn.execute(_EVICT_OLDEST_SQL, (over,)).rowcount
+            with self._state_lock:
+                self._row_count -= evicted
+
     def _sqlite_set(self, conn: sqlite3.Connection, hash_key: str, entry: CompressionEntry) -> None:
         with conn:
-            # Insert-vs-replace via a PK point-lookup (O(log n)) so the
-            # maintained counter stays exact within this process — far cheaper
-            # than the per-put COUNT(*) full-scan it replaces (audit #6).
-            existed = (
-                conn.execute(
-                    "SELECT 1 FROM ccr_entries WHERE hash_key = ?", (_encode_text(hash_key),)
-                ).fetchone()
-                is not None
+            self._sqlite_set_body(conn, hash_key, entry)
+
+    def _sqlite_set_linked(
+        self,
+        conn: sqlite3.Connection,
+        hash_key: str,
+        entry: CompressionEntry,
+        link: LinkMutation,
+    ) -> None:
+        """Upsert the entry AND apply its edge mutation in ONE transaction (F8,
+        R5), so ``derived_of`` and the edge table can never disagree on disk. If
+        either half fails the whole ``with conn:`` rolls back, so the half-applied
+        durable state this series kept reopening is now unrepresentable."""
+        with conn:
+            self._sqlite_set_body(conn, hash_key, entry)
+            self._apply_link_in_txn(conn, hash_key, link)
+
+    def _apply_link_in_txn(
+        self, conn: sqlite3.Connection, hash_key: str, link: LinkMutation
+    ) -> None:
+        """Apply the edge mutation for a linked persist (F8, R5). MUST run inside
+        the caller's transaction and open NO ``with conn:`` of its own, so it
+        commits or rolls back together with the entry upsert — that shared
+        transaction is the whole atomicity guarantee."""
+        if isinstance(link, LinkToParent):
+            conn.execute(
+                "INSERT OR IGNORE INTO ccr_derived_links (parent_hash, child_hash) VALUES (?, ?)",
+                (_encode_text(link.parent_hash), _encode_text(hash_key)),
             )
-            conn.execute(_UPSERT_SQL, _entry_to_row(hash_key, entry))
-            # Count the put only once the write is in flight inside the
-            # transaction, so lock-contention retries of the same logical put
-            # do not inflate the purge cadence.
-            with self._state_lock:
-                self._put_count += 1
-                purge_now = self._put_count % self._purge_every_n_puts == 0
-            if purge_now:
-                # Indexed opportunistic purge, then resync the counter from the
-                # shared file: corrects any drift from another process's writes
-                # this counter never saw, at 1/purge_every_n_puts the cost of the
-                # old per-put COUNT(*).
-                conn.execute(_PURGE_EXPIRED_SQL, (time.time(),))
-                resynced = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
-                with self._state_lock:
-                    self._row_count = resynced
-            elif not existed:
-                with self._state_lock:
-                    self._row_count += 1
-            with self._state_lock:
-                over = self._row_count - self._max_rows
-            if over > 0:
-                evicted = conn.execute(_EVICT_OLDEST_SQL, (over,)).rowcount
-                with self._state_lock:
-                    self._row_count -= evicted
+        elif isinstance(link, ClearIncomingLinks):
+            # Primary write (R6-1): drop EVERY incoming parent edge to this key so a
+            # stale edge from a concurrent derived write of the same hash cannot
+            # survive. These two cases are the whole LinkMutation union — there is no
+            # no-op inhabitant, which is what makes the linkage decision stateless.
+            conn.execute(
+                "DELETE FROM ccr_derived_links WHERE child_hash = ?",
+                (_encode_text(hash_key),),
+            )
 
     def _sqlite_delete(self, conn: sqlite3.Connection, hash_key: str) -> bool:
         with conn:
@@ -675,8 +983,27 @@ class SqliteBackend:
 
     def _sqlite_purge_expired(self, conn: sqlite3.Connection, now: float) -> int:
         """Indexed delete of rows whose per-row TTL elapsed by ``now`` (uses the
-        ``created_at + ttl`` expression index). Maintains the row counter."""
+        ``created_at + ttl`` expression index). Maintains the row counter.
+
+        R1: also drops derived-link edges that reference the EXPIRING rows in the
+        same transaction, so an entry that TTL-expires without a cascade does not
+        leave its edges behind. Bounded to the expiring set via the expiry index
+        subquery, not a whole-table anti-join, so it stays cheap on the hot path.
+        The cascade's survival check already ignores dead parents, so this is a
+        memory bound, not a correctness fix.
+
+        Orphan edges whose CHILD row is ALREADY absent are NOT swept here (R5-2):
+        this method runs on every store via ``_clean_expired``, so an unbounded
+        anti-join here would sit on the write hot path. The child-absent sweep runs
+        instead unconditionally on open in :meth:`_initialize`, which reaps them
+        regardless of expiry rather than only when something happens to expire."""
         with conn:
+            conn.execute(
+                "DELETE FROM ccr_derived_links WHERE parent_hash IN "
+                "(SELECT hash_key FROM ccr_entries WHERE created_at + ttl < ?) "
+                "OR child_hash IN (SELECT hash_key FROM ccr_entries WHERE created_at + ttl < ?)",
+                (now, now),
+            )
             purged = conn.execute(_PURGE_EXPIRED_SQL, (now,)).rowcount
         if purged:
             with self._state_lock:
@@ -695,12 +1022,47 @@ class SqliteBackend:
             row = conn.execute("SELECT value FROM ccr_counters WHERE name = ?", (name,)).fetchone()
         return int(row[0])
 
+    def _sqlite_link_derived(
+        self, conn: sqlite3.Connection, parent_hash: str, child_hash: str
+    ) -> None:
+        """Commit a PARENT->CHILD derived edge (F8, R1, M1). The ``with conn:``
+        makes the INSERT durable exactly like :meth:`_sqlite_set`; a bare execute
+        leaves the row in an uncommitted transaction that the next close rolls
+        back, so the edge would silently vanish across a restart."""
+        with conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO ccr_derived_links (parent_hash, child_hash) VALUES (?, ?)",
+                (_encode_text(parent_hash), _encode_text(child_hash)),
+            )
+
+    def _sqlite_unlink_parent(self, conn: sqlite3.Connection, parent_hash: str) -> None:
+        """Commit the removal of every edge owned by *parent_hash* (F8, R1, M1),
+        durable via ``with conn:`` like :meth:`_sqlite_delete`."""
+        with conn:
+            conn.execute(
+                "DELETE FROM ccr_derived_links WHERE parent_hash = ?",
+                (_encode_text(parent_hash),),
+            )
+
+    def _sqlite_unlink_child(self, conn: sqlite3.Connection, child_hash: str) -> None:
+        """Commit the removal of every edge pointing at *child_hash* (F8, R1, M1),
+        durable via ``with conn:``. This is the promotion cleanup (N1): if it does
+        not commit, a former parent's cascade deletes the promoted primary across
+        a restart."""
+        with conn:
+            conn.execute(
+                "DELETE FROM ccr_derived_links WHERE child_hash = ?",
+                (_encode_text(child_hash),),
+            )
+
     def _sqlite_clear(self, conn: sqlite3.Connection) -> None:
         with conn:
             conn.execute("DELETE FROM ccr_entries")
             # A full clear resets counters too (matches the in-memory backend and
             # keeps test isolation / furl_purge(all) a clean slate).
             conn.execute("DELETE FROM ccr_counters")
+            # R1: and the derived-link edges, so a wipe leaves no dangling links.
+            conn.execute("DELETE FROM ccr_derived_links")
         with self._state_lock:
             self._row_count = 0
 
@@ -797,6 +1159,7 @@ def _entry_to_row(hash_key: str, entry: CompressionEntry) -> tuple[Any, ...]:
         entry.retrieval_count,
         json.dumps(entry.search_queries),  # ensure_ascii escapes surrogates
         entry.last_accessed,
+        _encode_optional_text(entry.derived_of),
     )
 
 
@@ -823,4 +1186,5 @@ def _row_to_entry(row: tuple[Any, ...]) -> CompressionEntry:
         retrieval_count=int(row[14]),
         search_queries=list(json.loads(row[15])),
         last_accessed=float(row[16]) if row[16] is not None else None,
+        derived_of=_decode_optional_text(row[17]),
     )

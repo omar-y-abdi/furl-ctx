@@ -412,10 +412,16 @@ permission rules are configured.
 **Observability counters.** Every hook run tallies into the shared per-project CCR store,
 cross-process and cumulative, surviving entry eviction, surfaced by `furl_stats` under
 `store.hook_activity` as `hook_invocations_seen` and `hook_compressions_applied`, plus
-bucketed `hook_noop_reasons`. A rising `hook_compressions_applied` confirms the hook is
-both compressing and, on 2.1.163 and newer, delivering the shorter output the model reads.
-The counters are stored via `CompressionStore.increment_counter` and `get_counters` and
-read back cross-process through the durable SQLite backend. The on-by-default PreToolUse
+bucketed `hook_noop_reasons` and `hook_size_reroute` (the subset of compressions that took
+the fast reversible offload for an over-threshold blob). A rising `hook_compressions_applied`
+confirms the hook is both compressing and, on 2.1.163 and newer, delivering the shorter
+output the model reads. These are LIFETIME totals across every session on this project; the
+block is labeled `scope: LIFETIME` and carries a `this_session` delta, lifetime minus a
+snapshot taken when this server first read the counters. Because the counters are
+cross-process that delta may include concurrent processes on this project, so it is labeled
+as a since-first-read delta rather than strictly this run; it still separates a rolling
+lifetime total from recent activity, which is the misread the labels prevent. The counters are stored via `CompressionStore.increment_counter` and
+`get_counters` and read back cross-process through the durable SQLite backend. The on-by-default PreToolUse
 pipe adds its own buckets to the same `store.hook_activity` block: `pipe_invocations_seen`
 / `pipe_compressions_applied` when it compresses, and `pipe_noop:<reason>` when it declines
 a rewrite for a **dynamic** reason: `settings-doubt`, `already-wrapped`, `not-bash`, and the
@@ -541,7 +547,10 @@ already-dense input is instead governed by the router's own
 `min_tokens_to_compress` floor (250 tokens by default) and by the router's
 refusal to ship a compression that would not actually shrink the input — either
 gate reports back a `router:noop:below_min_tokens` or `router:noop:no_savings`
-reason rather than a silent pass-through.
+reason rather than a silent pass-through. On such a no-op the MCP `furl_compress`
+tool returns the original unchanged with `hash: null` and stores **nothing**, so
+a no-op does not consume a retrieval cap slot; pass `persist: true` to store the
+original anyway and receive a hash.
 
 ## Compared to
 

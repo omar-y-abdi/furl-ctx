@@ -60,7 +60,11 @@ bounds): see the plugin README.
 ## The MCP tools
 
 - `furl_compress` — compress a string on demand. Returns compressed text plus a
-  `hash`; the original is stored for later retrieval.
+  `hash`; the original is stored for later retrieval. When Furl decides not to
+  compress (a no-op: the content is too small or would not shrink) it returns the
+  original unchanged with `hash: null` and stores nothing, so a no-op no longer
+  consumes a retrieval slot; pass `persist: true` to store it anyway and get a
+  hash back.
 - `furl_retrieve` — get original, uncompressed content back. Pass a `<<ccr:HASH>>`
   marker's hash for the full original, or narrow it with a filter: `pattern` +
   `context_lines` / `line_range` (regex or a line window over the text),
@@ -106,11 +110,13 @@ hash** — it returns the stored original, byte-exact for raw text and a
 semantically-complete re-serialization for a structured JSON array, as long as the
 entry is still within its retention window. **The plugin's 24-hour default
 (`FURL_CCR_TTL_SECONDS=86400`) is a ceiling, not a guarantee: the store also caps
-at 1000 live entries per project, and a single moderately-sized tool output can
-consume dozens of those, so a handful of large outputs typically evict well
-before 24 hours.** Past either limit the entry is gone and a retrieve is a loud
-miss, never a silent wrong answer; check `furl_stats` for live entry counts
-against the cap. The hook and the `furl` MCP server share one durable
+at 1000 **logical** entries per project.** One compression counts as one logical
+entry: a columnar row-drop offloads each dropped row as its own chunk, but those
+derived chunks are excluded from the cap and cascade-evicted with their parent,
+so a structured output takes one slot, not one-plus-N. Past either limit the entry
+is gone and a retrieve is a loud miss, never a silent wrong answer; check
+`furl_stats` — its `store.cap_accounting` block reports `logical_entries` vs the
+cap and the `retrieval_headroom` remaining, and warns as it approaches the limit. The hook and the `furl` MCP server share one durable
 per-project SQLite store, `~/.furl/ccr-ns-<hash>.sqlite3`, keyed by
 `FURL_CCR_PROJECT_DIR` so one project never sees another's entries. The global
 `~/.furl/ccr.sqlite3` is used only when project scoping is turned off, and it is the

@@ -801,9 +801,17 @@ class SmartCrusher(Transform):
         query_context: str,
         tool_name: str | None,
         typed: bool = False,
+        derived_of: str | None = None,
     ) -> None:
         """Mirror a single Rust-stored CCR entry into the Python
         compression_store, keyed by `ccr_hash`.
+
+        ``derived_of`` (F8): when this entry is a DERIVED per-row chunk of a
+        columnar row-drop, the whole-blob parent's hash. Threaded to
+        ``store.store`` so the chunk does NOT count against the store's logical
+        cap and is cascade-deleted with its parent. ``None`` (the default) marks
+        a PRIMARY entry — the whole-blob parent itself, or a normal mirror — so
+        every non-row-chunk mirror is byte-identical to before.
 
         ``typed=True`` marks a hash the ENGINE ITSELF surfaced as a typed
         Rust field (``CrushResult.ccr_hashes`` / ``crush_array_json``'s
@@ -920,6 +928,11 @@ class SmartCrusher(Transform):
                 query_context=query_context if query_context else None,
                 compression_strategy=strategy,
                 explicit_hash=ccr_hash,
+                # F8: a per-row chunk carries its whole-blob parent's hash so it
+                # is excluded from the store's logical cap and cascade-deleted
+                # with the parent; None for the parent/whole-blob and normal
+                # mirrors (unchanged).
+                derived_of=derived_of,
                 # A durable write that fell open to the volatile fallback raises
                 # DurableWriteError (audit #3); the `except Exception` below
                 # turns it into CcrMirrorError so compress() reverts to the
@@ -1018,6 +1031,13 @@ class SmartCrusher(Transform):
             return
         if not isinstance(row_hashes, list):
             return
+        # F8: the whole-blob parent these chunks belong to is the index key
+        # WITHOUT the ``#rows`` suffix (verified: ``index_key.removesuffix("#rows")``
+        # == the ``ref.hash`` under which ``_mirror_typed_refs`` mirrored the
+        # whole blob). Tag every chunk with it so the store counts this columnar
+        # offload as ONE logical unit and cascade-drops the chunks with the
+        # parent.
+        parent_hash = index_key[: -len("#rows")] if index_key.endswith("#rows") else index_key
         for row_hash in row_hashes:
             if not isinstance(row_hash, str):
                 continue
@@ -1029,6 +1049,7 @@ class SmartCrusher(Transform):
                 strategy=strategy,
                 query_context=query_context,
                 tool_name=tool_name,
+                derived_of=parent_hash,
             )
 
     def _extract_context_from_messages(self, messages: list[dict[str, Any]]) -> str:

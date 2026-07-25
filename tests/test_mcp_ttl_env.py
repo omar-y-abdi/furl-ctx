@@ -36,6 +36,11 @@ from furl_ctx.ccr.mcp_server import (  # noqa: E402
 
 # Small, distinct content — enough for a real compress() pass; the wrapper hash
 # is stored regardless of savings.
+#
+# F9: _TINY is a router no-op (below_min_tokens), which is no longer stored by
+# default. These tests assert the TTL carried by the STORED wrapper entry, so
+# they force the store with persist=True — the input and the property under test
+# are unchanged; only the storage that F9 made opt-in is re-requested explicitly.
 _TINY = "The quick brown fox jumps over the lazy dog near the river bank at dawn."
 
 # Big enough to force at least one CCR offload (embedded ``<<ccr:HASH>>``
@@ -117,7 +122,7 @@ def test_env_set_wins_for_compress_entries(_isolate_store, server) -> None:
     """Env set → the wrapper hash carries the env TTL, and the store default
     (which governs embedded dropped-row entries) matches it — lockstep."""
     _isolate_store.setenv("FURL_CCR_TTL_SECONDS", "7200")
-    out = server._compress_content(_TINY)
+    out = server._compress_content(_TINY, persist=True)
     assert "error" not in out, out
     entry = _stored_entry(server, out["hash"])
     assert entry.ttl == 7200
@@ -126,7 +131,7 @@ def test_env_set_wins_for_compress_entries(_isolate_store, server) -> None:
 
 def test_env_unset_keeps_the_3600_session_default(server) -> None:
     """No env → exactly the pre-fix bare-MCP behavior: 3600 s everywhere."""
-    out = server._compress_content(_TINY)
+    out = server._compress_content(_TINY, persist=True)
     assert "error" not in out, out
     entry = _stored_entry(server, out["hash"])
     assert entry.ttl == MCP_SESSION_TTL == 3600
@@ -137,7 +142,7 @@ def test_env_unset_keeps_the_3600_session_default(server) -> None:
 def test_env_invalid_falls_back_to_3600_and_warns(_isolate_store, server, caplog, bad) -> None:
     _isolate_store.setenv("FURL_CCR_TTL_SECONDS", bad)
     with caplog.at_level(logging.WARNING, logger="furl_ctx.ccr.mcp"):
-        out = server._compress_content(_TINY)
+        out = server._compress_content(_TINY, persist=True)
     assert "error" not in out, out
     assert _stored_entry(server, out["hash"]).ttl == MCP_SESSION_TTL
     assert any("FURL_CCR_TTL_SECONDS" in record.message for record in caplog.records)

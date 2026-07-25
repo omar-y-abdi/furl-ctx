@@ -40,10 +40,12 @@ _SPAWN = mp.get_context("spawn")
 
 
 class _FlakyDurableBackend:
-    """Wrap ``InMemoryBackend`` and expose ``set_durable`` that reports ``False``
-    for the first ``fail_times`` calls, then ``True`` — a deterministic stand-in
-    for transient lock contention that clears. The entry is always stored in the
-    volatile tier, so same-process retrieval round-trips throughout."""
+    """Wrap ``InMemoryBackend`` and expose ``set_durable_linked`` that reports
+    ``False`` for the first ``fail_times`` calls, then ``True`` — a deterministic
+    stand-in for transient lock contention that clears. The store persists through
+    the atomic ``set_durable_linked`` (R5), so that is the op made flaky here. The
+    entry is always stored in the volatile tier, so same-process retrieval
+    round-trips throughout."""
 
     def __init__(self, fail_times: int) -> None:
         from furl_ctx.cache.backends import InMemoryBackend
@@ -52,9 +54,12 @@ class _FlakyDurableBackend:
         self._fail_times = fail_times
         self.durable_calls = 0
 
-    def set_durable(self, hash_key: str, entry: Any) -> bool:
+    def set_durable_linked(self, hash_key: str, entry: Any, link: Any) -> bool:
         self.durable_calls += 1
-        self._mem.set(hash_key, entry)
+        # Apply the entry AND its edge to the volatile tier together, mirroring the
+        # real backend's atomic fallback, so a flaky durable report never leaves
+        # the entry and its edge disagreeing in the volatile tier.
+        self._mem.set_durable_linked(hash_key, entry, link)
         return self.durable_calls > self._fail_times
 
     def __getattr__(self, name: str) -> Any:
