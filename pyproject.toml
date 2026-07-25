@@ -117,6 +117,18 @@ dev = [
     # the meta-test that keeps the required-check deadlock (#15/#32/#56) from
     # re-entering the workflow. >=6 for the safe_load-by-default API.
     "pyyaml>=6",
+    # The ReDoS / marker-scan security suites (tests/test_regex_budget.py and
+    # tests/test_marker_scan_budget.py) assert the catastrophic-backtracking and
+    # 10 MiB-scan bounds that ONLY hold under RE2's linear-time engine; each of
+    # those 28 tests is gated on re2_available()/_RE2, so with google-re2 absent
+    # they SKIP (not fail) and the security coverage silently leaves a green
+    # suite. re2 is otherwise declared only in the `re2` extra (pulled in by
+    # `mcp`), which made its presence in the test environment incidental to also
+    # installing `[mcp]` or a bare `google-re2` on a CI line. Pull it into `dev`
+    # so every test install carries the engine those tests require by
+    # construction; tests/test_security_suite_requires_re2.py turns its absence
+    # into a hard failure rather than a silent skip.
+    "furl-ctx[re2]",
 ]
 # All optional dependencies (everything the compression library can use)
 all = [
