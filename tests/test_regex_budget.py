@@ -320,17 +320,12 @@ def test_ingress_still_accepts_the_benign_catastrophic_pattern() -> None:
 def test_ingress_accepts_normal_and_non_regex_patterns(pattern: str) -> None:
     """B1 must not break globs: a source that is not a Python regex at all (``*.py``)
     is UNKNOWN, not UNBOUNDABLE -- ``compress_modes`` still matches it via fnmatch,
-    and ``retrieve_filters`` still reports its own ``invalid regex`` error."""
+    and ``retrieve_filters`` still reports its own ``invalid regex`` error.
+    Rejecting on 'RE2 cannot compile it' alone would have killed every glob filter,
+    since ``*.py`` fails BOTH engines; that ``*.py`` still MATCHES after the screen
+    is pinned by test_ccr_filter_units.py::test_pattern_glob_fallback."""
     assert _validate_pattern(pattern, "include") is None
     assert regex_budget.classify_boundability("*.py") is regex_budget.Boundability.UNKNOWN
-
-
-def test_glob_filter_still_matches_after_the_ingress_screen() -> None:
-    """B1 regression guard: rejecting on 'RE2 cannot compile it' alone would have
-    killed every glob filter, since ``*.py`` fails BOTH engines."""
-    matcher = _resolve_matcher("*.py")
-    assert matcher("foo.py") is True
-    assert matcher("foo.txt") is False
 
 
 def test_ingress_does_not_reject_when_re2_is_absent(without_re2: None) -> None:

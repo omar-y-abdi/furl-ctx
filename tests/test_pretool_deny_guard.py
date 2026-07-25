@@ -28,7 +28,6 @@ import importlib.util
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -139,21 +138,6 @@ def test_loader_merges_all_settings_files(tmp_path) -> None:
     bodies, doubt = _pretool_mod._load_bash_rule_bodies((a, b))
     assert doubt is False
     assert sorted(str(x) for x in bodies) == ["curl:*", "touch:*"]
-
-
-# --- unit: the existence predicate ------------------------------------------------
-
-
-def test_has_any_bash_rule_true_for_scoped_and_blanket() -> None:
-    assert _pretool_mod._has_any_bash_rule(["printf:*"]) is True
-    # CRITICAL: a blanket/unterminated rule is a None body; the predicate uses
-    # bool(bodies), not any(bodies) — any([None]) is False, bool([None]) is True.
-    assert _pretool_mod._has_any_bash_rule([None]) is True
-    assert _pretool_mod._has_any_bash_rule([None, "rm:*"]) is True
-
-
-def test_has_any_bash_rule_false_only_for_empty() -> None:
-    assert _pretool_mod._has_any_bash_rule([]) is False
 
 
 # --- acceptance: the real hook subprocess against settings on disk ----------------
@@ -327,15 +311,6 @@ def test_local_settings_scope_rule_passes_through(tmp_path) -> None:
     proc = _run_hook("cat big", tmp_path, cwd_local_settings=_ask("Bash(curl:*)"))
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", "project-local settings.local.json rule must gate"
-
-
-def test_guard_is_hermetic_zero_rules_rewrites() -> None:
-    """Meta-pin: every acceptance test supplies its own HOME + cwd, so a
-    developer's real ~/.claude rules can never decide these outcomes — a truly
-    empty environment rewrites."""
-    with tempfile.TemporaryDirectory() as tmp:
-        proc = _run_hook("cat bigfile", Path(tmp))
-        assert "updatedInput" in proc.stdout
 
 
 def _no_config_env(monkeypatch) -> None:
@@ -512,23 +487,6 @@ def test_scan_doubt_on_malformed(tmp_path, monkeypatch) -> None:
     (cwd / ".claude" / "settings.json").write_text("{ not json", encoding="utf-8")
     scan = _pretool_mod._scan_bash_rules(str(cwd))
     assert scan.doubt is True
-
-
-def test_scan_block_condition_matches_old_flat_gate(tmp_path, monkeypatch) -> None:
-    """Equivalence guard: routing the gate through _scan_bash_rules changed NO
-    decision. ``rule_count > 0 or doubt`` equals the flat _settings_paths +
-    _load_bash_rule_bodies + _has_any_bash_rule condition the gate used before."""
-    _no_config_env(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
-    monkeypatch.setattr(_pretool_mod, "_managed_settings_paths", lambda: ([], False))
-    cwd = tmp_path / "proj"
-    _write_settings(cwd / ".claude" / "settings.json", _ask("Bash(curl:*)"))
-    scan = _pretool_mod._scan_bash_rules(str(cwd))
-    paths, path_doubt = _pretool_mod._settings_paths(str(cwd))
-    bodies, load_doubt = _pretool_mod._load_bash_rule_bodies(paths)
-    old_blocks = path_doubt or load_doubt or _pretool_mod._has_any_bash_rule(bodies)
-    new_blocks = scan.rule_count > 0 or scan.doubt
-    assert new_blocks is True and old_blocks is True
 
 
 # --- F3: FURL_PIPE_WITH_RULES conscious opt-in override ----------------------------

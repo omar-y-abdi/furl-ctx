@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from furl_ctx.ccr.marker_grammar import (
     CCR_TOOL_NAME,
     HASH_WIDTHS,
@@ -154,37 +156,23 @@ class TestScanSmartCrusherMarkers:
 class TestSpoofGuard:
     """is_valid_ccr_hash — the retrieval-ingress width+charset guard."""
 
-    def test_12char_hash_accepted(self):
-        assert is_valid_ccr_hash(SMARTCRUSHER_HASH)
-
-    def test_24char_canonical_hash_accepted(self):
-        assert is_valid_ccr_hash(CANONICAL_HASH)
-
-    def test_10char_hash_rejected(self):
-        """A 10-char hash is not in HASH_WIDTHS."""
-        assert not is_valid_ccr_hash("1a2b3c4d5e")
-
-    def test_non_hex_hash_rejected(self):
-        """A 12-char value with non-hex characters is rejected."""
-        assert not is_valid_ccr_hash("9f3a2b1c4xyz")
-
-    def test_50char_hash_rejected(self):
-        """An overlong (spoofed) hash is rejected."""
-        assert not is_valid_ccr_hash("a" * 50)
-
-    def test_all_z_hash_rejected(self):
-        """'zzzzzzzzzzzz' (12 chars but non-hex) is rejected."""
-        assert not is_valid_ccr_hash("z" * 12)
-
-    def test_16char_hash_rejected(self):
-        assert not is_valid_ccr_hash("a1b2c3d4e5f6a1b2")
-
-    def test_32char_hash_rejected(self):
-        assert not is_valid_ccr_hash("a" * 32)
-
-    def test_none_and_non_str_rejected(self):
-        assert not is_valid_ccr_hash(None)
-        assert not is_valid_ccr_hash(123456789012)
+    @pytest.mark.parametrize(
+        ("value", "accepted"),
+        [
+            (SMARTCRUSHER_HASH, True),  # 12-hex, the SmartCrusher marker width
+            (CANONICAL_HASH, True),  # 24-hex, the canonical store-key width
+            ("1a2b3c4d5e", False),  # 10 chars: not in HASH_WIDTHS
+            ("9f3a2b1c4xyz", False),  # right width, non-hex characters
+            ("z" * 12, False),  # 12 chars but wholly non-hex
+            ("a1b2c3d4e5f6a1b2", False),  # 16 chars: between the two accepted widths
+            ("a" * 32, False),  # 32 chars
+            ("a" * 50, False),  # overlong (spoofed)
+            (None, False),  # non-str inputs must be rejected, not raise
+            (123456789012, False),
+        ],
+    )
+    def test_width_and_charset_guard(self, value, accepted):
+        assert is_valid_ccr_hash(value) is accepted
 
     def test_scan_does_not_detect_non_hex_hash(self):
         """The grammar does not extract <<ccr:>> with non-hex content."""

@@ -54,35 +54,16 @@ def test_parse_version_never_raises_on_odd_input() -> None:
 # --- meets_compression_floor ---------------------------------------------------
 
 
-def test_meets_compression_floor_unknown_is_none() -> None:
-    assert meets_compression_floor(None) is None
-
-
-def test_meets_compression_floor_above() -> None:
-    assert meets_compression_floor((2, 1, 212)) is True
-    assert meets_compression_floor((2, 2, 0)) is True
-    assert meets_compression_floor((3, 0, 0)) is True
-
-
-def test_meets_compression_floor_exact() -> None:
-    assert meets_compression_floor((2, 1, 163)) is True
-
-
-def test_meets_compression_floor_below() -> None:
-    assert meets_compression_floor((2, 1, 162)) is False
-    assert meets_compression_floor((2, 0, 999)) is False
-    assert meets_compression_floor((1, 9, 999)) is False
-
-
-def test_floor_constant_is_2_1_163() -> None:
-    """Pin: T7's investigated floor. If this ever needs to change, it must be a
-    deliberate, evidenced edit, not drift."""
-    assert MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT == (2, 1, 163)
-
-
 @pytest.mark.parametrize(
     ("version", "expected"),
     [
+        (None, None),  # unknown host version stays unknown, never a False verdict
+        ((2, 1, 163), True),  # exactly the floor — the comparison is inclusive (>=)
+        ((2, 1, 212), True),
+        ((3, 0, 0), True),
+        ((2, 1, 162), False),
+        ((2, 0, 999), False),
+        ((1, 9, 999), False),
         # PATCH below the floor's PATCH, MAJOR.MINOR tied: below floor. Verified
         # trap direction: lexically "2.1.9" > "2.1.163" (the digit '9' outranks
         # '1' at the first differing character), so a naive string compare would
@@ -100,15 +81,24 @@ def test_floor_constant_is_2_1_163() -> None:
         ((2, 2, 0), True),
     ],
 )
-def test_meets_compression_floor_semver_lexical_traps(
-    version: tuple[int, int, int], expected: bool
+def test_meets_compression_floor(
+    version: tuple[int, int, int] | None, expected: bool | None
 ) -> None:
-    """Correct by construction today, since meets_compression_floor compares
-    parsed integer tuples. Pins these boundary-adjacent values so a future
-    refactor to formatted-string comparison, e.g. sorting ``format_version()``
-    output instead of the tuple, fails loud instead of silently inverting the
-    PATCH-magnitude or MINOR-rollover cases above."""
+    """The floor verdict for unknown / at / above / below, plus the semver
+    lexical traps.
+
+    The trap cases are correct by construction today, since
+    meets_compression_floor compares parsed integer tuples. They are pinned so a
+    future refactor to formatted-string comparison, e.g. sorting
+    ``format_version()`` output instead of the tuple, fails loud instead of
+    silently inverting the PATCH-magnitude or MINOR-rollover cases."""
     assert meets_compression_floor(version) is expected
+
+
+def test_floor_constant_is_2_1_163() -> None:
+    """Pin: T7's investigated floor. If this ever needs to change, it must be a
+    deliberate, evidenced edit, not drift."""
+    assert MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT == (2, 1, 163)
 
 
 def test_meets_compression_floor_suffixed_version_string_resolves_capable() -> None:

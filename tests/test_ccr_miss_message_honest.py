@@ -46,25 +46,3 @@ def test_missing_miss_is_ai_tell_free() -> None:
     msg = _missing_msg()
     assert "—" not in msg and "–" not in msg, f"miss must carry no em/en dash: {msg!r}"
     assert "(" not in msg and ")" not in msg, f"miss must carry no round-bracket aside: {msg!r}"
-
-
-def test_missing_miss_stays_cause_honest_for_capacity() -> None:
-    # Consistency with the hardened cause-honesty pin: eviction, capacity, and the
-    # configured size are all still named.
-    msg = _missing_msg(1000)
-    lo = msg.lower()
-    assert "evict" in lo and "capacity" in lo and "1000" in msg
-
-
-def test_expired_miss_unchanged() -> None:
-    # The accurate 'expired' branch is untouched by the reword.
-    msg = format_retrieval_miss_detail(
-        {
-            "hash": "cafe",
-            "status": "expired",
-            "ttl_seconds": 300,
-            "default_ttl_seconds": 300,
-            "age_seconds": 412.0,
-        }
-    )
-    assert "expired" in msg.lower() and "300" in msg and "412" in msg

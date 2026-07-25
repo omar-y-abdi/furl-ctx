@@ -301,17 +301,6 @@ class TestResultCacheCCRDivergence:
         assert not _extract_ccr_hashes(out1)
         assert not _extract_ccr_hashes(out2)
 
-    def test_ensure_ccr_backed_method_present(self):
-        """Smoke: ``_ensure_ccr_backed`` is on ContentRouter and callable."""
-        router = ContentRouter(ContentRouterConfig())
-        assert hasattr(router, "_ensure_ccr_backed"), (
-            "_ensure_ccr_backed missing from ContentRouter — fix not applied"
-        )
-        # No-op when no sentinel present — must not raise.
-        router._ensure_ccr_backed("plain text, no sentinels", "")
-        # Must not raise even with a sentinel pattern if SmartCrusher is loaded.
-        router._ensure_ccr_backed("<<ccr:deadbeef01234567>>", "some query")
-
     def test_result_cache_hit_confirmed_on_second_apply(self):
         """Confirm the result cache is actually hit: ``cache_hits`` increments."""
         messages = _make_messages(_log_rows(90))

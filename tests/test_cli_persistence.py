@@ -82,33 +82,15 @@ def _cli(args: list[str], env: dict[str, str], stdin: str = "") -> subprocess.Co
     )
 
 
-def test_compress_then_retrieve_round_trips_across_processes(tmp_path) -> None:
-    """``furl compress`` in one process, ``furl retrieve`` in another → success.
+def test_round_trip_survives_a_fresh_workspace_only_via_the_file(tmp_path) -> None:
+    """``furl compress`` in one process, ``furl retrieve`` in another → success,
+    and the durability is the sqlite FILE, not shared process memory.
 
     RED on pre-fix code: without the CLI's durable-by-default backend, the second
     process gets a fresh empty in-memory store and the retrieve is a loud miss
     (exit 1) — the exact evaluator failure. GREEN once the CLI defaults to sqlite.
     """
     env = _clean_ccr_env(tmp_path)  # no FURL_CCR_BACKEND → exercise the default
-
-    compressed = _cli(["compress", "--json"], env=env, stdin=_PAYLOAD)
-    assert compressed.returncode == 0, compressed.stderr
-    hashes = json.loads(compressed.stdout)["ccr_hashes"]
-    assert hashes, "payload must offload at least one retrievable CCR hash"
-    hash_key = hashes[0]
-
-    # A genuinely separate process — no shared in-memory state.
-    retrieved = _cli(["retrieve", hash_key], env=env)
-    assert retrieved.returncode == 0, (
-        "cross-process retrieve missed under the CLI default backend: " + retrieved.stderr
-    )
-    assert retrieved.stdout == _PAYLOAD
-
-
-def test_round_trip_survives_a_fresh_workspace_only_via_the_file(tmp_path) -> None:
-    """The durability is the sqlite FILE, not shared process memory: a third
-    process retrieving the same hash still succeeds (the file persists)."""
-    env = _clean_ccr_env(tmp_path)
     compressed = _cli(["compress", "--json"], env=env, stdin=_PAYLOAD)
     hash_key = json.loads(compressed.stdout)["ccr_hashes"][0]
     # sqlite file exists on disk under the sandboxed workspace.

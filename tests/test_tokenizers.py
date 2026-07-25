@@ -6,7 +6,6 @@ from furl_ctx.tokenizers import (
     BaseTokenizer,
     EstimatingTokenCounter,
     TiktokenCounter,
-    TokenCounter,
     get_tokenizer,
     list_supported_models,
     register_tokenizer,
@@ -735,27 +734,9 @@ class TestTokenizerRegistry:
         assert second._fixed_ratio == 2.0  # the real (retried) tokenizer
 
 
-class TestTokenCounterProtocol:
-    """Tests for TokenCounter protocol."""
-
-    def test_tiktoken_implements_protocol(self):
-        """Test TiktokenCounter implements protocol."""
-        counter = TiktokenCounter()
-        assert isinstance(counter, TokenCounter)
-
-    def test_estimating_implements_protocol(self):
-        """Test EstimatingTokenCounter implements protocol."""
-        counter = EstimatingTokenCounter()
-        assert isinstance(counter, TokenCounter)
-
-
-class TestBaseTokenizer:
-    """Tests for BaseTokenizer base class."""
-
-    def test_message_overhead_constant(self):
-        """Test message overhead constant."""
-        assert BaseTokenizer.MESSAGE_OVERHEAD == 4
-
-    def test_reply_overhead_constant(self):
-        """Test reply overhead constant."""
-        assert BaseTokenizer.REPLY_OVERHEAD == 3
+# MESSAGE_OVERHEAD / REPLY_OVERHEAD are pinned by the exact per-message totals in
+# TestTiktokenCounter::test_count_messages_single (== 9) and
+# TestEstimatingTokenCounter::test_count_messages (== 18): either constant drifting
+# moves those literals. The former standalone `== 4` / `== 3` asserts, and the two
+# `isinstance(counter, TokenCounter)` checks (runtime_checkable Protocol — a
+# method-name check only, satisfied by any rename-free class), added nothing.

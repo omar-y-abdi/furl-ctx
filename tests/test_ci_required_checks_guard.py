@@ -174,17 +174,10 @@ def _transitive_needs(jobs: dict[str, object], start: str) -> set[str]:
     return ancestors
 
 
-def test_required_jobs_exist() -> None:
-    # Assertion 1: the required jobs are present under their expected names. A rename
-    # must force a conscious update here, never a vacuous pass of the checks below.
-    jobs = _jobs(_load_ci_workflow())
-    missing = [name for name in _REQUIRED_JOBS if name not in jobs]
-    assert not missing, (
-        f"ci.yml is missing required status-check job(s) {missing}. Ruleset 18484290 "
-        f"requires {list(_REQUIRED_JOBS)} to conclude on every PR; if a job was renamed, "
-        "GitHub still waits on the old context and every PR re-blocks. Update the ruleset "
-        f"AND _REQUIRED_JOBS together. Present jobs: {sorted(jobs)}."
-    )
+# Assertion 1 — "the required jobs are present under their expected names" — is
+# enforced by ``_required_job()`` itself, which hard-asserts presence and is called
+# for every name in _REQUIRED_JOBS by the tests below. A rename therefore still
+# fails loudly; a standalone existence test only duplicated that assert.
 
 
 def test_required_jobs_have_no_job_level_if() -> None:

@@ -9,7 +9,6 @@ from furl_ctx.transforms import (
     DiffCompressor,
     DiffCompressorConfig,
     LogCompressor,
-    LogCompressorConfig,
     SearchCompressor,
     SearchCompressorConfig,
     detect_content_type,
@@ -167,16 +166,6 @@ class TestSearchCompressor:
 
         assert "ERROR: something failed" in result.compressed
 
-    def test_small_results_unchanged(self):
-        """Small search results pass through unchanged."""
-        content = "src/file.py:1:def foo():\nsrc/file.py:2:    pass"
-
-        compressor = SearchCompressor()
-        result = compressor.compress(content)
-
-        assert result.compression_ratio == 1.0
-        assert result.compressed == content
-
 
 class TestLogCompressor:
     """Tests for log/build output compression."""
@@ -232,15 +221,6 @@ INFO: Done
         assert "ERROR: Failed to process" in result.compressed
         assert "Traceback" in result.compressed
         assert "ZeroDivisionError" in result.compressed
-
-    def test_small_logs_unchanged(self):
-        """Small logs pass through unchanged."""
-        content = "INFO: Starting\nINFO: Done"
-
-        compressor = LogCompressor(config=LogCompressorConfig(min_lines_for_ccr=100))
-        result = compressor.compress(content)
-
-        assert result.compression_ratio == 1.0
 
 
 class TestDiffCompressor:

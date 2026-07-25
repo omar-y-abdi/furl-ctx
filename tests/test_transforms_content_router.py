@@ -626,59 +626,30 @@ def test_assistant_text_blocks_opt_in_compresses(
     assert "[compressed]" in result["content"][0]["text"]
 
 
-def test_user_text_blocks_never_compressed_even_with_assistant_optin(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("role", "kwargs", "compressed"),
+    [
+        # compress_assistant_text_blocks MUST NOT bleed into user text.
+        ("user", {"compress_assistant_text_blocks": True}, False),
+        ("system", {"skip_system": True, "compress_assistant_text_blocks": True}, False),
+        # tool role ≈ tool output — compress freely, no opt-in needed.
+        ("tool", {}, True),
+        # Unknown role ("developer"): be safe, don't compress.
+        ("developer", {"compress_assistant_text_blocks": True}, False),
+    ],
+)
+def test_role_gates_for_text_blocks(
+    monkeypatch: pytest.MonkeyPatch, role: str, kwargs: dict, compressed: bool
 ) -> None:
     router = _make_router_with_mock_compress(monkeypatch)
-    long_text = "U" * 1000
-    msg = {"role": "user", "content": [{"type": "text", "text": long_text}]}
-    result = _process_blocks(
-        router,
-        msg,
-        compress_assistant_text_blocks=True,  # MUST NOT bleed into user
-    )
-    assert result["content"][0]["text"] == long_text
-
-
-def test_system_text_blocks_skipped_when_skip_system_true(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router = _make_router_with_mock_compress(monkeypatch)
-    long_text = "S" * 1000
-    msg = {"role": "system", "content": [{"type": "text", "text": long_text}]}
-    result = _process_blocks(
-        router,
-        msg,
-        skip_system=True,
-        compress_assistant_text_blocks=True,
-    )
-    assert result["content"][0]["text"] == long_text
-
-
-def test_tool_role_text_blocks_compressed_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router = _make_router_with_mock_compress(monkeypatch)
-    long_text = "T" * 1000
-    msg = {"role": "tool", "content": [{"type": "text", "text": long_text}]}
-    result = _process_blocks(router, msg)
-    # tool role ≈ tool output — compress freely
-    assert "[compressed]" in result["content"][0]["text"]
-
-
-def test_unknown_role_text_blocks_skipped_for_safety(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router = _make_router_with_mock_compress(monkeypatch)
-    long_text = "Q" * 1000
-    msg = {"role": "developer", "content": [{"type": "text", "text": long_text}]}
-    result = _process_blocks(
-        router,
-        msg,
-        compress_assistant_text_blocks=True,
-    )
-    # Unknown role: be safe, don't compress
-    assert result["content"][0]["text"] == long_text
+    long_text = role[0].upper() * 1000
+    msg = {"role": role, "content": [{"type": "text", "text": long_text}]}
+    result = _process_blocks(router, msg, **kwargs)
+    text = result["content"][0]["text"]
+    if compressed:
+        assert "[compressed]" in text, f"{role} text blocks must compress"
+    else:
+        assert text == long_text, f"{role} text blocks must be left byte-identical"
 
 
 def test_min_chars_gates_short_blocks(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -177,28 +177,3 @@ def test_two_namespaces_spill_to_different_files_and_cannot_read_each_other(
     for spill in spill_files:
         assert stat.S_IMODE(spill.stat().st_mode) == 0o600, f"{spill.name} must be 0600"
     assert stat.S_IMODE(os.stat(workspace).st_mode) == 0o700, "the spill dir must be 0700"
-
-
-def test_spill_env_flag_does_protect_the_bare_global_store_for_contrast(
-    monkeypatch, tmp_path
-) -> None:
-    """Contrast case: the SAME env flag, on the store the plugin does NOT use
-    (FURL_CCR_PROJECT_DIR unset -> the bare global singleton), also works --
-    confirming the spill mechanism itself is sound (covered in depth by
-    ``tests/test_ccr_spill_tier.py``) and that the fix above is specifically a
-    per-namespace wiring, not a change to the global spill feature."""
-    monkeypatch.delenv("FURL_CCR_PROJECT_DIR", raising=False)
-    monkeypatch.setenv("FURL_CCR_SPILL", "1")
-    assert resolve_ccr_namespace_store() is None, "no project dir set -> no namespaced store"
-
-    from furl_ctx.cache.compression_store import get_compression_store
-
-    store = get_compression_store(max_entries=3)
-    hashes = _fill(store, 3, prefix="row")
-    victim = hashes[0]
-    _fill(store, 3, prefix="overflow")
-
-    assert store.retrieve(victim) is not None, (
-        "the global store DOES honor FURL_CCR_SPILL=1 -- the mechanism itself works, "
-        "the plugin just reaches it through the per-namespace path instead"
-    )

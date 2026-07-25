@@ -16,10 +16,16 @@ siblings:
   persist-failure/mirror/code-aware suites.
 * ``make_large_diff`` — the CCR-triggering synthetic git diff duplicated
   between the diff-compressor suites.
+* ``high_entropy_logs`` / ``find_sentinel`` / ``sentinel_from_output`` /
+  ``hash_from_marker`` — the row-drop-forcing generator and its sentinel/marker
+  readers, duplicated between ``test_ccr_proportional_retrieval.py`` and
+  ``test_ccr_rows_marker_removed.py`` (the latter's docstring admitted the copy).
+  The test FUNCTIONS in those files stay separate: they pin different invariants.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import textwrap
 from typing import Any
@@ -126,6 +132,86 @@ def assert_fixture_drops() -> None:
         "recovery/divergence suite built on it is now vacuous. Re-tune the "
         "fixture (see its docstring) before trusting those suites."
     )
+
+
+# ── the high-entropy (row-drop-forcing) log fixture + sentinel readers ──────
+
+
+def high_entropy_logs(n: int, seed: int) -> list[dict]:
+    """Deterministic, real-shaped, NEAR-UNIQUE log rows — the exact tier where
+    the single-blob model collapsed and where the lossless compactor is defeated
+    into a lossy row drop (fresh uuid-ish id + random sha-ish commit + per-row
+    service/level/message). Generated from a seeded SHA stream so it is
+    reproducible without a committed fixture.
+
+    Previously duplicated as ``_high_entropy_logs`` in
+    ``test_ccr_proportional_retrieval.py`` and ``test_ccr_rows_marker_removed.py``.
+    """
+    rows: list[dict] = []
+    services = ["api", "worker", "scheduler", "auth", "billing", "ingest"]
+    levels = ["INFO", "WARN", "ERROR", "DEBUG"]
+    for i in range(n):
+        h = hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()
+        rows.append(
+            {
+                "id": h[:32],
+                # Defensive: never slice past the digest even if the hash
+                # function's width ever shrinks.
+                "commit": h[32:72] if len(h) >= 72 else (h + h)[32:72],
+                "service": services[int(h[:2], 16) % len(services)],
+                "level": levels[int(h[2:4], 16) % len(levels)],
+                "latency_ms": int(h[4:8], 16) % 5000,
+                "message": f"request {h[8:20]} handled in span {h[20:28]}",
+            }
+        )
+    return rows
+
+
+def find_sentinel(node: object) -> dict | None:
+    """Return the ``{"_ccr_dropped": ...}`` sentinel object from the parsed
+    output tree, if present."""
+    if isinstance(node, dict):
+        if "_ccr_dropped" in node:
+            return node
+        for v in node.values():
+            found = find_sentinel(v)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for x in node:
+            found = find_sentinel(x)
+            if found is not None:
+                return found
+    return None
+
+
+def sentinel_from_output(compressed: str) -> dict | None:
+    """Locate the ``{"_ccr_dropped": ...}`` sentinel in a compressed output.
+    Two renders are possible: a JSON array/object tree whose last element is the
+    sentinel (the plain lossy row-drop path), or a JSON STRING wrapping a
+    CSV-schema table whose LAST LINE is the sentinel (the survivor-compaction
+    path).
+    """
+    tree = json.loads(compressed)
+    found = find_sentinel(tree)
+    if found is not None:
+        return found
+    if isinstance(tree, str):
+        last_line = tree.strip().rsplit("\n", 1)[-1]
+        try:
+            obj = json.loads(last_line)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(obj, dict) and "_ccr_dropped" in obj:
+            return obj
+    return None
+
+
+def hash_from_marker(marker: str) -> str:
+    """Pull the KEY out of ``<<ccr:KEY <sep>...>>``."""
+    start = marker.index("<<ccr:") + len("<<ccr:")
+    rest = marker[start:]
+    return rest[: rest.index(" ")]
 
 
 # ── recovery-comparison helpers (previously cross-imported between files) ───

@@ -307,6 +307,17 @@ _GATE_PARITY_CASES: tuple[tuple[str | None, bool], ...] = (
     ("1", True),
     ("TRUE", True),
     ("garbage", True),  # unknown non-falsy → ON ("on unless explicitly disabled")
+    # The typo named by pretool_pipe.py's ``_pipe_disabled`` docstring as the
+    # motivating case for "on unless explicitly disabled": a misspelled "false"
+    # must NEVER silently disable savings.
+    ("fasle", True),
+    ("2", True),  # non-1 numeric: not in _DISABLE_VALUES → ON
+    ("On", True),  # mixed-case truthy
+    (" 1", True),  # whitespace-padded truthy
+    ("YES", True),
+    # NB: "disabled" is falsy but "Enabled" is NOT its inverse — it is merely an
+    # unrecognized value, and unrecognized means ON.
+    ("Enabled", True),
     ("o f f", False),  # INTERNAL whitespace (F1): both gates remove it → falsy
     ("\tFALSE\n", False),  # mixed whitespace + case
     ("d i s a b l e d", False),

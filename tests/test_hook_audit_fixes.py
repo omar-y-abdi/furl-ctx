@@ -121,23 +121,12 @@ def _no_ai_tells(text: str) -> bool:
 # --- F-A1: profile-safe invocation ------------------------------------------------
 
 
-def test_faA1_functional_hooks_use_non_login_shell() -> None:
-    """Root-cause fix: neither functional hook uses ``sh -lc``. A login shell
-    sources profiles that may print to stdout and corrupt the JSON envelope."""
-    for event in ("PostToolUse", "PreToolUse"):
-        command = _hook_command(event)
-        assert command.startswith("sh -c "), f"{event} is not sh -c: {command[:12]!r}"
-        assert "sh -lc" not in command, f"{event} still uses a login shell"
-
-
-def test_faA1_functional_hooks_resolve_uv_via_path_append() -> None:
-    """uv is resolved by APPENDING common install dirs to PATH (never a login
-    shell, never an override of the user's PATH), so it is found under sh -c."""
-    for event in ("PostToolUse", "PreToolUse"):
-        command = _hook_command(event)
-        assert 'PATH="$PATH:' in command, f"{event} must append, not replace, PATH"
-        for uv_dir in ("$HOME/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"):
-            assert uv_dir in command, f"{event} missing uv dir {uv_dir}"
+# The ``sh -c`` (never ``sh -lc``) invocation and the PATH-append that resolves uv
+# are pinned BYTE-EXACTLY for both functional hooks in test_plugin_hooks_manifest.py
+# (``test_runtime_behavior_preserved`` == _EXPECTED_COMMAND for PostToolUse,
+# ``test_pretool_command_is_env_gated_and_pinned`` == _EXPECTED_PRETOOL_COMMAND for
+# PreToolUse); full-string equality strictly dominates the substring checks that
+# used to live here. What this file adds is the RUNTIME proof below.
 
 
 def test_faA1_profile_noise_does_not_corrupt_envelope() -> None:

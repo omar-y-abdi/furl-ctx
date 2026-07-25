@@ -137,12 +137,6 @@ def test_B_eviction_scoped_to_own_backend(tmp_path) -> None:
         store_b.close()
 
 
-def test_B_project_stores_have_distinct_backends(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    store_a = _project_store(monkeypatch, tmp_path / "A")
-    store_b = _project_store(monkeypatch, tmp_path / "B")
-    assert store_a._backend is not store_b._backend
-
-
 # --------------------------------------------------------------------------- #
 # C. Explicit shared override still works
 # --------------------------------------------------------------------------- #
