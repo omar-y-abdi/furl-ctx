@@ -4,9 +4,8 @@
 //!
 //! For each fixture the rendered output is scraped exactly the way the
 //! Python mirror scrapes it (comma-shape opaque markers, space-shape
-//! row-drop markers, `#rows` index keys) and compared against the typed
-//! sets carried on `CrushResult::dropped`. The retirement-safety
-//! property is DIRECTIONAL:
+//! row-drop markers) and compared against the typed sets carried on
+//! `CrushResult::dropped`. The retirement-safety property is DIRECTIONAL:
 //!
 //! 1. `scraped ∖ planted  ⊆  collected` — nothing the scrape would
 //!    mirror is missing from the typed carrier (retiring the scrape
@@ -16,8 +15,8 @@
 //!    no phantom refs;
 //! 3. payloads containing LITERAL `<<ccr:...>>` text (the scrape's
 //!    false-positive class) are scraped but never collected;
-//! 4. row-drop hashes and `#rows` index keys match EXACTLY in both
-//!    directions (those markers are never encoding-folded).
+//! 4. row-drop hashes match EXACTLY in both directions (those markers
+//!    are never encoding-folded).
 //!
 //! Strict `collected == scraped` equality deliberately does NOT hold in
 //! general — and that is a FINDING, not a test weakness: when a
@@ -93,8 +92,8 @@ fn scrape_opaque(text: &str) -> BTreeSet<(String, String, String)> {
     out
 }
 
-/// Scrape row-drop hashes (`<<ccr:HASH N_rows_offloaded>>`, space shape,
-/// no `#rows` suffix) out of rendered text.
+/// Scrape row-drop hashes (`<<ccr:HASH N_rows_offloaded>>`, space shape)
+/// out of rendered text.
 fn scrape_row_drop(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut idx = 0;
@@ -109,26 +108,6 @@ fn scrape_row_drop(text: &str) -> BTreeSet<String> {
         let after = &rest[hash_len..];
         if after.starts_with(' ') && after.contains("_rows_offloaded>>") {
             out.insert(rest[..hash_len].to_string());
-        }
-        idx = cursor + hash_len;
-    }
-    out
-}
-
-/// Scrape granular index keys (`<<ccr:HASH#rows N_chunks>>` → `HASH#rows`).
-fn scrape_index_keys(text: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut idx = 0;
-    while let Some(start) = text[idx..].find("<<ccr:") {
-        let cursor = idx + start + "<<ccr:".len();
-        let rest = &text[cursor..];
-        let hash_len = rest.chars().take_while(|&c| is_hex(c)).count();
-        if hash_len == 0 {
-            idx = cursor;
-            continue;
-        }
-        if rest[hash_len..].starts_with("#rows ") {
-            out.insert(format!("{}#rows", &rest[..hash_len]));
         }
         idx = cursor + hash_len;
     }
@@ -159,10 +138,6 @@ fn typed_row_drop(dropped: &[DroppedRef]) -> BTreeSet<String> {
             DroppedRef::Opaque { .. } => None,
         })
         .collect()
-}
-
-fn typed_index_keys(dropped: &[DroppedRef]) -> BTreeSet<String> {
-    dropped.iter().filter_map(|d| d.row_index_key()).collect()
 }
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────
@@ -335,18 +310,13 @@ fn typed_refs_cover_scrape_on_every_fixture() {
             );
         }
 
-        // (4) Row-drop + index parity, EXACT in both directions (those
-        // marker shapes are never encoding-folded: they live in JSON
-        // sentinel strings / plain sentinel lines).
+        // (4) Row-drop parity, EXACT in both directions (that marker
+        // shape is never encoding-folded: it lives in JSON sentinel
+        // strings / plain sentinel lines).
         assert_eq!(
             typed_row_drop(&r.dropped),
             scrape_row_drop(&r.compressed),
             "[{name}] typed row-drop hashes must equal the scraped set"
-        );
-        assert_eq!(
-            typed_index_keys(&r.dropped),
-            scrape_index_keys(&r.compressed),
-            "[{name}] typed row-index keys must equal the scraped set"
         );
     }
 }

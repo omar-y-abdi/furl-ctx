@@ -100,10 +100,8 @@ fn type_name(v: &serde_json::Value) -> &'static str {
 /// defensively under the pinned 0.29 — re-check on pyo3 bumps).
 ///
 /// `dropped_refs` (typed recovery refs, §4.2 R3/R4) is converted to a
-/// `list[DroppedRef]`; `row_index_key` is the bare `"HASH#rows"` store
-/// key of the top-level row-drop (NOT marker text), `None` when no
-/// granular index was written. `set_item` on the pyclass list allocates
-/// Python objects and can in principle fail — propagated as PyErr.
+/// `list[DroppedRef]`. `set_item` on the pyclass list allocates Python
+/// objects and can in principle fail — propagated as PyErr.
 #[allow(clippy::too_many_arguments)]
 fn build_crush_array_dict<'py>(
     py: Python<'py>,
@@ -113,7 +111,6 @@ fn build_crush_array_dict<'py>(
     strategy_info: String,
     compacted: Option<String>,
     compaction_kind: Option<&'static str>,
-    row_index_key: Option<String>,
     dropped_refs: Vec<PyDroppedRef>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
@@ -123,7 +120,6 @@ fn build_crush_array_dict<'py>(
     dict.set_item("strategy_info", strategy_info).unwrap();
     dict.set_item("compacted", compacted).unwrap();
     dict.set_item("compaction_kind", compaction_kind).unwrap();
-    dict.set_item("row_index_key", row_index_key).unwrap();
     dict.set_item("dropped_refs", dropped_refs)?;
     Ok(dict)
 }
@@ -561,8 +557,6 @@ impl PySmartCrusherConfig {
 ///
 /// * `kind_tag` — `"row_drop"` | `"opaque"` (the variant discriminator).
 /// * `hash` — the CCR store key (also embedded in the rendered marker).
-/// * `row_index_key` — bare granular-index store key (`"HASH#rows"`,
-///   NOT marker text); row-drop only, `None` when no index was written.
 /// * `opaque_kind` — wire kind token (`"base64"` / `"string"` / `"html"`
 ///   / custom); opaque only.
 /// * `byte_size` — EXACT original payload length in bytes (the rendered
@@ -572,7 +566,6 @@ impl PySmartCrusherConfig {
 struct PyDroppedRef {
     kind_tag: &'static str,
     hash: String,
-    row_index_key: Option<String>,
     opaque_kind: Option<String>,
     byte_size: Option<usize>,
 }
@@ -583,7 +576,6 @@ impl From<&RustDroppedRef> for PyDroppedRef {
             RustDroppedRef::RowDrop { hash, .. } => PyDroppedRef {
                 kind_tag: "row_drop",
                 hash: hash.clone(),
-                row_index_key: r.row_index_key(),
                 opaque_kind: None,
                 byte_size: None,
             },
@@ -594,7 +586,6 @@ impl From<&RustDroppedRef> for PyDroppedRef {
             } => PyDroppedRef {
                 kind_tag: "opaque",
                 hash: hash.clone(),
-                row_index_key: None,
                 opaque_kind: Some(kind.clone()),
                 byte_size: Some(*byte_size),
             },
@@ -617,10 +608,6 @@ impl PyDroppedRef {
         &self.hash
     }
     #[getter]
-    fn row_index_key(&self) -> Option<String> {
-        self.row_index_key.clone()
-    }
-    #[getter]
     fn opaque_kind(&self) -> Option<String> {
         self.opaque_kind.clone()
     }
@@ -639,11 +626,7 @@ impl PyDroppedRef {
             }
         }
         match self.kind_tag {
-            "row_drop" => format!(
-                "DroppedRef(kind_tag='row_drop', hash='{}', row_index_key={})",
-                self.hash,
-                opt(&self.row_index_key)
-            ),
+            "row_drop" => format!("DroppedRef(kind_tag='row_drop', hash='{}')", self.hash),
             _ => format!(
                 "DroppedRef(kind_tag='opaque', hash='{}', opaque_kind={}, byte_size={})",
                 self.hash,
@@ -696,18 +679,6 @@ impl PyCrushResult {
     #[getter]
     fn ccr_hashes(&self) -> Vec<String> {
         self.inner.ccr_hashes()
-    }
-
-    /// Granular per-blob row-index markers (`<<ccr:HASH#rows N_chunks>>`)
-    /// paired with `ccr_hashes`, for proportional retrieval. May be
-    /// shorter than `ccr_hashes` (a drop with no store configured has no
-    /// row index); never longer. Returned as a fresh `list[str]` per
-    /// call. Back-compat derivation over the typed `dropped` carrier —
-    /// byte-identical to the retired field. Deprecated: prefer
-    /// `dropped_refs` (bare `row_index_key`, no marker re-parsing).
-    #[getter]
-    fn row_index_markers(&self) -> Vec<String> {
-        self.inner.row_index_markers()
     }
 
     /// Every CCR-recoverable reduction this crush shipped, typed
@@ -859,8 +830,6 @@ impl PySmartCrusher {
     ///   `"smart_sample"`, `"lossless:table"`, `"none:adaptive_at_limit"`)
     /// - `compacted`: rendered bytes when the lossless path won, else `None`
     /// - `compaction_kind`: `"table" | "buckets" | "ccr" | None`
-    /// - `row_index_key`: bare `"HASH#rows"` granular-index store key of
-    ///   the drop (NOT marker text), `None` when no index was written
     /// - `dropped_refs`: `list[DroppedRef]` — every typed recovery ref
     ///   the shipped render carries (the row-drop plus any opaque
     ///   substitutions baked into `compacted`), §4.2 R3/R4
@@ -944,10 +913,6 @@ impl PySmartCrusher {
                 }))
             })
             .map_err(panic_to_pyerr)??;
-        // Bare granular-index key of the top-level row-drop (a
-        // CrushArrayResult carries at most ONE RowDrop ref by
-        // construction — one array, one drop).
-        let row_index_key = dropped_refs.iter().find_map(|d| d.row_index_key());
         build_crush_array_dict(
             py,
             kept_json,
@@ -956,7 +921,6 @@ impl PySmartCrusher {
             strategy_info,
             compacted,
             compaction_kind,
-            row_index_key,
             py_dropped_refs(&dropped_refs),
         )
     }

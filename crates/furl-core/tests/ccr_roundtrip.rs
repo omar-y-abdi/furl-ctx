@@ -194,51 +194,19 @@ fn distinct_inputs_produce_distinct_store_entries() {
     assert_eq!(store.get(&ha).unwrap(), canonical_json(&a));
     assert_eq!(store.get(&hb).unwrap(), canonical_json(&b));
 
-    // Granular model: besides the two distinct whole-blobs, each crush
-    // also stores PER-ROW chunks (so a single retrieve fetches one row,
-    // not the whole blob) plus a `{hash}#rows` index. The store therefore
-    // grows by 2 whole-blobs + 2 row indexes + the per-row chunks across
-    // both inputs — not just 2. Pin the proportional-retrieval contract
-    // directly: the index holds one hash per DROPPED row (kept rows are
-    // visible in the output and are never written — COR-4), each
-    // resolving to EXACTLY that one original row, in original order.
-    for (result, blob_hash, original) in [(&ra, &ha, &a), (&rb, &hb, &b)] {
-        let index_raw = store
-            .get(&format!("{blob_hash}#rows"))
-            .expect("row index must be stored under {hash}#rows");
-        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
-        let dropped = original.len() - result.items.len();
-        assert!(dropped > 0, "the lossy path must actually drop rows");
-        assert_eq!(
-            row_hashes.len(),
-            dropped,
-            "row index must hold one hash per DROPPED row (kept rows never chunked)"
+    // Each crush stores EXACTLY ONE entry — the whole-blob original. No
+    // per-row chunks and no `{hash}#rows` index are written (Design A):
+    // row-level recovery is served from the whole-blob parent.
+    for blob_hash in [&ha, &hb] {
+        assert!(
+            store.get(&format!("{blob_hash}#rows")).is_none(),
+            "no granular row index is written for {blob_hash}"
         );
-        // Each chunk is one original row; together they preserve the
-        // original relative order (strictly increasing source indices —
-        // the rows here are all distinct, so the mapping is unambiguous).
-        let mut last_idx: Option<usize> = None;
-        for rh in &row_hashes {
-            let row_payload = store
-                .get(rh)
-                .expect("each per-row chunk must resolve individually");
-            let row_arr: Vec<Value> = serde_json::from_str(&row_payload).unwrap();
-            assert_eq!(row_arr.len(), 1, "a row chunk holds exactly one row");
-            let idx = original
-                .iter()
-                .position(|orig| *orig == row_arr[0])
-                .expect("every chunk must be byte-exactly one ORIGINAL row");
-            assert!(
-                last_idx.is_none_or(|prev| idx > prev),
-                "chunks must preserve the original row order"
-            );
-            last_idx = Some(idx);
-        }
     }
 
-    // The two whole-blobs are distinct entries; the total grew beyond the
-    // legacy "+2" because of the granular chunks + indexes.
-    assert!(store.len() > starting_len + 2);
+    // The two whole-blobs are the only new entries — the store grew by
+    // exactly 2.
+    assert_eq!(store.len(), starting_len + 2);
 }
 
 #[test]
@@ -542,12 +510,12 @@ fn two_large_arrays_in_one_document_keep_every_marker_resolvable() {
 
 #[test]
 fn single_oversized_array_never_advertises_unresolvable_chunks() {
-    // COR-4 reproduction (single-array flavour): one array with more
-    // droppable rows than the store's capacity. Before the fix, the
-    // per-row chunk flood self-evicted its own earliest chunks, so the
-    // surfaced `_ccr_rows` index advertised row hashes that no longer
-    // resolved. RED before the fix; GREEN after (granular chunking is
-    // skipped for oversized drops — whole-blob only, nothing dangles).
+    // A large array's drop: row-level recovery is served from the
+    // whole-blob parent, so the output advertises NO granular `_ccr_rows`
+    // index that could dangle. (Historically the per-row chunk flood
+    // self-evicted its own earliest chunks, leaving the surfaced index
+    // pointing at row hashes that no longer resolved; the index is now
+    // gone entirely — whole-blob only.)
     let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
     let crusher = SmartCrusherBuilder::new(SmartCrusherConfig::default())
         .with_default_oss_setup()
@@ -579,29 +547,13 @@ fn single_oversized_array_never_advertises_unresolvable_chunks() {
         "byte-exact whole-blob recovery"
     );
 
-    // IF a granular `_ccr_rows` index is advertised, then EVERY row hash
-    // it lists must resolve — the output must never advertise retrievals
-    // the store cannot honor. (After the fix, oversized drops advertise
-    // no index at all, making this vacuously green; before the fix the
-    // index was surfaced with its earliest chunks already self-evicted.)
-    if let Some(idx_marker) = sentinel.get("_ccr_rows").and_then(|v| v.as_str()) {
-        let index_key = extract_hash_from_marker(idx_marker).expect("index marker embeds a key");
-        let index_raw = store
-            .get(&index_key)
-            .expect("an advertised `_ccr_rows` index must itself resolve");
-        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
-        let dangling: Vec<&String> = row_hashes
-            .iter()
-            .filter(|rh| store.get(rh).is_none())
-            .collect();
-        assert!(
-            dangling.is_empty(),
-            "{} of {} advertised row chunks DANGLE (self-eviction; COR-4); first: {:?}",
-            dangling.len(),
-            row_hashes.len(),
-            dangling.first()
-        );
-    }
+    // An oversized drop advertises NO granular `_ccr_rows` index at all —
+    // row-level recovery is served from the whole-blob parent, so there is
+    // never a per-row index that could dangle.
+    assert!(
+        !sentinel.contains_key("_ccr_rows"),
+        "an oversized drop must not advertise a granular row index"
+    );
 }
 
 // ─── helpers ──────────────────────────────────────────────────────

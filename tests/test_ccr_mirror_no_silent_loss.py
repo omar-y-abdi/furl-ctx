@@ -41,7 +41,6 @@ never fired). After the fix it is GREEN: the output equals the original input.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -236,91 +235,61 @@ def test_logging_level_check_is_quiet_on_success(caplog: pytest.LogCaptureFixtur
 # window "cannot be fully eliminated"; Python is the last place to catch it.
 
 
-def _evicting_sub_arrays() -> list[list[dict[str, Any]]]:
-    """Six independently-droppable sub-arrays of 255 near-unique dict rows.
+class _CcrGetMissing:
+    """Wrap a real Rust SmartCrusher so every ``ccr_get`` MISSES (returns
+    ``None``) while every other call (``crush``, ``crush_array_json``, …)
+    delegates to the real engine.
 
-    Each sub-array's drop stays UNDER the COR-4 granular budget
-    (~240 dropped ≤ capacity/4 = 250), so every drop writes ~240 per-row
-    chunks + 1 index + 1 whole-blob ≈ 242 entries. Six drops write ~1450
-    entries into the 1000-entry FIFO — in aggregate a >capacity drop — so
-    the LAST arrays' chunk floods evict the FIRST arrays' whole-blobs
-    BEFORE ``crush()`` returns. The typed ``ccr_hashes`` then contain
-    hashes whose ``ccr_get`` misses: the exact COR-4 residual window the
-    COR-5 detector exists to catch.
-    """
+    Forces the COR-5 window deterministically: a typed row-drop hash the engine
+    surfaced whose Rust-store entry is gone by the time the mirror reads it.
+    That window used to open by accident under the per-row chunk store flood
+    (F8) — six sub-arrays writing ~1450 entries into the 1000-slot FIFO evicted
+    the first arrays' whole-blobs mid-crush. Design A closed the flood at the
+    producer (one whole-blob per drop, never ~240 chunks), so no fixture can
+    evict a just-written entry within one crush of the fixed-capacity store.
+    The fail-safe still matters (TTL expiry, a genuine >capacity aggregate), so
+    the miss is induced directly instead of by flooding — no wall-clock, no
+    load sensitivity."""
 
-    def rows(seed: int) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for i in range(255):
-            h = hashlib.sha256(f"arr{seed}:{i}".encode()).hexdigest()
-            out.append(
-                {
-                    "id": h[:32],
-                    "commit": h[32:64],
-                    "svc": ["api", "worker"][i % 2],
-                    "lvl": ["INFO", "WARN"][i % 2],
-                    "msg": f"req {h[8:20]} done {h[20:28]}",
-                }
-            )
-        return out
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self.ccr_get_calls = 0
 
-    return [rows(seed) for seed in range(6)]
+    def ccr_get(self, _hash: str) -> None:
+        self.ccr_get_calls += 1
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        # Everything except ccr_get / _real / ccr_get_calls delegates, so the
+        # real crush still runs and real dropped refs are still produced.
+        return getattr(self._real, name)
 
 
 def test_typed_hash_evicted_before_mirror_raises() -> None:
-    """COR-5 unit-level bite (real data, no mocks): when a typed row-drop
-    hash was evicted from the Rust store before the mirror ran, ``crush()``
-    must raise ``CcrMirrorError`` — not debug-skip the miss as a marker
-    "leaked from elsewhere" (impossible for a typed hash).
+    """COR-5 bite (deterministic, real crush): when a TYPED row-drop hash misses
+    the Rust store at mirror time, ``crush()`` must raise ``CcrMirrorError`` —
+    never debug-skip the miss as a marker "leaked from elsewhere" (impossible
+    for a hash the engine itself surfaced).
 
-    RED pre-fix: the miss was swallowed at ``logger.debug`` and ``crush()``
-    returned a compressed payload whose ``<<ccr:HASH>>`` marker dangled.
-    GREEN post-fix: the raise reaches ``compress()``'s fail-open."""
-    content = json.dumps(_evicting_sub_arrays(), ensure_ascii=False)
-
-    # Fixture guard: prove the eviction window actually opened. A separate
-    # crusher (own store) crushes the same content; determinism makes the
-    # main assertion's crusher behave identically. Without this, a future
-    # capacity bump could turn the raises-assert into a confusing failure.
-    probe = SmartCrusher(config=SmartCrusherConfig())
-    r = probe._rust.crush(content, "", 1.0)
-    dangling = [h for h in r.ccr_hashes if probe._rust.ccr_get(h) is None]
-    assert dangling, (
-        "fixture did not evict any typed whole-blob before the mirror; "
-        "grow the sub-array count so aggregate writes exceed store capacity"
-    )
-
+    The real crush produces real dropped refs; ``_CcrGetMissing`` then makes
+    every ``ccr_get`` miss — exactly a typed entry evicted/expired between the
+    drop and the mirror. Under the old per-row chunk flood this window opened by
+    accident; Design A closes it at the producer, so the miss is induced
+    directly rather than by flooding the fixed-capacity (1000) Rust store. RED
+    if the ``if typed: raise`` branch is dropped: the miss would debug-skip and
+    ``crush()`` would hand back a payload whose ``<<ccr:HASH>>`` marker dangles."""
     crusher = SmartCrusher(config=SmartCrusherConfig())
+    crusher._rust = _CcrGetMissing(crusher._rust)
+
     with pytest.raises(CcrMirrorError):
-        crusher.crush(content, query="x")
+        crusher.crush(json.dumps(_ROW_DROP_ITEMS), query="x")
 
-
-def test_typed_drop_eviction_reverts_to_original() -> None:
-    """BEHAVIOR-level bite for COR-5: the same aggregate >capacity drop
-    through the full ``compress()`` path must NOT let the lossy output
-    stand once a typed drop's recovery entry is gone — fail-open reverts
-    to the ORIGINAL messages, exactly like the store-write-failure case.
-
-    RED pre-fix (verified): compression PROCEEDED (~70k → ~1.6k tokens),
-    the output carried ``<<ccr:>>`` markers with two of them dangling, and
-    ``error`` was ``None`` — silent loss. GREEN post-fix: output == input,
-    no marker, error recorded."""
-    tool_msg = {
-        "role": "tool",
-        "tool_call_id": "t1",
-        "content": json.dumps(_evicting_sub_arrays()),
-    }
-
-    result = compress(_build_messages(tool_msg))
-
-    assert result.messages[1]["content"] == tool_msg["content"], (
-        "lossy output stood although a typed drop's store entry was evicted "
-        "before the mirror — dangling-marker silent loss"
+    # Guard against a vacuous pass: the crush must have produced a typed
+    # row-drop ref whose mirror actually reached the (forced-miss) ccr_get.
+    assert crusher._rust.ccr_get_calls > 0, (
+        "ccr_get was never called — the crush produced no typed row-drop ref, "
+        "so the miss branch under test never ran"
     )
-    assert "<<ccr:" not in json.dumps(result.messages), (
-        "a CCR marker survived although its recovery entry may be gone"
-    )
-    assert result.error is not None, "fail-open did not fire; typed miss was swallowed"
 
 
 def test_scraped_hash_store_miss_stays_debug_skip() -> None:

@@ -105,15 +105,8 @@ pub struct CrushArrayResult {
     /// `"buckets"`/`"ccr"` shapes are declined from the lossless tier
     /// until the reference decoder covers them (COR-13).
     pub compaction_kind: Option<&'static str>,
-    /// Compact granular-retrieval marker (`<<ccr:HASH#rows N_chunks>>`)
-    /// carried alongside the whole-blob `dropped_summary`. Surfaced in
-    /// the `_ccr_rows` field of the `{"_ccr_dropped": ...}` sentinel so a
-    /// consumer can resolve the per-blob row index and retrieve ONE row
-    /// at a time instead of paying for the whole offloaded blob. `None`
-    /// when nothing was dropped or no store was configured.
-    pub row_index_marker: Option<String>,
     /// Typed recovery refs for THIS result's shipped render (§4.2): the
-    /// row-drop ref mirroring `ccr_hash`/`row_index_marker` plus — when
+    /// row-drop ref mirroring `ccr_hash` plus — when
     /// the compacted render carries `<<ccr:HASH,KIND,SIZE>>`
     /// substitutions — one [`DroppedRef::Opaque`] per substitution, in
     /// render order. Pure side-output: the values are exactly those the

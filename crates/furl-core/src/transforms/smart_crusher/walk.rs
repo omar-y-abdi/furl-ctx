@@ -273,15 +273,10 @@ impl SmartCrusher {
                             // unambiguously.
                             let mut items = result.items;
                             if !result.dropped_summary.is_empty() {
-                                // The `_ccr_rows` marker names the per-blob
-                                // row index so retrieval is proportional
-                                // (resolve index, fetch only needed rows);
-                                // `_ccr_dropped` keeps the byte-stable
-                                // whole-blob pointer.
-                                let sentinel = ccr_sentinel_map(
-                                    &result.dropped_summary,
-                                    result.row_index_marker.as_deref(),
-                                );
+                                // `_ccr_dropped` carries the byte-stable
+                                // whole-blob recovery pointer; row-level
+                                // recovery is served from that parent.
+                                let sentinel = ccr_sentinel_map(&result.dropped_summary);
                                 items.push(Value::Object(sentinel));
                             }
                             // Surface the SAME hash + row-index data the
@@ -1265,7 +1260,6 @@ mod tests {
         );
         assert!(result.dropped.is_empty(), "no typed recovery refs");
         assert!(result.ccr_hashes().is_empty(), "no typed row-drop hashes");
-        assert!(result.row_index_markers().is_empty());
         assert_eq!(store.len(), 0, "no store writes in strict mode");
         // Every original row/line survives (parse and count).
         let parsed: Value = serde_json::from_str(&result.compressed).unwrap();
@@ -1313,16 +1307,6 @@ mod tests {
                 if let Some(Value::String(s)) = map.get("_ccr_dropped") {
                     if let Some(h) = extract_ccr_hash(s) {
                         hashes.push(h);
-                    }
-                    // GRANULAR retrieval: the `_ccr_rows` marker names the
-                    // per-blob row index (`{hash}#rows`). The index key is
-                    // collected so the caller can resolve it to per-row
-                    // hashes and prove each row is individually
-                    // addressable + recoverable.
-                    if let Some(Value::String(idx)) = map.get("_ccr_rows") {
-                        if let Some(h) = extract_ccr_hash(idx) {
-                            hashes.push(h);
-                        }
                     }
                     return;
                 }
@@ -1377,15 +1361,11 @@ mod tests {
         );
         assert!(store.len() > 0, "ccr_store must be populated on drop");
 
-        // Resolve every surfaced hash. With the granular model a drop
-        // surfaces BOTH the whole-blob pointer (`_ccr_dropped`) and one
-        // per-row pointer per original row (`_ccr_rows`). When the array
-        // is large enough that the per-row chunks fill the bounded LRU,
-        // the (now-redundant) whole-blob entry MAY be evicted — that is
-        // acceptable precisely because the granular chunks recover every
-        // row on their own. So a hash that fails to resolve is tolerated
-        // here; the real invariant — every distinct input recovered — is
-        // asserted on the final `recovered` set below.
+        // Resolve every surfaced whole-blob hash. A drop surfaces the
+        // whole-blob recovery pointer (`_ccr_dropped`); `ccr_get(hash)`
+        // returns the full offloaded array, from which every dropped row
+        // is recovered. The store holds one entry per drop (the
+        // whole-blob), so the recovery pointer always resolves.
         let mut recovered: HashSet<String> = kept_scalars;
         let mut n_resolved = 0usize;
         for h in &hashes {
@@ -1394,24 +1374,6 @@ mod tests {
             };
             n_resolved += 1;
             let restored: Vec<Value> = serde_json::from_str(&payload).unwrap();
-            // A `{hash}#rows` ROW INDEX resolves to a JSON array of per-row
-            // hash STRINGS, not rows. Follow each one — the proportional
-            // retrieval path: one `ccr_get(row_hash)` per needed row,
-            // each returning exactly `[row]`. This is what makes a single
-            // needed row cost ONE row, not the whole blob.
-            if h.ends_with("#rows") {
-                for hv in &restored {
-                    if let Value::String(row_hash) = hv {
-                        if let Some(row_payload) = store.get(row_hash) {
-                            let row_arr: Vec<Value> = serde_json::from_str(&row_payload).unwrap();
-                            for x in row_arr {
-                                recovered.insert(canonical_json_for_match(&x));
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
             for x in restored {
                 recovered.insert(canonical_json_for_match(&x));
             }
@@ -1511,15 +1473,14 @@ mod tests {
 
     // ── crush() typed row-drop fields (pass 1a parity) ──────────────────
     //
-    // `crush()` now surfaces every row-drop hash + row-index marker TYPED
-    // on `CrushResult` so the Python shim mirrors them DIRECTLY instead of
-    // scraping `<<ccr:HASH>>` out of the rendered text. These tests pin the
-    // contract at the Rust boundary; the Python parity test
+    // `crush()` surfaces every row-drop hash TYPED on `CrushResult` so the
+    // Python shim mirrors them DIRECTLY instead of scraping `<<ccr:HASH>>`
+    // out of the rendered text. These tests pin the contract at the Rust
+    // boundary; the Python parity test
     // (`tests/test_crush_typed_hash_parity.py`) pins the end-to-end mirror.
 
-    /// Build a lossy-forced crusher WITH a store so row-drops persist and
-    /// row-index markers populate. Mirrors the harness used by the
-    /// no-silent-loss tests above.
+    /// Build a lossy-forced crusher WITH a store so row-drops persist.
+    /// Mirrors the harness used by the no-silent-loss tests above.
     fn lossy_crusher_with_store() -> (SmartCrusher, Arc<dyn CcrStore>) {
         use crate::ccr::InMemoryCcrStore;
         let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
@@ -1536,10 +1497,7 @@ mod tests {
     #[test]
     fn crush_surfaces_typed_row_drop_hash_matching_embedded_marker() {
         let (c, _store) = lossy_crusher_with_store();
-        // Single droppable dict array. Sized so the DROPPED count stays
-        // within the granular chunk budget (`capacity / 4` = 250 for the
-        // default store) — an oversized drop persists the whole-blob
-        // only (COR-4) and would surface no row-index marker to pin.
+        // A single droppable dict array.
         let items: Vec<Value> = (0..200)
             .map(|i| json!({"id": i, "status": "ok", "svc": "api"}))
             .collect();
@@ -1548,7 +1506,7 @@ mod tests {
 
         // A drop happened → at least one typed hash, and the SAME hash is
         // embedded in the rendered `<<ccr:HASH N_rows_offloaded>>` marker.
-        // Uses the DERIVED back-compat getters — the corpus lock for R1's
+        // Uses the DERIVED back-compat getter — the corpus lock for R1's
         // field→getter promotion (values asserted against the RENDERED
         // text, not against each other).
         assert!(
@@ -1562,29 +1520,14 @@ mod tests {
                 "typed hash {h} must match the embedded row-drop marker"
             );
         }
-        // Store-backed → a row-index marker is surfaced for proportional
-        // retrieval, and it is embedded too (as the `_ccr_rows` field).
+        // No granular `#rows` row-index marker is embedded — row-level
+        // recovery is served from the whole-blob parent, not a per-blob
+        // index the model's retrieve path could never resolve.
         assert!(
-            !r.row_index_markers().is_empty(),
-            "store-backed drop must surface a typed row_index_marker"
+            !r.compressed.contains("#rows"),
+            "no granular row-index marker must be embedded, got: {}",
+            &r.compressed[..r.compressed.len().min(200)]
         );
-        for m in &r.row_index_markers() {
-            assert!(
-                r.compressed.contains(m.as_str()),
-                "typed row_index_marker {m} must be embedded in the output"
-            );
-        }
-        // The typed refs' BARE index keys resolve in the store — the
-        // datum R5's Python mirror consumes instead of marker text.
-        for d in &r.dropped {
-            let key = d
-                .row_index_key()
-                .expect("store-backed row drop carries a row-index key");
-            assert!(
-                key.ends_with("#rows"),
-                "bare key form is HASH#rows, got: {key}"
-            );
-        }
     }
 
     #[test]

@@ -430,9 +430,9 @@ class SmartCrusher(Transform):
         # ── Recovery mirroring: TYPED refs (§4.2 R5) ──
         #
         # `crush()` receives EVERY recovery ref typed on `dropped_refs` —
-        # row-drop hashes with their bare `HASH#rows` index keys AND the
-        # opaque-blob substitutions — so nothing is re-parsed out of
-        # `r.compressed`. Unlike the sibling `crush_array_json` (one
+        # the row-drop hashes AND the opaque-blob substitutions — so
+        # nothing is re-parsed out of `r.compressed`. Unlike the sibling
+        # `crush_array_json` (one
         # top-level array, one hash), `crush()` recurses via
         # `process_value` and can reduce many spots, so the refs are
         # PLURAL. The A1 fail-safe is preserved — the mirror helpers
@@ -473,16 +473,16 @@ class SmartCrusher(Transform):
         surfaced these refs, so a Rust store miss is a dangling marker —
         `CcrMirrorError`, not a debug-skip (COR-5).
 
-        The per-row chunks a row-drop also writes to the (process-local) Rust
-        store are deliberately NOT mirrored into Python: each chunk is a
-        byte-duplicate of a row the parent already holds, unreachable by any
-        prompt marker (row hashes are never inlined, and the ``#rows`` index
-        key fails ``furl_retrieve``'s hex-hash guard), and mirroring one would
-        burn a cap slot per dropped row — the F8 defect. Row-level retrieval is
-        served from the parent instead: a bare ``furl_retrieve(hash)`` returns
-        the parent's full stored array (every dropped row); ``query=…`` (BM25,
-        capped) and ``select_field`` only narrow it. One columnar output is
-        exactly one logical entry.
+        A row-drop persists ONLY the whole-blob parent — no per-row chunks
+        and no ``{hash}#rows`` index are written anywhere (Design A). Per-row
+        chunks are byte-duplicates of rows the parent already holds and were
+        unreachable by any prompt marker (row hashes are never inlined, and a
+        ``#rows`` index key fails ``furl_retrieve``'s hex-hash guard), so
+        storing them only burned a cap slot per dropped row — the F8 defect.
+        Row-level retrieval is served from the parent: a bare
+        ``furl_retrieve(hash)`` returns the parent's full stored array (every
+        dropped row); ``query=…`` (BM25, capped) and ``select_field`` only
+        narrow it. One columnar output is exactly one logical entry.
         """
         for ref in refs:
             self._mirror_single_hash_to_python_store(
@@ -510,10 +510,10 @@ class SmartCrusher(Transform):
         the hash directly rather than parsing it out of a prompt marker.
         """
         result: dict[str, Any] = self._rust.crush_array_json(items_json, query, bias)
-        # Every recovery ref of the shipped render — the row-drop (hash +
-        # bare `row_index_key`) and any opaque substitutions baked into
-        # `compacted` — arrives TYPED on `dropped_refs` (§4.2 R5). Mirror
-        # them directly; nothing is re-parsed out of the rendered text.
+        # Every recovery ref of the shipped render — the row-drop (hash)
+        # and any opaque substitutions baked into `compacted` — arrives
+        # TYPED on `dropped_refs` (§4.2 R5). Mirror them directly; nothing
+        # is re-parsed out of the rendered text.
         strategy = str(result.get("strategy_info") or "smart_crusher_row_drop")
         self._mirror_typed_refs(
             list(result.get("dropped_refs") or []),
@@ -715,13 +715,15 @@ class SmartCrusher(Transform):
             <<ccr:HASH<sep>...>>
 
         where ``HASH`` is `[0-9a-f]+` and ``<sep>`` is one of the
-        delimiters the Rust emitters use today: a single space (the
-        row-drop summary, ``<<ccr:abc 100_rows_offloaded>>``; or the
-        GRANULAR row-index marker ``<<ccr:abc#rows 100_chunks>>``) or a
-        comma (the opaque-blob marker, ``<<ccr:abc,base64,4.5KB>>``).
-        We accept either delimiter and tolerate `>>` as the terminator
-        (the case where the marker is just `<<ccr:abc>>` with no
-        suffix, used by the bare CCR helpers).
+        delimiters the parser accepts: a single space (the row-drop
+        summary, ``<<ccr:abc 100_rows_offloaded>>``) or a comma (the
+        opaque-blob marker, ``<<ccr:abc,base64,4.5KB>>``). It also
+        tolerates the RETIRED ``#rows`` row-index shape
+        (``<<ccr:abc#rows 100_chunks>>``): no producer emits it since the
+        granular per-row offload was removed (Design A, F8/#168), but a
+        stale result-cache entry can still carry one. We accept these and
+        tolerate `>>` as the terminator (the bare ``<<ccr:abc>>`` case,
+        used by the bare CCR helpers).
 
         The granular row-index key carries a literal ``#rows`` suffix
         (``abc#rows``); it is captured WITH the suffix so a consumer can
