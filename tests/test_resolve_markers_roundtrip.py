@@ -61,7 +61,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 
 import pytest
 
@@ -346,79 +345,36 @@ def test_generic_bracket_unresolvable_hash_leaves_text_untouched() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# ReDoS regression (review finding 1): the double-angle SUBSTITUTION pattern
-# must stay near-linear on adversarial input, not just correct on real
-# markers. DOUBLE_ANGLE_FULL_PATTERN has no RE2 twin (only
-# GENERIC_BRACKET_PATTERN does — see marker_grammar.finditer_within_budget),
-# so it runs on Python's backtracking `re` engine; an unbounded tail
-# quantifier is O(text_length) worst-case backtrack PER attempted match
+# Forged-marker over-match window (review finding 2) AND the ReDoS regression
+# (review finding 1) — ONE two-sided assertion covers both, because both are
+# consequences of the same constant: how far past the hash the tail may reach
+# for a ">>".
+#
+# Over-match: bounding the tail bounds how much unrelated intervening text a
+# hash-shaped prefix can swallow on its way to a distant, unrelated ">>".
+# Below the bound a marker-shaped span still resolves (correctness for any
+# real marker, always far under 64 chars of tail); past it the span must not
+# match at all, so surrounding text is left untouched rather than silently
+# collapsed into one substitution.
+#
+# ReDoS: the double-angle SUBSTITUTION pattern runs on Python's backtracking
+# `re` engine, so an UNBOUNDED tail (`[^>]*`) makes every failed match-start
+# scan forward to the next ">>" or end-of-text — O(remaining) backtrack per
 # start, i.e. O(n^2) overall on input shaped like many marker starts with no
-# closing ">>". Bounding the tail to a small constant caps that per-attempt
-# backtrack at O(bound), restoring O(n) overall.
-# --------------------------------------------------------------------------- #
-
-
-def test_double_angle_resolution_scan_stays_linear_under_adversarial_input() -> None:
-    """RED on an unbounded ``[^>]*`` tail: doubling the input roughly
-    QUADRUPLES the wall time (the O(n^2) signature). GREEN on the bounded
-    ``[^>]{0,64}`` tail: doubling the input roughly DOUBLES it.
-
-    Structural assertion, not a fixed wall-clock ceiling: compares the RATIO
-    of two measurements rather than an absolute threshold, so it stays valid
-    on a slower or more loaded machine (both measurements scale together —
-    a uniform 5x slowdown leaves the ratio unchanged). 3.0x is the cutoff:
-    linear scaling measures close to 2.0x in practice (see the docstring on
-    DOUBLE_ANGLE_FULL_PATTERN for the measured numbers this test's bound
-    was chosen against — 1.8x-2.1x observed for the bounded pattern across
-    four doublings), while the quadratic regression measured 2.8x-4.6x
-    per doubling on the same adversarial shape; 3.0 sits strictly between
-    the two with margin on both sides.
-
-    Adversarial input: many ``<<ccr:HASH`` starts, no closing ``">>"``
-    anywhere, so DOUBLE_ANGLE_FULL_PATTERN never matches and every attempt
-    is a full failed scan — the worst case for an unbounded backtrack. No
-    store hit is needed; the scan itself is what must stay bounded.
-    """
-
-    def _scan_seconds(reps: int) -> float:
-        adversarial = "<<ccr:aaaaaaaaaaaa" * reps
-        messages = [{"role": "tool", "content": adversarial}]
-        t0 = time.monotonic()
-        resolve_markers(messages)
-        return time.monotonic() - t0
-
-    _scan_seconds(1_000)  # warm-up: first-call overhead, caches
-
-    reps_small = 10_000
-    small = _scan_seconds(reps_small)
-    large = _scan_seconds(2 * reps_small)
-
-    # A too-fast small measurement makes the ratio noise-dominated rather
-    # than signal-dominated; this floor is far below the bounded pattern's
-    # observed ~0.003s at this size, so it should never legitimately fire.
-    assert small > 0.0005, (
-        f"warm-up measurement too fast to compare reliably ({small:.6f}s for "
-        f"{reps_small} reps) -- widen reps_small if this ever fires"
-    )
-    ratio = large / small
-    assert ratio < 3.0, (
-        f"input doubled ({reps_small} -> {2 * reps_small} reps) but wall "
-        f"time scaled {ratio:.2f}x (small={small:.4f}s large={large:.4f}s) "
-        f"-- quadratic-shaped regression in the double-angle substitution "
-        f"scan (DOUBLE_ANGLE_FULL_PATTERN's tail bound was likely widened "
-        f"or removed)"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Forged-marker over-match window (review finding 2): bounding the tail also
-# bounds how much unrelated intervening text a hash-shaped prefix can
-# swallow on its way to a distant, unrelated ">>". Below the bound, a
-# marker-shaped span still resolves (correctness for any real marker, which
-# is always far under 64 chars of tail — see DOUBLE_ANGLE_FULL_PATTERN's
-# docstring); past it, the span must not match at all, so the surrounding
-# text is left untouched rather than silently collapsed into one
-# substitution.
+# closing ">>" (measured: 562.5 KB took 19.66s unbounded vs 0.0095s bounded).
+# Bounding the tail to a small constant caps each failed start at O(bound),
+# restoring O(n).
+#
+# The guard below is the bound itself, asserted DETERMINISTICALLY with NO wall
+# clock. It was previously ALSO guarded by a separate
+# `assert ratio < 3.0` between two sub-millisecond timings, which was deleted:
+# a noisy baseline inflates the denominator, so that assertion FALSE-PASSED the
+# very O(n^2) regression it named — measured 5 false-greens in 15 runs at load
+# 86, and the miss rate RISES with machine load, making it least trustworthy
+# exactly on a busy CI runner. The two checks below are a tight two-sided vise
+# at 64/65 that catches every widening of the bound (verified by sweep: 20, 32,
+# 128, 1024, 4095 and unbounded all trip it), which is strictly more detection
+# power than any reach-ceiling or timing proxy could add.
 # --------------------------------------------------------------------------- #
 
 
