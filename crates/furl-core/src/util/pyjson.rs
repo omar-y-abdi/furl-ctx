@@ -7,8 +7,6 @@
 //!   `", "` / `": "` separators, sorted keys, `ensure_ascii=True`.
 //!   Feeds the MD5 item hashes (`anchor_selector::compute_item_hash` /
 //!   `stable_item_hash`) — a one-byte drift silently changes dedup.
-//! - [`python_json_dumps`] — `json.dumps(v)`: insertion-order keys
-//!   (serde_json `preserve_order`), `ensure_ascii=True`.
 //! - [`python_safe_json_dumps`] / [`write_python_safe_json`] — Python
 //!   `safe_json_dumps`: compact `(",", ":")` separators,
 //!   `ensure_ascii=False`. This is the format `SmartCrusher` uses to
@@ -57,26 +55,6 @@ pub fn python_json_dumps_sort_keys(value: &Value) -> String {
         &mut out,
         JsonFmt {
             sort_keys: true,
-            compact: false,
-            ensure_ascii: true,
-        },
-    );
-    out
-}
-
-/// Python `json.dumps(value)` — exact format parity, preserving
-/// object-key insertion order (matches the JSON parser's order via
-/// serde_json's `preserve_order` feature).
-///
-/// Bytes differ from `to_string` because of the `, ` / `: ` separators
-/// and `\uXXXX` non-ASCII escapes — both Python defaults.
-pub fn python_json_dumps(value: &Value) -> String {
-    let mut out = String::new();
-    write_python_json_inner(
-        value,
-        &mut out,
-        JsonFmt {
-            sort_keys: false,
             compact: false,
             ensure_ascii: true,
         },
@@ -331,16 +309,6 @@ mod tests {
         let mut streamed = String::new();
         write_python_safe_json(&v, &mut streamed);
         assert_eq!(streamed, python_safe_json_dumps(&v));
-    }
-
-    // ---------- python_json_dumps (insertion order) ----------
-
-    #[test]
-    fn json_dumps_preserves_insertion_order() {
-        // serde_json preserve_order keeps parse order; python_json_dumps
-        // must NOT sort.
-        let v: Value = serde_json::from_str(r#"{"b": 1, "a": 2}"#).unwrap();
-        assert_eq!(python_json_dumps(&v), r#"{"b": 1, "a": 2}"#);
     }
 
     // ---------- filtered projection serialization ----------

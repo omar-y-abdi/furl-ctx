@@ -263,12 +263,6 @@ pub fn emit_opaque_ccr_marker(
     (marker, dropped_ref)
 }
 
-/// Convenience: walk and compact with default config + CSV-schema
-/// formatter. Equivalent to `DocumentCompactor::new().compact(doc)`.
-pub fn compact_document(doc: Value) -> Value {
-    DocumentCompactor::new().compact(doc)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

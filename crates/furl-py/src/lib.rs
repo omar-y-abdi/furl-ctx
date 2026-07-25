@@ -26,10 +26,6 @@ use furl_core::transforms::smart_crusher::{
     RoutingPolicy as RustRoutingPolicy, SmartCrusher as RustSmartCrusher,
     SmartCrusherConfig as RustSmartCrusherConfig,
 };
-use furl_core::transforms::tag_protector::{
-    is_known_html_tag as rust_is_known_html_tag, known_html_tag_names as rust_known_html_tag_names,
-    protect_tags as rust_protect_tags, restore_tags as rust_restore_tags,
-};
 use furl_core::transforms::{
     detect as rust_detect_chain, DetectionResult as RustDetectionResult, DiffCompressionResult,
     DiffCompressor, DiffCompressorConfig, LogCompressionResult as RustLogResult,
@@ -1787,69 +1783,6 @@ impl PyTextCrusher {
     }
 }
 
-// ─── tag_protector bridge (restored in Engine P2-11) ──────────────────
-//
-// Mirrors `furl_ctx.transforms.tag_protector.{protect_tags,restore_tags,
-// is_html_tag,KNOWN_HTML_TAGS}`. The Rust walker is single-pass and
-// fixes five real bugs the Python original carried (see crate-level
-// docs in `tag_protector.rs`); `restore_tags` additionally carries the
-// PERF-15 single-scan fix. The GIL is released during the walk because
-// the algorithm holds no Python references.
-
-/// Replace custom workflow tags in `text` with opaque placeholders so
-/// downstream lossy compressors can't accidentally drop them.
-///
-/// Returns `(cleaned_text, blocks)` where `blocks` is a list of
-/// `(placeholder, original)` tuples for `restore_tags`.
-#[pyfunction]
-#[pyo3(signature = (text, compress_tagged_content = false))]
-fn protect_tags(
-    py: Python<'_>,
-    text: &str,
-    compress_tagged_content: bool,
-) -> PyResult<(String, Vec<(String, String)>)> {
-    let owned = text.to_string();
-    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
-    py.detach(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let (cleaned, blocks, _stats) = rust_protect_tags(&owned, compress_tagged_content);
-            (cleaned, blocks)
-        }))
-    })
-    .map_err(panic_to_pyerr)
-}
-
-/// Splice protected blocks back into `text`. Missing placeholders are
-/// DISCARDED (Hotfix-A9 — no orphan-tag append); each placeholder
-/// substitutes at most once (PERF-15 single left-to-right scan).
-#[pyfunction]
-fn restore_tags(py: Python<'_>, text: &str, blocks: Vec<(String, String)>) -> PyResult<String> {
-    let owned = text.to_string();
-    // catch_unwind inside detach (see `panic_to_pyerr`): COR-7.
-    py.detach(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rust_restore_tags(&owned, &blocks)
-        }))
-    })
-    .map_err(panic_to_pyerr)
-}
-
-/// Case-insensitive HTML5 tag check. The Python shim uses this to
-/// preserve the legacy private `_is_html_tag` import surface for tests.
-#[pyfunction]
-fn is_html_tag(name: &str) -> bool {
-    rust_is_known_html_tag(name)
-}
-
-/// Return the canonical HTML5 tag name list. The Python shim
-/// reconstructs `KNOWN_HTML_TAGS` from this so callers that import the
-/// frozenset continue to work without re-declaring the set in two
-/// languages.
-#[pyfunction]
-fn known_html_tag_names() -> Vec<&'static str> {
-    rust_known_html_tag_names().to_vec()
-}
-
 // ─── Module init ───────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -1872,10 +1805,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTextCrusherConfig>()?;
     m.add_class::<PyTextCrushResult>()?;
     m.add_class::<PyTextCrusher>()?;
-    m.add_function(wrap_pyfunction!(protect_tags, m)?)?;
-    m.add_function(wrap_pyfunction!(restore_tags, m)?)?;
-    m.add_function(wrap_pyfunction!(is_html_tag, m)?)?;
-    m.add_function(wrap_pyfunction!(known_html_tag_names, m)?)?;
     m.add_function(wrap_pyfunction!(detect_content_type, m)?)?;
     m.add_function(wrap_pyfunction!(score_line, m)?)?;
     m.add_function(wrap_pyfunction!(content_has_error_indicators, m)?)?;

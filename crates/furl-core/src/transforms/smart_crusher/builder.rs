@@ -43,7 +43,6 @@ use super::crusher::SmartCrusher;
 /// Builder for `SmartCrusher`. See module docs.
 pub struct SmartCrusherBuilder {
     config: SmartCrusherConfig,
-    anchor_config: Option<AnchorConfig>,
     scorer: Option<Box<dyn RelevanceScorer + Send + Sync>>,
     compaction: Option<CompactionStage>,
     ccr_store: Option<Arc<dyn CcrStore>>,
@@ -55,19 +54,11 @@ impl SmartCrusherBuilder {
     pub fn new(config: SmartCrusherConfig) -> Self {
         SmartCrusherBuilder {
             config,
-            anchor_config: None,
             scorer: None,
             compaction: None,
             ccr_store: None,
             tokenizer: None,
         }
-    }
-
-    /// Override the default `AnchorConfig` (rare — most callers leave
-    /// this as the default).
-    pub fn anchor_config(mut self, cfg: AnchorConfig) -> Self {
-        self.anchor_config = Some(cfg);
-        self
     }
 
     /// Set the relevance scorer. The Enterprise plug-in point — pass
@@ -131,7 +122,7 @@ impl SmartCrusherBuilder {
     /// other customization still produces a working crusher.
     pub fn build(self) -> SmartCrusher {
         let analyzer = SmartAnalyzer::new(self.config.clone());
-        let anchor_selector = AnchorSelector::new(self.anchor_config.unwrap_or_default());
+        let anchor_selector = AnchorSelector::new(AnchorConfig::default());
         let scorer = self
             .scorer
             .unwrap_or_else(|| Box::<HybridScorer>::default());

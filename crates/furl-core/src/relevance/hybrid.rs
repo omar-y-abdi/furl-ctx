@@ -65,11 +65,6 @@ impl RelevanceScorer for HybridScorer {
             .map(|r| self.boost_bm25_only(r))
             .collect()
     }
-
-    fn is_available(&self) -> bool {
-        // Always available — BM25 with a match boost.
-        true
-    }
 }
 
 #[cfg(test)]
@@ -78,11 +73,6 @@ mod tests {
 
     fn scorer() -> HybridScorer {
         HybridScorer::default()
-    }
-
-    #[test]
-    fn hybrid_always_available() {
-        assert!(scorer().is_available());
     }
 
     #[test]

@@ -71,14 +71,6 @@ impl TiktokenCounter {
             bpe,
         })
     }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub fn encoding_name(&self) -> &'static str {
-        self.encoding_name
-    }
 }
 
 impl Tokenizer for TiktokenCounter {
@@ -261,7 +253,7 @@ mod tests {
         ] {
             let t = TiktokenCounter::for_model(model)
                 .unwrap_or_else(|e| panic!("for_model({model}) failed: {e}"));
-            assert_eq!(t.encoding_name(), expected, "{model}");
+            assert!(format!("{t:?}").contains(expected), "{model}");
         }
     }
 
@@ -275,7 +267,7 @@ mod tests {
     #[test]
     fn case_insensitive_dispatch() {
         let t = TiktokenCounter::for_model("GPT-4o-Mini").unwrap();
-        assert_eq!(t.encoding_name(), "o200k_base");
+        assert!(format!("{t:?}").contains("o200k_base"));
     }
 
     #[test]

@@ -253,19 +253,11 @@ fn opaque_kind_str(k: &OpaqueKind) -> String {
 /// CSV-escaped rows. Nested cells render as JSON inline; opaque cells
 /// render as `<<ccr:...>>` markers.
 #[derive(Debug, Clone, Default)]
-pub struct CsvSchemaFormatter {
-    /// If true, emit a `__total:N` line when rows were dropped under
-    /// budget. Costs a few bytes; useful for downstream telemetry.
-    pub include_drop_summary: bool,
-}
+pub struct CsvSchemaFormatter;
 
 impl CsvSchemaFormatter {
     pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn with_drop_summary(mut self) -> Self {
-        self.include_drop_summary = true;
-        self
+        Self
     }
 }
 
@@ -276,37 +268,31 @@ impl Formatter for CsvSchemaFormatter {
 
     fn format(&self, c: &Compaction) -> String {
         let mut out = String::new();
-        write_compaction(&mut out, c, self);
+        write_compaction(&mut out, c);
         out
     }
 }
 
-fn write_compaction(out: &mut String, c: &Compaction, fmt: &CsvSchemaFormatter) {
+fn write_compaction(out: &mut String, c: &Compaction) {
     match c {
         Compaction::Table {
             schema,
             rows,
             original_count,
         } => {
-            write_table(out, schema, rows, *original_count, fmt);
+            write_table(out, schema, rows, *original_count);
         }
         Compaction::Buckets {
             discriminator,
             buckets,
-            original_count,
+            original_count: _,
         } => {
             out.push_str("__buckets:");
             out.push_str(discriminator);
-            if fmt.include_drop_summary {
-                let kept: usize = buckets.iter().map(|b| b.rows.len()).sum();
-                if kept < *original_count {
-                    out.push_str(&format!(" __dropped:{}", original_count - kept));
-                }
-            }
             out.push('\n');
             for b in buckets {
                 out.push_str(&format!("__key:{}\n", json_scalar_to_csv(&b.key)));
-                write_table(out, &b.schema, &b.rows, b.rows.len(), fmt);
+                write_table(out, &b.schema, &b.rows, b.rows.len());
             }
         }
         Compaction::OpaqueRef {
@@ -322,13 +308,7 @@ fn write_compaction(out: &mut String, c: &Compaction, fmt: &CsvSchemaFormatter) 
     }
 }
 
-fn write_table(
-    out: &mut String,
-    schema: &Schema,
-    rows: &[Row],
-    original_count: usize,
-    fmt: &CsvSchemaFormatter,
-) {
+fn write_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: usize) {
     // Declaration line: [N]{col:type,col:type,...}
     //
     // Constant-column fold: a column with `const_value = Some(v)`
@@ -398,9 +378,6 @@ fn write_table(
         .collect();
     out.push_str(&col_decl.join(","));
     out.push('}');
-    if fmt.include_drop_summary && rows.len() < original_count {
-        out.push_str(&format!(" __dropped:{}", original_count - rows.len()));
-    }
     out.push('\n');
 
     // Dictionary lines: each `DictString` column declares its distinct
@@ -754,18 +731,10 @@ fn needs_csv_quote(s: &str) -> bool {
 }
 
 fn csv_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        if c == '"' {
-            out.push('"');
-            out.push('"');
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('"');
-    out
+    // `"` is ASCII, so it can never appear inside a multi-byte UTF-8
+    // sequence — `replace` sees exactly the quotes the char walk did.
+    // Byte-identical to the old walk, including on the empty string.
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 // ─────────────────────────── Markdown-KV formatter ───────────────────────────
@@ -789,20 +758,11 @@ fn csv_quote(s: &str) -> String {
 /// - Opaque cells keep the fixed `<<ccr:HASH,KIND,SIZE>>` marker
 ///   contract shared by all formatters.
 #[derive(Debug, Clone, Default)]
-pub struct MarkdownKvFormatter {
-    /// If true, emit a `__dropped:N` note on the declaration line when
-    /// rows were dropped under budget. Mirrors
-    /// [`CsvSchemaFormatter::include_drop_summary`].
-    pub include_drop_summary: bool,
-}
+pub struct MarkdownKvFormatter;
 
 impl MarkdownKvFormatter {
     pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn with_drop_summary(mut self) -> Self {
-        self.include_drop_summary = true;
-        self
+        Self
     }
 }
 
@@ -813,37 +773,31 @@ impl Formatter for MarkdownKvFormatter {
 
     fn format(&self, c: &Compaction) -> String {
         let mut out = String::new();
-        write_compaction_kv(&mut out, c, self);
+        write_compaction_kv(&mut out, c);
         out
     }
 }
 
-fn write_compaction_kv(out: &mut String, c: &Compaction, fmt: &MarkdownKvFormatter) {
+fn write_compaction_kv(out: &mut String, c: &Compaction) {
     match c {
         Compaction::Table {
             schema,
             rows,
             original_count,
         } => {
-            write_kv_table(out, schema, rows, *original_count, fmt);
+            write_kv_table(out, schema, rows, *original_count);
         }
         Compaction::Buckets {
             discriminator,
             buckets,
-            original_count,
+            original_count: _,
         } => {
             out.push_str("__buckets:");
             out.push_str(discriminator);
-            if fmt.include_drop_summary {
-                let kept: usize = buckets.iter().map(|b| b.rows.len()).sum();
-                if kept < *original_count {
-                    out.push_str(&format!(" __dropped:{}", original_count - kept));
-                }
-            }
             out.push('\n');
             for b in buckets {
                 out.push_str(&format!("__key:{}\n", kv_scalar(&b.key)));
-                write_kv_table(out, &b.schema, &b.rows, b.rows.len(), fmt);
+                write_kv_table(out, &b.schema, &b.rows, b.rows.len());
             }
         }
         Compaction::OpaqueRef {
@@ -858,13 +812,7 @@ fn write_compaction_kv(out: &mut String, c: &Compaction, fmt: &MarkdownKvFormatt
     }
 }
 
-fn write_kv_table(
-    out: &mut String,
-    schema: &Schema,
-    rows: &[Row],
-    original_count: usize,
-    fmt: &MarkdownKvFormatter,
-) {
+fn write_kv_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: usize) {
     // Same declaration line as the CSV formatter: keeps row count and
     // typed shape up front where the model (and telemetry) expect it.
     // Unlike CSV (pre-existing exposure, kept byte-identical), KV quotes
@@ -893,9 +841,6 @@ fn write_kv_table(
         .collect();
     out.push_str(&col_decl.join(","));
     out.push('}');
-    if fmt.include_drop_summary && rows.len() < original_count {
-        out.push_str(&format!(" __dropped:{}", original_count - rows.len()));
-    }
     out.push('\n');
 
     for row in rows {
@@ -1127,29 +1072,6 @@ mod tests {
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
         assert!(out.contains("_compaction"), "got: {out}");
-    }
-
-    #[test]
-    fn csv_formatter_drop_summary_opt_in() {
-        let mut rows = vec![Row::new(vec![CellValue::Scalar(json!(1))])];
-        rows.push(Row::new(vec![CellValue::Scalar(json!(2))]));
-        let c = Compaction::Table {
-            schema: Schema {
-                fields: vec![super::super::ir::FieldSpec {
-                    name: "x".into(),
-                    type_tag: "int".into(),
-                    nullable: false,
-                    const_value: None,
-                    encoding: None,
-                }],
-            },
-            rows,
-            original_count: 5, // 3 dropped
-        };
-        let with_summary = CsvSchemaFormatter::new().with_drop_summary().format(&c);
-        assert!(with_summary.contains("__dropped:3"));
-        let without = CsvSchemaFormatter::new().format(&c);
-        assert!(!without.contains("__dropped"));
     }
 
     // ── F4 header total + F5 nested-object envelope ──
@@ -2239,31 +2161,6 @@ mod tests {
         assert!(out.contains("__key:order"));
         assert!(out.contains("__key:user"));
         assert!(out.contains("- id:"), "got: {out}");
-    }
-
-    #[test]
-    fn markdown_kv_drop_summary_opt_in() {
-        let rows = vec![
-            Row::new(vec![CellValue::Scalar(json!(1))]),
-            Row::new(vec![CellValue::Scalar(json!(2))]),
-        ];
-        let c = Compaction::Table {
-            schema: Schema {
-                fields: vec![super::super::ir::FieldSpec {
-                    name: "x".into(),
-                    type_tag: "int".into(),
-                    nullable: false,
-                    const_value: None,
-                    encoding: None,
-                }],
-            },
-            rows,
-            original_count: 5, // 3 dropped
-        };
-        let with_summary = MarkdownKvFormatter::new().with_drop_summary().format(&c);
-        assert!(with_summary.contains("__dropped:3"));
-        let without = MarkdownKvFormatter::new().format(&c);
-        assert!(!without.contains("__dropped"));
     }
 
     #[test]
