@@ -122,8 +122,8 @@ it never misses a matching row. Omit the query (or use `select_field`) when you
 need the whole entry.**
 Past either limit the entry is gone and a retrieve is a loud miss, never a silent
 wrong answer; check `furl_stats` — its `store.cap_accounting` block reports live
-entries against the cap and the `retrieval_headroom` remaining, and warns as it
-nears the limit. The hook and the `furl` MCP server share one durable
+entries against the cap and the `retrieval_headroom` remaining, and warns once it
+reaches 90% of the cap. The hook and the `furl` MCP server share one durable
 per-project SQLite store, `~/.furl/ccr-ns-<hash>.sqlite3`, keyed by
 `FURL_CCR_PROJECT_DIR` so one project never sees another's entries. The global
 `~/.furl/ccr.sqlite3` is used only when project scoping is turned off, and it is the
@@ -141,6 +141,12 @@ columnar table is not the universal case:
   not escape-inflated.
 - A **JSON object with one dominant inner array** (e.g. a Chrome trace) leaves an
   `_ccr_summary` preview: schema, per-field value histograms, and numeric ranges.
+  This preview appears only once the object is large enough to offload — a hard
+  floor of **4000 characters** (~4 KB of ASCII). It counts characters, not bytes,
+  and is measured on the raw content you pass, before any marker is added, so
+  predict it from your input's own character length — a multibyte payload reaches it
+  with fewer bytes. A small sample (a few dozen events, under 4000 characters) comes
+  back unchanged with no summary, so exercise it on a realistic slice, not a 20-row toy.
 - **Line-oriented text** (logs, stack traces) is *not* tabled — it leaves a head+tail
   excerpt, plus any ERROR, Traceback, or other severity lines lifted from the omitted
   middle so a buried error stays visible in the compressed view, with the full text
