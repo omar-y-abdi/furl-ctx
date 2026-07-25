@@ -288,6 +288,16 @@ class TiktokenCounter(BaseTokenizer):
     _COUNT_CACHE_MIN_LEN = 65_536
     _COUNT_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
+    # Above this length, count_text estimates by extrapolating from a bounded
+    # prefix instead of exact-encoding the whole string (see _estimate_huge).
+    # 8 MiB matches the router's default huge-content ceiling, so the boundary
+    # is: content the router OFFLOADS (>= this) gets an estimated count it
+    # discards anyway; content it COMPRESSES (< this) is still counted exactly.
+    # A representative 1 MiB sample keeps the estimate close while turning a
+    # ~13 s full pass on a 33 MB trace into well under a second.
+    _ESTIMATE_ABOVE_LEN = 8 * 1024 * 1024
+    _ESTIMATE_SAMPLE_LEN = 1 * 1024 * 1024
+
     def __init__(self, model: str = "gpt-4o", *, proxy_for: str | None = None):
         """Initialize tiktoken counter.
 
@@ -364,17 +374,20 @@ class TiktokenCounter(BaseTokenizer):
     def count_text(self, text: str) -> int:
         """Count tokens in text using tiktoken.
 
-        Large strings are memoized (see ``_COUNT_CACHE_MIN_LEN``): the router and
-        the ``min_ratio`` gate re-count the same multi-MB content many times per
-        compress(), and tiktoken is O(n). A cache hit returns the exact count (a
-        pure function of the text for this encoding), so accounting is unchanged —
-        only the number of encode passes drops.
+        Exact for all but the largest inputs. Large strings are memoized (see
+        ``_COUNT_CACHE_MIN_LEN``): the router and the ``min_ratio`` gate re-count
+        the same multi-MB content many times per compress(), and tiktoken is
+        O(n), so a cache hit avoids re-encoding. Above ``_ESTIMATE_ABOVE_LEN`` the
+        count is ESTIMATED from a bounded prefix (see ``_estimate_huge``) rather
+        than exact-encoded, because content that large is offloaded wholesale and
+        its exact count is discarded — a deliberate speed/accuracy trade confined
+        to the offload path; everything below that threshold is still exact.
 
         Args:
             text: Text to tokenize.
 
         Returns:
-            Number of tokens.
+            Number of tokens (exact below ``_ESTIMATE_ABOVE_LEN``, estimated above).
         """
         if not text:
             return 0
@@ -383,19 +396,33 @@ class TiktokenCounter(BaseTokenizer):
         cached = self._count_cache.get(text)
         if cached is not None:
             return cached
-        # Refuse backtracking-prone input BEFORE the (super-linear / stack-blowing)
-        # encode, so the decline is loud and identical on every platform rather
-        # than a raise-here / silent-passthrough-there split (see
-        # _MAX_SAFE_SAME_CLASS_RUN). The raise rides compress()'s fail-open path
-        # into result.error with the original content returned byte-exact.
-        if _has_backtracking_prone_run(text, _MAX_SAFE_SAME_CLASS_RUN):
-            raise ValueError(
-                "tokenizer input has an unbroken same-class run of at least "
-                f"{_MAX_SAFE_SAME_CLASS_RUN} characters, which triggers catastrophic "
-                "regex backtracking in the tokenizer (a platform-dependent stack "
-                "overflow); declining compression and returning the original unchanged."
-            )
-        n = len(self._encode_tolerant(text))
+
+        if len(text) >= self._ESTIMATE_ABOVE_LEN:
+            # Very large text is offloaded WHOLESALE by the router (its
+            # huge-content fast path swaps content past ~8 MiB for a
+            # <<ccr:HASH>> marker), so this exact o200k count is a number the
+            # caller discards moments later — yet computing it exactly means the
+            # full pure-Python ReDoS-guard scan plus a BPE encode over tens of MB
+            # (~13 s on a 33 MB trace, the dominant cost of ingesting one).
+            # Estimate from a bounded prefix instead; see ``_estimate_huge``.
+            n = self._estimate_huge(text)
+        else:
+            # Refuse backtracking-prone input BEFORE the (super-linear /
+            # stack-blowing) encode, so the decline is loud and identical on
+            # every platform rather than a raise-here / silent-passthrough-there
+            # split (see _MAX_SAFE_SAME_CLASS_RUN). The raise rides compress()'s
+            # fail-open path into result.error with the original returned
+            # byte-exact. (Above the estimate threshold there is no full encode
+            # to guard — the pathological content simply offloads, byte-exact.)
+            if _has_backtracking_prone_run(text, _MAX_SAFE_SAME_CLASS_RUN):
+                raise ValueError(
+                    "tokenizer input has an unbroken same-class run of at least "
+                    f"{_MAX_SAFE_SAME_CLASS_RUN} characters, which triggers catastrophic "
+                    "regex backtracking in the tokenizer (a platform-dependent stack "
+                    "overflow); declining compression and returning the original unchanged."
+                )
+            n = len(self._encode_tolerant(text))
+
         self._count_cache[text] = n
         self._count_cache_bytes += len(text)
         while self._count_cache_bytes > self._COUNT_CACHE_MAX_BYTES and len(self._count_cache) > 1:
@@ -403,6 +430,39 @@ class TiktokenCounter(BaseTokenizer):
             self._count_cache_bytes -= len(oldest)
             del self._count_cache[oldest]
         return n
+
+    def _estimate_huge(self, text: str) -> int:
+        """Estimate the token count of very large *text* by extrapolating from a
+        bounded prefix, instead of exact-encoding the whole thing.
+
+        Reached only for ``len(text) >= _ESTIMATE_ABOVE_LEN`` — content the
+        router offloads wholesale, so an EXACT count is discarded by the caller
+        (see ``count_text``). Encoding a representative ``_ESTIMATE_SAMPLE_LEN``
+        prefix and scaling by length turns a ~13 s full pass into well under a
+        second while staying close for the homogeneous large payloads this fires
+        on (traces, logs). Content below the threshold is still counted exactly.
+
+        Safety: the encode is bounded to the prefix, so no same-class run past
+        the sample can drive catastrophic backtracking; the prefix is itself
+        run-guarded first, and a pathological prefix skips the encode for a
+        coarse ratio. A degenerate huge run therefore offloads (byte-exact, via
+        the caller) rather than raising — a strictly safer outcome than the
+        exact path's refusal.
+        """
+        sample = text[: self._ESTIMATE_SAMPLE_LEN]
+        if _has_backtracking_prone_run(sample, _MAX_SAFE_SAME_CLASS_RUN):
+            # Degenerate prefix — never hand it to the encoder; a coarse
+            # bytes/token ratio is enough for a count that is about to be thrown
+            # away, and cannot backtrack.
+            return max(1, len(text) // 3)
+        sample_tokens = len(self._encode_tolerant(sample))
+        if sample_tokens <= 0:
+            # Whitespace-only prefix: fall back to a coarse ratio so a non-empty
+            # body is never reported as 0 tokens (and never divides by zero).
+            return max(1, len(text) // 4)
+        # Scale the sampled density to the full length. len(sample) is exactly
+        # _ESTIMATE_SAMPLE_LEN here (text is strictly larger than the threshold).
+        return max(1, round(sample_tokens * len(text) / len(sample)))
 
     def count_messages(self, messages: list[dict[str, Any]]) -> int:
         """Count tokens in messages using OpenAI's exact formula.

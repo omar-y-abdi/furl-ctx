@@ -59,12 +59,17 @@ bounds): see the plugin README.
 
 ## The MCP tools
 
-- `furl_compress` — compress a string on demand. Returns compressed text plus a
-  `hash`; the original is stored for later retrieval. When Furl decides not to
-  compress (a no-op: the content is too small or would not shrink) it returns the
-  original unchanged with `hash: null` and stores nothing, so a no-op no longer
-  consumes a retrieval slot; pass `persist: true` to store it anyway and get a
-  hash back.
+- `furl_compress` — compress content on demand. Pass `content` with inline text,
+  **or** `file_path` to have the server read and compress a file from disk — so a
+  large artifact (a multi-MB trace or log) that would overflow the context window
+  if pasted inline is ingested directly, and only the compressed form plus a
+  `hash` comes back. Exactly one of the two. The file path is confined to the
+  workspace jail and capped by `FURL_MCP_MAX_FILE_BYTES` (default 40 MiB, larger
+  than the inline cap). Returns compressed text plus a `hash`; the original is
+  stored for later retrieval. When Furl decides not to compress (a no-op: the
+  content is too small or would not shrink) it returns the original unchanged with
+  `hash: null` and stores nothing, so a no-op no longer consumes a retrieval slot;
+  pass `persist: true` to store it anyway and get a hash back.
 - `furl_retrieve` — get original, uncompressed content back. Pass a `<<ccr:HASH>>`
   marker's hash for the full original, or narrow it with a filter: `pattern` +
   `context_lines` / `line_range` (regex or a line window over the text),
@@ -216,6 +221,7 @@ Set these in the plugin's `hooks/hooks.json` / `.mcp.json` env, or your shell:
 | `FURL_CCR_SPILL` | `1` (set by the plugin) | Durable per-namespace spill tier. When on, a capacity-evicted entry is demoted to a per-project `ccr-ns-<hash>-spill.sqlite3` file instead of dropped, so its marker stays retrievable past the 1000-entry cap (bounded by the spill's own row cap and TTL). Set `0` to opt out. Must match between the hook and the `furl` server. |
 | `FURL_CCR_TTL_SECONDS` | `86400` = 24h (set by the plugin) | How long offloaded originals stay retrievable before they expire. Lower to reclaim disk sooner; raise for a longer retrieval window. |
 | `FURL_CCR_PROJECT_DIR` | auto, per project (set by the plugin) | Scopes the CCR store to the current project so one machine-global `~/.furl` store never surfaces or evicts another project's entries. Derived automatically from the project root; set to `""` to share one store across all projects — this is also how you read a pre-1.0 global store after upgrading. |
+| `FURL_MCP_MAX_FILE_BYTES` | `41943040` = 40 MiB | Byte ceiling for `furl_compress`'s `file_path` ingest (the file the server reads from disk), separate from and larger than the 10 MiB inline-`content` cap. A real DoS bound — the model chooses the path and the server reads it with your privileges, and compression cost is super-linear in size (measured: ~34 MiB ingests in ~18–20 s, ~40 MiB in ~30 s, ~64 MiB in ~158 s) — so it is never unbounded (a blank, non-numeric, or non-positive value falls back to the default) and is set at 40 MiB, where a file at the ceiling still returns inside the MCP tool-call budget; a larger file is refused fast (`File too large to compress: N bytes (limit 41943040 bytes) — raise FURL_MCP_MAX_FILE_BYTES...`) rather than left to hang. Raise it to ingest a bigger file, accepting the extra latency. |
 
 The full `FURL_*` reference (workspace dir, store paths, row caps, circuit breaker)
 is in [`LIBRARY.md`](../../../../LIBRARY.md) → "Configuration".
