@@ -353,20 +353,50 @@ def effective_savings(
     rates: tuple[float, ...] = (0.0, 0.25, 0.50),
     n_dropped_rows: int = 0,
 ) -> dict[str, float]:
-    """Effective savings ratio once the model retrieves a fraction of the
-    DROPPED ROWS, INCLUDING round-trip overhead.
+    """Effective savings ratio once the model retrieves offloaded content,
+    INCLUDING the round-trip cost.
 
-    The engine offloads dropped rows behind ONE whole-blob recovery pointer, so
-    ANY non-zero retrieval pays back the entire offloaded payload — the
-    conservative whole-blob model, which never flatters the engine:
+    Every offload the engine makes is emitted behind a
+    ``{"_ccr_dropped": "<<ccr:HASH>>"}`` sentinel, so ``_retrieve_originals``
+    puts the WHOLE payload into ``recovered`` for every one of them. That
+    sentinel invariant is load-bearing: it is why a single ``recovered``-based
+    charge is COMPLETE, with no separate opaque path to read — there is no
+    offload the harness sees that is absent from ``recovered``.
+
+    ``_ccr_dropped`` is a CROSS-MODULE contract, not one function's private
+    detail. THREE independent emitters construct it, one per offload path:
+
+    * row-drop (Rust)   — ``crates/furl-core/src/transforms/smart_crusher/
+      persist.rs::ccr_sentinel_map``, appended to the crushed rendering.
+    * cross-message dedup — ``furl_ctx/transforms/cross_message_dedup.py::
+      duplicate_sentinel`` (exact duplicate) and ``::near_duplicate_rendering``
+      (shared rows elided).
+    * opaque whole-blob  — ``furl_ctx/transforms/router_engine.py::_ccr_offload``.
+
+    and the key is READ back by ``furl_ctx/transforms/smart_crusher.py`` and
+    ``furl_ctx/transforms/csv_schema_decoder.py``. All three emitters are pinned
+    by real ``compress()`` calls in
+    ``tests/test_effective_savings_offload_cost.py``, so a bare-marker offload
+    on ANY of the three turns that suite RED instead of being silently
+    mispriced here.
+
+    Each offload sits behind ONE marker with no granular row index, so ANY
+    non-zero retrieval pulls the ENTIRE payload back:
 
         k = ceil(r * n_dropped_rows)
-        retrieval_cost(r) = (total_offloaded_tokens if k > 0 else 0)
-                            + k * per_call_overhead
+        retrieval_cost(r > 0) = recovered_payload_tokens + k * per_call_overhead
+        retrieval_cost(0)     = 0
 
     effective_after = tokens_after + retrieval_cost; savings =
     (before - effective_after) / before. At r=0 cost is 0 (savings == raw
     reduction); at r>0 you pay back the whole offloaded payload.
+
+    The gate is ``r > 0``, not the old ``k > 0``. A family that offloads with
+    ZERO dropped rows — cross-message dedup, or an opaque code blob — has k=0 at
+    every rate, so the old gate charged it nothing and it read flat across rates
+    (raw reduction reported as the effective number at 25% and 50%, a retrieval
+    that costs a full payload priced at zero). For a row-DROPPING family
+    ``k > 0`` iff ``r > 0``, so those families' numbers are unchanged.
 
     A granular per-row model was once also computed here (charging only the
     ``k`` retrieved chunks), but the unconsumable ``_ccr_rows`` index it read was
@@ -376,11 +406,17 @@ def effective_savings(
     model could never perform.
     """
     out: dict[str, float] = {}
-    total_offloaded_tokens = sum(tok.count_text(blob) for blob in recovered.values())
+    # Named for what it holds: the WHOLE retrieved payload. The zero-drop cases
+    # this gate exists for (dedup, opaque whole-blob) have no rows at all.
+    recovered_payload_tokens = sum(tok.count_text(blob) for blob in recovered.values())
     for r in rates:
         k = int(math.ceil(r * n_dropped_rows))
-        content_cost = total_offloaded_tokens if k > 0 else 0
-        call_cost = k * RETRIEVE_CALL_OVERHEAD_TOKENS
+        if r > 0.0:
+            content_cost = recovered_payload_tokens
+            call_cost = k * RETRIEVE_CALL_OVERHEAD_TOKENS
+        else:
+            content_cost = 0
+            call_cost = 0
         effective_after = tokens_after + content_cost + call_cost
         savings = (tokens_before - effective_after) / tokens_before if tokens_before else 0.0
         out[f"{int(r * 100)}"] = savings
