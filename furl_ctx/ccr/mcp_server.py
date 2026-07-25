@@ -126,6 +126,44 @@ def _safe_decode_for_logging(raw: bytes) -> str:
 # realistic source file or tool output while bounding worst-case allocation.
 _MAX_READ_BYTES = 10 * 1024 * 1024
 
+# Maximum bytes furl_compress ingests from a caller-named ``file_path`` — the
+# on-disk source the model points the server at, distinct from the ``content``
+# string passed inline. File ingest is the entry point for the large artifacts
+# furl exists to compress: a 33 MB Chrome trace overflows the context window
+# precisely because it cannot be pasted inline, so this ceiling is deliberately
+# larger than the 10 MiB ``_MAX_READ_BYTES`` inline/read cap. It stays a REAL
+# ceiling, never "unlimited": the model chooses the path and the server reads it
+# with the user's privileges, so an unbounded read is a memory-exhaustion (OOM
+# DoS) surface — AND, because the compression cost grows super-linearly with
+# size, an unbounded read is also a wall-clock DoS that would exceed the MCP
+# client's tool-call budget and hang. 40 MiB is measurement-driven: it clears
+# the 33.8 MB / ~33 MiB target trace with headroom, and a file AT the ceiling
+# ingests in ~30 s on a dev machine (vs ~20 s at 34 MiB, ~158 s at 64 MiB — the
+# curve steepens fast), comfortably inside the tool-call timeout. Above it the
+# tool refuses FAST and clearly rather than accepting a file that would hang.
+# Override with ``FURL_MCP_MAX_FILE_BYTES`` to trade latency for a larger file.
+_MAX_COMPRESS_FILE_BYTES_DEFAULT = 40 * 1024 * 1024
+_MAX_COMPRESS_FILE_BYTES_ENV = "FURL_MCP_MAX_FILE_BYTES"
+
+
+def _max_compress_file_bytes() -> int:
+    """The file-ingest byte ceiling; override with ``FURL_MCP_MAX_FILE_BYTES``.
+
+    Parse semantics mirror ``router_engine._huge_content_bytes``: a positive
+    integer wins; anything else — blank, non-numeric, or non-positive — falls
+    back to the default WITHOUT raising, so a typo or a hostile ``0``/negative
+    value can never silently widen the jail to an unbounded read.
+    """
+    raw = os.environ.get(_MAX_COMPRESS_FILE_BYTES_ENV)
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return _MAX_COMPRESS_FILE_BYTES_DEFAULT
+        if parsed > 0:
+            return parsed
+    return _MAX_COMPRESS_FILE_BYTES_DEFAULT
+
 
 def _describe_arguments_for_log(arguments: dict[str, Any]) -> str:
     """Non-sensitive descriptor of a tool-call ``arguments`` dict for logging.
@@ -234,6 +272,15 @@ _DIR_FD_WALK_SUPPORTED = (
     os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
 )
 
+# O_NONBLOCK on the final file open makes a FIFO (named pipe) inside the jail
+# return a descriptor IMMEDIATELY instead of blocking the open until a writer
+# appears — O_NOFOLLOW stops symlinks but NOT FIFOs, so without this a caller
+# could name an in-jail FIFO and hang the read/ingest forever (a DoS, since the
+# model chooses the path). The fd is still rejected by the S_ISREG gate; for a
+# regular file O_NONBLOCK is a no-op (POSIX ignores it for regular-file reads),
+# so this only defuses the pathological non-regular case. 0 where unsupported.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
 
 def _open_jailed(path: Path, root: Path) -> int:
     """Open ``path`` read-only with every component pinned under ``root``.
@@ -263,7 +310,7 @@ def _open_jailed(path: Path, root: Path) -> int:
     map them to the "File not found" / generic "Cannot read file" envelopes.
     """
     if not _DIR_FD_WALK_SUPPORTED:
-        return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | _O_NONBLOCK)
 
     rel_parts = path.relative_to(root).parts
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
@@ -276,12 +323,150 @@ def _open_jailed(path: Path, root: Path) -> int:
             # path == root: hand back the root fd; the caller's S_ISREG gate
             # turns a directory into the "Not a file" envelope.
             return fd
-        final_fd = os.open(rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        final_fd = os.open(rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW | _O_NONBLOCK, dir_fd=fd)
     except BaseException:
         os.close(fd)
         raise
     os.close(fd)
     return final_fd
+
+
+def _read_jailed_file(
+    file_path: str,
+    max_bytes: int,
+    *,
+    what: str = "read",
+    oversize_hint: str = "",
+) -> tuple[Path, str] | list[TextContent]:
+    """Resolve *file_path* inside the workspace jail and return its decoded body.
+
+    The single hardened file-ingress path shared by ``furl_read`` and
+    ``furl_compress``'s ``file_path`` input, so both cross the SAME checks rather
+    than growing a second, weaker path-validation surface next to the audited one
+    (resolve + ``is_relative_to`` jail, the fd-pinned ``_open_jailed`` component
+    walk, and the ``fstat`` type/hardlink/size gates on that one descriptor).
+    Redaction and any caching are the CALLER's concern — kept out so ``furl_read``
+    keeps redacting-then-caching while ``furl_compress`` lets ``_compress_content``
+    redact once, with no double pass.
+
+    ``max_bytes`` is the size ceiling: ``furl_read`` passes ``_MAX_READ_BYTES``;
+    the compress file-ingest path passes its own larger
+    ``_max_compress_file_bytes()``. ``what``/``oversize_hint`` only shape the
+    too-large message ("read" keeps furl_read's wording byte-identical; the
+    compress path says "compress" and names the override env var).
+
+    Returns ``(resolved_path, decoded_content)`` on success, or an already-formed
+    ``_err`` envelope (a one-element ``list[TextContent]``) on any
+    validation/read failure — the caller returns it verbatim.
+    """
+    path = Path(file_path).expanduser().resolve()
+
+    # Path jail: confine access to the workspace root (resolve() above already
+    # canonicalized symlinks, so a symlink pointing outside the root resolves
+    # outside it and is rejected here). The check runs BEFORE any exists/stat
+    # probe so an out-of-jail path cannot be used as a file-existence oracle.
+    # Log the attempted path server-side; return a generic message to the
+    # model channel (never echo the rejected path back).
+    root = _workspace_root()
+    if not path.is_relative_to(root):
+        logger.warning(
+            "event=mcp_jailed_read_rejected reason=outside_workspace attempted=%s root=%s",
+            path,
+            root,
+        )
+        return _err("path outside workspace")
+
+    # Open ONCE and pin the file descriptor, then stat + read from that SAME
+    # fd (TOCTOU defense): re-opening the path by name for the size stat and
+    # again for the body read would let a swap between checks serve a different
+    # inode than the one validated. ``_open_jailed`` walks every component from
+    # the workspace root with dir_fd + O_NOFOLLOW (SEC-5) and O_NONBLOCK on the
+    # final open (a FIFO cannot wedge the open). ``fstat`` on the fd drives the
+    # regular-file, hardlink, and size checks so they describe exactly the inode
+    # we will read — no second lookup.
+    try:
+        fd = _open_jailed(path, root)
+    except FileNotFoundError:
+        # Missing path (or a final-component symlink removed between resolve
+        # and open). Mirror the prior exists()-check message + path echo.
+        return _err(f"File not found: {file_path}")
+    except OSError as e:
+        # Non-missing open failure: O_NOFOLLOW on a symlink raises ELOOP,
+        # permission-denied raises EACCES, etc. Reserve "File not found" for a
+        # genuine FileNotFoundError above; route everything else to the generic
+        # read-error message (never confirm existence, never echo errno detail
+        # to the model). Detail is logged server-side only.
+        logger.warning(
+            "event=mcp_jailed_open_failed errno=%s root=%s",
+            getattr(e, "errno", None),
+            root,
+        )
+        return _err("Cannot read file")
+
+    # fstat the BARE fd first and run the type/link/size gates before any read
+    # wrapper: os.fdopen(fd, "rb") raises IsADirectoryError on a directory fd,
+    # so the S_ISREG gate has to happen on the raw fstat. The fd is closed on
+    # every path — by os.fdopen's context manager once we reach the read, by the
+    # explicit os.close otherwise.
+    adopted_for_read = False
+    try:
+        st = os.fstat(fd)
+
+        # os.open succeeds on a directory (and a FIFO/device/socket opened
+        # O_NONBLOCK); S_ISREG is then False. Surface all non-regular inodes as
+        # "Not a file" — this is also the FIFO defense's second half (the first
+        # is O_NONBLOCK, which kept the open itself from blocking).
+        if not stat.S_ISREG(st.st_mode):
+            return _err(f"Not a file: {file_path}")
+
+        # Reject a multiply-linked inode: an in-jail hardlink can point at an
+        # out-of-jail inode and resolve() cannot see through a hardlink (unlike a
+        # symlink), so is_relative_to alone would pass it. The error string is
+        # honest about WHY (SEC-5): a legitimately hardlinked in-jail file is
+        # rejected too, and telling its owner "path outside workspace" was false.
+        if st.st_nlink > 1:
+            logger.warning(
+                "event=mcp_jailed_read_rejected reason=multiply_linked_inode nlink=%d root=%s",
+                st.st_nlink,
+                root,
+            )
+            return _err("hardlinked file rejected")
+
+        # Reject oversized files via the fd's own size (OOM DoS guard) BEFORE
+        # reading the body, so a file past the cap is never allocated.
+        if st.st_size > max_bytes:
+            return _err(
+                f"File too large to {what}: {st.st_size} bytes "
+                f"(limit {max_bytes} bytes){oversize_hint}"
+            )
+
+        # Read from the pinned fd, bounded by the cap so an append after fstat
+        # cannot blow the budget on the same descriptor. os.fdopen adopts the
+        # fd; its `with` block closes it, so skip the finally-close path.
+        adopted_for_read = True
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read(max_bytes + 1)
+    except OSError as e:
+        logger.warning(
+            "event=mcp_jailed_read_failed errno=%s root=%s",
+            getattr(e, "errno", None),
+            root,
+        )
+        return _err("Cannot read file")
+    finally:
+        if not adopted_for_read:
+            os.close(fd)
+
+    if len(raw) > max_bytes:
+        return _err(
+            f"File too large to {what}: >{max_bytes} bytes (limit {max_bytes} bytes){oversize_hint}"
+        )
+
+    # Decode the bytes read from the pinned fd. Avoid lossy decode kwargs in
+    # furl_ctx/ccr/ — use the centralized safe-log decoder (this path is for tool
+    # output display, not the SSE/wire path, so a replacement char on invalid
+    # bytes is acceptable). Redaction is left to the caller.
+    return path, _safe_decode_for_logging(raw)
 
 
 # Feature flag: enable furl_read tool (file read caching via CCR)
@@ -1626,6 +1811,9 @@ class FurlMCPServer:
                         "Compress content to save context window space. "
                         "Use this on large tool outputs, file contents, search results, "
                         "or any content you want to shrink before reasoning over it. "
+                        "Pass 'content' with inline text, OR 'file_path' to have the server "
+                        "read and compress a file from disk (ideal for a large trace/log that "
+                        "would overflow context if pasted inline) — exactly one of the two. "
                         "When it compresses, the original is stored and can be retrieved "
                         f"later via mcp__furl__{CCR_TOOL_NAME}: returns compressed text + a "
                         "hash for retrieval. When Furl decides NOT to compress (a no-op: "
@@ -1642,8 +1830,20 @@ class FurlMCPServer:
                             "content": {
                                 "type": "string",
                                 "description": (
-                                    "The content to compress. Can be any text: file contents, "
-                                    "JSON, search results, logs, code, etc."
+                                    "The inline content to compress. Any text: tool output, "
+                                    "JSON, search results, logs, code, etc. Provide EITHER "
+                                    "content OR file_path, not both."
+                                ),
+                            },
+                            "file_path": {
+                                "type": "string",
+                                "description": (
+                                    "Absolute path to a file the server reads from disk and "
+                                    "compresses, so a large artifact (e.g. a multi-MB trace or "
+                                    "log) never has to be pasted inline and pay the full context "
+                                    "cost first. Confined to the workspace. Provide EITHER "
+                                    "file_path OR content, not both. Larger byte ceiling than "
+                                    "inline content (override with FURL_MCP_MAX_FILE_BYTES)."
                                 ),
                             },
                             "mode": {
@@ -1690,7 +1890,10 @@ class FurlMCPServer:
                                 ),
                             },
                         },
-                        "required": ["content"],
+                        # Neither is schema-required: exactly one of content /
+                        # file_path is enforced in the handler (JSON Schema cannot
+                        # express "exactly one of" portably across MCP clients).
+                        "required": [],
                     },
                 ),
                 Tool(
@@ -2053,30 +2256,69 @@ class FurlMCPServer:
     async def _handle_compress(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle furl_compress tool call."""
         content = arguments.get("content")
-        if not content:
-            return _err("content parameter is required")
+        file_path = arguments.get("file_path")
 
-        # Non-string params take a parameter error, not the generic internal
-        # path — mirrors the retrieve handler's hash guard (API-15).
-        if not isinstance(content, str):
-            return _err(f"content parameter must be a string, got {type(content).__name__}")
+        # Exactly one input source. ``content`` is inline text the caller already
+        # holds; ``file_path`` is a file the SERVER reads from disk so the large
+        # artifact this tool exists to compress — e.g. a 33 MB Chrome trace that
+        # overflows context precisely because it cannot be pasted inline — never
+        # has to be materialized in the conversation first. They are mutually
+        # exclusive: two sources for one output is a caller mistake, not a merge.
+        if file_path is not None and content is not None:
+            return _err("provide either 'content' or 'file_path', not both")
 
-        # Reject oversized input before compressing it (OOM DoS guard). The cap
-        # is a BYTE ceiling (matching furl_read's byte-measured limit), so measure
-        # the encoded byte length, not the character count (Bug-8) — on multibyte
-        # content a char count is up to ~4x short and lets an over-ceiling payload
-        # through. Cheap bounds avoid encoding the common small case: chars are a
-        # lower bound on UTF-8 bytes and 4*chars an upper bound.
-        _char_len = len(content)
-        _too_large = _char_len > _MAX_READ_BYTES or (
-            _char_len * 4 > _MAX_READ_BYTES
-            and len(content.encode("utf-8", errors="replace")) > _MAX_READ_BYTES
-        )
-        if _too_large:
-            _byte_len = len(content.encode("utf-8", errors="replace"))
-            return _err(
-                f"Content too large to compress: {_byte_len} bytes (limit {_MAX_READ_BYTES} bytes)"
+        if file_path is not None:
+            # Non-string / empty path is a parameter error, mirroring the content
+            # and hash guards (API-15) — the jail must only ever see a real path.
+            if not isinstance(file_path, str):
+                return _err(f"file_path parameter must be a string, got {type(file_path).__name__}")
+            if not file_path:
+                return _err("file_path parameter must not be empty")
+            # Read + jail off the event loop (blocking file I/O), through the SAME
+            # hardened ingress as furl_read — never a second path-validation
+            # surface. The file-ingest ceiling (_max_compress_file_bytes,
+            # override FURL_MCP_MAX_FILE_BYTES) is deliberately larger than the
+            # 10 MiB inline cap because ingesting the oversized file IS the point.
+            # Redaction runs later in _compress_content, so pass the raw decode.
+            jailed = await asyncio.to_thread(
+                _read_jailed_file,
+                file_path,
+                _max_compress_file_bytes(),
+                what="compress",
+                oversize_hint=f" — raise {_MAX_COMPRESS_FILE_BYTES_ENV} to ingest a larger file",
             )
+            if isinstance(jailed, list):
+                return jailed
+            _resolved_path, content = jailed
+        else:
+            # Inline content path (unchanged). "" is falsy → the same
+            # required-parameter error as an absent key.
+            if not content:
+                return _err("content parameter is required")
+
+            # Non-string params take a parameter error, not the generic internal
+            # path — mirrors the retrieve handler's hash guard (API-15).
+            if not isinstance(content, str):
+                return _err(f"content parameter must be a string, got {type(content).__name__}")
+
+            # Reject oversized input before compressing it (OOM DoS guard). The
+            # cap is a BYTE ceiling (matching furl_read's byte-measured limit),
+            # so measure the encoded byte length, not the character count (Bug-8)
+            # — on multibyte content a char count is up to ~4x short and lets an
+            # over-ceiling payload through. Cheap bounds avoid encoding the common
+            # small case: chars are a lower bound on UTF-8 bytes and 4*chars an
+            # upper bound.
+            _char_len = len(content)
+            _too_large = _char_len > _MAX_READ_BYTES or (
+                _char_len * 4 > _MAX_READ_BYTES
+                and len(content.encode("utf-8", errors="replace")) > _MAX_READ_BYTES
+            )
+            if _too_large:
+                _byte_len = len(content.encode("utf-8", errors="replace"))
+                return _err(
+                    f"Content too large to compress: {_byte_len} bytes "
+                    f"(limit {_MAX_READ_BYTES} bytes)"
+                )
 
         # NR2-2 feature c: aggressiveness/filter mode. Both default to today's
         # behavior (mode=normal, no patterns), so a plain call is byte-identical.
@@ -2889,114 +3131,14 @@ class FurlMCPServer:
 
         from furl_ctx.redaction import build_store_redactor
 
-        path = Path(file_path).expanduser().resolve()
-
-        # Path jail: confine reads to the workspace root (resolve() above already
-        # canonicalized symlinks, so a symlink pointing outside the root resolves
-        # outside it and is rejected here). The check runs BEFORE any exists/stat
-        # probe so an out-of-jail path cannot be used as a file-existence oracle.
-        # Log the attempted path server-side; return a generic message to the
-        # model channel (never echo the rejected path back).
-        root = _workspace_root()
-        if not path.is_relative_to(root):
-            logger.warning(
-                "event=mcp_read_path_rejected reason=outside_workspace attempted=%s root=%s",
-                path,
-                root,
-            )
-            return _err("path outside workspace")
-
-        # Open ONCE and pin the file descriptor, then stat + read from that SAME
-        # fd (TOCTOU defense): the old flow re-opened the path by name for the
-        # size stat and again for the body read, so a swap between checks could
-        # serve a different inode than the one validated. ``_open_jailed`` walks
-        # every component from the workspace root with dir_fd + O_NOFOLLOW
-        # (SEC-5: a single O_NOFOLLOW open guarded only the final component; a
-        # directory component swapped to a symlink after resolve() escaped).
-        # ``fstat`` on the fd drives the regular-file, hardlink, and size checks
-        # so they describe exactly the inode we will read — no second lookup.
-        try:
-            fd = _open_jailed(path, root)
-        except FileNotFoundError:
-            # Missing path (or a final-component symlink removed between resolve
-            # and open). Mirror the prior exists()-check message + path echo.
-            return _err(f"File not found: {file_path}")
-        except OSError as e:
-            # Non-missing open failure: O_NOFOLLOW on a symlink raises ELOOP,
-            # permission-denied raises EACCES, etc. Reserve "File not found" for a
-            # genuine FileNotFoundError above; route everything else to the
-            # generic read-error message (never confirm existence, never echo
-            # errno detail to the model). Detail is logged server-side only.
-            logger.warning(
-                "event=mcp_read_open_failed errno=%s root=%s",
-                getattr(e, "errno", None),
-                root,
-            )
-            return _err("Cannot read file")
-
-        # fstat the BARE fd first and run the type/link/size gates before any
-        # read wrapper: os.fdopen(fd, "rb") raises IsADirectoryError on a
-        # directory fd, so the S_ISREG gate has to happen on the raw fstat. The
-        # fd is closed on every path — by os.fdopen's context manager once we
-        # reach the read, by the explicit os.close otherwise.
-        adopted_for_read = False
-        try:
-            st = os.fstat(fd)
-
-            # os.open succeeds on a directory (S_ISREG is then False); the prior
-            # is_file() guard surfaced that as "Not a file".
-            if not stat.S_ISREG(st.st_mode):
-                return _err(f"Not a file: {file_path}")
-
-            # Reject a multiply-linked inode: an in-jail hardlink can point at an
-            # out-of-jail inode and resolve() cannot see through a hardlink
-            # (unlike a symlink), so is_relative_to alone would pass it. The
-            # error string is honest about WHY (SEC-5): a legitimately
-            # hardlinked in-jail file is rejected too, and telling its owner
-            # "path outside workspace" was simply false.
-            if st.st_nlink > 1:
-                logger.warning(
-                    "event=mcp_read_rejected reason=multiply_linked_inode nlink=%d root=%s",
-                    st.st_nlink,
-                    root,
-                )
-                return _err("hardlinked file rejected")
-
-            # Reject oversized files via the fd's own size (OOM DoS guard) BEFORE
-            # reading the body, so a file past the cap is never allocated. Read
-            # the module global live so the cap stays patchable in tests.
-            if st.st_size > _MAX_READ_BYTES:
-                return _err(
-                    f"File too large to read: {st.st_size} bytes (limit {_MAX_READ_BYTES} bytes)"
-                )
-
-            # Read from the pinned fd, bounded by the cap so an append after fstat
-            # cannot blow the budget on the same descriptor. os.fdopen adopts the
-            # fd; its `with` block closes it, so skip the finally-close path.
-            adopted_for_read = True
-            with os.fdopen(fd, "rb") as fh:
-                raw = fh.read(_MAX_READ_BYTES + 1)
-        except OSError as e:
-            logger.warning(
-                "event=mcp_read_failed errno=%s root=%s",
-                getattr(e, "errno", None),
-                root,
-            )
-            return _err("Cannot read file")
-        finally:
-            if not adopted_for_read:
-                os.close(fd)
-
-        if len(raw) > _MAX_READ_BYTES:
-            return _err(
-                f"File too large to read: >{_MAX_READ_BYTES} bytes (limit {_MAX_READ_BYTES} bytes)"
-            )
-
-        # Decode the bytes read from the pinned fd. Avoid lossy decode kwargs
-        # in furl_ctx/ccr/ — use the centralized safe-log decoder (this path
-        # is for tool output display, not SSE/wire path, so a replacement
-        # char on invalid bytes is acceptable).
-        content = _safe_decode_for_logging(raw)
+        # Jail + pinned-fd read + decode via the shared ingress (also used by
+        # furl_compress's file_path). ``_MAX_READ_BYTES`` is read live at the
+        # call so the cap stays monkeypatchable in tests; the "read" wording keeps
+        # furl_read's too-large message byte-identical.
+        jailed = _read_jailed_file(file_path, _MAX_READ_BYTES, what="read")
+        if isinstance(jailed, list):
+            return jailed
+        path, content = jailed
 
         # Credential redaction (built-in patterns ON by default + FURL_REDACT_PATTERNS),
         # applied AFTER decode and BEFORE the hash / cache / store / served output —
