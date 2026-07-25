@@ -81,12 +81,7 @@ docker run --rm -i -v furl-store:/home/furl/.furl furl-mcp
 **Retrieval is pull-based, not push-based.** A `<<ccr:HASH>>` marker replaces the
 dropped content in the compressed output, so the dropped rows are not in the view the
 model reads. To get a specific one back, an agent has to call `retrieve()` for it by
-pattern, field, or line range. Recovery is byte-exact for raw text. A JSON array
-narrowed by `select`/`fields` comes back re-serialized — semantically complete but
-pretty-printed, so **not** byte-identical to the source; pass `raw=True` on a
-row-select for byte fidelity (each matched row returns byte-identical to its source
-bytes, rows rejoined with fresh array punctuation, so each row is exact while the
-whole blob is not one contiguous slice). Nothing is lost, but a lone
+pattern, field, or line range. Nothing is lost, but a lone
 anomaly inside otherwise-repetitive data will not surface in the compressed view unless
 someone queries for it. A compressed summary is trustworthy for the shape of the data,
 not for spotting an outlier no one thought to look for.
@@ -207,8 +202,8 @@ retrieve.
 
 ## Redact & purge — security
 
-Offloaded content is stored for later `retrieve()`, byte-exact for raw text and as a
-semantically-complete re-serialization for structured JSON arrays, so by default a
+Offloaded content is stored for later `retrieve()` (see "Retrieve — full or sliced"
+for the byte-exact-vs-re-serialized split), so by default a
 secret inside a tool output is stored and stays recoverable — unencrypted, in a
 local per-project SQLite file under `~/.furl` (`0600` perms). See
 [SECURITY.md](SECURITY.md) → "Stored originals: at-rest posture" for the full

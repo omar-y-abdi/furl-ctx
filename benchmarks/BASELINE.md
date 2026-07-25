@@ -25,10 +25,10 @@ inputs). Token counts use the SAME tokenizer the engine uses
 |---|---:|---:|---:|---:|---:|---:|---|
 | code@7 | 7 | 41025 | 1678 | 95.9% | 100.0% | 100.0% | LOSSY |
 | logs@90 | 90 | 8556 | 632 | 92.6% | 91.1% | 100.0% | LOSSY |
-| search@90 | 90 | 4102 | 336 | 91.8% | 85.6% | 100.0% | LOSSY |
-| repeated_logs@90 | 90 | 3621 | 134 | 96.3% | 95.6% | 100.0% | LOSSY |
-| disk@9 | 9 | 694 | 291 | 58.1% | 44.4% | 100.0% | LOSSY |
-| multiturn@135 | 135 | 14686 | 2141 | 85.4% | 70.4% | 100.0% | LOSSY |
+| search@90 | 90 | 4102 | 365 | 91.1% | 85.6% | 100.0% | LOSSY |
+| repeated_logs@90 | 90 | 3621 | 171 | 95.3% | 95.6% | 100.0% | LOSSY |
+| disk@9 | 9 | 694 | 347 | 50.0% | 0.0% | 100.0% | lossless |
+| multiturn@135 | 135 | 14686 | 2283 | 84.5% | 65.2% | 100.0% | LOSSY |
 | ci_log@212 | 212 | 5161 | 692 | 86.6% | 79.2% | 100.0% | LOSSY |
 | grep_raw@300 | 300 | 7472 | 894 | 88.0% | 90.0% | 100.0% | LOSSY |
 | diff_raw@238 | 238 | 4673 | 2701 | 42.2% | 38.7% | 100.0% | LOSSY |
@@ -119,9 +119,10 @@ auditable and re-derivable. Capture commands:
 
 ## Honest read
 
-- **Deletion-backed savings**: 10/10 datasets (code@7, logs@90, search@90, repeated_logs@90, disk@9, multiturn@135, ci_log@212, grep_raw@300, diff_raw@238, markdown_doc@62) ship with rows dropped from the visible
+- **Deletion-backed savings**: 9/10 datasets (code@7, logs@90, search@90, repeated_logs@90, multiturn@135, ci_log@212, grep_raw@300, diff_raw@238, markdown_doc@62) ship with rows dropped from the visible
   output — their savings are NOT free; every drop must be (and is)
   covered by a CCR recovery pointer.
+- **True zero-loss savings**: disk@9 (drop ratio 0.0% — the only rows where the reduction is free).
 - **Retention floor**: 100.0% — every dataset's dropped rows
   resolve through the emitted recovery pointers (sentinel `<<ccr:HASH>>`
   or the raw-text `Retrieve …: hash=…` marker) against the live store.

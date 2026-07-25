@@ -28,12 +28,12 @@
 >
 > **Update (Q10 spill tier, 2026-07-06 + 2026-07-08): SHIPPED, opt-in.** The
 > retention half described as open below is now built. `FURL_CCR_SPILL=1`
-> (`compression_store.py:1729` `CCR_SPILL_ENV`, `:1733`
+> (`compression_store.py:2378` `CCR_SPILL_ENV`, `:2393`
 > `_create_spill_backend_from_env`, wired into `get_compression_store` at
-> `:1794`) demotes a capacity-evicted entry to a durable `SqliteBackend`
-> instead of deleting it: `_evict_if_needed` calls `_spill_evicted` (`:1341`,
-> best-effort/fail-open) BEFORE the primary `delete` (`:1436-1442`), and
-> `retrieve()` falls through to `_recover_from_spill` (`:614`, `:1357`) on a
+> `:2419`) demotes a capacity-evicted entry to a durable `SqliteBackend`
+> instead of deleting it: `_evict_if_needed` (`:1944`) calls `_spill_evicted` (`:1898`,
+> best-effort/fail-open) BEFORE the primary `delete` (`:1999-2000`), and
+> `retrieve()` falls through to `_recover_from_spill` (`:891`, `:1914`) on a
 > primary miss — a spill hit returns byte-identical to the pre-eviction value,
 > no promotion, no bookkeeping mutation. Lifecycle is bounded by the spill
 > `SqliteBackend`'s own row-cap/TTL (`FURL_CCR_SQLITE_MAX_ROWS`), answering the
@@ -47,7 +47,7 @@
 
 The break-eval flagged *"CCR FIFO eviction → unbacked sentinels"* (Cluster G,
 `ttl-capacity-eviction-unbacked-sentinel-v1`) as a **silent-loss** defect: the
-in-memory store has a fixed `max_entries = 1000` cap (`in_memory.rs:87/119`,
+in-memory store has a fixed `max_entries = 1000` cap (`in_memory.rs:93/111`,
 Python `compression_store.py`), so a long enough session evicts the oldest
 whole-blob entries (FIFO). A `<<ccr:HASH>>` sentinel emitted earlier then points
 at data that is gone.
@@ -70,17 +70,13 @@ The **only live model-facing retrieval surface** today is the MCP tool, and it
 misses loudly:
 
 - **MCP tool (live)** — `FurlMCPServer._retrieve_content`
-  (`furl_ctx/ccr/mcp_server.py:322`): on a store miss it returns an explicit
+  (`furl_ctx/ccr/mcp_server.py:1654`): on a store miss it returns an explicit
   `error` dict routed through the cause-honest helper
-  (`format_retrieval_miss_detail`, `mcp_server.py:388`). This is what the model
+  (`format_retrieval_miss_detail`, `mcp_server.py:1754`). This is what the model
   reaches via the `furl_retrieve` tool.
-- **Proxy / handler (archived, NOT live)** — `CCRResponseHandler._execute_retrieval`
-  once provided a second loud surface, calling `store.get_entry_status(...)` and
-  returning `success=False` with an explicit `error` payload for the bulk path,
-  the search path, AND a granular `#rows` offload (a shape that was never
-  model-retrievable and has since been removed, F8/#168). That module now lives at
-  `archive/furl_ctx/ccr/response_handler.py` and is no longer wired into a live
-  retrieval path. Kept here only for the historical loud-miss measurement below.
+- **Proxy / handler — GONE.** `CCRResponseHandler._execute_retrieval` once
+  provided a second loud surface. It is not present in this repository in any
+  form; the historical loud-miss probe below was measured against it.
 
 The only other `store.retrieve()` caller, `context_tracker._execute_expansions`,
 is **proactive prefetch**, not a model request — a miss there just skips one
@@ -157,12 +153,12 @@ trade-offs, ranked by how close they are to a free lunch:
    window, but durability alone doesn't widen the window — that gap is now
    closed by the **spill tier**: `FURL_CCR_SPILL=1` makes a fast in-memory
    primary demote (not delete) capacity/TTL-evicted entries into a durable
-   `SqliteBackend` spill (`compression_store.py:1341` `_spill_evicted`, called
+   `SqliteBackend` spill (`compression_store.py:1898` `_spill_evicted`, called
    from `_evict_if_needed` immediately before the primary `delete`;
-   `:1357` `_recover_from_spill`, checked on a primary `retrieve()` miss). The
+   `:1914` `_recover_from_spill`, checked on a primary `retrieve()` miss). The
    spill's own row-cap/TTL bounds its lifecycle (no unbounded growth). A
    redundant-combo guard skips the spill when the primary is already
-   `SqliteBackend` (`_create_spill_backend_from_env`, `:1733`). **Off by
+   `SqliteBackend` (`_create_spill_backend_from_env`, `:2393`). **Off by
    default** — single-tier remains the out-of-the-box behavior; opting in via
    `FURL_CCR_SPILL=1` is what buys demote-not-delete. Locked by
    `tests/test_ccr_spill_tier.py`.
@@ -202,8 +198,6 @@ restarts.
 ## Cross-references
 - `docs/audits/EVAL-break.md` — Cluster G original finding (row 6) + this reframe.
 - `furl_ctx/ccr/mcp_server.py` — `_retrieve_content` (the live loud-miss surface).
-- `archive/furl_ctx/ccr/response_handler.py` — `_execute_retrieval`; archived,
-  no longer a live retrieval surface (kept for the historical loud-miss probe).
 - `furl_ctx/cache/compression_store.py` — `format_retrieval_miss_detail`,
   `get_entry_status`, and the `CompressionStoreBackend` protocol. Two concrete
   backends ship: `InMemoryBackend` (`furl_ctx/cache/backends/memory.py`, the
@@ -211,9 +205,9 @@ restarts.
   (`furl_ctx/cache/backends/sqlite.py`, the MCP server default — Engine P1-7;
   locked by `tests/test_sqlite_backend.py` + `tests/test_mcp_sqlite_default.py`).
 - `furl_ctx/cache/compression_store.py` — the Q10 spill tier:
-  `CCR_SPILL_ENV`/`_create_spill_backend_from_env` (`:1729-1757`),
-  `_spill_evicted`/`_recover_from_spill` (`:1341`, `:1357`), wired into
-  `_evict_if_needed` (`:1436-1442`) and `retrieve()` (`:614`). Locked by
+  `CCR_SPILL_ENV`/`_create_spill_backend_from_env` (`:2378`, `:2393`),
+  `_spill_evicted`/`_recover_from_spill` (`:1898`, `:1914`), wired into
+  `_evict_if_needed` (`:1944`) and `retrieve()` (`:891`). Locked by
   `tests/test_ccr_spill_tier.py`.
 - `tests/test_ccr_eviction_loud_miss.py` — the locking regression tests.
 - `furl_ctx/ccr/marker_grammar.py` is the single owner of the CCR marker grammar.

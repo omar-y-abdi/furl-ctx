@@ -18,7 +18,7 @@ Furl is shipped as a Python package (`furl-ctx`) with an MCP server exposing six
 
 - [Get started](README.md#quick-install): two-command Claude Code plugin install — auto-compression hook, MCP tools, and skill; no `pip install` needed.
 - [How it works](LIBRARY.md#how-it-works): pipeline diagram + per-content-type compressors.
-- [Proof / benchmark table](README.md#proof): measured reductions on committed real captures (60–99% per dataset, redundancy-dependent; lossy rows are CCR-recoverable).
+- [Proof / benchmark table](README.md#proof): measured reductions on committed real captures (50–96% per dataset, redundancy-dependent; lossy rows are CCR-recoverable).
 - [Configuration (environment variables)](LIBRARY.md#configuration-environment-variables): every live `FURL_*` knob with defaults.
 - [Full benchmark methodology](BENCHMARKS.md): adversarial multi-seed sweep and honest-metrics definitions. See [the three public headline numbers](BENCHMARKS.md#the-three-public-headline-numbers) for how the 95% ceiling, the 91.5% six-capture subset, and the 0-54% high-entropy band relate.
 - [Current baseline numbers](benchmarks/BASELINE.md): the deterministic per-dataset capture at HEAD.

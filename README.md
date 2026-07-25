@@ -37,8 +37,6 @@
 
 **Answer:** Stop making your AI agent read everything.
 
-furl-ctx works as a context compression and retrieval layer for AI agents. It shrinks large tool outputs, logs, web fetches, and RAG chunks before they consume your agent's context window, and keeps the original data available for exact retrieval when needed.
-
 # Quick install
 
 **Prerequisite:** [`uv`](https://docs.astral.sh/uv/) on your PATH (same as the official [serena](https://github.com/oraios/serena) plugin).
@@ -71,23 +69,9 @@ Install, usage, pipeline internals, prompt-caching contract, and the full `FURL_
 # How it works
 **furl-ctx filters out unwanted noise** while the agent searches for the sections it needs, so input token usage drops while the answer stays the same. 
 
-**What works today** is an on-demand toolkit for Furl:
-Your agent calls the MCP tools directly
-- `furl_compress` — compress large payloads into an agent-readable summary
-- `furl_retrieve` — recover exact original content by pattern, field, or line range
-- `furl_search` — locate relevant sections inside compressed data
-- `furl_list` — inspect stored payloads
-- `furl_stats` — view compression results
-- `furl_purge` — remove stored payloads
-
-Instead of pushing thousands of irrelevant lines into the model, Furl gives the agent a compressed view of the data. If it later needs something that was omitted, it explicitly retrieves just that portion—by pattern, field, or line range—without materializing the entire payload again.
+Instead of pushing thousands of irrelevant lines into the model, Furl gives the agent a compressed view of the data. If it later needs something that was omitted, it explicitly retrieves just that portion—by pattern, field, or line range—without materializing the entire payload again. The MCP tools your agent calls directly are listed under [What you get](#what-you-get).
 
 Unlike token compressors or summarizers, Furl never throws data away. Compression is **reversible**: every original text payload remains byte-exact and retrievable.
-
-**Compression savings vary by data type:**
-
-- 0–54% on high-entropy content
-- up to 95% on repetitive logs and fixtures
 
 **Where furl-ctx saves little or nothing.** Repetitive text with no newlines compresses at roughly 0 percent, because the engine is line and structure oriented. Single-line high-entropy content is near 0 percent. Code and file reads are 0 percent by design, because Read, Grep, and Glob are never touched. So a coding session's expected savings come only from large structured tool outputs, for example JSON, logs, and search results from Bash, WebFetch, and sub-agent tasks.
 
@@ -111,7 +95,7 @@ Furl is a hard fork of [Headroom](https://github.com/headroomlabs-ai/headroom)'s
 ## **What you get**
 
 - **Auto-compression hook** — shrinks large `Bash` / `WebFetch` / `WebSearch` / `Task` (sub-agent) outputs before they enter context. Fail-open: never breaks a tool call. **It does *not* touch your `Read` / `Grep` / `Glob` file reads — by design**, so a later `Edit` still sees exact file bytes; those reads (often a coding agent's largest context cost) pass through uncompressed ([why](#proof)). One honest limit: when an output is so large that Claude Code itself persists it to a file and hands the model only a file reference, there is no inline output for the hook to compress.
-- **Harness status:** On Claude Code 2.1.163 and newer, the PostToolUse hook mirrors its replacement to the tool's output shape, so the harness honors it and automatic compression reaches the model. This shape-mirroring answers upstream issue [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an unmirrored replacement was dropped. The manual tools `furl_compress`, `furl_retrieve`, and `furl_search` work on every version, and the on-by-default PreToolUse pipe adds Bash savings when no Bash permission rules exist. Disable that pipe with `FURL_PRETOOL_PIPE=0`. See [LIBRARY.md](LIBRARY.md) for the canonical harness status.
+- **PreToolUse Bash pipe** — on by default, but it rewrites a `Bash` command only when you have **no** Bash permission rules configured; with any Bash allow, deny, or ask rule it stays out of the way so your rules apply exactly as native. Disable it with `FURL_PRETOOL_PIPE=0`.
 - **Signal-aware offload + sliceable retrieval** — a payload too big to compress inline (e.g. a 33 MB trace) comes back as a structured summary (schema, per-field value histograms, example rows) instead of a truncated head/tail, and the agent pulls a narrow slice on demand — `retrieve(hash, select_field="name", select_equals="DroppedFrame")` or a numeric range — without materializing the whole thing.
 - **MCP tools** — `furl_compress`, `furl_retrieve`, `furl_stats`, `furl_purge` (erase stored originals), `furl_search` (find by content substring), `furl_list` (list stored entries). A seventh tool, `furl_read`, exists but is off by default — enable with `FURL_MCP_READ=1` (see [LIBRARY.md](LIBRARY.md)).
 - **Skill** — explains the `<<ccr:HASH>>` retrieval flow and how to tune or disable it.
@@ -142,25 +126,23 @@ Read every figure below as a **best-case ceiling**, not a typical — the honest
 | Dataset       | Items | Before | After  | Reduction | Info retention |
 |---------------|------:|-------:|-------:|----------:|---------------:|
 | code          |     7 | 41,025 |  1,678 |     95.9% |           100% |
-| multiturn     |   135 | 14,866 |  2,073 |       86% |           100% |
-| logs          |    90 |  8,595 |    619 |       93% |           100% |
-| search        |    90 |  4,102 |    318 |       92% |           100% |
-| repeated logs |    90 |  3,621 |    120 |       97% |           100% |
-| disk          |     9 |    694 |    279 |       60% |           100% |
+| multiturn     |   135 | 14,686 |  2,283 |     84.5% |           100% |
+| logs          |    90 |  8,556 |    632 |     92.6% |           100% |
+| search        |    90 |  4,102 |    365 |     91.1% |           100% |
+| repeated logs |    90 |  3,621 |    171 |     95.3% |           100% |
+| disk          |     9 |    694 |    347 |     50.0% |           100% |
 
-Across the corpus: **93% fewer tokens** (72,903 → 5,087) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
+Every cell is the committed capture in [`benchmarks/baseline_results.json`](benchmarks/baseline_results.json), rendered in full at [`benchmarks/BASELINE.md`](benchmarks/BASELINE.md).
+Across these six datasets: **92% fewer tokens** (72,684 → 5,476) at 100% information retention. Full methodology and the 6-seed adversarial sweep: [BENCHMARKS.md](BENCHMARKS.md).
 
 Information retention here means every byte is recoverable byte-exact through `furl_retrieve`. It does not mean the compressed view shows every row. Retrieval is pull-based, so an agent has to query for a specific dropped item to see it, and a lone anomaly will not surface in the compressed summary on its own.
 
 **Honest read:** the numbers above are best-case, low-entropy *ceilings* measured on the dev fixtures — two independent, out-of-sample audits show they degrade by 6–43pp on fresh high-entropy / near-unique / realistic data (exactly where real logs and listings live). 
-On genuinely high-entropy content, honest lossless savings sit in the **0–54% band**, not 60–95% (code 0%, search 40%, repeated_logs 54%); read every figure here as a ceiling, not a typical, and see the tier-aware breakdown in [BENCHMARKS.md](BENCHMARKS.md).
+On genuinely high-entropy content, honest lossless savings sit in the **0–54% band**, not the 50–96% above (code 0%, search 40%, repeated_logs 54%); read every figure here as a ceiling, not a typical, and see the tier-aware breakdown in [BENCHMARKS.md](BENCHMARKS.md).
 
 The `code` row is not reversible structural compression like the logs, search, and disk rows. It is an opaque whole-blob offload: the router cannot shrink source code structurally, so it moves the whole blob to the CCR store behind one marker and leaves a small summary. The headline percent is a marker reduction, not a token saving, and the offload has no granular row index, so an agent that needs the code must retrieve the entire blob back. That round trip is net-negative: measured fresh this fixture is raw 95.9% but effective -4.1% after one retrieval. See the `code` row in the effective-savings section of [BENCHMARKS.md](BENCHMARKS.md); `compress()` also reports each opaque offload per call as `result.opaque_offloads` so a caller can see the round trip is net-negative before paying for it. An agent's own `Read`, `Grep`, or `Glob` file access bypasses the compression hook by design and passes through unchanged, at 0%.
 
 **Stability:** The public API is what `furl_ctx` exports at the top level, including `compress()`, `retrieve()`, `purge()`, and `resolve_markers()`. Those signatures are the surface to build against. Submodule internals under `furl_ctx.*` may change between releases, so import from the top-level package rather than reaching into submodules. Releases have been frequent during early development, so pin a minor version if you need a fixed surface to depend on.
-
-**Automatic, hands-off compression works on Claude Code 2.1.163 and newer**, because the PostToolUse hook mirrors its replacement to the tool's output shape and the harness honors it. Upstream issue [#68951](https://github.com/anthropics/claude-code/issues/68951) is the reason the mirror was built, not an open blocker. 
-The opt-out PreToolUse pipe gives automatic Bash savings today only if you have no Bash permission rules configured. With any Bash allow, deny, or ask rule it stays out of the way, so your rules apply exactly as native.
 
 ## Community
 
