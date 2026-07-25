@@ -10,7 +10,11 @@
 >
 > Byte-exact here means the raw offloaded bytes for text. A structured JSON array
 > recovers as a semantically-complete re-serialization of the same rows, not the
-> original bytes. `FURL_CCR_TTL_SECONDS` and the other store env vars are read once,
+> original bytes. More precisely the split is by ROUTE, not content type: whole-blob
+> offloads (raw text, or JSON too irregular to crush) store and return VERBATIM bytes, while
+> structurally-crushed arrays store the canonical `json.dumps` form and the hash keys that
+> canonical form — so two byte-different inputs that canonicalize identically share one entry (a
+> semantic identifier on the crush path, a byte identifier on the whole-blob path). `FURL_CCR_TTL_SECONDS` and the other store env vars are read once,
 > when the store is first built in a process, and changing them later in the same
 > process is silently ignored.
 >

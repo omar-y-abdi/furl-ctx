@@ -95,7 +95,14 @@ not for spotting an outlier no one thought to look for.
 `<<ccr:HASH>>` marker. `retrieve(hash)` turns a marker's hash back into content.
 With **no filter argument it returns the full stored original**. That is
 byte-identical for a raw-text offload, and a semantically-complete re-serialization
-of the rows for a structured JSON array. If the hash has left the store window it
+of the rows for a structured JSON array. **The deciding factor is the offload route, not the
+content type:** whatever the router crushes structurally (columnar/tabular arrays) is stored as
+canonical `json.dumps` and returns canonical bytes — byte-identical only if the input was already
+canonical — while content offloaded whole-blob (plain text, or JSON too irregular to crush) is
+stored verbatim and returns byte-exact. On the crush path the hash keys the canonical form
+(`smart_crusher/persist.rs:202`), so two byte-different inputs that canonicalize identically
+collapse to one stored entry: a semantic identifier on that path, a byte identifier on the
+whole-blob path. If the hash has left the store window it
 returns `None`, a loud and explicit miss. Passing a
 filter narrows what comes back **without dumping the whole original**, so an agent
 can drill into a huge offloaded array cheaply:
@@ -560,7 +567,7 @@ has no effect. Set them before the first `compress()` or `retrieve()`.
 | `FURL_CCR_NAMESPACE` | unset | Names a shared CCR store, overriding per-project scoping. When set, the isolation key becomes this namespace plus any `session_id` and `agent_id`, so several projects or agents can deliberately share one store. Takes precedence over `FURL_CCR_PROJECT_DIR`. |
 | `FURL_REDACT_BUILTINS` | `on` | Built-in credential redaction, ON by default. High-confidence secret shapes, among them private keys, AWS `AKIA`/`ASIA` keys, GCP, OpenAI, GitHub, and Slack tokens, and JWTs, are scrubbed from the stored original before compression, on every store path. A private key is taken as a WHOLE block — armor and base64 key material together, PEM/OpenSSH/PGP, terminated or cut off mid-payload — not just its `-----BEGIN` line. Set `0`/`false`/`no`/`off` to opt out. Security-relevant: opting out stores those secrets verbatim in the CCR store. Composes with `FURL_REDACT_PATTERNS`, built-ins first. See SECURITY.md. |
 | `FURL_MCP_LEGEND` | `on` | Prepends the columnar-table legend that decodes the `[N]{col:type,...}` compaction grammar — including the `[kept/total]` header (original row count when rows are dropped), the `__stats:` whole-array numeric summary, and length-prefixed nested-object cells — to MCP tool output. ON by default; `off`/`false`/`0`/`no`/`disabled` hides it for callers that already know the grammar. |
-| `FURL_MAX_COMPRESS_BYTES` | `8388608` | Byte ceiling, 8 MB by default. A content block larger than this is offloaded straight to the reversible CCR store instead of the super-linear mixed compression path. Positive integer; invalid values fall back to the default. |
+| `FURL_MAX_COMPRESS_BYTES` | `8388608` | Byte ceiling, 8 MiB by default. A content block larger than this is offloaded straight to the reversible CCR store instead of the super-linear mixed compression path. Positive integer; invalid values fall back to the default. |
 | `FURL_PROFILE_BANNER` | `1` | `furl` CLI only. Prints a one-line profile banner to stderr on `furl` commands, keeping stdout pure compressed output. Set `0`/`false`/`no`/`off`/`disabled` to silence it. |
 
 The Claude Code plugin's own hook/MCP knobs (`FURL_HOOK_*`) are documented in
