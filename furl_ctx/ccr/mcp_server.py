@@ -1612,6 +1612,18 @@ class FurlMCPServer:
         if outcome.lines_skipped_over_cap > 0:
             result["lines_skipped_over_cap"] = outcome.lines_skipped_over_cap
             result["note"] = outcome.note
+        # F7: the sibling signal for a row-select. When select_field is absent
+        # from EVERY row the empty result is a misnamed field, not a value that
+        # matched nothing — surface the field and the known field names so the two
+        # are distinguishable. Present ONLY when triggered: a select on a real
+        # field (even one that matched no row) adds none of these keys, so the
+        # default response stays byte-identical.
+        if outcome.select_field_absent is not None:
+            absent = outcome.select_field_absent
+            result["select_field_absent"] = absent.field
+            result["known_fields"] = list(absent.known_fields)
+            result["known_fields_elided"] = absent.elided
+            result["note"] = outcome.note
         return result
 
     def _setup_handlers(self) -> None:
@@ -1827,6 +1839,26 @@ class FurlMCPServer:
                                     "one explicit truncation-marker row. It does not bound a "
                                     "pattern or line_range window, which line_range bounds "
                                     "instead."
+                                ),
+                            },
+                            "raw": {
+                                "type": "boolean",
+                                "description": (
+                                    "Return each matched row byte-identical to its source "
+                                    "bytes instead of a re-serialized, pretty-printed copy — "
+                                    "for hashing, diffing, or signature checks where the "
+                                    "exact formatting must survive. Requires select_field "
+                                    "(only a row-select yields whole source rows) and cannot "
+                                    "be combined with fields (a projection has no source "
+                                    "span). Every returned row is byte-exact; the rows are "
+                                    "rejoined with fresh JSON array punctuation, so the blob "
+                                    "as a whole is not a contiguous slice. If more rows match "
+                                    "than 'limit', a single trailing "
+                                    '{"__ccr_truncated__": ...} object is appended as a '
+                                    "synthetic marker (NOT a source row); strip that one "
+                                    "element by its key before hashing, or raise 'limit' to "
+                                    "avoid truncation. Default false keeps the re-serialized "
+                                    "output."
                                 ),
                             },
                         },

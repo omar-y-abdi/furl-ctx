@@ -81,9 +81,12 @@ docker run --rm -i -v furl-store:/home/furl/.furl furl-mcp
 **Retrieval is pull-based, not push-based.** A `<<ccr:HASH>>` marker replaces the
 dropped content in the compressed output, so the dropped rows are not in the view the
 model reads. To get a specific one back, an agent has to call `retrieve()` for it by
-pattern, field, or line range. Recovery is byte-exact for raw text, and a structured
-JSON array comes back as a semantically-complete re-serialization of the same rows
-rather than the original bytes. Nothing is lost, but a lone
+pattern, field, or line range. Recovery is byte-exact for raw text. A JSON array
+narrowed by `select`/`fields` comes back re-serialized — semantically complete but
+pretty-printed, so **not** byte-identical to the source; pass `raw=True` on a
+row-select for byte fidelity (each matched row returns byte-identical to its source
+bytes, rows rejoined with fresh array punctuation, so each row is exact while the
+whole blob is not one contiguous slice). Nothing is lost, but a lone
 anomaly inside otherwise-repetitive data will not surface in the compressed view unless
 someone queries for it. A compressed summary is trustworthy for the shape of the data,
 not for spotting an outlier no one thought to look for.
@@ -115,6 +118,10 @@ window = retrieve(hash, select_field="ts", select_min=404733, select_max=404999)
 cols = retrieve(hash, select_field="name", select_equals="Paint",
                 fields=["name", "ts"], limit=200)
 
+# BYTE-EXACT rows (hashing / diffing / signatures) — each matched row verbatim
+# from the source instead of the pretty-printed re-serialization:
+exact = retrieve(hash, select_field="name", select_equals="DroppedFrame", raw=True)
+
 # TEXT filters over the original as lines (regex + context, or a line window):
 lines = retrieve(hash, pattern=r"ERROR", context_lines=2)
 head  = retrieve(hash, line_range=[1, 50])
@@ -132,6 +139,23 @@ Rules (they mirror the `furl_retrieve` MCP tool and share one validated spec):
   `pattern`/`line_range`. The result is always bounded by `limit` (default 1000);
   when more rows match, a `{"_truncated": …}` marker row is appended so a
   truncated slice is never mistaken for the full set.
+- **`raw=True`** (row-select only) returns each matched row byte-identical to its
+  source bytes instead of the pretty-printed re-serialization — for hashing,
+  diffing, or signature checks. Rows are rejoined with fresh `[ , ]`, so each **row**
+  is byte-exact while the returned blob is **not** one contiguous source slice (that
+  only holds when the matched rows are adjacent). It needs a `select_field` and
+  cannot combine with `fields` (a projection has no source span) — both raise
+  `ValueError`. Default `False` keeps the re-serialized output byte-identical.
+- When a row-select's `select_field` is present in **no** row, the MCP
+  `furl_retrieve` envelope adds a `select_field_absent` warning plus the known field
+  names in a structured `known_fields` array — sorted, sanitized, and size-bounded
+  (each name capped, at most 50 names, with an elided count) — so a typo is
+  distinguishable from a real empty match. The names ride only in that array, never
+  woven into the generic `note` prose, so an attacker-chosen key reads as data, not
+  guidance. It fires **only** when the field is absent from every row
+  — a present field that simply matched nothing stays silent. (The library
+  `retrieve()` returns the content string as before; the warning rides the MCP
+  envelope, like the over-cap `note`.)
 - `select`/`fields` need a JSON array (or a dominant-array object for select). On
   any other shape they raise `ValueError` — never a silent empty result.
 - `pattern`/`line_range` operate on the original as text lines and return matching
