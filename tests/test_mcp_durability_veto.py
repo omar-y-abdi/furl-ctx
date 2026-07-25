@@ -90,7 +90,10 @@ def test_compress_veto_returns_volatile_hash_and_flags_not_durable(
     # implying total loss.
     store = _with_fail_open_store(server, tmp_path, monkeypatch)
 
-    out = server._compress_content("plain content for the durability veto test")
+    # F9: this short control string is a router no-op, no longer stored by
+    # default; persist=True forces the store so the durable-write VETO path (the
+    # subject of this test) actually runs and surfaces its volatile hash.
+    out = server._compress_content("plain content for the durability veto test", persist=True)
 
     assert "hash" in out and out["hash"], "veto must surface the volatile retrieval hash"
     assert store.retrieve(out["hash"]) is not None, "the returned hash resolves in-process now"
@@ -116,7 +119,9 @@ def test_compress_healthy_store_still_returns_hash_and_note(server, tmp_path, mo
     store = _with_healthy_store(server, tmp_path, monkeypatch)
 
     content = "plain content for the durable control test"
-    out = server._compress_content(content)
+    # F9: short control string no-ops; persist=True keeps the healthy-store
+    # success shape (hash + note, no durably_stored) under test.
+    out = server._compress_content(content, persist=True)
 
     assert "hash" in out, "healthy durable store must return the retrieval hash"
     assert "durably_stored" not in out, "success response shape is unchanged"

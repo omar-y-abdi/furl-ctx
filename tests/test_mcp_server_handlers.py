@@ -297,7 +297,11 @@ async def test_call_tool_routes_and_rejects_unknown(server) -> None:
     assert "compressions" in stats and "savings_percent" in stats
 
     # End-to-end through the dispatcher: compress then retrieve round-trips.
-    comp = _envelope(await call_tool(COMPRESS_TOOL_NAME, {"content": "round trip me"}))
+    # F9: "round trip me" is a router no-op, not stored by default; persist=True
+    # forces the store so there is a hash to round-trip through retrieve.
+    comp = _envelope(
+        await call_tool(COMPRESS_TOOL_NAME, {"content": "round trip me", "persist": True})
+    )
     again = _envelope(await call_tool(CCR_TOOL_NAME, {"hash": comp["hash"]}))
     assert again["original_content"] == "round trip me"
 

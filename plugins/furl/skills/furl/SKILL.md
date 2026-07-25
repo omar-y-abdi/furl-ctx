@@ -60,7 +60,11 @@ bounds): see the plugin README.
 ## The MCP tools
 
 - `furl_compress` — compress a string on demand. Returns compressed text plus a
-  `hash`; the original is stored for later retrieval.
+  `hash`; the original is stored for later retrieval. When Furl decides not to
+  compress (a no-op: the content is too small or would not shrink) it returns the
+  original unchanged with `hash: null` and stores nothing, so a no-op no longer
+  consumes a retrieval slot; pass `persist: true` to store it anyway and get a
+  hash back.
 - `furl_retrieve` — get original, uncompressed content back. Pass a `<<ccr:HASH>>`
   marker's hash for the full original, or narrow it with a filter: `pattern` +
   `context_lines` / `line_range` (regex or a line window over the text),
