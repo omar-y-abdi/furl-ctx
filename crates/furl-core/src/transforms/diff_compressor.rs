@@ -584,6 +584,22 @@ struct DiffFile {
     /// Full original `Binary files X and Y differ` line if present.
     /// Captured so we can detect when emit simplifies to `Binary files differ`.
     original_binary_line: Option<String>,
+    /// Full original `old mode <NNNNNN>` line: present on a permission
+    /// change (`chmod`) or a type change (e.g. regular file <-> symlink via
+    /// 100644 <-> 120000). When the mode change is the ONLY change, git
+    /// emits just this pair with no `---`/`+++`/hunks at all (verified
+    /// against real `git diff` output); the pair can also precede an
+    /// `index`/`---`/`+++`/hunks block when mode and content both changed
+    /// in the same commit. Bug-fix: previously unrecognized by the parser
+    /// entirely (distinct prefix from `new file mode`/`deleted file mode`),
+    /// so these lines silently vanished with no CCR marker to recover them
+    /// when nothing else in the diff compressed enough to clear the ratio
+    /// gate.
+    original_old_mode_line: Option<String>,
+    /// Full original `new mode <NNNNNN>` line, paired with
+    /// `original_old_mode_line`. See that field's doc for the bug this
+    /// fixes.
+    original_new_mode_line: Option<String>,
     /// Populated by the `drop_noise_hunks` pass when hunks were elided
     /// from this file. `None` when the flag is off or nothing matched.
     noise_elision: Option<NoiseElision>,
@@ -754,6 +770,8 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
                 original_new_file_mode_line: None,
                 original_deleted_file_mode_line: None,
                 original_binary_line: None,
+                original_old_mode_line: None,
+                original_new_mode_line: None,
                 noise_elision: None,
             });
             continue;
@@ -793,6 +811,13 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
             } else if binary_regex().is_match(line) {
                 f.is_binary = true;
                 f.original_binary_line = Some(line.to_string());
+            } else if line.starts_with("old mode ") {
+                // "old mode"/"new mode" (chmod-only or type-change diffs)
+                // have a distinct prefix from "new file mode"/"deleted file
+                // mode" handled above, so this branch never shadows those.
+                f.original_old_mode_line = Some(line.to_string());
+            } else if line.starts_with("new mode ") {
+                f.original_new_mode_line = Some(line.to_string());
             }
         }
 
@@ -1206,6 +1231,19 @@ fn format_output(
             out_lines.push("deleted file mode 100644".into());
         }
 
+        // Bug-fix: re-emit a permission-only or type-change mode pair
+        // verbatim (`old mode`/`new mode`, mutually exclusive with the
+        // new-file/deleted-file lines above — git never emits both for the
+        // same file section). Previously dropped entirely: a chmod-only
+        // section carried nothing past its `diff --git` header, and below
+        // the CCR ratio gate nothing recovered the lost permission bit.
+        if let Some(old_mode) = &f.original_old_mode_line {
+            out_lines.push(old_mode.clone());
+        }
+        if let Some(new_mode) = &f.original_new_mode_line {
+            out_lines.push(new_mode.clone());
+        }
+
         if f.is_binary {
             out_lines.push("Binary files differ".into());
             continue;
@@ -1465,6 +1503,102 @@ mod tests {
         let (label, original) = &stats.file_mode_normalizations[0];
         assert!(label.contains("script.sh"));
         assert_eq!(original, "new file mode 100755");
+    }
+
+    #[test]
+    fn bugfix_chmod_only_loss_survives_below_ccr_ratio_gate() {
+        // A pure permission change (`chmod +x`, or a regular file <-> symlink
+        // conversion via mode 120000) emits ONLY `old mode`/`new mode` lines
+        // — no `---`/`+++`, no hunks — matching real `git diff` output for a
+        // mode-only change (verified against actual `git diff` output).
+        // Before the fix, parse_diff recognized neither "old mode" nor
+        // "new mode" as anything (they don't match `new file mode`/
+        // `deleted file mode`, aren't a hunk header, and no hunk is open
+        // yet to swallow them as content), so they silently vanished.
+        //
+        // Critically, this test keeps every OTHER file's hunk exactly at
+        // its `max_context_lines` boundary (2 leading + 2 trailing, verified
+        // against `reduce_context`) so nothing else in the diff compresses.
+        // The only shrinkage is the 2 dropped mode lines out of 54, which
+        // stays well above the 0.8 `min_compression_ratio_for_ccr` gate —
+        // so no CCR marker is emitted and `cache_key` is `None`. This is
+        // the true "unrecoverable" case: unlike the ordinary CCR-recoverable
+        // compression path (where the full original is persisted under the
+        // marker's hash), there is nothing here for a caller to retrieve.
+        let mut input = String::new();
+        for i in 0..5 {
+            input.push_str(&format!(
+                "diff --git a/file_{i}.py b/file_{i}.py\n\
+                 --- a/file_{i}.py\n\
+                 +++ b/file_{i}.py\n\
+                 @@ -1,5 +1,5 @@\n\
+                  ctx1_{i}\n\
+                  ctx2_{i}\n\
+                 -old_{i}\n\
+                 +new_{i}\n\
+                  ctx3_{i}\n\
+                  ctx4_{i}\n",
+            ));
+        }
+        input.push_str(
+            "diff --git a/script.sh b/script.sh\n\
+             old mode 100644\n\
+             new mode 100755\n",
+        );
+
+        let (r, stats) = DiffCompressor::default().compress_with_stats(&input, "");
+        assert_eq!(stats.files_total, 6);
+        assert!(
+            r.cache_key.is_none(),
+            "test setup should stay below the CCR ratio gate so the only \
+             possible recovery route is the visible output itself: {stats:?}"
+        );
+        assert!(
+            r.compressed.contains("old mode 100644") && r.compressed.contains("new mode 100755"),
+            "mode change silently dropped with no cache_key to recover it:\n{}",
+            r.compressed
+        );
+    }
+
+    #[test]
+    fn bugfix_mode_change_survives_alongside_content_hunks() {
+        // Sibling shape: a mode change combined with a real content edit in
+        // the same commit (`chmod +x` plus an edit), verified against real
+        // `git diff` output — `old mode`/`new mode` precede `--- `/`+++ `/
+        // the hunk, all in the same file section. The hunk itself must
+        // still compress normally (max_hunks_per_file / context trim), and
+        // the mode pair must survive regardless of which recovery path
+        // (visible output vs CCR marker) this particular file ends up on.
+        let mut input = String::from(
+            "diff --git a/script.sh b/script.sh\n\
+             old mode 100644\n\
+             new mode 100755\n\
+             --- a/script.sh\n\
+             +++ b/script.sh\n\
+             @@ -1,2 +1,2 @@\n\
+              echo hi\n\
+             -echo old\n\
+             +echo new\n\
+              echo bye\n",
+        );
+        // Pad past `min_lines_for_ccr` (50) with an unrelated file so
+        // compression actually runs.
+        for i in 0..50 {
+            input.push_str(&format!(
+                "diff --git a/pad_{i}.txt b/pad_{i}.txt\n\
+                 --- a/pad_{i}.txt\n\
+                 +++ b/pad_{i}.txt\n\
+                 @@ -1 +1 @@\n\
+                 -pad{i}\n\
+                 +pad{i}\n",
+            ));
+        }
+
+        let (r, _stats) = DiffCompressor::default().compress_with_stats(&input, "");
+        assert!(r.compressed.contains("old mode 100644"));
+        assert!(r.compressed.contains("new mode 100755"));
+        assert!(r.compressed.contains("-echo old"));
+        assert!(r.compressed.contains("+echo new"));
     }
 
     #[test]
