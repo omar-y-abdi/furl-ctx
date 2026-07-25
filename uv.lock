@@ -464,7 +464,7 @@ wheels = [
 
 [[package]]
 name = "furl-ctx"
-version = "1.3.0"
+version = "1.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "tiktoken" },
@@ -480,6 +480,7 @@ code = [
     { name = "tree-sitter-language-pack" },
 ]
 dev = [
+    { name = "google-re2" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -499,6 +500,7 @@ re2 = [
 [package.metadata]
 requires-dist = [
     { name = "furl-ctx", extras = ["mcp"], marker = "extra == 'all'" },
+    { name = "furl-ctx", extras = ["re2"], marker = "extra == 'dev'" },
     { name = "furl-ctx", extras = ["re2"], marker = "extra == 'mcp'" },
     { name = "google-re2", marker = "extra == 're2'", specifier = ">=1.1" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.28.1" },
