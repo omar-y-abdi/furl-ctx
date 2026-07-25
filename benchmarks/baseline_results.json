@@ -1,7 +1,7 @@
 {
   "schema": "furl_ctx.imp3.baseline.v1",
-  "captured_at_utc": "2026-07-19T22:08:35.942263+00:00",
-  "git_commit": "57148d7b64150395742b9923d4cd8afb2e4375dc",
+  "captured_at_utc": "2026-07-25T23:11:36.200273+00:00",
+  "git_commit": "d02778b6e43bcc291ad5b15dd35523e4011be0d7",
   "engine_model": "gpt-4o",
   "python": "3.13.14",
   "platform": "macOS-15.7.8-x86_64-i386-64bit-Mach-O",
@@ -99,8 +99,8 @@
       "name": "logs@90",
       "n_input_items": 90,
       "tokens_before": 8556,
-      "tokens_after": 632,
-      "lossless_reduction": 0.9261337073398784,
+      "tokens_after": 603,
+      "lossless_reduction": 0.929523141654979,
       "n_present": 8,
       "n_dropped": 82,
       "n_recoverable": 82,
@@ -109,15 +109,15 @@
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:mixed:0.07"
+        "router:smart_crusher:0.07"
       ]
     },
     {
       "name": "search@90",
       "n_input_items": 90,
       "tokens_before": 4102,
-      "tokens_after": 365,
-      "lossless_reduction": 0.9110190151145783,
+      "tokens_after": 336,
+      "lossless_reduction": 0.9180887372013652,
       "n_present": 13,
       "n_dropped": 77,
       "n_recoverable": 77,
@@ -133,8 +133,8 @@
       "name": "repeated_logs@90",
       "n_input_items": 90,
       "tokens_before": 3621,
-      "tokens_after": 171,
-      "lossless_reduction": 0.9527754763877382,
+      "tokens_after": 141,
+      "lossless_reduction": 0.9610604805302403,
       "n_present": 4,
       "n_dropped": 86,
       "n_recoverable": 86,
@@ -143,36 +143,36 @@
       "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:smart_crusher:0.04"
+        "router:smart_crusher:0.03"
       ]
     },
     {
       "name": "disk@9",
       "n_input_items": 9,
       "tokens_before": 694,
-      "tokens_after": 347,
-      "lossless_reduction": 0.5,
-      "n_present": 9,
-      "n_dropped": 0,
-      "n_recoverable": 0,
-      "lossy_drop_ratio": 0.0,
+      "tokens_after": 340,
+      "lossless_reduction": 0.5100864553314121,
+      "n_present": 5,
+      "n_dropped": 4,
+      "n_recoverable": 4,
+      "lossy_drop_ratio": 0.4444444444444444,
       "information_retention": 1.0,
-      "took_lossy_path": false,
+      "took_lossy_path": true,
       "transforms": [
         "router:protected:user_message",
-        "router:smart_crusher:0.49"
+        "router:smart_crusher:0.48"
       ]
     },
     {
       "name": "multiturn@135",
       "n_input_items": 135,
       "tokens_before": 14686,
-      "tokens_after": 2283,
-      "lossless_reduction": 0.8445458259566935,
-      "n_present": 47,
-      "n_dropped": 88,
-      "n_recoverable": 88,
-      "lossy_drop_ratio": 0.6518518518518519,
+      "tokens_after": 2179,
+      "lossless_reduction": 0.8516274002451314,
+      "n_present": 40,
+      "n_dropped": 95,
+      "n_recoverable": 95,
+      "lossy_drop_ratio": 0.7037037037037037,
       "information_retention": 1.0,
       "took_lossy_path": true,
       "transforms": [
@@ -183,11 +183,11 @@
         "router:protected:user_message",
         "router:protected:user_message",
         "router:protected:user_message",
-        "router:smart_crusher:0.15",
-        "router:smart_crusher:0.49",
-        "router:smart_crusher:0.49",
-        "router:smart_crusher:0.15",
-        "router:smart_crusher:0.15"
+        "router:smart_crusher:0.14",
+        "router:smart_crusher:0.47",
+        "router:smart_crusher:0.48",
+        "router:smart_crusher:0.14",
+        "router:smart_crusher:0.14"
       ]
     },
     {
