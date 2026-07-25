@@ -21,6 +21,9 @@ import time
 import pytest
 
 from furl_ctx.cache.compression_store import (
+    _CROSS_STORE_PREVIEW_CHARS,
+    _REDACT_WINDOW_MARGIN_CHARS,
+    _RETRIEVAL_LOG_PREVIEW_CHARS,
     CompressionStore,
     _payload_for_retrieval_log,
     _redact_retrieval_log_payload,
@@ -36,9 +39,22 @@ _BASE64URL_256K = ("aB3-xY7z_Qw9-" * ((256 * 1024) // 13 + 1))[: 256 * 1024]
 # ``sk-`` rule wherever it sits, so it does not depend on a key name.
 _SECRET = "sk-" + "abcdefghijklmnopqrstuvwx"
 
-# Generous vs. the pre-fix quadratic (~20 min at 256 KB); the fixed window
-# redaction is ~0.3 s, so 1.0 s cleanly separates linear-window from O(N^2).
-_FAST = 1.0
+# ReDoS bound: RELATIVE, not absolute wall-clock. An absolute perf_counter bound
+# (the old ``_FAST = 1.0``) encodes the machine's speed into the test, so it flakes
+# on a shared or loaded box even though the ReDoS is already fixed. The property is
+# pinned instead as a RATIO. Slice-before-redact means every preview/log surface
+# redacts only a bounded WINDOW, so a 256 KB body must cost no more than redacting
+# that one window; the adversarial body and a lone window do ~equal work. Removing
+# the slice makes the body O((body/window)^2): measured ~68x more at 32 KB and
+# ~4000x at 256 KB, while a correct impl measured 0.93-1.12x here (idle AND under
+# 2x-core CPU load). k=10 sits ~9x above that correct ratio yet ~400x below the
+# regression, so the test fails hard on a real ReDoS but never on a slow machine.
+_REDOS_RATIO_K = 10
+
+# Redaction windows, imported from production so the baseline tracks the real
+# slice size exactly instead of duplicating a magic number that could drift.
+_LOG_WINDOW = _RETRIEVAL_LOG_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS
+_CROSS_STORE_WINDOW = _CROSS_STORE_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS
 
 
 def _elapsed(fn) -> float:
@@ -47,22 +63,52 @@ def _elapsed(fn) -> float:
     return time.perf_counter() - t
 
 
+def _min_elapsed(fn, reps: int = 3) -> float:
+    """Best-of-``reps`` wall time. Taking the MIN rejects transient scheduling
+    stalls so the ratio stays stable under load; it is a measurement technique,
+    not a retry of the assertion, and a genuine ReDoS blows up the min as well."""
+    return min(_elapsed(fn) for _ in range(reps))
+
+
+def _assert_redact_window_bounded(fn, full: str, window_len: int, label: str) -> None:
+    """Pin slice-before-redact as a RATIO: redacting ``full`` must cost under ``k``
+    times redacting one window-sized slice of the same adversarial run. Both do
+    identical work under a correct impl (~1x); a removed slice makes ``full``
+    quadratic in the body length (thousands x), which fails this hard."""
+    base = _min_elapsed(lambda: fn(full[:window_len]))
+    got = _min_elapsed(lambda: fn(full))
+    assert got < _REDOS_RATIO_K * base, (
+        f"{label}: {got * 1e3:.1f}ms on {len(full)} chars vs {base * 1e3:.1f}ms "
+        f"window baseline = {got / base:.1f}x (limit {_REDOS_RATIO_K}x); "
+        f"slice-before-redact likely removed (ReDoS)"
+    )
+
+
 def test_payload_log_redact_is_fast_on_large_base64() -> None:
-    dt = _elapsed(lambda: _payload_for_retrieval_log(_BASE64URL_256K))
-    assert dt < _FAST, f"retrieval-log redaction still quadratic: {dt:.2f}s on 256KB"
+    _assert_redact_window_bounded(
+        _payload_for_retrieval_log, _BASE64URL_256K, _LOG_WINDOW, "retrieval-log redaction"
+    )
 
 
 def test_cross_store_preview_is_fast_on_large_base64() -> None:
-    dt = _elapsed(lambda: _cross_store_preview_for_test(_BASE64URL_256K))
-    assert dt < _FAST, f"cross-store preview still quadratic: {dt:.2f}s on 256KB"
+    _assert_redact_window_bounded(
+        _cross_store_preview_for_test, _BASE64URL_256K, _CROSS_STORE_WINDOW, "cross-store preview"
+    )
 
 
 def test_store_retrieve_large_body_is_fast_end_to_end() -> None:
-    # retrieve() calls the full-body log-redact unconditionally on every hit.
+    # retrieve() calls the full-body log-redact unconditionally on every hit, so a
+    # 256KB body must cost ~the same as retrieving a window-sized one (the redaction
+    # is sliced); a removed slice makes retrieve() quadratic in the body length.
     store = CompressionStore(max_entries=10)
     h = store.store(original=_BASE64URL_256K, compressed="<<ccr:x>>")
-    dt = _elapsed(lambda: store.retrieve(h))
-    assert dt < _FAST, f"retrieve() hung on a 256KB base64url body: {dt:.2f}s"
+    h_window = store.store(original=_BASE64URL_256K[:_LOG_WINDOW], compressed="<<ccr:w>>")
+    base = _min_elapsed(lambda: store.retrieve(h_window))
+    got = _min_elapsed(lambda: store.retrieve(h))
+    assert got < _REDOS_RATIO_K * base, (
+        f"retrieve() on a 256KB base64url body: {got * 1e3:.1f}ms vs {base * 1e3:.1f}ms "
+        f"window baseline = {got / base:.1f}x (limit {_REDOS_RATIO_K}x)"
+    )
     # And retrieval is byte-exact — the PAYLOAD to the caller is untouched
     # (only the LOG preview is redacted/sliced).
     entry = store.retrieve(h)
@@ -74,8 +120,9 @@ def test_payload_log_still_redacts_secret_inside_kept_window() -> None:
     # Fail-closed: a secret INSIDE the kept window (here at the very head) must
     # still be masked even though the tail is a huge un-redacted base64url run.
     payload = f'{{"api_key": "{_SECRET}"}} ' + _BASE64URL_256K
-    dt = _elapsed(lambda: _payload_for_retrieval_log(payload))
-    assert dt < _FAST, f"redaction still quadratic with a head secret: {dt:.2f}s"
+    _assert_redact_window_bounded(
+        _payload_for_retrieval_log, payload, _LOG_WINDOW, "retrieval-log redaction with head secret"
+    )
     preview = _payload_for_retrieval_log(payload)["payload_preview"]
     assert _SECRET not in preview, f"secret leaked into log preview: {preview[:80]!r}"
     assert "[REDACTED]" in preview
@@ -97,14 +144,29 @@ def test_cross_store_preview_still_redacts_secret_inside_window() -> None:
     ],
 )
 def test_mcp_previews_fast_and_fail_closed(make) -> None:
-    from furl_ctx.ccr.mcp_server import _list_preview, _match_preview
+    from furl_ctx.ccr.mcp_server import (
+        _LIST_PREVIEW_CHARS,
+        _MATCH_PREVIEW_RADIUS,
+        _PREVIEW_REDACT_MARGIN,
+        _list_preview,
+        _match_preview,
+    )
 
     content = make()
     # A needle deep after the secret so the match window is far from the head —
     # proves _match_preview does not redact the whole original to locate it.
     needle = "xY7z".lower()
-    assert _elapsed(lambda: _match_preview(content, needle)) < _FAST
-    assert _elapsed(lambda: _list_preview(content)) < _FAST
+    # Both previews slice to a bounded window before redacting; a 256KB body must
+    # cost no more than k x one window of the same run. The match baseline window
+    # still contains the needle, so its redaction path matches the full-body call
+    # except for the linear find() over the original.
+    match_window = 2 * (_MATCH_PREVIEW_RADIUS + _PREVIEW_REDACT_MARGIN) + len(needle)
+    _assert_redact_window_bounded(
+        lambda s: _match_preview(s, needle), content, match_window, "match preview"
+    )
+    _assert_redact_window_bounded(
+        _list_preview, content, _LIST_PREVIEW_CHARS + _PREVIEW_REDACT_MARGIN, "list preview"
+    )
     # _list_preview shows the head → the secret must be masked there.
     lp = _list_preview(content)
     assert _SECRET not in lp and "[REDACTED]" in lp

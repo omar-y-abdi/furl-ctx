@@ -42,6 +42,26 @@ _MCP_JSON = _ROOT / "plugins" / "furl" / ".mcp.json"
 _EMPTY_HOME = tempfile.mkdtemp(prefix="furl-audit-home-")
 _NO_RULES_CWD = tempfile.mkdtemp(prefix="furl-audit-cwd-")
 
+# Hermetic ``uv`` for the F-A2 kill tests. The rewritten wrapper's completion line
+# runs ``uv run --with furl-ctx[mcp]==<pin> python3 <compressor>`` — a LIVE PyPI
+# resolve. That is irrelevant to what F-A2 pins (the INT/TERM trap flushing the
+# captured partial stdout when a piped command is killed) yet couples the test to
+# the network: if the kill path ever falls through to that completion line (the
+# non-interactive SIGINT case can — see docs/audits/IMPROVEMENT-LEDGER.md,
+# 2026-07-21), then an unresolvable pin (drifted ahead of PyPI) or a cold uv cache
+# under a contended network makes ``uv run`` hang, and ``communicate(timeout=20)``
+# times out — a load/network FALSE red that says nothing about the trap. A local
+# stub ``uv`` that exits non-zero makes the wrapper take its own shell-level
+# ``|| cat "$f"`` fail-open path instead: the partial stdout is still delivered,
+# with ZERO network, so the test's verdict depends only on the shell/trap
+# behaviour it pins. On the pass path the trap re-raises and ``uv`` is never
+# reached at all, so this changes nothing there.
+_UV_STUB_DIR = tempfile.mkdtemp(prefix="furl-audit-uvstub-")
+_uv_stub = Path(_UV_STUB_DIR) / "uv"
+_uv_stub.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+_uv_stub.chmod(0o755)
+_HERMETIC_UV_ENV = {**os.environ, "PATH": f"{_UV_STUB_DIR}{os.pathsep}{os.environ.get('PATH', '')}"}
+
 # The PostToolUse uv body, swapped for a stub so the wrapper (shell) is exercised
 # without a real uv resolve.
 _POST_UV_BODY_RE = re.compile(
@@ -211,6 +231,10 @@ def _kill_midrun_stdout(script: str, sig: int = signal.SIGTERM) -> tuple[str, in
     installed a trap and merely fell through to its normal completion line
     exits NORMALLY with a positive status (e.g. 130). Stdout content alone
     cannot always tell those two paths apart; the returncode can.
+
+    The wrapper runs with a stub ``uv`` on PATH (see ``_HERMETIC_UV_ENV``) so its
+    compressor completion line can never make a live network call: this pins the
+    kill/trap behaviour, never PyPI resolution.
     """
     proc = subprocess.Popen(
         ["/bin/sh", "-c", script],
@@ -218,6 +242,7 @@ def _kill_midrun_stdout(script: str, sig: int = signal.SIGTERM) -> tuple[str, in
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        env=_HERMETIC_UV_ENV,
     )
     pgid = os.getpgid(proc.pid)
     _wait_for_descendant_sleep(pgid)
