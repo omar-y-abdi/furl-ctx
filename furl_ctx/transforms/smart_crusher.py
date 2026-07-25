@@ -467,11 +467,22 @@ class SmartCrusher(Transform):
         """Mirror every typed ``DroppedRef`` into the Python
         compression_store (§4.2 R5).
 
-        Row-drop refs mirror the whole-blob hash and expand the granular
-        row index (proportional retrieval); opaque refs mirror the
-        substituted original. All with ``typed=True``: the engine itself
+        Each ref mirrors ONE whole-blob entry: the row-drop parent (whose
+        ``original_content`` is the canonical array of EVERY dropped row) or an
+        opaque substitution's original. ``typed=True``: the engine itself
         surfaced these refs, so a Rust store miss is a dangling marker —
         `CcrMirrorError`, not a debug-skip (COR-5).
+
+        The per-row chunks a row-drop also writes to the (process-local) Rust
+        store are deliberately NOT mirrored into Python: each chunk is a
+        byte-duplicate of a row the parent already holds, unreachable by any
+        prompt marker (row hashes are never inlined, and the ``#rows`` index
+        key fails ``furl_retrieve``'s hex-hash guard), and mirroring one would
+        burn a cap slot per dropped row — the F8 defect. Row-level retrieval is
+        served from the parent instead: a bare ``furl_retrieve(hash)`` returns
+        the parent's full stored array (every dropped row); ``query=…`` (BM25,
+        capped) and ``select_field`` only narrow it. One columnar output is
+        exactly one logical entry.
         """
         for ref in refs:
             self._mirror_single_hash_to_python_store(
@@ -481,15 +492,6 @@ class SmartCrusher(Transform):
                 tool_name=tool_name,
                 typed=True,
             )
-            index_key = ref.row_index_key
-            if index_key is not None:
-                self._mirror_row_index_to_python_store(
-                    index_key,
-                    strategy=strategy,
-                    query_context=query_context,
-                    tool_name=tool_name,
-                    typed=True,
-                )
 
     def crush_array_json(
         self,
@@ -722,9 +724,11 @@ class SmartCrusher(Transform):
         suffix, used by the bare CCR helpers).
 
         The granular row-index key carries a literal ``#rows`` suffix
-        (``abc#rows``); it is captured WITH the suffix so the mirror can
-        tell an index from a row/blob hash and expand it to per-row
-        chunks.
+        (``abc#rows``); it is captured WITH the suffix so a consumer can
+        tell an index key from a row/blob hash. The mirror no longer
+        expands it to per-row chunks (Design A — see
+        ``_mirror_single_hash_to_python_store``); the suffix is kept only
+        so scrapers and the result-cache bridge can distinguish the shapes.
         """
         # Prefix + hex alphabet come from the owned grammar spec
         # (marker_grammar). This walker intentionally enforces NO width — it
@@ -747,9 +751,11 @@ class SmartCrusher(Transform):
                 idx = cursor
                 continue
             hash_str = s[cursor:end].lower()
-            # Granular row-index key: `<<ccr:HASH#rows N_chunks>>`. Keep
-            # the `#rows` suffix so `_mirror_single_hash_to_python_store`
-            # recognizes the index and mirrors the per-row chunks.
+            # Granular row-index key: `<<ccr:HASH#rows N_chunks>>`. Keep the
+            # `#rows` suffix so a consumer can tell an index key from a row/blob
+            # hash. `_mirror_single_hash_to_python_store` now SKIPS such keys
+            # (Design A): per-row chunks are no longer mirrored into the Python
+            # store, so the whole-blob parent is the only entry a row-drop adds.
             if s[end:].startswith("#rows"):
                 hash_str = f"{hash_str}#rows"
                 end += len("#rows")
@@ -813,22 +819,18 @@ class SmartCrusher(Transform):
         default) keep the graceful debug-skip: a hash substring-scanned out
         of rendered text may genuinely belong to another transform.
 
-        GRANULAR row-index keys (``HASH#rows``) are expanded: the index
-        (a JSON array of per-row hashes) is fetched from Rust and EACH
-        per-row chunk is mirrored into Python under its own hex hash, so
-        a Python-side ``furl_retrieve`` can serve a SINGLE row instead of
-        the whole blob. The ``#rows`` key itself is not stored in Python (its
-        non-hex form fails the store's hex-hash validation, and Python
-        retrieve is keyed by the per-row hex hashes anyway).
+        GRANULAR row-index keys (``HASH#rows``) are SKIPPED (Design A). The
+        per-row chunks they index are byte-duplicates of rows the whole-blob
+        parent already holds, so mirroring them would burn one cap slot per
+        dropped row (the F8 defect) for content already durably present one
+        entry over. A scraper can still hand this method a ``#rows`` key (shape
+        B markers carry it); the whole-blob parent is mirrored separately from
+        its own shape-A ``N_rows_offloaded`` marker, and row-level retrieval is
+        served from that parent — a bare ``furl_retrieve(hash)`` returns its
+        full stored array, and ``query=…`` / ``select_field`` only narrow it.
+        The ``#rows`` key fails the store's hex-hash validation anyway.
         """
         if ccr_hash.endswith("#rows"):
-            self._mirror_row_index_to_python_store(
-                ccr_hash,
-                strategy=strategy,
-                query_context=query_context,
-                tool_name=tool_name,
-                typed=typed,
-            )
             return
         canonical = self._rust.ccr_get(ccr_hash)
         if canonical is None:
@@ -964,72 +966,6 @@ class SmartCrusher(Transform):
                 f"CCR mirror: store.store() failed for hash {ccr_hash} "
                 f"({e}); dropped rows would be unrecoverable"
             ) from e
-
-    def _mirror_row_index_to_python_store(
-        self,
-        index_key: str,
-        strategy: str,
-        query_context: str,
-        tool_name: str | None,
-        typed: bool = False,
-    ) -> None:
-        """Expand a granular row-index key (``HASH#rows``) and mirror each
-        per-row chunk into the Python compression_store under its own hex
-        hash. This is what makes Python-side ``furl_retrieve`` PROPORTIONAL:
-        a single needed row resolves to exactly that one row, not the
-        whole offloaded blob. Best-effort — a missing index or chunk just
-        leaves the whole-blob fallback (mirrored from ``_ccr_dropped``)
-        in place.
-
-        ``typed=True`` marks an index key carried by a typed
-        ``CrushResult.row_index_markers`` entry. An index miss stays
-        graceful IFF the whole-blob still resolves; when the blob is ALSO
-        gone, a typed index marker is the same dangling-marker loss class
-        as a typed row-drop hash and raises ``CcrMirrorError`` (COR-5).
-        """
-        index_raw = self._rust.ccr_get(index_key)
-        if index_raw is None:
-            # The per-row index is missing. GRACEFUL DEGRADATION iff the
-            # whole-blob entry (mirrored from `_ccr_dropped`) still
-            # resolves: it recovers the data — just coarser (the full blob
-            # instead of one row). That state is by design: FIFO eviction
-            # sheds the redundant chunks/index BEFORE the whole-blob
-            # (persist_dropped's write order), and post-COR-4 an OVERSIZED
-            # drop (> capacity/4) never writes an index at all. Warn for
-            # visibility; do NOT raise.
-            if typed and self._rust.ccr_get(index_key.removesuffix("#rows")) is None:
-                # TYPED index marker with the whole-blob backstop ALSO
-                # gone: nothing recovers the drop — same dangling-marker
-                # silent-loss class as a typed blob miss (COR-5). Raise so
-                # compress()'s fail-open reverts to the originals.
-                raise CcrMirrorError(
-                    f"CCR mirror: typed row index {index_key} AND its "
-                    f"whole-blob entry are missing from the Rust store; "
-                    f"the dropped rows would be unrecoverable"
-                )
-            logger.warning("CCR mirror: row index %s not in Rust store", index_key)
-            return
-        try:
-            row_hashes = json.loads(index_raw)
-        except (json.JSONDecodeError, ValueError):
-            # Same graceful degradation: the index is unparseable but the
-            # whole-blob fallback still recovers. Warn, do NOT raise.
-            logger.warning("CCR mirror: row index %s is not valid JSON", index_key)
-            return
-        if not isinstance(row_hashes, list):
-            return
-        for row_hash in row_hashes:
-            if not isinstance(row_hash, str):
-                continue
-            # Each per-row chunk is a pure-hex hash keying a 1-element
-            # canonical array — mirror it like any whole-blob entry so
-            # Python retrieve can serve that single row.
-            self._mirror_single_hash_to_python_store(
-                row_hash,
-                strategy=strategy,
-                query_context=query_context,
-                tool_name=tool_name,
-            )
 
     def _extract_context_from_messages(self, messages: list[dict[str, Any]]) -> str:
         """Build a query string from recent user messages + recent assistant

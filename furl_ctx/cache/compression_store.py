@@ -514,6 +514,27 @@ class CompressionStore:
         self._lock = threading.Lock()
         self._max_entries = max_entries
         self._default_ttl = default_ttl
+
+        # Cap-ordering guard (F4). The documented invariant — the logical
+        # ``max_entries`` cap binds before the backend's physical file-row cap —
+        # holds only AT THE DEFAULTS (1000 << 10 000). Both caps are configurable
+        # (``max_entries`` here; ``FURL_CCR_SQLITE_MAX_ROWS`` / ``max_rows`` on a
+        # ``SqliteBackend``), so a ``max_rows`` set below ``max_entries`` inverts
+        # it: the file cap would then evict oldest-first with NO TTL ordering
+        # before the logical cap ever binds. Warn loudly rather than let a
+        # documented invariant flip silently. InMemoryBackend has no ``_max_rows``
+        # (getattr -> None), so this fires only for a mis-sized durable backend.
+        backend_max_rows = getattr(self._backend, "_max_rows", None)
+        if isinstance(backend_max_rows, int) and backend_max_rows < max_entries:
+            logger.warning(
+                "CompressionStore max_entries=%d exceeds the backend physical "
+                "row cap max_rows=%d; the file cap will evict oldest-first (no "
+                "TTL ordering) before the logical cap binds, inverting the "
+                "documented cap ordering — set FURL_CCR_SQLITE_MAX_ROWS at or "
+                "above max_entries to restore it.",
+                max_entries,
+                backend_max_rows,
+            )
         self._enable_feedback = enable_feedback
         self._now: Callable[[], float] = now_fn or time.time
 

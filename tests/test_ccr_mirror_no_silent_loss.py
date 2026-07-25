@@ -267,25 +267,6 @@ def _evicting_sub_arrays() -> list[list[dict[str, Any]]]:
     return [rows(seed) for seed in range(6)]
 
 
-class _DenyingRust:
-    """Delegating proxy over the pyo3 crusher that pretends specific CCR
-    keys were evicted (``ccr_get`` → ``None``) while every other lookup
-    passes through — deterministic simulation of FIFO-eviction states the
-    write-order design permits (chunks/index shed before the whole-blob)."""
-
-    def __init__(self, inner: Any, denied: set[str]) -> None:
-        self._inner = inner
-        self._denied = denied
-
-    def ccr_get(self, key: str) -> str | None:
-        if key in self._denied:
-            return None
-        return self._inner.ccr_get(key)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-
 def test_typed_hash_evicted_before_mirror_raises() -> None:
     """COR-5 unit-level bite (real data, no mocks): when a typed row-drop
     hash was evicted from the Rust store before the mirror ran, ``crush()``
@@ -357,45 +338,6 @@ def test_scraped_hash_store_miss_stays_debug_skip() -> None:
         query_context="x",
         tool_name=None,
     )  # must NOT raise
-
-
-def test_typed_row_index_miss_graceful_iff_whole_blob_present() -> None:
-    """The ``#rows`` carve-out: a TYPED granular-index miss stays GRACEFUL
-    when the whole-blob still resolves (FIFO sheds the redundant
-    chunks/index before the blob by write order, and post-COR-4 an
-    oversized drop never writes an index at all — in both states the blob
-    recovers every dropped row, just coarser). Only when the whole-blob
-    backstop is ALSO gone does the typed index miss become the same
-    dangling-marker loss class — ``CcrMirrorError``."""
-    crusher = SmartCrusher(config=SmartCrusherConfig())
-    crushed = crusher.crush_array_json(json.dumps(["log-line-payload"] * 80), query="x")
-    ccr_hash = crushed.get("ccr_hash")
-    assert ccr_hash, "fixture did not produce a row-drop hash"
-    index_key = f"{ccr_hash}#rows"
-    assert crusher._rust.ccr_get(index_key) is not None, "fixture produced no granular index"
-
-    real_rust = crusher._rust
-
-    # (1) Index evicted, whole-blob alive → graceful degradation, no raise.
-    crusher._rust = _DenyingRust(real_rust, {index_key})
-    crusher._mirror_row_index_to_python_store(
-        index_key,
-        strategy="smart_crusher_row_drop",
-        query_context="x",
-        tool_name=None,
-        typed=True,
-    )  # must NOT raise — whole-blob backstop holds
-
-    # (2) Whole-blob ALSO gone → nothing recovers the typed drop → loud.
-    crusher._rust = _DenyingRust(real_rust, {index_key, ccr_hash})
-    with pytest.raises(CcrMirrorError):
-        crusher._mirror_row_index_to_python_store(
-            index_key,
-            strategy="smart_crusher_row_drop",
-            query_context="x",
-            tool_name=None,
-            typed=True,
-        )
 
 
 # ─── store-concurrency-honesty: the surfaced veto text must not self-contradict ─

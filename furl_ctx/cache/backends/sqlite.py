@@ -145,6 +145,22 @@ _SELECT_SQL = f"SELECT {_COLUMNS} FROM ccr_entries WHERE hash_key = ?"
 
 _PURGE_EXPIRED_SQL = "DELETE FROM ccr_entries WHERE created_at + ttl < ?"
 
+# File-cap eviction (physical backstop). Sheds the oldest rows with NO TTL check
+# and no logical-cap awareness — intentionally: it is a retention GC for the
+# shared file's size (DEFAULT_MAX_ROWS = 10 000), an order of magnitude above the
+# store's 1000-entry logical cap AT THE DEFAULTS. Because a columnar row-drop
+# stores ONE whole-blob entry — per-row chunks are NOT mirrored into the store
+# (see smart_crusher `_mirror_typed_refs`) — physical rows track logical
+# entries, so at the default caps the store's own TTL-and-eviction-ordered
+# logical cap binds first and this file cap does not fire under normal load.
+# Both caps are configurable (max_entries; FURL_CCR_SQLITE_MAX_ROWS): a max_rows
+# set below max_entries inverts the ordering, and CompressionStore.__init__ logs
+# a warning when it detects that. Making it TTL-aware would not
+# help the only case it can fire (>10 000 rows ALL within TTL — a TTL filter
+# changes nothing there); the correct response to a genuinely full file is to
+# shed the oldest. Pinned by
+# tests/test_ccr_row_drop_one_slot.py::test_sqlite_physical_rows_track_logical_entries.
+#
 # Subquery form: DELETE ... ORDER BY ... LIMIT needs a non-default SQLite
 # compile flag, the IN-subquery works on every build. Tie-broken on hash_key
 # for determinism when two rows share a created_at.

@@ -682,6 +682,10 @@ class SessionStats:
 # match sitting next to a credential never surfaces it.
 _SEARCH_LIST_LIMIT_DEFAULT = 20
 _SEARCH_LIST_LIMIT_CAP = 100
+# F8 headroom: furl_stats.store.cap_accounting emits a warning once the LOGICAL
+# entry count crosses this fraction of the cap, so a caller sees eviction
+# pressure before the oldest within-TTL <<ccr:…>> markers start loud-missing.
+_CAP_WARN_RATIO = 0.9
 _MATCH_PREVIEW_RADIUS = 60  # chars of context each side of a furl_search match
 _MATCH_PREVIEW_MAX = 240  # hard char cap on a single furl_search preview
 _LIST_PREVIEW_CHARS = 120  # leading chars of a furl_list entry preview
@@ -2333,6 +2337,11 @@ class FurlMCPServer:
             "entries": len(live),
             "live_entries": len(live),
             "max_entries": max_entries,
+            # F8 effective retrieval headroom: one compression is one logical
+            # entry (a columnar row-drop stores ONE whole-blob parent, not
+            # 1 + N per-row chunks), so this is the real count of retrievable
+            # slots left before FIFO eviction starts within-TTL loud-misses.
+            "cap_accounting": self._cap_accounting_block(len(live), max_entries),
             "total_original_bytes": total_original_bytes,
             "total_compressed_bytes": total_compressed_bytes,
             "total_original_tokens": total_original_tokens,
@@ -2350,6 +2359,38 @@ class FurlMCPServer:
             ages = [now - entry.created_at for _, entry in live]
             block["oldest_entry_age_seconds"] = round(max(ages))
             block["newest_entry_age_seconds"] = round(min(ages))
+        return block
+
+    @staticmethod
+    def _cap_accounting_block(entries: int, max_entries: int) -> dict[str, Any]:
+        """Effective-headroom readout for the shared store's FIFO cap (F8).
+
+        The store caps on LOGICAL entries — one per compression. A columnar
+        row-drop stores ONE whole-blob parent (its ``original_content`` holds
+        every dropped row; a bare ``furl_retrieve(hash)`` returns them all,
+        with ``query=…`` / ``select_field`` as narrowings), never 1 + N
+        per-row chunks — so ``retrieval_headroom`` is the real number of further
+        compressions that fit before FIFO eviction starts dropping the OLDEST
+        retrievable content: the honest answer to "how long will my markers
+        resolve", which the raw 24h TTL overstates. A ``warning`` appears once
+        the fill crosses ``_CAP_WARN_RATIO``.
+        """
+        headroom = max(0, max_entries - entries) if max_entries else 0
+        fill_percent = round(entries / max_entries * 100, 1) if max_entries > 0 else 0.0
+        block: dict[str, Any] = {
+            "scope": "logical entries (one per compression) vs the FIFO cap",
+            "entries": entries,
+            "max_entries": max_entries,
+            "retrieval_headroom": headroom,
+            "fill_percent": fill_percent,
+        }
+        if max_entries > 0 and entries >= _CAP_WARN_RATIO * max_entries:
+            block["warning"] = (
+                f"retrieval headroom is low: {entries} of {max_entries} logical slots "
+                f"used, {fill_percent}% full. Past the cap the store evicts the OLDEST "
+                f"entries first, so the oldest <<ccr:...>> markers can loud-miss well "
+                f"within their 24h TTL. Retrieve or purge what you no longer need."
+            )
         return block
 
     def _hook_activity_block(self, store: CompressionStore) -> dict[str, Any]:
