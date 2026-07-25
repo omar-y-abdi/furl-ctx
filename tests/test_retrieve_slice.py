@@ -246,16 +246,19 @@ def test_parse_rejects_bad_select(arguments: dict) -> None:
 
 
 def test_select_equals_null_is_a_valid_request() -> None:
-    # select_equals=null is a real "field is null" match, distinct from "no
-    # select_equals given" (which, with a field, is also a null match).
+    # select_equals=null matches rows whose field is PRESENT and null. An absent
+    # key is NOT a null value (MAJOR-2 fix): {"other": 2} lacks "k" and is NOT
+    # matched, so a caller asking for null-valued rows does not silently also get
+    # rows that merely omit the field. (Pre-fix this conflated absent with null via
+    # dict.get; the _MISSING sentinel in _select_rows/_equals now separates them.)
     spec = RetrieveFilters.parse({"select_field": "k", "select_equals": None})
     assert isinstance(spec, RetrieveFilters)
     assert spec.has_select
     rows = json.dumps([{"k": None}, {"k": 1}, {"other": 2}])
     out = apply_filters(rows, spec)
     assert isinstance(out, FilteredContent)
-    # Both the explicit null and the absent field read as None on .get.
-    assert json.loads(out.content) == [{"k": None}, {"other": 2}]
+    assert json.loads(out.content) == [{"k": None}]  # present-null only, not the absent-key row
+    assert out.select_field_absent is None  # "k" is present in some rows → no absent warning
 
 
 def test_parse_empty_is_still_empty_spec() -> None:

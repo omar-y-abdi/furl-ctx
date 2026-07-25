@@ -36,6 +36,7 @@ _HONORED_RETRIEVE_PARAMS = {
     "select_min",
     "select_max",
     "limit",
+    "raw",  # F10: byte-exact row spans — read by RetrieveFilters.parse, advertised below.
 }
 
 

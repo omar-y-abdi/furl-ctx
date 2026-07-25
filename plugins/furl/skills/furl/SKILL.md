@@ -14,9 +14,13 @@ every dropped byte **retrievable on demand**. It ships two things to this sessio
 
 **Retrieval is pull-based, not push-based.** The compressed text you read does not
 contain the dropped rows. To inspect a specific dropped item, call `furl_retrieve` for
-it by pattern, field, or line range. Retrieval is byte-exact for raw text, and a
-structured JSON array comes back as a semantically-complete re-serialization of the
-same rows rather than the original bytes. Nothing is lost, but a one-off anomaly
+it by pattern, field, or line range. Retrieval is byte-exact for raw text. A JSON
+array narrowed by `select`/`fields` comes back re-serialized — semantically complete
+but pretty-printed, so **not** byte-identical to the source; when byte fidelity
+matters (hashing, diffing, signature checks) pass `raw: true` on a row-select and
+each matched row returns byte-identical to its source bytes, the rows rejoined with
+fresh array punctuation, so each row is exact while the whole blob is not one
+contiguous slice. Nothing is lost, but a one-off anomaly
 buried in otherwise-repetitive data will not appear in the compressed
 view unless you query for it. Trust a compressed summary for the shape of the data, not
 for surfacing an anomaly you were not already looking for.
@@ -77,7 +81,12 @@ bounds): see the plugin README.
   `select_field` + `select_equals` (a value) or `select_min`/`select_max` (a
   numeric range), with optional `fields` and `limit` — to pull just the matching
   ROWS of a large offloaded JSON array (or a dominant-array object like a Chrome
-  trace) instead of the whole thing. A free-text `query` searches stored entries.
+  trace) instead of the whole thing. Add `raw: true` to a row-select for byte-exact
+  rows (each matched row byte-identical to its source bytes; needs `select_field`,
+  cannot combine with `fields`). A row-select whose `select_field` is present in NO
+  row returns a `select_field_absent` warning naming the field and listing the known
+  field names, so a typo is not silently an empty result. A free-text `query`
+  searches stored entries.
 - `furl_stats` — session compression statistics (compressions, tokens saved, cost).
 - `furl_purge` — permanently erase stored originals: one hash, or all of them. No undo.
 - `furl_search` — find stored originals by a case-insensitive content substring; returns a hash + preview per hit.
@@ -177,6 +186,30 @@ those rows, or `select_field=<a numeric field>, select_min=…, select_max=…` 
 range window (add `fields=[…]` to project columns, `limit` to cap). The slice is
 tiny compared to the full original, so locality and anomaly questions are
 answerable without pulling megabytes back into context.
+
+**Byte fidelity — `raw: true`.** A slice is re-serialized by default: semantically
+complete but pretty-printed (2-space indent), so it is **not** byte-identical to the
+stored source. That is fine for reading, wrong for hashing, diffing, or signature
+checks. Add `raw: true` to a row-select and each matched row comes back
+byte-identical to its exact source bytes, the rows rejoined with fresh `[ , ]`
+punctuation. So each returned **row** is byte-exact — but the returned blob as a
+whole is **not** one contiguous slice of the source (that would only hold when the
+matched rows happen to be adjacent, so it is not the promise). `raw` needs a
+`select_field` and cannot combine with `fields`: a projection returns a subset of a
+row's keys, which has no source span. When the match count exceeds `limit`, a single
+`{"__ccr_truncated__": …}` object is appended as the one synthetic (non-source)
+element — on a namespaced key so you can strip it before hashing rather than
+identify it only by position; raise `limit` to avoid truncation entirely.
+
+**Absent-field warning.** A row-select whose `select_field` is present in **no** row
+of the array comes back with a `select_field_absent` warning: it names the field and
+carries the known field names in a structured `known_fields` array (sorted, sanitized,
+and size-bounded, with a count of any elided). The `note` prose stays generic and never
+lists the names, so an attacker-chosen key cannot ride in as instruction text, and a
+mistyped field name is distinguishable from a real empty match. It fires **only**
+when the field is absent from every row — **no warning means the field exists and
+genuinely matched nothing**, a legitimate empty result, not a typo. A field present
+in only some rows is a real field and stays silent too.
 
 ## The `furl_read` tool (opt-in)
 

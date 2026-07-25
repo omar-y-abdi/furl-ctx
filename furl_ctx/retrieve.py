@@ -40,6 +40,7 @@ def retrieve(
     select_min: float | None = None,
     select_max: float | None = None,
     limit: int | None = None,
+    raw: bool = False,
     session_id: str | None = None,
     agent_id: str | None = None,
 ) -> str | None:
@@ -71,6 +72,12 @@ def retrieve(
       ``limit`` — keep the ROWS whose ``select_field`` matches, over a JSON array
       of objects or a JSON object with one dominant inner array. Composes with
       ``fields`` (project columns of the selected rows).
+    * ``raw`` — with a ``select_field`` row-select, return each matched row
+      byte-identical to its source bytes instead of the re-serialized projection
+      (for hashing, diffing, or signature checks). Requires ``select_field`` and
+      is incompatible with ``fields``; default ``False`` keeps the re-serialized
+      output. The rows are rejoined with fresh array punctuation, so only each
+      row is byte-exact, not the whole blob.
 
     A filter argument (other than ``query``) makes this a slice: it returns the
     projected text, and ``None`` still means a store miss (the hash resolved to
@@ -94,6 +101,7 @@ def retrieve(
             "select_min": select_min,
             "select_max": select_max,
             "limit": limit,
+            "raw": raw,
         }
     )
     if isinstance(filters, FilterError):
