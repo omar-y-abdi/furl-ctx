@@ -823,7 +823,7 @@ def _list_preview(original: str) -> str:
 
 
 def _rebaselined_counters(base: dict[str, int], counters: dict[str, int]) -> dict[str, int]:
-    """``base`` with every counter that went BACKWARDS re-baselined to 0 (F11).
+    """The ``this_session`` baseline, dropped WHOLESALE when the store was reset (F11).
 
     The lifetime counters are monotonic only while the store lives: ``furl_purge
     all=true`` -> ``CompressionStore.clear()`` wipes them (``DELETE FROM
@@ -832,16 +832,29 @@ def _rebaselined_counters(base: dict[str, int], counters: dict[str, int]) -> dic
     would DETECT nothing and report genuine post-purge events as
     ``this_session: 0`` until activity climbed back past the stale baseline.
 
-    A value below its own snapshot is only explainable by a reset, so that
-    counter's baseline drops to 0 and the delta counts everything since the
-    reset. Detection is per counter, and the caller must PERSIST the result:
-    once a counter climbs back past its stale baseline the reset is no longer
-    detectable from the values alone. Returns a new dict; ``base`` is untouched.
+    ONE counter below its snapshot re-baselines ALL of them, which is strictly
+    more accurate than a per-counter rule rather than a trade. The store keeps
+    counters MONOTONIC BETWEEN GLOBAL CLEARS: the only writes are an
+    ``INSERT OR IGNORE ... 0`` + ``UPDATE ... value = value + ?`` upsert and the
+    two unconditional global wipes above, with no per-counter delete, no
+    decrement, and no negative ``amount`` at any call site. So an observed drop
+    implies EVERY counter was cleared, and re-baselining only the counters that
+    happen to still read low would UNDER-count the ones that already climbed
+    back past their stale snapshot before this read.
+
+    A future editor who adds a per-counter reset, a decrement, or a negative
+    ``increment_counter`` amount INVALIDATES that reasoning and must narrow this
+    back to per-counter detection.
+
+    An empty baseline means "count everything visible", which is exactly the
+    post-reset truth and stays correct across any number of later resets. The
+    caller must PERSIST the result: once a counter climbs back past its stale
+    baseline the reset is no longer detectable from the values alone. Returns a
+    new value; ``base`` is never mutated.
     """
-    reset = {name for name, value in counters.items() if value < base.get(name, 0)}
-    if not reset:
-        return base
-    return {name: (0 if name in reset else value) for name, value in base.items()}
+    if any(value < base.get(name, 0) for name, value in counters.items()):
+        return {}
+    return base
 
 
 class FurlMCPServer:
@@ -872,8 +885,9 @@ class FurlMCPServer:
         # start snapshot) alongside the lifetime totals. Because the counters are
         # cross-process the delta is not strictly this run, so it is labeled as
         # "since this server first read the counters", not "this session". None
-        # until the first read; a counter wiped under us by furl_purge(all) has
-        # its baseline re-dropped to 0 (see _rebaselined_counters).
+        # until the first read; a wipe under us by furl_purge(all) drops the
+        # whole snapshot so the delta counts from the reset (see
+        # _rebaselined_counters).
         self._hook_counters_at_start: dict[str, int] | None = None
         self._compressor_initialized = False
         # File read cache: path → (content_hash, ccr_hash, line_count, token_count)
@@ -2376,9 +2390,10 @@ class FurlMCPServer:
 
         # F11: snapshot the lifetime counters the first time this server reads
         # them, so ``this_session`` = lifetime - start. Captured lazily (the
-        # store is lazy). A counter below its snapshot means the store was reset
-        # under us (furl_purge all=true), so that baseline is DROPPED to 0 and
-        # persisted — see _rebaselined_counters. Every delta below is then
+        # store is lazy). ANY counter below its snapshot means the store was
+        # reset under us (furl_purge all=true) — the counters only move by
+        # upsert-add between global wipes — so the WHOLE baseline is dropped and
+        # persisted, see _rebaselined_counters. Every delta below is then
         # non-negative by construction, with no clamp hiding a reset.
         if self._hook_counters_at_start is None:
             self._hook_counters_at_start = dict(counters)

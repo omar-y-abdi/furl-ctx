@@ -113,6 +113,35 @@ async def test_session_delta_rebaselines_when_a_purge_resets_the_counters() -> N
     assert later["this_session"]["hook_invocations_seen"] == 7
 
 
+async def test_a_single_dropped_counter_rebaselines_all_of_them() -> None:
+    """One counter below its snapshot means EVERY counter was cleared.
+
+    The store keeps counters monotonic between GLOBAL clears: the only writes
+    are an upsert-add and the two unconditional wipes, with no per-counter
+    delete, no decrement, and no negative amount at any call site. So the mixed
+    case is real: after a purge one counter can already have climbed back PAST
+    its stale baseline by the time furl_stats reads, while another still reads
+    below it. Re-baselining only the counter that still reads low would
+    under-count the one that recovered, reporting 1 instead of 6.
+    """
+    store = resolve_ccr_namespace_store()
+    store.increment_counter("hook_invocations_seen", 5)
+    store.increment_counter("hook_compressions_applied", 5)
+
+    server = FurlMCPServer()
+    _envelope(await server._handle_stats())  # baseline: both at 5
+
+    store.clear()
+    store.increment_counter("hook_invocations_seen", 6)  # ABOVE the stale 5
+    store.increment_counter("hook_compressions_applied", 3)  # BELOW the stale 5
+
+    session = _envelope(await server._handle_stats())["store"]["hook_activity"]["this_session"]
+    assert session["hook_compressions_applied"] == 3  # the detectable drop
+    assert session["hook_invocations_seen"] == 6, (
+        "a counter that recovered past its stale baseline must be re-baselined too"
+    )
+
+
 async def test_session_delta_buckets_noop_reasons() -> None:
     store = resolve_ccr_namespace_store()
     server = FurlMCPServer()
