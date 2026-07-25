@@ -25,7 +25,7 @@ silently breaks a consumer pattern fails HERE, naming the exact shape.
 THE 9 SHAPES (verified against source — file:line cited per case)
 =================================================================
   A  ``<<ccr:HASH N_rows_offloaded>>``        12-hex  crusher.rs:1239
-  B  ``<<ccr:HASH#rows N_chunks>>``           12-hex  crusher.rs:1212 (index_key="{hash}#rows")
+  B  ``<<ccr:HASH#rows N_chunks>>``           RETIRED — no producer (removed F8/#168); consumer still parses it
   C  ``<<ccr:HASH,KIND,SIZE>>``               12-hex  walker.rs:193 / formatter.rs:568
   D  ``<<ccr:HASH>>`` bare                    24-hex  smart_crusher.py:871 (explicit_hash :875)
   E  ``<<ccr:HASH N_bytes_duplicate>>``       24-hex  cross_message_dedup.py:164
@@ -225,12 +225,14 @@ def _build_A(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_B(store: CompressionStore) -> tuple[str, str, str]:
-    # crusher.rs:1212 -> format!("<<ccr:{index_key} {dropped_count}_chunks>>")
-    # crusher.rs (just above) -> index_key = format!("{hash}#rows"), hash = sha256[:12].
-    # The consumer pattern 4 delimiter class [ ,#>] stops the hash capture at
-    # '#', so the EXTRACTED hash is the bare 12-hex blob hash (not "{hash}#rows").
-    # That bare 12-hex blob hash is the whole-blob recovery key, so we store the
-    # original under it (matching crusher's unconditional whole-blob persist).
+    # Shape B (``<<ccr:{hash}#rows {n}_chunks>>``) is RETIRED: its producer
+    # (marker_for_row_index / the granular per-row offload) was removed (F8/#168),
+    # so nothing emits it any more. The CONSUMER still tolerates the shape
+    # defensively (a stale marker could surface from Tier-2-cached content); this
+    # pins that handling. The pattern-4 delimiter class [ ,#>] stops the hash
+    # capture at '#', so the EXTRACTED hash is the bare 12-hex blob hash (not
+    # "{hash}#rows"). That bare hash is the whole-blob recovery key, so we store
+    # the original under it (matching the crusher's unconditional whole-blob persist).
     original = json.dumps([{"k": i, "blob": "x" * 20} for i in range(7)])
     h = _sha256_12(original)
     store.store(original=original, compressed=f"<<ccr:{h}>>", explicit_hash=h)
@@ -770,52 +772,6 @@ def test_producer_driven_A_rows_offloaded_binds_to_production_consumer() -> None
     )
 
 
-def test_producer_driven_B_row_index_binds_to_production_consumer() -> None:
-    """Shape B: the REAL ``ContentRouter().compress`` granular row-index path
-    emits ``<<ccr:HASH#rows N_chunks>>``; the production consumer's delimiter
-    class ``[ ,#>]`` stops the capture at ``#``, so it surfaces the BARE 12-hex
-    blob hash (not ``HASH#rows``), which the Rust store resolves byte-exact.
-
-    A producer-side change to the ``#`` separator (``markers.rs
-    marker_for_row_index``) that the consumer no longer treats as a delimiter
-    fails HERE — either by surfacing a wrong-width hash or none at all.
-
-    Fixture sizing: the DROPPED count must stay within the granular chunk
-    budget (``store.capacity() / 4`` = 250 on the default 1000-entry store) —
-    an oversized drop persists the whole-blob only and emits NO ``#rows``
-    marker (COR-4 store-flood gate), so 200 rows (~193 dropped) keeps the
-    granular producer firing.
-    """
-    from furl_ctx.transforms.content_router import ContentRouter
-
-    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(200)]
-    router = ContentRouter()
-    output = router.compress(json.dumps(items)).compressed
-    if "#rows" not in output:
-        pytest.skip("granular row-index path did not fire (#rows absent) — environment gap")
-
-    detected = _scan(output)
-    assert detected, (
-        "real row-index producer emitted a '#rows' marker the PRODUCTION "
-        f"consumer did not surface.\n  output head={output[:200]!r}"
-    )
-    # The '#' delimiter must stop the capture: surfaced hash is the bare width,
-    # never the literal "HASH#rows".
-    for h in detected:
-        assert len(h) in marker_grammar.HASH_WIDTHS, (
-            f"row-index consumer surfaced a {len(h)}-char hash ({h!r}); the '#' "
-            f"delimiter should have bounded it to {sorted(marker_grammar.HASH_WIDTHS)}"
-        )
-        assert "#" not in h
-
-    crusher = router._get_smart_crusher()
-    recovered = [crusher.ccr_get(h) for h in detected if crusher.ccr_get(h) is not None]
-    assert recovered, "scanned row-index hash did not resolve in the Rust store"
-    assert any(items[0]["v"] in (r or "") for r in recovered), (
-        "the dropped row is not byte-exact recoverable via the consumer's bare hash"
-    )
-
-
 def test_producer_driven_C_opaque_blob_binds_to_production_consumer() -> None:
     """Shape C: the REAL ``ContentRouter().compress`` opaque-substitution path
     emits ``<<ccr:HASH,KIND,SIZE>>``; the production consumer extracts every
@@ -902,30 +858,3 @@ def test_producer_driven_G_diff_retrieve_full_binds_to_production_consumer() -> 
         )
     finally:
         clear_request_compression_store()
-
-
-def test_fixture_actually_fires_row_index_path() -> None:
-    """Prove that the 200-item fixture produces a granular ``#rows`` marker.
-
-    ``test_producer_driven_B_row_index_binds_to_production_consumer`` skips
-    when ``#rows`` is absent in the output (labelled "environment gap").
-    This companion asserts the skip precondition never silently hides a gap:
-    if the engine stops emitting ``#rows`` markers for this fixture, THIS
-    test fails loudly instead of the main test going green-via-skip.
-
-    The fixture is 200 rows (not the historical 500): drops bigger than the
-    granular chunk budget (``capacity / 4`` = 250) intentionally emit no
-    ``#rows`` marker (COR-4 store-flood gate), so the fixture's dropped
-    count (~193) must stay under the budget for the producer to fire.
-    """
-    import json as _json
-
-    from furl_ctx.transforms.content_router import ContentRouter
-
-    items = [{"id": i, "k": i, "blob": "x" * 40, "v": f"val-{i}"} for i in range(200)]
-    router = ContentRouter()
-    output = router.compress(_json.dumps(items)).compressed
-    assert "#rows" in output, (
-        "200-item fixture did not produce a granular '#rows' CCR marker; "
-        "the row-index grammar test will skip silently — fix the fixture size"
-    )

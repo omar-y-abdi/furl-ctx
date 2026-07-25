@@ -1,13 +1,12 @@
 """Characterization: the engine surfaces CCR recovery TYPED (§4.2).
 
 The live ``SmartCrusher.crush()`` path surfaces every recovery ref as a
-typed carrier: the dropped-row CCR hashes (with granular row-index keys)
-AND — since §4.2 R2/R3 — the opaque-blob substitutions, all carried on
-``CrushResult.dropped_refs`` (a list of ``furl_ctx._core.DroppedRef``)
-instead of being substring-scraped out of the rendered ``<<ccr:...>>``
-text. The Python shim mirrors those typed refs DIRECTLY into the
-compression_store; the back-compat ``ccr_hashes`` / ``row_index_markers``
-getters stay byte-identical to the retired fields.
+typed carrier: the dropped-row CCR hashes AND — since §4.2 R2/R3 — the
+opaque-blob substitutions, all carried on ``CrushResult.dropped_refs`` (a
+list of ``furl_ctx._core.DroppedRef``) instead of being substring-scraped
+out of the rendered ``<<ccr:...>>`` text. The Python shim mirrors those
+typed refs DIRECTLY into the compression_store; the back-compat
+``ccr_hashes`` getter stays byte-identical to the retired field.
 
 These tests PIN that contract and were written to BITE: stubbing the
 typed getter to drop/wrong a hash turns them RED (proven during
@@ -54,37 +53,12 @@ def _scrape_row_drop_hashes(rendered: str) -> set[str]:
     return {h for h in sink if not h.endswith("#rows")}
 
 
-def _scrape_index_keys(rendered: str) -> set[str]:
-    """The ``#rows`` granular index keys the scrape extracts."""
-    sink: set[str] = set()
-    SmartCrusher._collect_ccr_hashes_from_string(rendered, sink)
-    return {h for h in sink if h.endswith("#rows")}
-
-
-def _typed_index_keys(row_index_markers: list[str]) -> set[str]:
-    """The ``HASH#rows`` keys carried by the typed ``row_index_markers``
-    (each is a full ``<<ccr:HASH#rows N_chunks>>`` marker)."""
-    keys: set[str] = set()
-    for marker in row_index_markers:
-        sink: set[str] = set()
-        SmartCrusher._collect_ccr_hashes_from_string(marker, sink)
-        keys.update(h for h in sink if h.endswith("#rows"))
-    return keys
-
-
 # ── Row-drop fixtures: ≥20 distinct cases (dicts, strings, numbers, mixed) ──
 #
 # Each must take the lossy row-drop path under the default config so a
-# `<<ccr:HASH N_rows_offloaded>>` marker is emitted. Built large + low
-# uniqueness (or numeric/string) so the analyzer crushes rather than keeps.
-#
-# SIZE CEILING (COR-4): every case must ALSO keep its dropped-row count
-# UNDER the granular budget (store capacity / 4 = 250 under the default
-# 1000-entry store) — an oversized drop persists the whole-blob ONLY and
-# emits NO `#rows` index marker, which would turn the row-index parity
-# test into an empty-vs-empty no-op. Dozens of rows are plenty to trigger
-# the drop while staying far below the budget; the ≥1-marker floor in
-# `test_crush_typed_row_index_equals_scrape` enforces this.
+# `<<ccr:HASH N_rows_offloaded>>` marker is emitted and a typed ccr_hash is
+# surfaced. Built large + low uniqueness (or numeric/string) so the analyzer
+# crushes rather than keeps.
 
 
 def _dict_case(seed: int) -> list[dict]:
@@ -140,7 +114,7 @@ _ROW_DROP_CASES = [
 @pytest.fixture
 def crusher() -> SmartCrusher:
     # Default config wires a CCR store (with_default_ccr_store), so row-drops
-    # persist and row-index markers populate — the production shape.
+    # persist — the production shape.
     return SmartCrusher()
 
 
@@ -186,30 +160,6 @@ def test_crush_typed_hash_equals_scrape_and_retrieves(
             f"{shape}-{seed}: payload under {h} must be the FULL original "
             f"array (typed and scraped recovery resolve the same entry)"
         )
-
-
-@pytest.mark.parametrize("shape, seed", _ROW_DROP_CASES)
-def test_crush_typed_row_index_equals_scrape(crusher: SmartCrusher, shape: str, seed: int) -> None:
-    """The granular ``#rows`` index keys recovered from the typed
-    ``row_index_markers`` equal the ``#rows`` keys the scrape extracts —
-    so proportional retrieval also comes typed, not scraped."""
-    items = _BUILDERS[shape](seed)
-    r = crusher._rust.crush(json.dumps(items, ensure_ascii=False), "", 1.0)
-
-    typed_idx = _typed_index_keys(list(r.row_index_markers))
-    scraped_idx = _scrape_index_keys(r.compressed)
-    # Non-vacuity guard (COR-4): an oversized drop (> capacity/4) emits NO
-    # granular index at all — typed and scraped would both be empty and the
-    # parity assertion below would pass without testing anything. The
-    # fixtures are sized to keep every drop under the granular budget; this
-    # ≥1-marker floor keeps the parity check honest if they ever regress.
-    assert typed_idx, (
-        f"{shape}-{seed}: no #rows index marker emitted — the drop exceeds "
-        f"the granular budget (capacity/4), so row-index parity is vacuous"
-    )
-    assert typed_idx == scraped_idx, (
-        f"{shape}-{seed}: typed index {sorted(typed_idx)} != scraped {sorted(scraped_idx)}"
-    )
 
 
 def test_crush_multi_array_surfaces_one_hash_per_drop(crusher: SmartCrusher) -> None:
@@ -269,29 +219,23 @@ def _scrape_row_drop_only(rendered: str) -> set[str]:
     return _scrape_row_drop_hashes(rendered) - _scrape_opaque_hashes(rendered)
 
 
-def _typed_by_kind(refs: list) -> tuple[set[str], set[str], set[str]]:
-    """(row_drop hashes, row_index keys, opaque hashes) from typed refs."""
+def _typed_by_kind(refs: list) -> tuple[set[str], set[str]]:
+    """(row_drop hashes, opaque hashes) from typed refs."""
     row_drop = {d.hash for d in refs if d.kind_tag == "row_drop"}
-    index_keys = {d.row_index_key for d in refs if d.row_index_key is not None}
     opaque = {d.hash for d in refs if d.kind_tag == "opaque"}
-    return row_drop, index_keys, opaque
+    return row_drop, opaque
 
 
 def test_crush_dropped_refs_carry_row_drop_and_opaque(crusher: SmartCrusher) -> None:
     """``CrushResult.dropped_refs`` carries BOTH planes typed: the row
-    drop (hash + bare ``HASH#rows`` index key, no marker text) and the
-    opaque substitution (hash + wire kind + EXACT byte size)."""
+    drop (hash) and the opaque substitution (hash + wire kind + EXACT
+    byte size)."""
     doc = {"payload": _blob(3), "rows": _dict_case(1)}
     r = crusher._rust.crush(json.dumps(doc, ensure_ascii=False), "", 1.0)
 
-    row_drop, index_keys, opaque = _typed_by_kind(list(r.dropped_refs))
-    # Row-drop plane: typed refs == back-compat getters == scrape.
+    row_drop, opaque = _typed_by_kind(list(r.dropped_refs))
+    # Row-drop plane: typed refs == back-compat getter == scrape.
     assert row_drop == set(r.ccr_hashes) == _scrape_row_drop_only(r.compressed)
-    assert index_keys == _typed_index_keys(list(r.row_index_markers))
-    for key in index_keys:
-        assert key.endswith("#rows") and "<<" not in key, (
-            f"row_index_key must be the BARE store key, got {key!r}"
-        )
     # Opaque plane: typed covers the scrape (directional — encoding folds
     # can hide markers from the scrape, never from the typed path).
     scraped_opaque = _scrape_opaque_hashes(r.compressed)
@@ -320,7 +264,7 @@ def test_smart_crush_content_typed_carries_refs_covering_the_scrape(
 
     crushed, _was_modified, _info, refs = crusher._rust.smart_crush_content_typed(content, "", 1.0)
 
-    row_drop, _index_keys, opaque = _typed_by_kind(list(refs))
+    row_drop, opaque = _typed_by_kind(list(refs))
     assert row_drop == _scrape_row_drop_only(crushed)
     assert _scrape_opaque_hashes(crushed) <= opaque
     assert opaque, "fixture must exercise the opaque substitution"
@@ -335,7 +279,7 @@ def test_compact_document_json_typed_carries_opaque_refs(
     doc = json.dumps({"summary": "ok", "payload": _blob(11)}, ensure_ascii=False)
 
     compacted, refs = crusher._rust.compact_document_json_typed(doc)
-    _row_drop, _index_keys, opaque = _typed_by_kind(list(refs))
+    _row_drop, opaque = _typed_by_kind(list(refs))
     assert opaque, "fixture must exercise the opaque substitution"
     assert _scrape_opaque_hashes(compacted) <= opaque
     for d in refs:
@@ -343,21 +287,19 @@ def test_compact_document_json_typed_carries_opaque_refs(
         assert crusher._rust.ccr_get(d.hash) is not None
 
 
-def test_crush_array_json_carries_row_index_key_and_dropped_refs(
+def test_crush_array_json_carries_dropped_refs(
     crusher: SmartCrusher,
 ) -> None:
-    """The dict gains ``row_index_key`` (bare key, not marker text) and
-    ``dropped_refs`` — and they agree with the established fields."""
+    """The ``crush_array_json`` dict surfaces ``dropped_refs`` — the typed
+    row-drop ref whose hash agrees with the established ``ccr_hash``."""
     items = _dict_case(3)
     result = crusher.crush_array_json(json.dumps(items, ensure_ascii=False))
 
     ccr_hash = result["ccr_hash"]
     assert ccr_hash, "fixture must take the lossy row-drop path"
-    assert result["row_index_key"] == f"{ccr_hash}#rows"
     refs = list(result["dropped_refs"])
-    row_drop, index_keys, _opaque = _typed_by_kind(refs)
+    row_drop, _opaque = _typed_by_kind(refs)
     assert ccr_hash in row_drop
-    assert result["row_index_key"] in index_keys
 
 
 def test_literal_marker_text_is_scraped_but_never_typed(crusher: SmartCrusher) -> None:

@@ -21,7 +21,6 @@
 //! | Fn                          | Shape                                                                 |
 //! |-----------------------------|-----------------------------------------------------------------------|
 //! | `marker_for_rows_offloaded` | `<<ccr:{hash} {n}_rows_offloaded>>`                                    |
-//! | `marker_for_row_index`      | `<<ccr:{hash}#rows {n}_chunks>>`                                       |
 //! | `marker_for_opaque`         | `<<ccr:{hash},{kind},{size}>>`                                         |
 //! | `marker_for_diff`           | `[{orig} lines compressed to {comp}. Retrieve full diff: hash={h}]`   |
 //! | `marker_for_retrieve_more`  | `[{orig} {unit} compressed to {comp}. Retrieve more: hash={h}]`       |
@@ -36,13 +35,6 @@
 /// whole-blob key the consumer resolves via `furl_retrieve`.
 pub(crate) fn marker_for_rows_offloaded(hash: &str, n_rows: usize) -> String {
     format!("<<ccr:{hash} {n_rows}_rows_offloaded>>")
-}
-
-/// Granular row-index pointer. `<<ccr:{hash}#rows {n_chunks}_chunks>>`.
-/// The `{hash}#rows` index key resolves to a JSON array of per-row
-/// hashes so the consumer can address each dropped row independently.
-pub(crate) fn marker_for_row_index(hash: &str, n_chunks: usize) -> String {
-    format!("<<ccr:{hash}#rows {n_chunks}_chunks>>")
 }
 
 /// Opaque-blob substitution marker. `<<ccr:{hash},{kind},{size}>>` where
@@ -163,16 +155,6 @@ mod tests {
         assert_eq!(
             marker_for_rows_offloaded("abc123def456", 7),
             "<<ccr:abc123def456 7_rows_offloaded>>"
-        );
-    }
-
-    #[test]
-    fn row_index_is_byte_identical() {
-        // crusher.rs old: index_key = "{hash}#rows";
-        //                 format!("<<ccr:{index_key} {dropped_count}_chunks>>")
-        assert_eq!(
-            marker_for_row_index("9f3a2b", 50),
-            "<<ccr:9f3a2b#rows 50_chunks>>"
         );
     }
 

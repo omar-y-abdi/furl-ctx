@@ -36,7 +36,7 @@ Two DISTINCT width contracts — also kept separate
 Marker shapes A..I and which producer emits each
 ================================================
   A  ``<<ccr:HASH N_rows_offloaded>>``        24-hex  markers.rs marker_for_rows_offloaded
-  B  ``<<ccr:HASH#rows N_chunks>>``           24-hex  markers.rs marker_for_row_index
+  B  ``<<ccr:HASH#rows N_chunks>>``           24-hex  RETIRED — no producer since F8/#168 (parse-only, stale content)
   C  ``<<ccr:HASH,KIND,SIZE>>``               24-hex  markers.rs marker_for_opaque
   D  ``<<ccr:HASH>>`` bare                    24-hex  smart_crusher.py (bare CCR helper)
   E  ``<<ccr:HASH N_bytes_duplicate>>``       24-hex  transforms/cross_message_dedup.py
@@ -221,10 +221,10 @@ DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{D
 # 64 is chosen with wide headroom over the measured maximum real tail
 # across every shape (arithmetic, `` `` = one literal space):
 #   A ``<<ccr:HASH {n}_rows_offloaded>>``       16 literal chars + digits
-#   B ``<<ccr:HASH#rows {n}_chunks>>``          13 literal chars + digits,
-#     n hard-capped at store.capacity()/4 = 250 (3 digits) —
-#     crates/furl-core/src/ccr/mod.rs DEFAULT_CAPACITY=1000,
-#     .../smart_crusher/persist.rs GRANULAR_CHUNK_CAPACITY_DIVISOR=4
+#   B ``<<ccr:HASH#rows {n}_chunks>>``          13 literal chars + digits
+#     (RETIRED shape, F8/#168 — no producer; the bound still covers it so a
+#     stale ``#rows`` marker in cached content parses safely. Historical n was
+#     capped at DEFAULT_CAPACITY/4 = 250, 3 digits.)
 #   C ``<<ccr:HASH,{kind},{size}>>``            2 literal commas + kind
 #     [4-6 chars, kind is one of "base64"/"string"/"html" in every
 #     production call site — OpaqueKind::Other's only construction site

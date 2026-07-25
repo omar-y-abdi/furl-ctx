@@ -73,7 +73,8 @@ misses loudly:
 - **Proxy / handler (archived, NOT live)** — `CCRResponseHandler._execute_retrieval`
   once provided a second loud surface, calling `store.get_entry_status(...)` and
   returning `success=False` with an explicit `error` payload for the bulk path,
-  the search path, AND a real granular `#rows` offload. That module now lives at
+  the search path, AND a granular `#rows` offload (a shape that was never
+  model-retrievable and has since been removed, F8/#168). That module now lives at
   `archive/furl_ctx/ccr/response_handler.py` and is no longer wired into a live
   retrieval path. Kept here only for the historical loud-miss measurement below.
 
@@ -90,15 +91,17 @@ evicted_after_10_calls = True        # concern #1: eviction happened
 model-facing retrieve  : success=False, loud=True   # concern #2: LOUD, never silent None
 ```
 
-**Granular offloads are all-or-nothing for the model.** A granular sentinel is
-`{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>", "_ccr_rows": "<<ccr:HASH#rows N_chunks>>"}`
-(`crusher.rs:113`). Both markers share the **same** `HASH`; the bare `HASH` the
-model retrieves is backed by a **single whole-blob entry holding all rows**
-(verified: `rows_in_original_content = 240` for a 240-row offload). The per-row
-chunks under `HASH#rows` are a *proportional-retrieve optimization* the model
-never addresses directly, so partial chunk eviction can never hand the model a
-**silent subset** — the bare-hash retrieve either returns the complete blob or
-misses loudly.
+**Row-drop offloads are all-or-nothing for the model.** A row-drop sentinel is
+`{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>"}` — the bare `HASH` the model
+retrieves is backed by a **single whole-blob entry holding all rows** (verified:
+`rows_in_original_content = 240` for a 240-row offload). A granular `_ccr_rows`
+index of per-row chunks was once emitted alongside it as a *proportional-retrieve
+optimization*, but the model could never address it — the `HASH#rows` key fails
+`is_valid_ccr_hash` at the sole entry to `furl_retrieve`, and the chunks were
+never mirrored into the Python store — so it was removed (Design A, F8/#168).
+Nothing but the whole-blob is stored now, so a retrieve either returns the
+complete blob or misses loudly; there is no per-row chunk that could hand the
+model a **silent subset**.
 
 **Conclusion: G as a *silent-loss* defect does not reproduce.** The invariant
 held at the retrieval layer before any change here.

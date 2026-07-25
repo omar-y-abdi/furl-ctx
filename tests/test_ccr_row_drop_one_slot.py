@@ -13,12 +13,14 @@ the per-row chunks at all: the whole-blob parent already holds every dropped
 row, and row-level retrieval is served from it (``furl_retrieve(hash, query=…)``
 / ``select_field``). One columnar output therefore consumes one cap slot.
 
-Each test names the DIMENSION it covers and was confirmed RED on ``main``
-(chunk mirroring live) and GREEN after the mirror was removed — this file exists
-because the codebase has repeatedly shipped green pins over untested dimensions.
-Rust is deliberately untouched: its process-local ``#rows`` index still exists,
-which is how these pins learn the per-row chunk hashes to assert their ABSENCE
-from the Python store.
+Each test names the DIMENSION it covers. The property is now enforced at the
+source: a row-drop persists EXACTLY ONE store entry (the whole-blob parent) —
+per-row chunks and the ``{hash}#rows`` index are no longer written anywhere
+(the granular row-index machinery, and the ``_ccr_rows`` marker that advertised
+it, were removed as an unretrievable false advertisement). These pins assert the
+one-entry-per-output property directly, so any regression that re-inflates the
+per-output entry count (a new mirror site, a nested-crush path, a cap-accounting
+slip) turns them RED.
 """
 
 from __future__ import annotations
@@ -60,27 +62,25 @@ def _distinct_rows(n: int, seed: int = 7) -> list[dict]:
 
 def _crush_into(
     store: CompressionStore, monkeypatch: pytest.MonkeyPatch, rows: list[dict]
-) -> tuple[SmartCrusher, str, list[str]]:
+) -> tuple[SmartCrusher, str]:
     """Run a real columnar crush whose mirror writes into ``store``.
 
     The mirror imports ``get_compression_store`` inside the function, so patching
-    the module attribute redirects the whole-blob (and, on main, per-row chunk)
-    writes into the store under test. Returns
-    ``(crusher, parent_hash, chunk_hashes)`` where ``chunk_hashes`` come from the
-    Rust ``#rows`` index (present before and after Design A — Rust is untouched).
+    the module attribute redirects the whole-blob write into the store under
+    test. Returns ``(crusher, parent_hash)``. A row-drop persists exactly the
+    whole-blob parent — there are no per-row chunk entries to probe (the granular
+    row index was removed).
     """
     monkeypatch.setattr(cs, "get_compression_store", lambda *a, **k: store)
     crusher = SmartCrusher(config=SmartCrusherConfig())
     result = crusher.crush_array_json(json.dumps(rows), query="")
     parent = result.get("ccr_hash")
     assert parent, "fixture did not drop rows (no ccr_hash) — the pin would be vacuous"
-    index_key = result.get("row_index_key")
-    assert index_key and index_key.endswith("#rows"), "fixture produced no #rows index"
-    index_raw = crusher._rust.ccr_get(index_key)
-    assert index_raw is not None, "Rust #rows index missing — fixture cannot check chunk absence"
-    chunk_hashes = json.loads(index_raw)
-    assert len(chunk_hashes) > 1, "fixture chunked <2 rows — the pin would be weak"
-    return crusher, parent, chunk_hashes
+    # The fixture must drop MULTIPLE rows or the one-slot pin is weak: the parent
+    # holds the full array while the visible output keeps only a small sample.
+    kept = json.loads(result["items"])
+    assert len(rows) - len(kept) > 1, "fixture dropped <2 rows — the pin would be weak"
+    return crusher, parent
 
 
 def test_columnar_drop_consumes_exactly_one_cap_slot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +94,7 @@ def test_columnar_drop_consumes_exactly_one_cap_slot(monkeypatch: pytest.MonkeyP
     RED on main: ``entry_count == 1 + N``. GREEN after: ``== 1``.
     """
     store = CompressionStore(backend=InMemoryBackend(), enable_feedback=False)
-    _crusher, parent, chunk_hashes = _crush_into(store, monkeypatch, _distinct_rows(200))
+    _crusher, parent = _crush_into(store, monkeypatch, _distinct_rows(200))
 
     assert store.get_stats()["entry_count"] == 1, (
         "a columnar drop consumed more than one cap slot — the per-row chunks are "
@@ -120,7 +120,7 @@ def test_dropped_rows_recover_through_parent_not_chunks(monkeypatch: pytest.Monk
     """
     store = CompressionStore(backend=InMemoryBackend(), enable_feedback=False)
     rows = _distinct_rows(200)
-    _crusher, parent, chunk_hashes = _crush_into(store, monkeypatch, rows)
+    _crusher, parent = _crush_into(store, monkeypatch, rows)
 
     # (a) COMPLETE recovery via the BARE parent retrieve — every original row is
     # present, verbatim. This is the lossless path the docs lead with (no query,
@@ -144,12 +144,13 @@ def test_dropped_rows_recover_through_parent_not_chunks(monkeypatch: pytest.Monk
     assert not isinstance(outcome, FilterError), f"select_field rejected: {outcome}"
     assert outcome.matched_count == 1, "select_field did not project exactly the one row"
 
-    # (c) no per-row chunk is a Python-store entry — recovery is via the parent.
-    for row_hash in chunk_hashes:
-        assert store.retrieve(row_hash) is None, (
-            f"per-row chunk {row_hash} was mirrored as its own entry — it consumes "
-            "a cap/file slot the parent already covers"
-        )
+    # (c) the parent is the ONLY store entry — no per-row chunk is an
+    # independently addressable entry consuming a cap/file slot. Per-row chunks
+    # are not written anywhere; row-level recovery is served from the parent.
+    assert store.get_stats()["entry_count"] == 1, (
+        "the drop added more than the whole-blob parent — a per-row chunk was "
+        "mirrored as its own entry, consuming a cap/file slot the parent covers"
+    )
 
 
 def test_sqlite_physical_rows_track_logical_entries(
@@ -191,47 +192,34 @@ def test_handful_of_columnar_outputs_do_not_evict_within_cap_content(
 ) -> None:
     """DIMENSION: the user-visible OUTCOME (the reported F8 harm), not the count.
 
-    The three pins above assert the MECHANISM (entry_count == 1, physical
-    rows == 1, chunk-hash absence). None of them fills the store to its cap or
-    observes an eviction — but the defect was never "the count is wrong", it was
-    "a handful of large outputs evicted still-retrievable content well inside
-    its TTL". This pins that PROMISE directly: it stores a first columnar output
-    (the anchor) into a small-cap store, then a handful more, and asserts the
-    anchor is STILL retrievable — and still holds its rows — afterward. It runs
-    on both backends (F14) so the outcome is covered on the durable store too.
+    The pins above assert the MECHANISM (entry_count == 1, physical rows == 1).
+    None of them fills the store to its cap or observes an eviction — but the
+    defect was never "the count is wrong", it was "a handful of large outputs
+    evicted still-retrievable content well inside its TTL". This pins that
+    PROMISE directly: it stores a first columnar output (the anchor) into a
+    small-cap store, then a handful more, and asserts the anchor is STILL
+    retrievable — and still holds its rows — afterward. It runs on both backends
+    (F14) so the outcome is covered on the durable store too.
 
-    The cap is DERIVED, not hardcoded (F11): the per-output chunk count is
-    engine-derived and threshold-dependent, so a probe crush measures it and the
-    cap is sized to ``chunks + 5`` — ABOVE one output's chunks (the anchor
-    survives its OWN crush, so the setup guard passes on main) but BELOW two (a
-    later output evicts it). A hardcoded cap below one output's chunk count would
-    make main evict the anchor DURING its own crush, landing the RED on the setup
-    guard ("fixture broken") instead of the OUTCOME assertion — a future engineer
-    would then "fix the fixture" and the F8 message would never fire.
-
-    On main each output mirrors 1 whole-blob + N per-row chunks: output one fits
-    (n+1 <= cap), output two pushes past the cap and evicts the anchor (oldest) —
-    RED on the OUTCOME assertion below. Under Design A each output is exactly one
-    entry, so five outputs sit far under the cap and the anchor survives,
-    unexpired — GREEN. Any future change that keeps the per-output count at 1 but
-    re-inflates eviction pressure another way (a second mirror site, a
-    nested-crush path, a cap-accounting regression) turns this RED.
+    Under Design A each columnar output is exactly ONE store entry, so the five
+    outputs stored here sit under a modest cap and the anchor survives, unexpired.
+    Any regression that re-inflates the per-output entry count — a second mirror
+    site, a nested-crush path, a re-introduced per-row chunk write, a
+    cap-accounting slip — pushes the five outputs past the cap and evicts the
+    anchor (oldest), turning this RED. The cap is sized just above the five
+    outputs (below twice that), so a >=2x per-output inflation is caught.
     """
     # Neutralize any ambient FURL_CCR_SQLITE_MAX_ROWS (L2): the sqlite variant
     # builds a backend at its DEFAULT cap, and an env value below max_entries would
     # evict content (or warn) spuriously.
     monkeypatch.delenv("FURL_CCR_SQLITE_MAX_ROWS", raising=False)
 
-    # Probe crush measures one output's chunk count so the cap is sized correctly.
-    probe = CompressionStore(backend=InMemoryBackend(), enable_feedback=False)
-    _c, _p, probe_chunks = _crush_into(probe, monkeypatch, _distinct_rows(200, seed=1))
-    max_entries = len(probe_chunks) + 5  # 1 output = n+1 <= cap; 2 outputs = 2n+2 > cap
-    # Self-check the arrangement (L1): one output must fit (anchor survives its own
-    # crush -> the setup guard passes) AND two outputs must exceed the cap (a later
-    # output evicts the anchor -> the OUTCOME assertion, not the setup guard, is
-    # what goes RED on main). Guards against a future n == 2 that would silently
-    # invert 2n+2 > n+5 and stop this being red-on-main.
-    assert 2 * (len(probe_chunks) + 1) > max_entries > len(probe_chunks) + 1
+    # One output = one entry (Design A). This test stores five distinct outputs;
+    # size the cap just above five so they all fit, but below twice five so a
+    # regression writing >=2 entries per output floods and evicts the anchor.
+    n_outputs = 5
+    max_entries = n_outputs + 3
+    assert n_outputs <= max_entries < 2 * n_outputs
 
     sqlite_backend = (
         SqliteBackend(db_path=tmp_path / "outcome.sqlite3") if backend_kind == "sqlite" else None
@@ -244,12 +232,12 @@ def test_handful_of_columnar_outputs_do_not_evict_within_cap_content(
         # Anchor = the first output. With the cap sized above one output's chunks
         # it survives its OWN crush on BOTH main and the branch, so this setup
         # guard passes either way — the RED is forced onto the OUTCOME assertion.
-        _c, anchor, _ch = _crush_into(store, monkeypatch, _distinct_rows(200, seed=1))
+        _c, anchor = _crush_into(store, monkeypatch, _distinct_rows(200, seed=1))
         assert store.retrieve(anchor) is not None, "anchor not stored — fixture broken"
 
-        # A handful more distinct outputs. On main their per-row chunks push the
-        # entry count past the cap and evict the anchor (oldest); on the branch
-        # each output is one entry, so all five fit with room to spare.
+        # A handful more distinct outputs. Each output is one entry, so all five
+        # fit under the cap with room to spare; a regression that writes extra
+        # entries per output would push past the cap and evict the anchor.
         for seed in range(2, 6):
             _crush_into(store, monkeypatch, _distinct_rows(200, seed=seed))
 
@@ -309,7 +297,7 @@ def test_inverted_physical_cap_loses_within_ttl_and_warns(
         # Store more distinct columnar outputs than the physical cap allows. Under
         # Design A each output is ONE physical row; all are within the default TTL
         # and well under the logical cap (10). Oldest = the first output.
-        _c, oldest, _ch = _crush_into(store, monkeypatch, _distinct_rows(200, seed=1))
+        _c, oldest = _crush_into(store, monkeypatch, _distinct_rows(200, seed=1))
         for seed in range(2, max_rows + 3):  # seeds 2..5 -> 5 outputs total > max_rows
             _crush_into(store, monkeypatch, _distinct_rows(200, seed=seed))
 

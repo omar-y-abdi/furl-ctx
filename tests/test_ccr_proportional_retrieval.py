@@ -1,42 +1,34 @@
-"""Effective-savings-UNDER-RETRIEVAL for the granular CCR offload.
+"""Whole-blob recovery + its honest effective-savings cost for a CCR row-drop.
 
-Held-out audit finding (``verify/heldout/REPORT.md`` leniency #2): the
-engine used to offload ALL dropped rows of an array into ONE CCR blob
-under a single ``<<ccr:HASH>>`` pointer. A single retrieve returns the
-WHOLE blob, so the moment the model needs even ONE dropped row it pays
-for the entire offloaded payload — effective savings can go NEGATIVE
-(``logs@90 high``: ``+55.7% @25% retrieval -> -10.3%`` worst case, i.e.
-MORE tokens than uncompressed).
+Held-out audit finding (``verify/heldout/REPORT.md`` leniency #2): the engine
+offloads ALL dropped rows of an array into ONE CCR blob under a single
+``<<ccr:HASH>>`` pointer. A single retrieve returns the WHOLE blob, so the
+moment the model needs even ONE dropped row it pays for the entire offloaded
+payload — effective savings can go NEGATIVE (``logs@90 high``: ``+55.7% @25%
+retrieval -> -10.3%`` worst case, i.e. MORE tokens than uncompressed).
 
-The granular model fixes this: every DROPPED row is also stored as its
-own individually-addressable chunk (``ccr_get(row_hash)`` returns exactly
-``[row]``), addressed through a per-blob row index. Retrieving one needed
-row now costs ONE row, not the whole blob — so effective savings stay
-PROPORTIONAL to what is actually retrieved.
+A granular per-row offload — a ``_ccr_rows`` index of individually-addressable
+per-row chunks — was once layered on top to make retrieval proportional. It
+never worked on the path the MODEL reads: the ``HASH#rows`` index key fails
+``is_valid_ccr_hash`` at the sole entry to ``furl_retrieve``, and the Python
+store never mirrored the chunks, so a per-row chunk was never resolvable
+through the production surface. It was removed (Design A, F8/#168): no
+``_ccr_rows`` index is emitted and no per-row chunk is stored anywhere.
 
-Two boundaries of the granular contract (COR-4 / COR-20):
+What remains — and what this test pins against the PRODUCTION store the model
+actually reads (``get_compression_store().retrieve``, the store MCP
+``furl_retrieve`` serves), NOT the crusher's Rust-side ``ccr_get`` handle the
+model never queries — is the whole-blob contract:
 
-* only DROPPED rows are chunked — kept rows are visible in the output and
-  are never written to the store, so one document's persists cannot flood
-  the bounded store and evict blobs its own markers still reference; and
-* when the dropped count exceeds the store's granular chunk budget
-  (``capacity / 4``), chunking is skipped entirely (no ``_ccr_rows``
-  index) and the whole-blob remains the sole — still byte-exact —
-  recovery key, so a huge array can never self-evict its own chunks.
+* a row-drop's whole-blob parent recovers every dropped row BYTE-EXACT, and
+* under whole-blob retrieval, pulling back even 25% of the rows pays for the
+  ENTIRE blob, so effective savings go NEGATIVE. That cost is the honest one;
+  the retired granular offload pretended to avoid it, and ``verify/measure.py``
+  now charges it directly at eff@25 / eff@50.
 
-This test reproduces the audit's effective-savings model on a real-shaped,
-deterministically-generated high-entropy logs array (no committed fixture,
-no synthetic benchmark file) and asserts:
-
-* the OLD whole-blob retrieval model goes NEGATIVE at >=25% retrieval
-  (reproducing the audit), AND
-* the NEW granular model stays POSITIVE (and well above the whole-blob
-  model) at every retrieval fraction in ``{0, 25, 50}%``.
-
-Token counts use the same ``o200k_base`` (gpt-4o) tiktoken encoding the
-engine uses. Retrieval cost is measured against the ACTUAL stored
-payloads (whole-blob vs per-row chunks) pulled back through the engine's
-own ``ccr_get`` surface — not an estimate.
+Token counts use the same ``o200k_base`` (gpt-4o) tiktoken encoding the engine
+uses. Retrieval cost is measured against the ACTUAL stored whole-blob payload
+the production store serves — not an estimate.
 """
 
 from __future__ import annotations
@@ -48,7 +40,7 @@ import re
 
 import pytest
 
-from furl_ctx.cache.compression_store import reset_compression_store
+from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
 tiktoken = pytest.importorskip("tiktoken")
@@ -60,10 +52,10 @@ def _toks(text: str) -> int:
 
 
 def _high_entropy_logs(n: int, seed: int) -> list[dict]:
-    """Deterministic, real-shaped, NEAR-UNIQUE log rows — the exact tier
-    where the single-blob model collapsed (fresh uuid-ish id + random
-    sha-ish commit + per-row service/level/message). Generated from a
-    seeded SHA stream so it is reproducible without a committed fixture.
+    """Deterministic, real-shaped, NEAR-UNIQUE log rows — the exact tier where
+    the single-blob model collapsed (fresh uuid-ish id + random sha-ish commit +
+    per-row service/level/message). Generated from a seeded SHA stream so it is
+    reproducible without a committed fixture.
     """
     rows: list[dict] = []
     services = ["api", "worker", "scheduler", "auth", "billing", "ingest"]
@@ -84,8 +76,8 @@ def _high_entropy_logs(n: int, seed: int) -> list[dict]:
 
 
 def _find_sentinel(node: object) -> dict | None:
-    """Return the ``{"_ccr_dropped": ..., "_ccr_rows": ...}`` sentinel
-    object from the parsed output tree, if present."""
+    """Return the ``{"_ccr_dropped": ...}`` sentinel object from the parsed
+    output tree, if present."""
     if isinstance(node, dict):
         if "_ccr_dropped" in node:
             return node
@@ -101,52 +93,17 @@ def _find_sentinel(node: object) -> dict | None:
     return None
 
 
-def _hash_from_marker(marker: str) -> str:
-    """Pull the key out of ``<<ccr:KEY <sep>...>>`` (KEY may carry a
-    ``#rows`` suffix for the granular index)."""
-    start = marker.index("<<ccr:") + len("<<ccr:")
-    rest = marker[start:]
-    end = rest.index(" ")
-    return rest[:end]
-
-
-def _count_from_marker(marker: str, suffix: str) -> int:
-    """Parse ``N`` out of ``<<ccr:KEY N_{suffix}>>`` (e.g. the dropped
-    count from ``..._rows_offloaded`` or the chunk count from
-    ``..._chunks``)."""
-    m = re.search(rf" (\d+)_{re.escape(suffix)}>>", marker)
-    assert m is not None, f"marker {marker!r} does not advertise a {suffix} count"
-    return int(m.group(1))
-
-
-def _is_ordered_subsequence(sub: list, full: list) -> bool:
-    """True iff ``sub``'s elements appear in ``full`` in the same relative
-    order (byte-exact equality, two-pointer walk)."""
-    pos = 0
-    for row in sub:
-        while pos < len(full) and full[pos] != row:
-            pos += 1
-        if pos == len(full):
-            return False
-        pos += 1
-    return True
-
-
 def _sentinel_from_output(compressed: str) -> dict | None:
-    """Locate the ``{"_ccr_dropped": ...}`` sentinel in a compressed
-    output. Two renders are possible:
-
-    * a JSON array/object tree whose last element is the sentinel object
-      (the plain lossy row-drop path), or
-    * a JSON STRING wrapping a CSV-schema table whose LAST LINE is the
-      sentinel object (the survivor-compaction path).
+    """Locate the ``{"_ccr_dropped": ...}`` sentinel in a compressed output.
+    Two renders are possible: a JSON array/object tree whose last element is the
+    sentinel (the plain lossy row-drop path), or a JSON STRING wrapping a
+    CSV-schema table whose LAST LINE is the sentinel (the survivor-compaction
+    path).
     """
     tree = json.loads(compressed)
     found = _find_sentinel(tree)
     if found is not None:
         return found
-    # Survivor-compaction: the payload is a string; the sentinel is its
-    # final newline-delimited line.
     if isinstance(tree, str):
         last_line = tree.strip().rsplit("\n", 1)[-1]
         try:
@@ -158,195 +115,114 @@ def _sentinel_from_output(compressed: str) -> dict | None:
     return None
 
 
-def _compress(items: list[dict]) -> tuple[str, object, dict]:
-    reset_compression_store()
-    router = ContentRouter(ContentRouterConfig())
-    result = router.compress(json.dumps(items, ensure_ascii=False))
-    crusher = router._get_smart_crusher()
-    sentinel = _sentinel_from_output(result.compressed)
-    assert sentinel is not None, "expected a lossy drop with a CCR sentinel"
-    return result.compressed, crusher, sentinel
+def _hash_from_marker(marker: str) -> str:
+    """Pull the KEY out of ``<<ccr:KEY <sep>...>>``."""
+    start = marker.index("<<ccr:") + len("<<ccr:")
+    rest = marker[start:]
+    end = rest.index(" ")
+    return rest[:end]
 
 
-def _effective_savings(
-    *,
-    raw_tokens: int,
-    compressed_tokens: int,
-    retrieved_tokens: int,
-) -> float:
+def _count_from_marker(marker: str, suffix: str) -> int:
+    """Parse ``N`` out of ``<<ccr:KEY N_{suffix}>>`` (e.g. the dropped count
+    from ``..._rows_offloaded``)."""
+    m = re.search(rf" (\d+)_{re.escape(suffix)}>>", marker)
+    assert m is not None, f"marker {marker!r} does not advertise a {suffix} count"
+    return int(m.group(1))
+
+
+def _effective_savings(*, raw_tokens: int, compressed_tokens: int, retrieved_tokens: int) -> float:
     """Effective savings = 1 - (compressed_on_wire + retrieved) / raw.
 
-    Mirrors the auditor's model: the consumer pays for the compressed
-    prompt PLUS whatever it pulls back via retrieval. Negative = the
-    retrieval made the whole thing cost MORE than the uncompressed
-    original.
+    Mirrors the auditor's model: the consumer pays for the compressed prompt
+    PLUS whatever it pulls back via retrieval. Negative = the retrieval made the
+    whole thing cost MORE than the uncompressed original.
     """
     if raw_tokens == 0:
         return 0.0
     return 1.0 - (compressed_tokens + retrieved_tokens) / raw_tokens
 
 
-@pytest.mark.parametrize("retrieval_fraction", [0.0, 0.25, 0.50])
-def test_granular_retrieval_stays_positive(retrieval_fraction: float) -> None:
-    items = _high_entropy_logs(90, seed=2000)
-    raw = json.dumps(items, ensure_ascii=False)
-    raw_tokens = _toks(raw)
+def _compress(items: list[dict]) -> dict:
+    """Compress ``items`` and return ``{"compressed", "sentinel"}``. Resets the
+    production compression store first so the whole-blob mirror lands in a
+    known-empty store (the same store ``furl_retrieve`` reads)."""
+    reset_compression_store()
+    router = ContentRouter(ContentRouterConfig())
+    result = router.compress(json.dumps(items, ensure_ascii=False))
+    sentinel = _sentinel_from_output(result.compressed)
+    assert sentinel is not None, "expected a lossy drop with a CCR sentinel"
+    return {"compressed": result.compressed, "sentinel": sentinel}
 
-    compressed, crusher, sentinel = _compress(items)
-    compressed_tokens = _toks(compressed)
 
-    # ── Whole-blob retrieval cost (OLD model) ──
-    # A single `<<ccr:HASH>>` retrieve returns the WHOLE offloaded blob,
-    # so ANY non-zero retrieval pays for the entire payload.
+def _recover_whole_blob(sentinel: dict) -> str:
+    """Recover the whole-blob parent through the PRODUCTION store the model
+    reads (``get_compression_store``) — the store MCP ``furl_retrieve`` serves,
+    NOT the crusher's process-local Rust ``ccr_get`` handle the model never
+    queries. Returns the stored canonical-JSON payload."""
     blob_hash = _hash_from_marker(sentinel["_ccr_dropped"])
-    blob_payload = crusher.ccr_get(blob_hash)
-    assert blob_payload is not None, "whole-blob must resolve"
-    # Byte-exact recovery, not mere presence: the whole blob must round-trip to
-    # the ORIGINAL rows. A mutation that corrupts a row but keeps the payload
-    # non-None passes `is not None` — it must fail this content equality.
-    assert json.loads(blob_payload) == items, "whole-blob must recover the original rows exactly"
-    blob_tokens = _toks(blob_payload)
+    entry = get_compression_store().retrieve(blob_hash)
+    assert entry is not None, "whole-blob must resolve from the PRODUCTION store"
+    return entry.original_content
 
-    # ── Granular retrieval cost (NEW model) ──
-    # The `_ccr_rows` marker names a per-blob row index → per-row chunks.
-    # Retrieving k rows costs only those k rows.
-    assert "_ccr_rows" in sentinel, "granular model must surface a row index"
-    index_key = _hash_from_marker(sentinel["_ccr_rows"])
-    assert index_key.endswith("#rows")
-    index_raw = crusher.ccr_get(index_key)
-    assert index_raw is not None, "row index must resolve"
-    row_hashes = json.loads(index_raw)
-    # Dropped-rows-only persist (COR-4): the index holds one chunk per
-    # DROPPED row — kept rows stay visible in the output and are never
-    # written to the store. Cross-check the count against the INDEPENDENT
-    # source: the dropped count the `_ccr_dropped` marker advertises.
+
+def test_row_drop_whole_blob_recovers_byte_exact() -> None:
+    """A high-entropy row-drop's whole-blob parent recovers every dropped row
+    BYTE-EXACT through the production store, and the output advertises NO
+    granular ``_ccr_rows`` index (the retired per-row offload)."""
+    items = _high_entropy_logs(90, seed=2000)
+    out = _compress(items)
+    sentinel = out["sentinel"]
+
+    assert "_ccr_rows" not in sentinel, "the retired granular row index must not be advertised"
+
+    # Byte-exact recovery, not mere presence: a mutation that corrupts a row but
+    # keeps the payload non-None must fail this content equality.
+    assert json.loads(_recover_whole_blob(sentinel)) == items, (
+        "whole-blob must recover the original rows exactly"
+    )
+
     n_dropped = _count_from_marker(sentinel["_ccr_dropped"], "rows_offloaded")
     assert 0 < n_dropped < len(items), "a lossy drop must keep a visible sample"
-    assert len(row_hashes) == n_dropped, "one chunk per DROPPED row (kept rows never chunked)"
-    # COR-20: the `_ccr_rows` marker advertises EXACTLY the number of
-    # chunks the index holds — no model-visible lie.
-    n_chunks = _count_from_marker(sentinel["_ccr_rows"], "chunks")
-    assert n_chunks == len(row_hashes), (
-        f"marker advertises {n_chunks} chunks but the index holds {len(row_hashes)}"
-    )
-    # The granular contract is not just "a chunk exists per dropped row" —
-    # each chunk must resolve to its OWN single original row, byte-exact,
-    # preserving the original relative order. This catches a corrupted or
-    # mis-indexed chunk that the count check and `is not None` would miss.
-    reconstructed = [json.loads(crusher.ccr_get(rh))[0] for rh in row_hashes]
-    assert _is_ordered_subsequence(reconstructed, items), (
-        "per-row chunks must recover their original rows exactly, in original order"
-    )
-
-    # Number of rows the model needs to pull back.
-    k = math.ceil(retrieval_fraction * len(items))
-
-    # Whole-blob: any k>0 pays the full blob; k==0 pays nothing.
-    whole_blob_retrieved = blob_tokens if k > 0 else 0
-
-    # Granular: pay only for the k retrieved per-row chunks (worst-case
-    # the k largest rows). Each chunk is `[row]`; we strip the 2-char
-    # array brackets so we are not double-charging the wrapper, matching
-    # how the rows would be served back inline.
-    chunk_tokens = sorted(
-        (_toks(crusher.ccr_get(rh) or "[]") for rh in row_hashes),
-        reverse=True,
-    )
-    granular_retrieved = sum(chunk_tokens[:k])
-
-    eff_whole = _effective_savings(
-        raw_tokens=raw_tokens,
-        compressed_tokens=compressed_tokens,
-        retrieved_tokens=whole_blob_retrieved,
-    )
-    eff_granular = _effective_savings(
-        raw_tokens=raw_tokens,
-        compressed_tokens=compressed_tokens,
-        retrieved_tokens=granular_retrieved,
-    )
-
-    print(
-        f"\nretrieval={retrieval_fraction:.0%} k={k}/{len(items)} "
-        f"raw={raw_tokens} compressed={compressed_tokens} "
-        f"blob={blob_tokens} granular_retrieved={granular_retrieved} "
-        f"| eff_whole_blob={eff_whole:+.1%} eff_granular={eff_granular:+.1%}"
-    )
-
-    # The granular model never costs MORE than the whole-blob model.
-    assert eff_granular >= eff_whole - 1e-9
-
-    # The granular model stays POSITIVE at every retrieval fraction —
-    # the audit's negative-savings failure no longer occurs.
-    assert eff_granular > 0.0, (
-        f"granular effective savings went non-positive ({eff_granular:+.1%}) "
-        f"at {retrieval_fraction:.0%} retrieval"
-    )
 
 
-def test_whole_blob_model_reproduces_audit_negative() -> None:
-    """Sanity anchor: confirm the OLD whole-blob model DOES collapse on
-    this tier (so the granular win above is real, not a tier that never
-    had the problem). At >=25% retrieval the whole-blob effective savings
-    must be far below the granular savings."""
+@pytest.mark.parametrize("retrieval_fraction", [0.25, 0.50])
+def test_whole_blob_retrieval_cost_goes_negative(retrieval_fraction: float) -> None:
+    """Honest cost model (audit reproduction): under whole-blob retrieval,
+    pulling back even 25% of the dropped rows pays for the ENTIRE offloaded
+    blob, so effective savings go NEGATIVE — the compressed prompt plus the
+    retrieved blob costs MORE than the uncompressed original.
+
+    The retired granular offload pretended to avoid this; with it gone the
+    number is reported, not hidden. ``verify/measure.py`` charges this same
+    whole-blob cost at eff@25 / eff@50.
+    """
     items = _high_entropy_logs(90, seed=2000)
     raw_tokens = _toks(json.dumps(items, ensure_ascii=False))
-    compressed, crusher, sentinel = _compress(items)
-    compressed_tokens = _toks(compressed)
+    out = _compress(items)
+    compressed_tokens = _toks(out["compressed"])
 
-    blob_tokens = _toks(crusher.ccr_get(_hash_from_marker(sentinel["_ccr_dropped"])))
-    index_raw = crusher.ccr_get(_hash_from_marker(sentinel["_ccr_rows"]))
-    row_hashes = json.loads(index_raw)
-
-    k = math.ceil(0.25 * len(items))
+    blob_tokens = _toks(_recover_whole_blob(out["sentinel"]))
+    k = math.ceil(retrieval_fraction * len(items))
     eff_whole = _effective_savings(
         raw_tokens=raw_tokens,
         compressed_tokens=compressed_tokens,
-        retrieved_tokens=blob_tokens,  # any retrieval = full blob
+        retrieved_tokens=blob_tokens if k > 0 else 0,  # any retrieval = the full blob
     )
-    chunk_tokens = sorted((_toks(crusher.ccr_get(rh) or "[]") for rh in row_hashes), reverse=True)
-    eff_granular = _effective_savings(
-        raw_tokens=raw_tokens,
-        compressed_tokens=compressed_tokens,
-        retrieved_tokens=sum(chunk_tokens[:k]),
-    )
-    # The headline premise of this anchor test (and the audit it reproduces):
-    # under whole-blob retrieval, pulling back even 25% of the rows pays for the
-    # ENTIRE offloaded blob, so effective savings go NEGATIVE — the compressed
-    # prompt plus the retrieved blob costs MORE than the uncompressed original.
-    # Pin the SIGN directly; the relative-gap assertion below cannot catch a
-    # regression that lifted whole-blob back to positive while still trailing
-    # granular.
     assert eff_whole < 0.0, (
-        f"whole-blob effective savings must go negative at 25% retrieval "
-        f"(audit reproduction); got {eff_whole:+.1%}"
+        f"whole-blob effective savings must go negative at {retrieval_fraction:.0%} "
+        f"retrieval (audit reproduction); got {eff_whole:+.1%}"
     )
-    # Granular must be strictly, materially better than whole-blob here.
-    assert eff_granular > eff_whole + 0.10
 
 
-def test_oversized_array_skips_granular_index_but_recovers_whole_blob() -> None:
-    """COR-4 store-flood gate: an array whose DROPPED count exceeds the
-    store's granular chunk budget (``capacity / 4`` = 250 on the default
-    1000-entry store) skips per-row chunking entirely — no ``_ccr_rows``
-    index is advertised. This is what keeps one document's markers
-    honest: a huge array's chunk flood used to evict its OWN earliest
-    chunks (and a second array's flood evicted the FIRST array's
-    whole-blob), leaving surfaced ``<<ccr:HASH>>`` pointers that resolved
-    to nothing. Proportional retrieval intentionally degrades to
-    whole-blob retrieval here; recovery does not degrade at all."""
+def test_oversized_drop_recovers_whole_blob() -> None:
+    """A large array's row-drop recovers byte-exact from the whole-blob parent
+    through the production store and advertises no granular index. (Pre-Design-A
+    a drop this size skipped granular chunking to avoid a store flood; now no
+    size ever chunks.)"""
     items = _high_entropy_logs(1100, seed=2001)
-    _compressed, crusher, sentinel = _compress(items)
-
-    # No granular index for oversized drops — the corrected contract.
-    assert "_ccr_rows" not in sentinel, (
-        "an oversized drop must not advertise a granular row index; the chunk "
-        "flood would evict entries this document's own markers reference"
-    )
-
-    # The whole-blob pointer remains and recovers byte-exactly.
-    blob_hash = _hash_from_marker(sentinel["_ccr_dropped"])
-    blob_payload = crusher.ccr_get(blob_hash)
-    assert blob_payload is not None, "whole-blob must resolve for oversized drops"
-    assert json.loads(blob_payload) == items, (
+    out = _compress(items)
+    assert "_ccr_rows" not in out["sentinel"], "no granular row index is ever advertised"
+    assert json.loads(_recover_whole_blob(out["sentinel"])) == items, (
         "whole-blob must recover the original rows byte-exactly"
     )

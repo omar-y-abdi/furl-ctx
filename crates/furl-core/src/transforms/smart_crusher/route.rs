@@ -14,7 +14,7 @@ use super::compaction::{ColumnEncoding, Compaction};
 use super::config::RoutingPolicy;
 use super::crusher::{CrushArrayResult, SmartCrusher};
 use super::field_role::compute_exclude_set;
-use super::persist::{ccr_sentinel_map, dropped_indices_from_kept, CcrWrite, PersistMode};
+use super::persist::{ccr_sentinel_map, CcrWrite, PersistMode};
 use super::types::{ArrayAnalysis, CompressionStrategy, DroppedRef};
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
@@ -82,7 +82,6 @@ impl LosslessCandidate {
             dropped_summary: String::new(),
             compacted: Some(self.rendered),
             compaction_kind: Some(self.kind),
-            row_index_marker: None,
             dropped_refs: self.dropped_refs,
         }
     }
@@ -117,7 +116,6 @@ fn passthrough_result(items: &[Value], strategy_info: String) -> CrushArrayResul
         dropped_summary: String::new(),
         compacted: None,
         compaction_kind: None,
-        row_index_marker: None,
         dropped_refs: Vec::new(),
     }
 }
@@ -766,23 +764,20 @@ impl SmartCrusher {
         // surviving rows, so their complement is EXACTLY the dropped
         // set — threaded through so only dropped rows get granular
         // chunks (COR-4: kept rows must never flood the bounded store).
-        let dropped_indices = dropped_indices_from_kept(&plan.keep_indices, items.len());
-        let (ccr_hash, dropped_summary, row_index_marker, row_drop_refs, pending_ccr_writes) =
-            match self.persist_dropped(items, dropped_count, &dropped_indices, persist_mode) {
+        let (ccr_hash, dropped_summary, row_drop_refs, pending_ccr_writes) =
+            match self.persist_dropped(items, dropped_count, persist_mode) {
                 Some(persisted) => {
-                    let row_index_marker = persisted.row_index_marker();
-                    // The typed carrier for this drop — same hash + chunk
-                    // count the sentinel advertises (§4.2).
+                    // The typed carrier for this drop — same hash the
+                    // sentinel advertises (§4.2).
                     let refs = vec![persisted.dropped_ref()];
                     (
                         Some(persisted.hash),
                         persisted.marker,
-                        row_index_marker,
                         refs,
                         persisted.pending_writes,
                     )
                 }
-                None => (None, String::new(), None, Vec::new(), Vec::new()),
+                None => (None, String::new(), Vec::new(), Vec::new()),
             };
 
         // ── Survivor compaction: lossless re-encoding of the kept rows ──
@@ -828,7 +823,7 @@ impl SmartCrusher {
                 // adjusted compaction.
                 let rendered = stage.formatter.format(&c);
                 if c.is_decoder_verifiable() && !c.contains_opaque_ref() {
-                    let sentinel = ccr_sentinel_map(&dropped_summary, row_index_marker.as_deref());
+                    let sentinel = ccr_sentinel_map(&dropped_summary);
                     let sentinel_line = crate::util::pyjson::python_safe_json_dumps(
                         &Value::Object(sentinel.clone()),
                     );
@@ -877,7 +872,6 @@ impl SmartCrusher {
                                 dropped_summary,
                                 compacted: Some(rendered_with_sentinel),
                                 compaction_kind: Some(kind),
-                                row_index_marker,
                                 dropped_refs,
                             },
                             pending_ccr_writes,
@@ -895,7 +889,6 @@ impl SmartCrusher {
                 dropped_summary,
                 compacted: None,
                 compaction_kind: None,
-                row_index_marker,
                 dropped_refs: row_drop_refs,
             },
             pending_ccr_writes,
@@ -939,10 +932,7 @@ impl SmartCrusher {
         let sentinel = if result.dropped_summary.is_empty() {
             None
         } else {
-            Some(Value::Object(ccr_sentinel_map(
-                &result.dropped_summary,
-                result.row_index_marker.as_deref(),
-            )))
+            Some(Value::Object(ccr_sentinel_map(&result.dropped_summary)))
         };
         let mut out = String::new();
         out.push('[');
@@ -1572,20 +1562,28 @@ mod tests {
 
     #[test]
     fn small_array_ships_lossless_when_savings_substantial() {
-        // 8 rows — `compute_optimal_k` returns n for n <= 8, so this is
-        // guaranteed inside the tier-1 passthrough zone (the SMALL
-        // path, not the big-array lossless attempt). Enough repeated-
-        // key overhead that the CSV rendering saves ≥ 256 bytes AND
-        // ≥ the ratio gate → lossless ships, nothing dropped.
+        // 8 rows whose columnar table DECISIVELY beats the lossy render:
+        // only `filesystem` varies, so the CSV schema folds four constant
+        // columns to one-line preambles and the 8-row table is far smaller
+        // than a keep-1 lossy render plus its recovery sentinel — lossless
+        // wins MinTokens robustly, nothing dropped.
+        //
+        // (This fixture previously varied three fields and sat on the
+        // MinTokens knife-edge: it shipped lossless ONLY because the old
+        // `_ccr_rows` granular marker padded the lossy candidate. With that
+        // unusable marker removed the lossy render is honestly smaller, so
+        // such borderline shapes now ship lossy — a deliberate, recoverable
+        // "output smaller" outcome. The fixture is tightened here to pin the
+        // lossless path off that knife-edge.)
         let c = crusher();
         let items: Vec<Value> = (0..8)
             .map(|i| {
                 json!({
                     "filesystem": format!("/dev/disk1s{i}"),
                     "kilobytes_total": 971350180,
-                    "kilobytes_used": 543210 + i,
+                    "kilobytes_used": 543210,
                     "capacity_percent": "85%",
-                    "mounted_on": format!("/Volumes/vol_{i}"),
+                    "mounted_on": "/Volumes/Data",
                 })
             })
             .collect();
@@ -2159,22 +2157,12 @@ mod tests {
             canonical_array_json(&items),
             "whole-blob recovery must be byte-exact"
         );
-        // Granular row chunks resolve byte-exact too.
-        let dropped = items.len() - result.items.len();
-        let index_raw = store
-            .get(&format!("{h}#rows"))
-            .expect("row index committed on ship");
-        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
-        assert_eq!(row_hashes.len(), dropped, "one chunk per dropped row");
-        for rh in &row_hashes {
-            let chunk = store.get(rh).expect("row chunk retrievable");
-            let arr: Vec<Value> = serde_json::from_str(&chunk).unwrap();
-            assert_eq!(arr.len(), 1, "each chunk holds exactly one row");
-            assert!(
-                items.contains(&arr[0]),
-                "chunk must be byte-exact one original row"
-            );
-        }
+        // No granular `#rows` index is written — the store holds one
+        // entry (the whole-blob) per drop.
+        assert!(
+            store.get(&format!("{h}#rows")).is_none(),
+            "no granular row index is written"
+        );
         // MinTokens honored: strictly fewer tokens than the raw array.
         let shipped_tokens = c.render_token_count(&result);
         let raw = crate::util::pyjson::python_safe_json_dumps(&Value::Array(items.clone()));
@@ -3502,25 +3490,16 @@ mod tests {
             Some(canonical_array_json(&items).as_str()),
             "shipped lossy render must persist the whole-blob (unconditional)"
         );
-        // Granular index + one chunk per dropped row committed too (this
-        // drop is well inside the capacity/4 budget).
-        let idx_marker = r
-            .row_index_marker
-            .as_ref()
-            .expect("store-backed in-budget drop advertises the row index");
-        let index_raw = store
-            .get(&format!("{h}#rows"))
-            .expect("row index must be committed when the lossy render ships");
-        let row_hashes: Vec<String> = serde_json::from_str(&index_raw).unwrap();
-        assert_eq!(row_hashes.len(), dropped, "one chunk per dropped row");
+        // A row-drop commits EXACTLY ONE store entry — the whole-blob. No
+        // granular `#rows` index or per-row chunks are written.
         assert!(
-            idx_marker.contains(&format!("#rows {}_chunks>>", row_hashes.len())),
-            "marker advertises exactly the committed chunk count, got: {idx_marker}"
+            store.get(&format!("{h}#rows")).is_none(),
+            "no granular row index is committed"
         );
         assert_eq!(
             store.len(),
-            dropped + 2,
-            "chunks + index + whole-blob — nothing more, nothing less"
+            1,
+            "the whole-blob is the only committed entry — nothing more"
         );
     }
 

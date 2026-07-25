@@ -126,77 +126,6 @@ def _emitted_drop_hashes(output_text: str) -> set[str]:
     return hashes
 
 
-def _find_sentinel_object(output_text: str) -> dict[str, Any] | None:
-    """Locate the ``{"_ccr_dropped": ..., "_ccr_rows": ...}`` sentinel object
-    in a compressed output (a JSON array/object tree, or a JSON-string-wrapped
-    CSV-schema table whose final line is the sentinel)."""
-
-    def walk(node: Any) -> dict[str, Any] | None:
-        if isinstance(node, dict):
-            if "_ccr_dropped" in node:
-                return node
-            for v in node.values():
-                found = walk(v)
-                if found is not None:
-                    return found
-        elif isinstance(node, list):
-            for x in node:
-                found = walk(x)
-                if found is not None:
-                    return found
-        return None
-
-    try:
-        tree = json.loads(output_text)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    found = walk(tree)
-    if found is not None:
-        return found
-    if isinstance(tree, str):
-        last_line = tree.strip().rsplit("\n", 1)[-1]
-        try:
-            obj = json.loads(last_line)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        if isinstance(obj, dict) and "_ccr_dropped" in obj:
-            return obj
-    return None
-
-
-def _marker_key(marker: str) -> str | None:
-    """Pull the key out of ``<<ccr:KEY <sep>...>>`` (KEY may carry a ``#rows``
-    suffix for the granular row index)."""
-    start = marker.find(CCR_PREFIX)
-    if start == -1:
-        return None
-    rest = marker[start + len(CCR_PREFIX) :]
-    end = len(rest)
-    for sep in (" ", ",", ">>"):
-        pos = rest.find(sep)
-        if pos != -1:
-            end = min(end, pos)
-    key = rest[:end]
-    return key or None
-
-
-def _active_crusher() -> Any:
-    """The SmartCrusher on the live singleton pipeline ``compress()`` just used
-    — its Rust CCR store holds the per-row chunks Frontier A wrote. Reaching it
-    via the engine's own public ``ccr_get`` is exactly what the engine's
-    proportional-retrieval test does. Returns ``None`` if unreachable."""
-    try:
-        from furl_ctx.compress import _get_pipeline
-
-        pipeline = _get_pipeline()
-        for transform in getattr(pipeline, "transforms", []):
-            if type(transform).__name__ == "ContentRouter":
-                return transform._get_smart_crusher()
-    except Exception:  # pragma: no cover - defensive; falls back to whole-blob
-        return None
-    return None
-
-
 def _retrieve_originals(hashes: set[str], query: str | None) -> dict[str, str]:
     """Retrieve original content per hash from the engine's CCR store."""
     store = get_compression_store()
@@ -416,51 +345,6 @@ def hash_compare_code(items: list[str], result_messages: list[dict[str, Any]]) -
 # ---------------------------------------------------------------------------
 
 
-def per_row_chunk_tokens(output_text: str, tok: Tokenizer) -> list[int] | None:
-    """REAL per-row retrieval cost (Frontier A's granular offload).
-
-    The granular CCR offload (commit cbf16a85) stores every dropped row as its
-    own individually-addressable canonical 1-element chunk and surfaces a single
-    ``_ccr_rows`` index marker (``<<ccr:HASH#rows N_chunks>>``). Retrieving ONE
-    row now fetches exactly that one row's chunk — not the whole blob — so the
-    retrieval cost is the sum of the ACTUAL chunk payloads pulled, not a
-    proportional slice of one monolithic blob.
-
-    We resolve the index and each per-row chunk through the engine's OWN
-    ``ccr_get`` surface (identical to ``tests/test_ccr_proportional_retrieval``),
-    and token-count the chunk bytes the engine would actually serve back.
-    Returns the per-chunk token sizes (one per dropped row), or ``None`` if the
-    output carries no granular row index (nothing offloaded / no store).
-    """
-    sentinel = _find_sentinel_object(output_text)
-    if sentinel is None or "_ccr_rows" not in sentinel:
-        return None
-    index_key = _marker_key(sentinel["_ccr_rows"])
-    if index_key is None:
-        return None
-    crusher = _active_crusher()
-    if crusher is None:
-        return None
-    index_raw = crusher.ccr_get(index_key)
-    if index_raw is None:
-        return None
-    try:
-        row_hashes = json.loads(index_raw)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(row_hashes, list):
-        return None
-    sizes: list[int] = []
-    for rh in row_hashes:
-        if not isinstance(rh, str):
-            continue
-        chunk = crusher.ccr_get(rh)
-        if chunk is None:
-            return None  # an unresolvable chunk => cannot model granular cost
-        sizes.append(tok.count_text(chunk))
-    return sizes
-
-
 def effective_savings(
     tokens_before: int,
     tokens_after: int,
@@ -468,42 +352,30 @@ def effective_savings(
     tok: Tokenizer,
     rates: tuple[float, ...] = (0.0, 0.25, 0.50),
     n_dropped_rows: int = 0,
-    chunk_tokens: list[int] | None = None,
 ) -> dict[str, float]:
     """Effective savings ratio once the model retrieves a fraction of the
-    DROPPED ROWS, INCLUDING round-trip overhead — REAL granular-retrieval cost.
+    DROPPED ROWS, INCLUDING round-trip overhead.
 
-    Now that the engine offloads each dropped row as its own addressable chunk
-    (Frontier A, commit cbf16a85), retrieving ``k`` rows costs only those ``k``
-    chunks. We charge the ACTUAL bytes of the ``k`` LARGEST chunks (worst-case
-    the model needs the biggest rows first) plus a per-call overhead — exactly
-    the model the engine's own ``test_ccr_proportional_retrieval`` asserts:
+    The engine offloads dropped rows behind ONE whole-blob recovery pointer, so
+    ANY non-zero retrieval pays back the entire offloaded payload — the
+    conservative whole-blob model, which never flatters the engine:
 
         k = ceil(r * n_dropped_rows)
-        retrieval_cost(r) = sum(sorted(chunk_tokens, desc)[:k])
+        retrieval_cost(r) = (total_offloaded_tokens if k > 0 else 0)
                             + k * per_call_overhead
 
     effective_after = tokens_after + retrieval_cost; savings =
     (before - effective_after) / before. At r=0 cost is 0 (savings == raw
-    reduction); at r=1 you pay back every offloaded chunk.
+    reduction); at r>0 you pay back the whole offloaded payload.
 
-    Fallback: if the granular row index is unavailable (``chunk_tokens is
-    None``) we fall back to the conservative WHOLE-BLOB model — ANY non-zero
-    retrieval pays the entire offloaded payload — which is the pre-granular
-    worst case and never flatters the engine.
+    A granular per-row model was once also computed here (charging only the
+    ``k`` retrieved chunks), but the unconsumable ``_ccr_rows`` index it read was
+    removed (F8, PR #168): no output emits a row index and no per-row chunk is
+    stored, so whole-blob is the only honest cost. This is why eff@25 / eff@50
+    read lower than pre-removal figures — those measured a per-row retrieval the
+    model could never perform.
     """
     out: dict[str, float] = {}
-    if chunk_tokens is not None:
-        ordered = sorted(chunk_tokens, reverse=True)
-        for r in rates:
-            k = int(math.ceil(r * n_dropped_rows))
-            content_cost = sum(ordered[:k])
-            call_cost = k * RETRIEVE_CALL_OVERHEAD_TOKENS
-            effective_after = tokens_after + content_cost + call_cost
-            savings = (tokens_before - effective_after) / tokens_before if tokens_before else 0.0
-            out[f"{int(r * 100)}"] = savings
-        return out
-
     total_offloaded_tokens = sum(tok.count_text(blob) for blob in recovered.values())
     for r in rates:
         k = int(math.ceil(r * n_dropped_rows))
@@ -741,8 +613,7 @@ def _measure_structured(case, result, transforms, tb, ta, tr, tok) -> CaseResult
     retention = (n_visible + n_recoverable) / n if n else 1.0
 
     hc = hash_compare_structured(case.items, output_text, recovered)
-    chunks = per_row_chunk_tokens(output_text, tok)
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks)
+    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
 
     needles: list[dict[str, Any]] = []
     markers = case.meta.get("needle_markers", [])
@@ -838,12 +709,7 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
     reconstructed_sha = _multiset_sha(recon_sigs)
     byte_exact = reconstructed_sha == original_sha and not missing
 
-    chunks = None
-    for t in texts:
-        chunks = per_row_chunk_tokens(t, tok)
-        if chunks is not None:
-            break
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped, chunk_tokens=chunks)
+    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
 
     cp = check_cache_prefix(case.messages, result.messages, case.meta.get("cache_prefix_texts", []))
     cache_prefix = {

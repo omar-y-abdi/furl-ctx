@@ -163,8 +163,8 @@ Two families:
 
 - **Double-angle `<<ccr:...>>`.** The bare `<<ccr:HASH>>`, plus annotated forms
   that carry a count or kind after the hash: `<<ccr:HASH N_rows_offloaded>>`,
-  `<<ccr:HASH#rows N_chunks>>`, `<<ccr:HASH,KIND,SIZE>>`,
-  `<<ccr:HASH N_bytes_duplicate>>`, and `<<ccr:HASH N_bytes_near_duplicate>>`.
+  `<<ccr:HASH,KIND,SIZE>>`, `<<ccr:HASH N_bytes_duplicate>>`, and
+  `<<ccr:HASH N_bytes_near_duplicate>>`.
 - **Bracket forms.** Readable sentences that end in a hash:
   `[N items compressed to M. Retrieve more: hash=H]`,
   `[N lines compressed to M. Retrieve full diff: hash=H]`, and
