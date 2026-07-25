@@ -49,9 +49,11 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from itertools import accumulate, islice
 from typing import TYPE_CHECKING, Any
 
 from ..config import (
@@ -189,10 +191,8 @@ def _huge_content_bytes() -> int:
 
     raw = os.environ.get("FURL_MAX_COMPRESS_BYTES")
     if raw:
-        try:
+        with suppress(ValueError):
             return max(1, int(raw))
-        except ValueError:
-            pass
     return _HUGE_CONTENT_BYTES_DEFAULT
 
 
@@ -836,20 +836,14 @@ class ContentCompressionEngine:
         """
         n = len(rows)
         # --- Pass 1: per-field aggregates (single scan over rows). ---
-        type_counts: dict[str, Counter[str]] = {}
-        value_counts: dict[str, Counter[Any]] = {}
+        type_counts: defaultdict[str, Counter[str]] = defaultdict(Counter)
+        value_counts: defaultdict[str, Counter[Any]] = defaultdict(Counter)
         numeric_ranges: dict[str, tuple[float, float]] = {}
         for row in rows:
             for field_name, value in row.items():
-                tc = type_counts.get(field_name)
-                if tc is None:
-                    tc = type_counts[field_name] = Counter()
-                tc[self._type_name(value)] += 1
+                type_counts[field_name][self._type_name(value)] += 1
                 if self._is_hashable_scalar(value):
-                    vc = value_counts.get(field_name)
-                    if vc is None:
-                        vc = value_counts[field_name] = Counter()
-                    vc[value] += 1
+                    value_counts[field_name][value] += 1
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     lo, hi = numeric_ranges.get(field_name, (value, value))
                     numeric_ranges[field_name] = (min(lo, value), max(hi, value))
@@ -1001,12 +995,9 @@ class ContentCompressionEngine:
         count = min(_SUMMARY_SAMPLE_ROWS, n)
         if count == 1:
             return [0]
-        seen: list[int] = []
-        for step in range(count):
-            index = step * (n - 1) // (count - 1)
-            if index not in seen:
-                seen.append(index)
-        return seen
+        # dict.fromkeys dedups preserving first-occurrence order (the indices are
+        # already non-decreasing), without the O(n²) ``not in`` list scan.
+        return list(dict.fromkeys(step * (n - 1) // (count - 1) for step in range(count)))
 
     @staticmethod
     def _extract_error_lines(omitted: list[str]) -> list[str]:
@@ -1023,13 +1014,19 @@ class ContentCompressionEngine:
         surfaced line can carry a masked ``[REDACTED:...]`` token but never a
         live secret.
         """
-        surfaced: list[str] = []
-        for line in omitted:
-            if _OFFLOAD_SEVERITY_RE.search(line):
-                surfaced.append(line[:_OFFLOAD_ERROR_LINE_MAX_CHARS])
-                if len(surfaced) >= _OFFLOAD_ERROR_LINES_MAX:
-                    break
-        return surfaced
+        # ``islice`` pulls exactly _OFFLOAD_ERROR_LINES_MAX matches then stops,
+        # so no line past the last surfaced one is ever scanned — same
+        # short-circuit (and same regex-call count) as the old ``break``.
+        return list(
+            islice(
+                (
+                    line[:_OFFLOAD_ERROR_LINE_MAX_CHARS]
+                    for line in omitted
+                    if _OFFLOAD_SEVERITY_RE.search(line)
+                ),
+                _OFFLOAD_ERROR_LINES_MAX,
+            )
+        )
 
     def _build_offload_preview(self, content: str) -> tuple[list[Any] | str, int]:
         """Identity preview of *content*: for a JSON array of objects, and for a
@@ -1435,11 +1432,10 @@ def run_router_passes(
     suffix_tokens: list[int] | None = None
     if hooks.config.enable_net_mutation_gate:
         per_msg = [tokenizer.count_messages([m]) for m in messages]
-        suffix_tokens = [0] * num_messages
-        running = 0
-        for j in range(num_messages - 1, -1, -1):
-            suffix_tokens[j] = running
-            running += per_msg[j]
+        # accumulate over the reversed list gives suffix sums INCLUDING each
+        # element; `initial=0` prepends the empty suffix and `[-2::-1]` drops the
+        # total and re-reverses, so suffix_tokens[j] == sum(per_msg[j + 1 :]).
+        suffix_tokens = list(accumulate(reversed(per_msg), initial=0))[-2::-1]
 
     # Adaptive Read protection: protect a fraction of recent messages
     if hooks.config.protect_recent_reads_fraction > 0:

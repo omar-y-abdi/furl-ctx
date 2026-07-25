@@ -31,8 +31,10 @@ import base64
 import binascii
 import logging
 import uuid as _uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import islice
 from typing import Any
 
 from ..config import CacheAlignerConfig, CachePrefixMetrics, TransformResult
@@ -184,12 +186,7 @@ def _split_tokens(content: str) -> list[str]:
     """
     if not content:
         return []
-    tokens: list[str] = []
-    for raw in content.split():
-        cleaned = raw.strip(".,;:!?\"'()[]{}<>")
-        if cleaned:
-            tokens.append(cleaned)
-    return tokens
+    return [cleaned for raw in content.split() if (cleaned := raw.strip(".,;:!?\"'()[]{}<>"))]
 
 
 def detect_volatile_content(content: str) -> list[VolatileFinding]:
@@ -249,10 +246,10 @@ class CacheAligner(Transform):
         """
         if not self.config.enabled:
             return False
-        for msg in messages:
-            if msg.get("role") == "system" and concat_text_parts(msg.get("content", "")):
-                return True
-        return False
+        return any(
+            msg.get("role") == "system" and concat_text_parts(msg.get("content", ""))
+            for msg in messages
+        )
 
     def apply(
         self,
@@ -281,27 +278,24 @@ class CacheAligner(Transform):
         tokens_before = tokenizer.count_messages(messages)
         result_messages = messages
         warnings: list[str] = []
-        all_findings: list[VolatileFinding] = []
         frozen_message_count = kwargs.get("frozen_message_count", 0)
 
-        for i, msg in enumerate(result_messages):
-            if i < frozen_message_count:
-                continue
-            if msg.get("role") != "system":
-                continue
-            # Block-format prompts are inspected via their concatenated text
-            # parts; plain-string prompts pass through unchanged (COR-53).
-            content = concat_text_parts(msg.get("content", ""))
-            if not content:
-                continue
-            findings = detect_volatile_content(content)
-            if findings:
-                all_findings.extend(findings)
+        # islice skips the frozen prefix the old ``i < frozen_message_count``
+        # guard did. The ``max(..., 0)`` is load-bearing: islice REJECTS a
+        # negative start with ValueError, whereas the old guard silently skipped
+        # nothing — clamping keeps that no-op for caller-supplied negatives.
+        # Block-format prompts are inspected via their concatenated text parts;
+        # plain-string prompts pass through unchanged (COR-53).
+        all_findings: list[VolatileFinding] = [
+            finding
+            for msg in islice(result_messages, max(frozen_message_count, 0), None)
+            if msg.get("role") == "system"
+            and (content := concat_text_parts(msg.get("content", "")))
+            for finding in detect_volatile_content(content)
+        ]
 
         if all_findings:
-            counts: dict[str, int] = {}
-            for f in all_findings:
-                counts[f.label] = counts.get(f.label, 0) + 1
+            counts = Counter(f.label for f in all_findings)
             counts_str = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
             msg_text = (
                 f"CacheAligner: detected volatile content in system prompt "

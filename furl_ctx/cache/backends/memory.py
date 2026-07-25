@@ -7,6 +7,7 @@ Data is lost when the process exits.
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -45,7 +46,7 @@ class InMemoryBackend:
         # across processes, so these count only THIS process's activity. The
         # durable SqliteBackend persists the same names to the shared file, which
         # is what lets furl_stats see the hook's cross-process increments.
-        self._counters: dict[str, int] = {}
+        self._counters: Counter[str] = Counter()
 
     def get(self, hash_key: str) -> CompressionEntry | None:
         """Retrieve an entry by hash key.
@@ -76,10 +77,7 @@ class InMemoryBackend:
         Returns:
             True if entry was deleted, False if it didn't exist.
         """
-        if hash_key in self._store:
-            del self._store[hash_key]
-            return True
-        return False
+        return self._store.pop(hash_key, None) is not None
 
     def exists(self, hash_key: str) -> bool:
         """Check if an entry exists.
@@ -111,7 +109,7 @@ class InMemoryBackend:
         in-memory tally is process-local; the durable SqliteBackend persists the
         same names to the shared file for the cross-process furl_stats picture.
         """
-        self._counters[name] = self._counters.get(name, 0) + amount
+        self._counters[name] += amount
         return self._counters[name]
 
     def get_counters(self) -> dict[str, int]:
@@ -170,17 +168,18 @@ class InMemoryBackend:
             Dict with stats including entry_count and memory estimate.
         """
         entry_count = len(self._store)
-        # Rough memory estimate
-        bytes_used = sys.getsizeof(self._store)
-        for entry in self._store.values():
-            bytes_used += sys.getsizeof(entry)
-            # ``surrogatepass``: stored content may carry lone surrogates
-            # (the store accepts them — JSON delivers them via \uD800
-            # escapes), and a strict encode would make this stats read
-            # raise UnicodeEncodeError. Identical byte counts for all
-            # valid-UTF8 content.
-            bytes_used += len(entry.original_content.encode("utf-8", "surrogatepass"))
-            bytes_used += len(entry.compressed_content.encode("utf-8", "surrogatepass"))
+        # Rough memory estimate.
+        # ``surrogatepass``: stored content may carry lone surrogates
+        # (the store accepts them — JSON delivers them via \uD800
+        # escapes), and a strict encode would make this stats read
+        # raise UnicodeEncodeError. Identical byte counts for all
+        # valid-UTF8 content.
+        bytes_used = sys.getsizeof(self._store) + sum(
+            sys.getsizeof(entry)
+            + len(entry.original_content.encode("utf-8", "surrogatepass"))
+            + len(entry.compressed_content.encode("utf-8", "surrogatepass"))
+            for entry in self._store.values()
+        )
 
         return {
             "backend_type": "memory",

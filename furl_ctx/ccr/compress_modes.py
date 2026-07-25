@@ -44,8 +44,10 @@ from __future__ import annotations
 import fnmatch
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
+from itertools import groupby
 from typing import Any
 
 from .regex_budget import Boundability, classify_boundability, matches_within_budget
@@ -177,9 +179,8 @@ class CompressionMode(Enum):
         if not isinstance(value, str):
             return f"mode must be a string, got {type(value).__name__}"
         normalized = value.strip().lower()
-        for member in cls:
-            if member.value == normalized:
-                return member
+        with suppress(ValueError):
+            return cls(normalized)
         valid = ", ".join(member.value for member in cls)
         return f"unknown mode {value!r}; valid modes: {valid}"
 
@@ -431,20 +432,11 @@ def partition_content(content: str, patterns: SectionPatterns) -> list[_LineRun]
     """
     lines = content.split("\n")
     matchers = patterns._resolve_matchers()  # compile once, reuse per line (SEC-1)
-    runs: list[_LineRun] = []
-    current_eligible: bool | None = None
-    current: list[str] = []
-
-    for line in lines:
-        eligible = patterns.line_is_eligible(line, matchers)
-        if current_eligible is None:
-            current_eligible = eligible
-        if eligible != current_eligible:
-            runs.append(_LineRun(eligible=current_eligible, text="\n".join(current)))
-            current = []
-            current_eligible = eligible
-        current.append(line)
-
-    if current_eligible is not None:
-        runs.append(_LineRun(eligible=current_eligible, text="\n".join(current)))
-    return runs
+    # ``groupby`` calls the key exactly once per line (same matcher-call count as
+    # the hand-rolled scan) and yields maximal runs of equal eligibility.
+    return [
+        _LineRun(eligible=eligible, text="\n".join(run))
+        for eligible, run in groupby(
+            lines, key=lambda line: patterns.line_is_eligible(line, matchers)
+        )
+    ]

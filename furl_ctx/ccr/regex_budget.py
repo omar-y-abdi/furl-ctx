@@ -112,6 +112,7 @@ import re
 import signal
 import threading
 import time
+from contextlib import suppress
 from enum import Enum
 from functools import lru_cache
 from types import FrameType
@@ -329,10 +330,9 @@ def search_within_budget(
     """
     engine = _compile_re2(compiled.pattern) if _re2_sees_same_flags(compiled) else None
     if engine is not None:
-        try:
+        # Fall back rather than fail the filter.
+        with suppress(Exception):
             return MatchVerdict.MATCH if engine.search(text) else MatchVerdict.NO_MATCH
-        except Exception:  # noqa: BLE001 - fall back rather than fail the filter
-            pass
     if _can_use_sigalrm():
         return _search_with_watchdog(compiled, text, budget_seconds)
     # THE RESIDUAL (see module docstring): off the main thread with no RE2 form of

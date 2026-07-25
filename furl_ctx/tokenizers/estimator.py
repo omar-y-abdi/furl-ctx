@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import suppress
 
 from .base import BaseTokenizer
 
@@ -142,11 +143,9 @@ class EstimatingTokenCounter(BaseTokenizer):
         # Check for JSON
         if self.JSON_PATTERN.match(sample):
             if len(text) <= _DETECTION_SAMPLE_CHARS:
-                try:
+                with suppress(json.JSONDecodeError, ValueError):
                     json.loads(text)
                     return self.CHARS_PER_TOKEN_JSON
-                except (json.JSONDecodeError, ValueError):
-                    pass
             elif self._sample_is_json_like(sample):
                 return self.CHARS_PER_TOKEN_JSON
 
@@ -190,17 +189,15 @@ class EstimatingTokenCounter(BaseTokenizer):
             Additional token overhead.
         """
         sample = text[:_DETECTION_SAMPLE_CHARS]
-        overhead = 0
 
-        # URLs typically tokenize to more tokens
-        urls = self.URL_PATTERN.findall(sample)
-        for url in urls:
-            # Each URL component adds overhead
-            overhead += url.count("/") + url.count("?") + url.count("&")
+        # URLs typically tokenize to more tokens — each component adds overhead
+        overhead: int = sum(
+            url.count("/") + url.count("?") + url.count("&")
+            for url in self.URL_PATTERN.findall(sample)
+        )
 
-        # UUIDs are typically 8-10 tokens despite being 36 chars
-        uuids = self.UUID_PATTERN.findall(sample)
-        overhead += len(uuids) * 2  # Each UUID adds ~2 extra tokens
+        # UUIDs are typically 8-10 tokens despite being 36 chars (~2 extra each)
+        overhead += len(self.UUID_PATTERN.findall(sample)) * 2
 
         return overhead
 

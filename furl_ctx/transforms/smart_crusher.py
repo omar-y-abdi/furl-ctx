@@ -764,44 +764,6 @@ class SmartCrusher(Transform):
             sink.add(hash_str)
             idx = end
 
-    # ── OPAQUE-only scrape (comma shape) ──────────────────────────────────
-    #
-    # Retained for the typed-parity suite: the comma-delimited walk
-    # distinguishes the opaque marker shape (`<<ccr:HASH,KIND,SIZE>>`)
-    # from the space-delimited row-drop and `#rows` shapes. No production
-    # mirror path calls it since §4.2 — all fresh-output sites consume
-    # typed refs; the result-cache bridge scrapes ALL shapes at once via
-    # `_collect_ccr_hashes`.
-
-    @staticmethod
-    def _collect_opaque_ccr_hashes_from_string(s: str, sink: set[str]) -> None:
-        """Extract OPAQUE-blob hashes (`<<ccr:HASH,KIND,SIZE>>`) from `s` by
-        substring scan — the comma delimiter is what distinguishes shape C
-        from the space-delimited row-drop (A) and the `#rows` index (B).
-
-        Same no-regex walk + hex alphabet as
-        `_collect_ccr_hashes_from_string`, but a hash is collected ONLY when
-        the character immediately after the hex run is a comma."""
-        idx = 0
-        prefix = marker_grammar.CCR_PREFIX
-        n = len(s)
-        while True:
-            start = s.find(prefix, idx)
-            if start == -1:
-                return
-            cursor = start + len(prefix)
-            end = cursor
-            while end < n and s[end] in marker_grammar.HEX_ALPHABET:
-                end += 1
-            if end == cursor:
-                # No hex after `<<ccr:` — not a real marker.
-                idx = cursor
-                continue
-            # OPAQUE shape iff the delimiter after the hash is a comma.
-            if end < n and s[end] == ",":
-                sink.add(s[cursor:end].lower())
-            idx = end
-
     def _mirror_single_hash_to_python_store(
         self,
         ccr_hash: str,

@@ -606,14 +606,12 @@ def _redact_messages(
     returned. Immutable: builds new message dicts; non-string content (and the
     caller's original list/dicts) are left untouched.
     """
-    redacted: list[dict[str, Any]] = []
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str):
-            redacted.append({**message, "content": redactor(content)})
-        else:
-            redacted.append(message)
-    return redacted
+    return [
+        {**message, "content": redactor(content)}
+        if isinstance(content := message.get("content"), str)
+        else message
+        for message in messages
+    ]
 
 
 def _unknown_model_warning(model: str) -> str | None:

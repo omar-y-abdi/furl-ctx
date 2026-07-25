@@ -49,6 +49,7 @@ import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -1012,15 +1013,10 @@ class CompressionStore:
         item_strs = [json.dumps(item, default=str) for item in items]
         scores = self._scorer.score_batch(item_strs, query)
 
-        # Filter and sort by score
-        scored_items = [
-            (items[i], scores[i].score)
-            for i in range(len(items))
-            if scores[i].score >= score_threshold
-        ]
-        scored_items.sort(key=lambda x: x[1], reverse=True)
-
-        results = [item for item, _ in scored_items[:max_results]]
+        # Filter and take the top max_results by score. nlargest breaks ties
+        # toward the earlier item, exactly as the stable sort-then-slice did.
+        scored = ((i, s.score) for i, s in zip(items, scores) if s.score >= score_threshold)
+        results = [item for item, _ in heapq.nlargest(max_results, scored, key=itemgetter(1))]
 
         # COR-37: record the access only AFTER results are known, and only
         # when the search actually returned items. A zero-result probe must
@@ -1133,14 +1129,16 @@ class CompressionStore:
         documents = [entry.original_content for _hash, entry in live_entries]
         scores = self._scorer.score_batch(documents, query)
 
-        ranked = sorted(
+        # nlargest breaks ties toward the earlier element, exactly as the
+        # stable ``sorted(..., reverse=True)[:max_results]`` it replaces.
+        ranked = heapq.nlargest(
+            max_results,
             (
-                (live_entries[i][0], live_entries[i][1], scores[i].score)
-                for i in range(len(live_entries))
-                if scores[i].score > score_threshold
+                (hash_key, entry, score.score)
+                for (hash_key, entry), score in zip(live_entries, scores)
+                if score.score > score_threshold
             ),
-            key=lambda triple: triple[2],
-            reverse=True,
+            key=itemgetter(2),
         )
 
         return [
@@ -1150,7 +1148,7 @@ class CompressionStore:
                 preview=self._cross_store_preview(entry.original_content),
                 tool_name=entry.tool_name,
             )
-            for hash_key, entry, score in ranked[:max_results]
+            for hash_key, entry, score in ranked
         ]
 
     @staticmethod
@@ -1723,17 +1721,15 @@ class CompressionStore:
         """
         with self._lock:
             items = list(self._backend.items())
-        for key, entry in items:
-            if key == nested_hash or key in ignoring:
-                continue
-            for text in (entry.compressed_content, entry.original_content):
-                if not isinstance(text, str) or not _may_reference_marker(text):
-                    continue
-                from furl_ctx.ccr.marker_grammar import hashes_in_text
+        from furl_ctx.ccr.marker_grammar import hashes_in_text
 
-                if nested_hash in hashes_in_text(text):
-                    return True
-        return False
+        return any(
+            nested_hash in hashes_in_text(text)
+            for key, entry in items
+            if key != nested_hash and key not in ignoring
+            for text in (entry.compressed_content, entry.original_content)
+            if isinstance(text, str) and _may_reference_marker(text)
+        )
 
     def delete_cascade(self, hash_key: str) -> tuple[bool, int]:
         """Delete *hash_key* AND every nested blob only it referenced.

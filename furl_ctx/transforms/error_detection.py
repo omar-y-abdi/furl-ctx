@@ -36,6 +36,7 @@ The Rust implementation fixes two bugs the Python originals carried:
 from __future__ import annotations
 
 import re
+from itertools import islice
 from typing import cast
 
 from furl_ctx._core import (
@@ -163,13 +164,8 @@ def content_has_strong_error_indicators(text: str) -> bool:
     error lines.
     """
     lowered = text.lower()
-    hits = 0
-    for keyword in ERROR_INDICATOR_KEYWORDS:
-        if keyword in lowered:
-            hits += 1
-            if hits >= 2:
-                return True
-    return False
+    # islice stops the scan at the second hit, exactly as the old early return.
+    return sum(1 for _ in islice((kw for kw in ERROR_INDICATOR_KEYWORDS if kw in lowered), 2)) >= 2
 
 
 __all__ = [

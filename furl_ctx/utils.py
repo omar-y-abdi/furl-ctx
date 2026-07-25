@@ -61,13 +61,13 @@ def concat_text_parts(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts)
+        return "\n".join(
+            text
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(text := block.get("text"), str)
+        )
     return ""
 
 

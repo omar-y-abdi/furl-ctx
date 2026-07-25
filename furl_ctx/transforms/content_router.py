@@ -699,19 +699,18 @@ class ContentRouter(Transform):
             # them). Each submission copies its own Context: a single Context
             # object cannot be entered by two threads concurrently.
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = []
-                for _, task_content, task_ctx, task_bias, _, task_detection in pending_tasks:
-                    futures.append(
-                        executor.submit(
-                            contextvars.copy_context().run,
-                            self._timed_compress,
-                            task_content,
-                            task_ctx,
-                            task_bias,
-                            token_counter,
-                            task_detection,
-                        )
+                futures = [
+                    executor.submit(
+                        contextvars.copy_context().run,
+                        self._timed_compress,
+                        task_content,
+                        task_ctx,
+                        task_bias,
+                        token_counter,
+                        task_detection,
                     )
+                    for _, task_content, task_ctx, task_bias, _, task_detection in pending_tasks
+                ]
                 task_results = [f.result() for f in futures]
 
         parallel_ms = (time.perf_counter() - t_parallel_start) * 1000
@@ -946,15 +945,6 @@ class ContentRouter(Transform):
             context,
             get_smart_crusher=self._get_smart_crusher,
         )
-
-    @staticmethod
-    def _extract_ccr_hashes(text: str) -> set[str]:
-        """Collect every distinct ``<<ccr:HASH...>>`` hash in *text*.
-
-        Thin delegator to :meth:`CcrMirror.extract_ccr_hashes` (kept as a
-        static back-compat seam).
-        """
-        return CcrMirror.extract_ccr_hashes(text)
 
     def _get_search_compressor(self) -> SearchCompressor | None:
         """Get SearchCompressor (lazy load).

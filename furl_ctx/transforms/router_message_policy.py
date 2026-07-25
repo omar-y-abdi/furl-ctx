@@ -42,6 +42,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -137,11 +138,9 @@ def _is_unstructured_error_output(content: str) -> bool:
     if not content_has_strong_error_indicators(content):
         return False
     if content.lstrip()[:1] in ("[", "{"):
-        try:
+        with suppress(json.JSONDecodeError, ValueError):
             json.loads(content)
             return False
-        except (json.JSONDecodeError, ValueError):
-            pass
     return True
 
 

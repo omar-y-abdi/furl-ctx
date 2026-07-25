@@ -176,10 +176,9 @@ def _similarity(pattern: list[object], tokens: tuple[str, ...]) -> float:
     if not tokens:
         # Two zero-token lines are trivially identical in structure.
         return 1.0
-    same = 0
-    for pat_tok, tok in zip(pattern, tokens):
-        if pat_tok is not _WILDCARD_TOKEN and pat_tok == tok:
-            same += 1
+    same = sum(
+        pat_tok is not _WILDCARD_TOKEN and pat_tok == tok for pat_tok, tok in zip(pattern, tokens)
+    )
     return same / len(tokens)
 
 
@@ -192,13 +191,10 @@ def _merged_pattern(pattern: list[object], tokens: tuple[str, ...]) -> list[obje
     wildcarded, never reverts — which keeps the template stable as more lines
     join.
     """
-    merged: list[object] = []
-    for pat_tok, tok in zip(pattern, tokens):
-        if pat_tok is not _WILDCARD_TOKEN and pat_tok == tok:
-            merged.append(pat_tok)
-        else:
-            merged.append(_WILDCARD_TOKEN)
-    return merged
+    return [
+        pat_tok if pat_tok is not _WILDCARD_TOKEN and pat_tok == tok else _WILDCARD_TOKEN
+        for pat_tok, tok in zip(pattern, tokens)
+    ]
 
 
 def _extract_params(pattern: tuple[object, ...], tokens: tuple[str, ...]) -> tuple[str, ...]:

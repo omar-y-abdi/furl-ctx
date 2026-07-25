@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any, Final
 
 # --------------------------------------------------------------------------- #
@@ -379,11 +380,10 @@ def finditer_within_budget(pattern: re.Pattern[str], text: str) -> list[Any]:
     """
     twin = _RE2_TWINS.get(pattern)
     if twin is not None:
-        try:
+        # RE2 refuses inputs re accepts (a lone surrogate has no UTF-8
+        # encoding); fall back to the total re engine.
+        with suppress(Exception):
             return list(twin.finditer(text))
-        except Exception:  # noqa: BLE001 - RE2 refuses inputs re accepts (a lone
-            # surrogate has no UTF-8 encoding); fall back to the total re engine.
-            pass
     return list(pattern.finditer(text))
 
 

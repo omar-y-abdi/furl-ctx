@@ -202,17 +202,13 @@ def resolve_markers(
             text = sub_within_budget(pattern, _sub, text)
         return text
 
-    resolved: list[dict[str, Any]] = []
-    for message in messages:
-        # A non-dict element passes through untouched (total) rather than
-        # crashing on ``.get`` — mirrors the "non-string content is passed
-        # through" contract one level up.
-        if not isinstance(message, dict):
-            resolved.append(message)
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            resolved.append({**message, "content": _expand(content)})
-        else:
-            resolved.append(message)
-    return resolved
+    # A non-dict element passes through untouched (total) rather than crashing
+    # on ``.get`` — mirrors the "non-string content is passed through" contract
+    # one level up; the ``isinstance(message, dict)`` short-circuit is what
+    # keeps ``.get`` off non-dicts.
+    return [
+        {**message, "content": _expand(content)}
+        if isinstance(message, dict) and isinstance(content := message.get("content"), str)
+        else message
+        for message in messages
+    ]

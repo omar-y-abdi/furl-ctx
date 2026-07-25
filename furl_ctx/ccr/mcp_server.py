@@ -32,6 +32,7 @@ import logging
 import os
 import stat
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -173,14 +174,13 @@ def _describe_arguments_for_log(arguments: dict[str, Any]) -> str:
     string value (or the type for non-strings) — never the values themselves.
     Used at DEBUG; safe to enable at any level because no payload is included.
     """
-    parts: list[str] = []
-    for key in sorted(arguments):
-        value = arguments[key]
-        if isinstance(value, str):
-            parts.append(f"{key}:len={len(value)}")
-        else:
-            parts.append(f"{key}:{type(value).__name__}")
-    return "{" + ", ".join(parts) + "}"
+    # Dict keys are unique, so sorting the items never falls through to
+    # comparing the (possibly unorderable) values.
+    parts = ", ".join(
+        f"{key}:len={len(value)}" if isinstance(value, str) else f"{key}:{type(value).__name__}"
+        for key, value in sorted(arguments.items())
+    )
+    return "{" + parts + "}"
 
 
 def _result_chars_for_log(result: list[TextContent]) -> int:
@@ -657,7 +657,8 @@ def shared_stats_file() -> Path:
 
 def _append_shared_event(event: dict[str, Any]) -> None:
     """Append an event to the shared stats file (cross-process, file-locked)."""
-    try:
+    # Never break compression because of stats.
+    with suppress(Exception):
         shared_stats_dir().mkdir(parents=True, exist_ok=True)
         event["pid"] = os.getpid()
         line = json.dumps(event, separators=(",", ":")) + "\n"
@@ -671,8 +672,6 @@ def _append_shared_event(event: dict[str, Any]) -> None:
             f.flush()
             if _HAS_FCNTL:
                 fcntl.flock(f, fcntl.LOCK_UN)
-    except Exception:
-        pass  # Never break compression because of stats
 
 
 def _read_shared_events(window_seconds: int = SESSION_WINDOW_SECONDS) -> list[dict[str, Any]]:
@@ -3255,10 +3254,9 @@ class FurlMCPServer:
             self._file_cache[str_path] = (content_hash, ccr_hash, line_count, token_estimate)
 
         # Return full content with line numbers (like Claude Code's Read tool)
-        numbered_lines = []
-        for i, line in enumerate(content.split("\n"), 1):
-            numbered_lines.append(f"{i:>6}\t{line}")
-        numbered_content = "\n".join(numbered_lines)
+        numbered_content = "\n".join(
+            f"{i:>6}\t{line}" for i, line in enumerate(content.split("\n"), 1)
+        )
 
         return [
             TextContent(

@@ -88,10 +88,7 @@ class TransformPipeline:
         self.config = config or FurlConfig()
         self._provider = provider
 
-        if transforms is not None:
-            self.transforms = transforms
-        else:
-            self.transforms = self._build_default_transforms()
+        self.transforms = transforms if transforms is not None else self._build_default_transforms()
 
         # Circuit breaker: after N consecutive pipeline
         # failures, pass messages through untouched for a cooldown window

@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sys
+from contextlib import suppress
 from typing import Any
 
 
@@ -195,15 +196,14 @@ def _emit_profile_banner() -> None:
     """
     if not _profile_banner_enabled():
         return
-    try:
+    # Observability must never be fatal.
+    with suppress(Exception):
         profile = _resolve_active_profile()
         sys.stderr.write(
             f"furl profile: backend={profile['backend']} ttl={profile['ttl_seconds']}s "
             f"scope={profile['scope']} min_tokens={profile['min_tokens_to_compress']} "
             "(FURL_PROFILE_BANNER=0 to silence)\n"
         )
-    except Exception:  # noqa: BLE001 — observability must never be fatal
-        pass
 
 
 def _invalid_hash_message(hash_value: str) -> str | None:
@@ -276,25 +276,9 @@ def _cmd_retrieve(args: argparse.Namespace) -> int:
 
     # Build kwargs only from flags the user actually passed (SUPPRESS default).
     # This keeps the no-flag path a plain full retrieve with no extra arguments.
-    kwargs: dict[str, Any] = {}
-    if hasattr(args, "pattern"):
-        kwargs["pattern"] = args.pattern
-    if hasattr(args, "context_lines"):
-        kwargs["context_lines"] = args.context_lines
-    if hasattr(args, "line_range"):
-        kwargs["line_range"] = args.line_range
-    if hasattr(args, "fields"):
-        kwargs["fields"] = args.fields
-    if hasattr(args, "select_field"):
-        kwargs["select_field"] = args.select_field
-    if hasattr(args, "select_equals"):
-        kwargs["select_equals"] = args.select_equals
-    if hasattr(args, "select_min"):
-        kwargs["select_min"] = args.select_min
-    if hasattr(args, "select_max"):
-        kwargs["select_max"] = args.select_max
-    if hasattr(args, "limit"):
-        kwargs["limit"] = args.limit
+    kwargs: dict[str, Any] = {
+        name: getattr(args, name) for name in _RETRIEVE_FLAGS if hasattr(args, name)
+    }
 
     try:
         result = retrieve(args.hash, **kwargs)
@@ -357,6 +341,21 @@ _SEARCH_SCAN_CAP = 5000  # bound the linear scan over live entries
 
 _LIST_PREVIEW_MAX = 80  # hard char cap on a `furl list` preview
 
+# The `furl retrieve` filter flags, all registered with `argparse.SUPPRESS` so an
+# unpassed flag is ABSENT from the namespace rather than None — `_cmd_retrieve`
+# forwards only the ones the user actually typed.
+_RETRIEVE_FLAGS = (
+    "pattern",
+    "context_lines",
+    "line_range",
+    "fields",
+    "select_field",
+    "select_equals",
+    "select_min",
+    "select_max",
+    "limit",
+)
+
 
 def _redacted_list_preview(original: str, redactor: Any) -> str:
     """The leading, credential-redacted window of *original* for ``furl list``.
@@ -369,10 +368,9 @@ def _redacted_list_preview(original: str, redactor: Any) -> str:
     """
     window = original[: _LIST_PREVIEW_MAX + _SEARCH_PREVIEW_MARGIN]
     if redactor is not None:
-        try:
+        # A preview must never break the listing.
+        with suppress(Exception):
             window = redactor(window)
-        except Exception:  # noqa: BLE001 — a preview must never break the listing
-            pass
     return window.replace("\n", " ")[:_LIST_PREVIEW_MAX]
 
 
@@ -391,10 +389,9 @@ def _redacted_search_preview(original: str, match_idx: int, needle_len: int, red
     )
     window = original[lo:hi]
     if redactor is not None:
-        try:
+        # A preview must never break the search.
+        with suppress(Exception):
             window = redactor(window)
-        except Exception:  # noqa: BLE001 — a preview must never break the search
-            pass
     return window.replace("\n", " ").strip()[:_SEARCH_PREVIEW_MAX]
 
 
@@ -550,10 +547,9 @@ def _corpus_files(path: str) -> list[str]:
     pooled ratio/recall over a dir does not depend on filesystem iteration.
     """
     if os.path.isdir(path):
-        found: list[str] = []
-        for root, _dirs, names in os.walk(path):
-            found.extend(os.path.join(root, name) for name in names)
-        return sorted(found)
+        return sorted(
+            os.path.join(root, name) for root, _dirs, names in os.walk(path) for name in names
+        )
     return [path]
 
 

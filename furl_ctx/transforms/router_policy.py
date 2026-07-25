@@ -177,11 +177,9 @@ def noop_transform(route_counts: Mapping[str, int]) -> str:
     input) falls through to ``router:noop:no_eligible_content`` — the same
     umbrella reason the transform-less shape/pinning lanes map to.
     """
-    dominant = "no_eligible_content"
-    best = 0
-    for counter, reason in _NOOP_REASON_BY_COUNTER:
-        count = route_counts.get(counter, 0)
-        if count > best:
-            best = count
-            dominant = reason
+    # ``max`` keeps the FIRST maximum, matching the strict ``>`` update. The
+    # explicit ``> 0`` re-check is load-bearing: with every count zero the old
+    # scan never fired, so the umbrella reason must win over the first row.
+    counter, reason = max(_NOOP_REASON_BY_COUNTER, key=lambda pair: route_counts.get(pair[0], 0))
+    dominant = reason if route_counts.get(counter, 0) > 0 else "no_eligible_content"
     return f"router:noop:{dominant}"

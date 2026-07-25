@@ -58,6 +58,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -571,10 +572,9 @@ class SqliteBackend:
         with self._state_lock:
             connections, self._all_connections = self._all_connections, []
         for conn in connections:
-            try:
+            # Cross-thread close; the OS reclaims the fd at exit either way.
+            with suppress(sqlite3.Error):
                 conn.close()
-            except sqlite3.Error:  # pragma: no cover - cross-thread close; OS reclaims fd at exit
-                pass
 
     # ------------------------------------------------------------------ #
     # SQLite plumbing
