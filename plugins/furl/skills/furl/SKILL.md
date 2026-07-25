@@ -110,11 +110,20 @@ hash** — it returns the stored original, byte-exact for raw text and a
 semantically-complete re-serialization for a structured JSON array, as long as the
 entry is still within its retention window. **The plugin's 24-hour default
 (`FURL_CCR_TTL_SECONDS=86400`) is a ceiling, not a guarantee: the store also caps
-at 1000 live entries per project, and a single moderately-sized tool output can
-consume dozens of those, so a handful of large outputs typically evict well
-before 24 hours.** Past either limit the entry is gone and a retrieve is a loud
-miss, never a silent wrong answer; check `furl_stats` for live entry counts
-against the cap. The hook and the `furl` MCP server share one durable
+at 1000 live entries per project. One compression counts as one entry — a columnar
+row-drop stores a single whole-blob entry, not separate per-row entries, so a
+structured output takes one slot, not one-plus-N. To read the dropped rows, call
+bare `furl_retrieve(hash)`: it returns the complete stored array of every row.
+`query=…` and `select_field` are optional narrowings that fail differently: the
+relevance-scored BM25 `query=` returns at most its top matches and can report
+`count: 0` for a row that is present but does not lexically match, whereas
+`select_field` filters the full array and only bounds how many rows come back —
+it never misses a matching row. Omit the query (or use `select_field`) when you
+need the whole entry.**
+Past either limit the entry is gone and a retrieve is a loud miss, never a silent
+wrong answer; check `furl_stats` — its `store.cap_accounting` block reports live
+entries against the cap and the `retrieval_headroom` remaining, and warns as it
+nears the limit. The hook and the `furl` MCP server share one durable
 per-project SQLite store, `~/.furl/ccr-ns-<hash>.sqlite3`, keyed by
 `FURL_CCR_PROJECT_DIR` so one project never sees another's entries. The global
 `~/.furl/ccr.sqlite3` is used only when project scoping is turned off, and it is the

@@ -91,31 +91,47 @@ def _crush_both_rows_dropped() -> tuple[SmartCrusher, str, list[str]]:
 
 
 def test_recovery_hash_collision_cannot_return_wrong_data() -> None:
-    """A dropped row's recovery key must resolve to ITS OWN content — never to
-    a different dropped row's content.
+    """A recovery-key collision must never let one dropped row recover as
+    ANOTHER row's content on the Python / MCP retrieval plane.
 
-    RED today: at 12 hex ROW_A and ROW_B share a recovery key, the Rust store
-    keeps only the last write, and ROW_A's key resolves to ROW_B's content.
-    GREEN after the fix: at the wider emitted key the pair no longer collides
-    (each recovers its own row), or the store drops the ambiguous binding so the
-    key loud-misses — in neither case is foreign content served.
+    The T3 bug: at a 12-hex key ROW_A and ROW_B collide; when both were dropped
+    and CHUNKED, the Rust store overwrote one under the shared key and the
+    Rust->Python mirror copied the wrong bytes out, so ROW_A's key silently
+    recovered ROW_B's content on the durable retrieval path.
+
+    Design A removes that path entirely: per-row chunks are no longer mirrored
+    into the Python store, so the colliding per-row keys are not stored at all
+    (a loud miss, never foreign bytes), and row recovery is served from the
+    whole-blob PARENT, which holds each row's own canonical bytes. Three things
+    are asserted below: the mechanism-INDEPENDENT invariant this file is named
+    for (no key ever serves foreign content — holds no matter how the fix
+    works), the Design-A specific (the colliding chunk keys are not stored at
+    all), and recovery through the parent. The wider 24-hex emitted key means
+    the pair no longer even collides, but Design A makes the collision
+    unreachable regardless.
     """
     _collision_precondition()
-    crusher, blob_hash, row_index = _crush_both_rows_dropped()
+    _crusher, blob_hash, row_index = _crush_both_rows_dropped()
 
-    # Width the producer actually emitted (12 on buggy main, 24 after the fix).
+    # Width the producer actually emitted (24 hex on current main).
     width = len(blob_hash)
     key_a = _key(ROW_A, width)
     key_b = _key(ROW_B, width)
 
-    # Setup guard: both colliding rows were dropped and chunked at this width.
+    # Setup guard: both colliding rows were dropped and chunked in the Rust index.
     assert key_a in row_index, "ROW_A was not dropped/chunked — fixture setup wrong"
     assert key_b in row_index, "ROW_B was not dropped/chunked — fixture setup wrong"
 
     store = get_compression_store()
 
-    # The core invariant: no dropped row recovers as the OTHER dropped row's
-    # content. On buggy main, ROW_A's key resolves to ROW_B's content — RED.
+    # (1) MECHANISM-INDEPENDENT INVARIANT — the property this file is named for:
+    # no dropped row's recovery key ever resolves to ANOTHER dropped row's
+    # content. This holds regardless of HOW the fix works — on buggy main
+    # ROW_A's key resolves to ROW_B's bytes (RED); under Design A the key
+    # resolves to nothing (None != foreign content); at a wider key it would
+    # resolve to its own bytes. It catches BOTH a chunk-mirroring reintroduction
+    # AND the wrong-data outcome, so it is strictly stronger than the absence
+    # check below and does not need removing when the mechanism changes.
     for row, other in ((ROW_A, ROW_B), (ROW_B, ROW_A)):
         entry = store.retrieve(_key(row, width))
         recovered = entry.original_content if entry is not None else None
@@ -124,15 +140,26 @@ def test_recovery_hash_collision_cannot_return_wrong_data() -> None:
             f"{other!r}'s content ({recovered!r})"
         )
 
-    # And each row recovers as its OWN content: at the wider width the two keys
-    # are distinct, so both dropped rows are independently retrievable.
+    # (2) MECHANISM-SPECIFIC (Design A): the colliding per-row chunk keys are
+    # NOT independently addressable at all, because chunks are no longer
+    # mirrored. A key that never resolves can never serve a DIFFERENT row's
+    # content. This pins today's implementation so a reintroduced mirror is
+    # caught even if a future key width happened to dodge this pair's collision.
     for row in (ROW_A, ROW_B):
-        entry = store.retrieve(_key(row, width))
-        assert entry is not None, f"{row!r}'s recovery entry is missing"
-        assert entry.original_content == _canon([row]), (
-            f"{row!r}'s recovery key resolved to {entry.original_content!r}, "
-            f"expected {_canon([row])!r}"
+        assert store.retrieve(_key(row, width)) is None, (
+            f"{row!r}'s per-row chunk was mirrored as its own entry; a colliding "
+            "chunk key could then serve foreign content"
         )
+
+    # (3) Both dropped rows recover as their OWN content from the whole-blob
+    # parent — the canonical array of every original row, keyed by its own
+    # 24-hex hash (which the store's collision guard protects independently).
+    parent = store.retrieve(blob_hash)
+    assert parent is not None, "whole-blob parent recovery entry is missing"
+    recovered = json.loads(parent.original_content)
+    assert recovered.count(ROW_A) == 1 and recovered.count(ROW_B) == 1, (
+        "the parent blob did not recover both colliding rows exactly once each"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - manual reproduction helper
