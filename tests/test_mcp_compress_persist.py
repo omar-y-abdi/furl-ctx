@@ -122,6 +122,22 @@ async def test_non_bool_persist_is_a_parameter_error(server) -> None:
     assert env["error"] == "persist parameter must be a boolean, got str"
 
 
+async def test_tool_description_matches_the_post_f9_contract(server) -> None:
+    """The TOOL DESCRIPTION is what the model reads before deciding to call.
+
+    It promised "the original is stored and can be retrieved later" with no
+    condition, which F9 made false by default. A stale description is exactly
+    the misread F9 exists to prevent, so it must name the no-op behavior and
+    point at persist, like LIBRARY.md and SKILL.md do.
+    """
+    description = (await _list_tools(server))[COMPRESS_TOOL_NAME].description or ""
+    assert "hash null" in description, "the no-op return must be stated"
+    assert "persist=true" in description, "the escape hatch must be named"
+    assert "stores NOTHING" in description
+    # The unconditional promise must be gone: storage is now the compressed case.
+    assert "The original is stored and can be retrieved later" not in description
+
+
 async def test_schema_advertises_persist(server) -> None:
     tools = await _list_tools(server)
     props = tools[COMPRESS_TOOL_NAME].inputSchema["properties"]

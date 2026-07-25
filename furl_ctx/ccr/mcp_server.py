@@ -822,6 +822,28 @@ def _list_preview(original: str) -> str:
     )
 
 
+def _rebaselined_counters(base: dict[str, int], counters: dict[str, int]) -> dict[str, int]:
+    """``base`` with every counter that went BACKWARDS re-baselined to 0 (F11).
+
+    The lifetime counters are monotonic only while the store lives: ``furl_purge
+    all=true`` -> ``CompressionStore.clear()`` wipes them (``DELETE FROM
+    ccr_counters`` on sqlite, ``_counters.clear()`` in memory) while a live
+    server still holds its pre-purge snapshot. Clamping the negative delta to 0
+    would DETECT nothing and report genuine post-purge events as
+    ``this_session: 0`` until activity climbed back past the stale baseline.
+
+    A value below its own snapshot is only explainable by a reset, so that
+    counter's baseline drops to 0 and the delta counts everything since the
+    reset. Detection is per counter, and the caller must PERSIST the result:
+    once a counter climbs back past its stale baseline the reset is no longer
+    detectable from the values alone. Returns a new dict; ``base`` is untouched.
+    """
+    reset = {name for name, value in counters.items() if value < base.get(name, 0)}
+    if not reset:
+        return base
+    return {name: (0 if name in reset else value) for name, value in base.items()}
+
+
 class FurlMCPServer:
     """MCP Server exposing Furl's context engineering toolkit.
 
@@ -850,7 +872,8 @@ class FurlMCPServer:
         # start snapshot) alongside the lifetime totals. Because the counters are
         # cross-process the delta is not strictly this run, so it is labeled as
         # "since this server first read the counters", not "this session". None
-        # until the first read.
+        # until the first read; a counter wiped under us by furl_purge(all) has
+        # its baseline re-dropped to 0 (see _rebaselined_counters).
         self._hook_counters_at_start: dict[str, int] | None = None
         self._compressor_initialized = False
         # File read cache: path → (content_hash, ccr_hash, line_count, token_count)
@@ -1585,10 +1608,15 @@ class FurlMCPServer:
                         "Compress content to save context window space. "
                         "Use this on large tool outputs, file contents, search results, "
                         "or any content you want to shrink before reasoning over it. "
-                        f"The original is stored and can be retrieved later via mcp__furl__{CCR_TOOL_NAME}. "
-                        "Returns compressed text + a hash for retrieval. Optional 'mode' "
-                        "controls aggressiveness; optional include/exclude patterns limit "
-                        "which lines are compressed."
+                        "When it compresses, the original is stored and can be retrieved "
+                        f"later via mcp__furl__{CCR_TOOL_NAME}: returns compressed text + a "
+                        "hash for retrieval. When Furl decides NOT to compress (a no-op: "
+                        "the content is too small or would not shrink) it returns the "
+                        "original unchanged with hash null and stores NOTHING, so a no-op "
+                        "does not consume a retrieval slot — pass persist=true to store it "
+                        "anyway and get a hash back. Optional 'mode' controls "
+                        "aggressiveness; optional include/exclude patterns limit which "
+                        "lines are compressed."
                     ),
                     inputSchema={
                         "type": "object",
@@ -2329,7 +2357,9 @@ class FurlMCPServer:
         start snapshot. Because the counters are cross-process it is not strictly
         this run: a concurrent process on the same project moves it too. It still
         separates a rolling lifetime total from recent activity, which is the
-        misread the scope labels prevent.
+        misread the scope labels prevent. A ``furl_purge all=true`` between two
+        reads resets the lifetime counters, so the delta then counts from that
+        reset rather than from server start (``_rebaselined_counters``).
 
         The opt-in FURL_PRETOOL_PIPE path is unaffected by #68951 — its ``pipe_*``
         counters appear only once it has run, and ``pipe_noop_reasons`` are
@@ -2346,12 +2376,15 @@ class FurlMCPServer:
 
         # F11: snapshot the lifetime counters the first time this server reads
         # them, so ``this_session`` = lifetime - start. Captured lazily (the
-        # store is lazy) and ONCE; a store reset that lowers a monotonic counter
-        # is clamped to 0 below rather than reported negative.
+        # store is lazy). A counter below its snapshot means the store was reset
+        # under us (furl_purge all=true), so that baseline is DROPPED to 0 and
+        # persisted — see _rebaselined_counters. Every delta below is then
+        # non-negative by construction, with no clamp hiding a reset.
         if self._hook_counters_at_start is None:
             self._hook_counters_at_start = dict(counters)
-        base = self._hook_counters_at_start
-        session = {name: max(0, value - base.get(name, 0)) for name, value in counters.items()}
+        base = _rebaselined_counters(self._hook_counters_at_start, counters)
+        self._hook_counters_at_start = base
+        session = {name: value - base.get(name, 0) for name, value in counters.items()}
 
         def _bucketed(source: dict[str, int], prefix: str) -> dict[str, int]:
             return {
@@ -2382,9 +2415,11 @@ class FurlMCPServer:
         session_block: dict[str, Any] = {
             "scope": (
                 "delta since this server first read the counters, its start "
-                "snapshot. The counters are cross-process, so this delta MAY "
-                "INCLUDE concurrent processes on this project; it is not "
-                "exclusively this run."
+                "snapshot — or since the last store reset (furl_purge all=true "
+                "wipes the lifetime counters and re-baselines this delta). The "
+                "counters are cross-process, so this delta MAY INCLUDE "
+                "concurrent processes on this project; it is not exclusively "
+                "this run."
             ),
             "hook_invocations_seen": session.get("hook_invocations_seen", 0),
             "hook_compressions_applied": session.get("hook_compressions_applied", 0),

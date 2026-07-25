@@ -77,6 +77,42 @@ async def test_session_delta_counts_only_activity_since_server_start() -> None:
     assert second["this_session"]["hook_invocations_seen"] == 3  # delta = 8 - 5
 
 
+async def test_session_delta_rebaselines_when_a_purge_resets_the_counters() -> None:
+    """A store wipe resets the LIFETIME counters under a live server.
+
+    ``furl_purge all=true`` -> ``store.clear()`` drops the counter rows
+    (``DELETE FROM ccr_counters`` on sqlite, ``_counters.clear()`` in memory)
+    while this server still holds its pre-purge snapshot. Clamping the resulting
+    negative delta to 0 would report GENUINE post-purge events as
+    ``this_session: 0`` until activity climbed back past the stale baseline. The
+    reset must be DETECTED and that counter re-baselined instead.
+    """
+    store = resolve_ccr_namespace_store()
+    store.increment_counter("hook_invocations_seen", 5)
+
+    server = FurlMCPServer()  # ONE server across the purge
+    first = _envelope(await server._handle_stats())["store"]["hook_activity"]
+    assert first["this_session"]["hook_invocations_seen"] == 0  # baseline = 5
+
+    store.clear()  # furl_purge all=true
+    store.increment_counter("hook_invocations_seen", 4)  # 4 GENUINE new events
+
+    after = _envelope(await server._handle_stats())["store"]["hook_activity"]
+    assert after["hook_invocations_seen"] == 4  # lifetime restarted at the reset
+    assert after["this_session"]["hook_invocations_seen"] == 4, (
+        "post-purge events must be counted, not clamped to 0 by a stale baseline"
+    )
+
+    # And the re-baseline STICKS: once activity climbs past the stale 5 the
+    # counter is no longer detectably below its snapshot, so a per-read
+    # detection that did not persist the new baseline would silently revert to
+    # subtracting 5 here and report 2 instead of 7.
+    store.increment_counter("hook_invocations_seen", 3)
+    later = _envelope(await server._handle_stats())["store"]["hook_activity"]
+    assert later["hook_invocations_seen"] == 7
+    assert later["this_session"]["hook_invocations_seen"] == 7
+
+
 async def test_session_delta_buckets_noop_reasons() -> None:
     store = resolve_ccr_namespace_store()
     server = FurlMCPServer()
