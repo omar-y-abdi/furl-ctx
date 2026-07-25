@@ -281,19 +281,30 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           WHEEL="$(ls dist/*.whl)"
-          # mcp + google-re2 alongside dev: without them every test gated on
-          # pytest.importorskip("mcp") or skipif(not re2_available()) silently
-          # skips here, so a regression in furl_ctx/ccr/mcp_server.py or the
+          # mcp + code + google-re2 alongside dev: without them every test gated
+          # on pytest.importorskip("mcp"), skipif(not _HAS_TREE_SITTER) or
+          # skipif(not re2_available()) silently skips here, so a regression in
+          # furl_ctx/ccr/mcp_server.py, the AST code-aware compressor, or the
           # RE2 regex-budget path could merge with green CI and zero signal.
-          # google-re2 is listed explicitly even though the mcp extra already
-          # depends on furl-ctx[re2] and self-referential extras do resolve
-          # it transitively for this wheel-based install, so the requirement
-          # reads directly off this line instead of through pyproject.toml's
-          # extras graph, and it matches the local gate's install command
-          # exactly. See docs/audits/IMPROVEMENT-LEDGER.md rows #119/#139 and
-          # the "CI test job installs only the [dev] extra" open candidate
-          # this closes.
-          pip install "${WHEEL}[dev,mcp]" pytest-split google-re2
+          # Dating this precisely, because "already" depends on where you look:
+          # BEFORE #178 the `dev` extra did NOT carry mcp/code, this line read
+          # `[dev,mcp]`, and the AST code suite genuinely DID skip in CI — the
+          # live gap #178 was written to close. SINCE #178 (721a3826) `dev`
+          # itself declares furl-ctx[mcp] and furl-ctx[code], so `[dev,mcp]`
+          # resolves tree-sitter transitively and the suite runs here. Verified
+          # against a wheel built from a pristine 721a3826 checkout: its
+          # METADATA carries `furl-ctx[code] ; extra == "dev"`, installing
+          # `[dev,mcp]` yields tree_sitter_language_pack, and the suite runs 31
+          # passed / 0 skipped. So naming `code` below adds no coverage today;
+          # it is named anyway, exactly as google-re2 is listed
+          # explicitly despite the mcp extra depending on furl-ctx[re2]: the
+          # requirement then reads directly off this line, matches the local
+          # gate's install command, and survives a change to the dev extra.
+          # tests/test_optional_suites_not_silently_disarmed.py pins this line
+          # so code can't be silently stripped. See docs/audits/
+          # IMPROVEMENT-LEDGER.md rows #119/#139 and the "CI test job installs
+          # only the [dev] extra" open candidate this closes.
+          pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2
           # cwd's ./furl_ctx source tree shadows the installed wheel; copy the
           # compiled extension in so tests import it (no second cargo build).
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"

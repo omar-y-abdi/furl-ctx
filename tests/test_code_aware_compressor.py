@@ -24,6 +24,7 @@ import ast
 import importlib.util
 import logging
 import re
+import sys
 from typing import Any
 
 import pytest
@@ -57,6 +58,30 @@ requires_tree_sitter = pytest.mark.skipif(
     not _HAS_TREE_SITTER,
     reason="optional [code] extra (tree-sitter-language-pack) not installed",
 )
+
+
+def _force_missing_tree_sitter(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Drive the production module down its REAL no-tree-sitter branch — even
+    with the ``[code]`` extra installed — and return the module.
+
+    A ``None`` entry in ``sys.modules`` makes ``import tree_sitter_language_pack``
+    raise ``ImportError`` at the finder level, exactly as it does on a machine
+    without the pack; clearing the cached ``_tree_sitter_available`` latch forces
+    ``_check_tree_sitter_available`` to re-run its real ``try/except ImportError``.
+    So the compressor takes the SAME fail-open branch it would take without the
+    extra — the assertions below hold identically whether tree-sitter is present
+    or absent. This is why these tests carry no ``@requires_tree_sitter`` guard:
+    unlike monkeypatching ``_check_tree_sitter_available`` itself (which never
+    exercises the import/except/cache logic), the real branch is under test here.
+    ``monkeypatch`` reverts all three seams on teardown.
+    """
+    import furl_ctx.transforms.code_aware_compressor as mod
+
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", None)
+    monkeypatch.setattr(mod, "_tree_sitter_available", None)
+    monkeypatch.setattr(mod, "_MISSING_DEP_WARNED", False)
+    return mod
+
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -299,7 +324,17 @@ class TestCcrBacking:
         assert working_store.get_stats()["entry_count"] == 0
 
 
-# ─── 4. Missing-dep fail-open ────────────────────────────────────────────────
+# ─── 4. Missing-dep fail-open — REAL import block (runs WITH tree-sitter) ─────
+#
+# Both tests prove the no-tree-sitter fail-open by blocking the import at the
+# module-finder level (see `_force_missing_tree_sitter`), so the production
+# `_check_tree_sitter_available` takes its actual `except ImportError` branch —
+# the same branch a machine without the [code] extra takes. They therefore run
+# and assert identically whether or not tree-sitter is installed and carry NO
+# `@requires_tree_sitter` guard. The router case was previously gated on
+# `@requires_tree_sitter` (so it never ran where the fallback actually matters)
+# AND faked absence by monkeypatching `_check_tree_sitter_available` itself
+# (never exercising the real import/except/cache) — both are fixed here.
 
 
 class TestMissingDepFailOpen:
@@ -309,10 +344,7 @@ class TestMissingDepFailOpen:
         caplog: pytest.LogCaptureFixture,
         working_store: Any,
     ) -> None:
-        import furl_ctx.transforms.code_aware_compressor as mod
-
-        monkeypatch.setattr(mod, "_check_tree_sitter_available", lambda: False)
-        monkeypatch.setattr(mod, "_MISSING_DEP_WARNED", False)
+        mod = _force_missing_tree_sitter(monkeypatch)
 
         code = _python_code()
         compressor = mod.CodeAwareCompressor()
@@ -326,6 +358,36 @@ class TestMissingDepFailOpen:
         warns = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warns) == 1, "missing-dep warning must fire exactly once"
         assert "furl-ctx[code]" in warns[0].getMessage()
+
+    def test_missing_dep_router_falls_back_to_passthrough(
+        self, monkeypatch: pytest.MonkeyPatch, working_store: Any
+    ) -> None:
+        """Enabled but dep missing: the router arm resolves to a passthrough-
+        shaped result (the reversible offload may still wrap it, exactly as it
+        does for any uncompressible large content today).
+
+        Moved out from under `@requires_tree_sitter` and switched from
+        monkeypatching `_check_tree_sitter_available` to blocking the real
+        import, so it proves the genuine no-tree-sitter router path — and does
+        so with the [code] extra installed, where the gate never let it run.
+        """
+        mod = _force_missing_tree_sitter(monkeypatch)
+        assert mod._check_tree_sitter_available() is False, (
+            "guard: the import block must actually force the missing-dep branch"
+        )
+
+        code = _python_code()
+        router = ContentRouter(ContentRouterConfig(enable_code_aware=True))
+        result = router.compress(code)
+        assert CompressionStrategy.CODE_AWARE.value in result.strategy_chain
+        # No AST compression happened: either untouched, or today's offload.
+        assert result.strategy_used in (
+            CompressionStrategy.CODE_AWARE,
+            CompressionStrategy.PASSTHROUGH,
+            CompressionStrategy.CCR_OFFLOAD,
+        )
+        if result.strategy_used is not CompressionStrategy.CCR_OFFLOAD:
+            assert result.compressed == code
 
 
 # ─── 5. Router integration ───────────────────────────────────────────────────
@@ -354,30 +416,6 @@ class TestRouterIntegration:
         router = ContentRouter(ContentRouterConfig(enable_code_aware=True, lossless_only=True))
         result = router.compress(code)
         assert result.compressed == code
-
-    def test_missing_dep_router_falls_back_to_passthrough(
-        self, monkeypatch: pytest.MonkeyPatch, working_store: Any
-    ) -> None:
-        """Enabled but dep missing: the arm resolves to a passthrough-shaped
-        result (the reversible offload may still wrap it, exactly as it
-        does for any uncompressible large content today)."""
-        import furl_ctx.transforms.code_aware_compressor as mod
-
-        monkeypatch.setattr(mod, "_check_tree_sitter_available", lambda: False)
-        monkeypatch.setattr(mod, "_MISSING_DEP_WARNED", False)
-
-        code = _python_code()
-        router = ContentRouter(ContentRouterConfig(enable_code_aware=True))
-        result = router.compress(code)
-        assert CompressionStrategy.CODE_AWARE.value in result.strategy_chain
-        # No AST compression happened: either untouched, or today's offload.
-        assert result.strategy_used in (
-            CompressionStrategy.CODE_AWARE,
-            CompressionStrategy.PASSTHROUGH,
-            CompressionStrategy.CCR_OFFLOAD,
-        )
-        if result.strategy_used is not CompressionStrategy.CCR_OFFLOAD:
-            assert result.compressed == code
 
 
 # ─── 6. Protection precedence ────────────────────────────────────────────────
