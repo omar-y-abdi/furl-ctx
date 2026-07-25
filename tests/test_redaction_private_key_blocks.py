@@ -154,6 +154,24 @@ def test_lone_armor_line_is_still_redacted() -> None:
     assert _redactor()("-----BEGIN RSA " + _ARMOR) == _MARKER
 
 
+@pytest.mark.parametrize(
+    "separator",
+    ["", " ", "\t", "\n", "\r\n", "\\n", "  \t"],
+    ids=["none", "space", "tab", "newline", "crlf", "escaped-newline", "mixed-blanks"],
+)
+def test_truncated_body_is_scrubbed_whatever_separates_it_from_the_armor(
+    separator: str,
+) -> None:
+    # Review F-1: every run used to require a leading NEWLINE, including the
+    # first, so a truncated body abutting the armor with no separator, or with
+    # only a space or a tab, kept its key material in cleartext under the
+    # marker. That shape is real once newlines have been stripped, which is how
+    # a single-line env-var key arrives.
+    out = _redactor()("-----BEGIN RSA " + _ARMOR + separator + _BODY)
+    assert _BODY not in out
+    assert out == _MARKER
+
+
 # ─── boundary: what must NOT be swallowed ────────────────────────────────────
 
 
@@ -170,12 +188,32 @@ def test_prose_after_a_lone_armor_survives_byte_exact() -> None:
     [(15, False), (16, True)],
     ids=["below-floor", "at-floor"],
 )
-def test_truncated_tail_base64_floor_boundary(run_length: int, eaten: bool) -> None:
-    # Pins the 16-character floor that separates "key material" from "a word".
-    # Below it the line is left alone; at it the line reads as base64 body.
-    text = "-----BEGIN RSA " + _ARMOR + "\n" + "A" * run_length
+@pytest.mark.parametrize("separator", ["\n", ""], ids=["newline", "abutting"])
+def test_truncated_tail_base64_floor_boundary(separator: str, run_length: int, eaten: bool) -> None:
+    # Pins the 16-character floor that separates "key material" from "a word",
+    # on BOTH the newline-separated run and the F-1 abutting run. Below it the
+    # run is left alone; at it the run reads as base64 body.
+    text = "-----BEGIN RSA " + _ARMOR + separator + "A" * run_length
     out = _redactor()(text)
-    assert out == (_MARKER if eaten else _MARKER + "\n" + "A" * run_length)
+    assert out == (_MARKER if eaten else _MARKER + separator + "A" * run_length)
+
+
+def test_prose_abutting_the_armor_survives_byte_exact() -> None:
+    # The precision cost of the F-1 widening is bounded by the 16-character
+    # floor: ordinary prose beside an armor, with or without a separator, is
+    # still left alone because its first word is far short of 16 unbroken
+    # base64 characters.
+    for tail in (" see the docs for details", "see docs", "\tnotes below"):
+        text = "-----BEGIN RSA " + _ARMOR + tail
+        assert _redactor()(text) == _MARKER + tail
+
+
+def test_abutting_run_at_or_past_the_floor_is_the_disclosed_over_redaction() -> None:
+    # The honest other half of the trade-off, pinned so it stays deliberate: a
+    # 16+ character unbroken alphanumeric word abutting the armor IS eaten. At
+    # most that one run; the rest of the sentence survives.
+    text = "-----BEGIN RSA " + _ARMOR + "Supercalifragilistic and the rest survives"
+    assert _redactor()(text) == _MARKER + " and the rest survives"
 
 
 def test_content_around_and_between_blocks_survives_byte_exact() -> None:
@@ -236,6 +274,36 @@ def test_ordinary_content_with_hyphen_rules_is_untouched() -> None:
     # Markdown/ASCII separators are 5+ hyphen runs too. Nothing here is a key.
     text = "summary\n-----\nsection two\n------------\nend of report\n"
     assert _redactor()(text) == text
+
+
+# ─── the two bounds, pinned so a future edit is deliberate ───────────────────
+
+
+def test_block_body_bound_falls_back_to_truncated_branch() -> None:
+    # ``_PEM_BLOCK_BODY``'s 100k ceiling is ~30x a 4096-bit RSA PEM. A block that
+    # exceeds it cannot match the full-block branch, and the point of this pin is
+    # that the fallback still takes the armor and the body: less than the whole
+    # block (the trailing END armor survives), never nothing.
+    oversized = "\n".join([_BODY] * 2000)  # ~126k chars, past the 100k bound
+    assert len(oversized) > 100_000
+    end_armor = "-----END RSA " + _ARMOR
+    out = _redactor()("-----BEGIN RSA " + _ARMOR + "\n" + oversized + "\n" + end_armor)
+    assert _BODY not in out, "key material must never survive either branch"
+    assert out == _MARKER + "\n" + end_armor
+
+
+def test_truncated_run_bound_is_2048_runs() -> None:
+    # ``_PEM_TRUNCATED_BODY``'s {0,2048} ceiling. 2048 base64 runs is ~128 KB of
+    # body, far past any real key, but the residual is honest: past the bound the
+    # remaining runs survive. Pinned at both sides of the edge.
+    redactor = _redactor()
+    armor = "-----BEGIN RSA " + _ARMOR
+    at_bound = "\n".join([_BODY] * 2048)
+    assert redactor(armor + "\n" + at_bound) == _MARKER
+
+    past_bound = "\n".join([_BODY] * 2049)
+    out = redactor(armor + "\n" + past_bound)
+    assert out == _MARKER + "\n" + _BODY, "exactly the 2049th run should survive"
 
 
 # ─── cost: the scan must stay bounded on adversarial input ───────────────────

@@ -95,18 +95,35 @@ _PEM_ARMOR_END = r"-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
 # interior costs 12 s on 310 KB of packed bare armors; this costs 5 ms. It spans
 # real newlines and the two-char ``\n`` escapes of a JSON-embedded key alike. The
 # 100k bound is belt-and-braces on top of that guard: ~30x a 4096-bit RSA PEM.
-# A block that somehow exceeds it falls to the truncated branch below rather
-# than going unredacted.
+# A block that somehow exceeds it falls to the truncated branch below, which
+# still takes the armor and the body's base64 runs — less than the whole block,
+# not nothing. Pinned by ``test_block_body_bound_falls_back_to_truncated_branch``.
 _PEM_BLOCK_BODY = r"(?:[^-]|-(?!----)){0,100000}"
 
 # Truncated-block fallback. Tool output is routinely cut mid-payload — that is
 # why this library exists — and a block whose ``-----END`` never arrived would
 # otherwise match NOTHING, losing even the header marker the old pattern gave.
-# So: armor plus any run of base64 lines hanging off it (real or ``\n``-escaped
-# newlines). The ``{16,}`` floor keeps it off prose — an English word after a
-# lone armor line is far short of 16 unbroken base64 characters — so the branch
-# redacts key material, not the paragraph that happens to follow.
-_PEM_TRUNCATED_BODY = r"(?:(?:\\n|[\r\n])+[ \t]*[A-Za-z0-9+/=]{16,}){0,2048}"
+# So: armor plus any run of base64 lines hanging off it.
+#
+# The FIRST run's separator is optional (review F-1): a body that abuts the armor
+# with no separator at all, or with only a space or a tab, is a real shape once
+# newlines have been stripped (single-line env-var keys) and it leaked while every
+# run required a leading newline. Later runs still require one, so multi-line
+# precision is untouched. Separators are real newlines or the two-char ``\n``
+# escapes of a JSON-embedded key.
+#
+# The ``{16,}`` floor keeps it off prose — an English word beside an armor is far
+# short of 16 unbroken base64 characters — so the branch redacts key material,
+# not the paragraph that happens to follow. The one disclosed cost of the F-1
+# widening: prose abutting the armor with NO separator whose first word is 16+
+# unbroken alphanumerics is eaten, at most that one run.
+#
+# Both bounds below are deliberate and pinned. Past 2048 runs the rest of the
+# body survives; that is ~128 KB of base64, far beyond any real key.
+_PEM_TRUNCATED_BODY = (
+    r"(?:[ \t]*[A-Za-z0-9+/=]{16,})?"
+    r"(?:(?:\\n|[\r\n])+[ \t]*[A-Za-z0-9+/=]{16,}){0,2048}"
+)
 
 _PEM_PRIVATE_KEY_PATTERN = (
     f"{_PEM_ARMOR_BEGIN}{_PEM_BLOCK_BODY}{_PEM_ARMOR_END}|{_PEM_ARMOR_BEGIN}{_PEM_TRUNCATED_BODY}"
