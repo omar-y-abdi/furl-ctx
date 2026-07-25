@@ -116,8 +116,10 @@ async def test_stdio_full_lifecycle_compress_retrieve_search_list_purge(tmp_path
     blob = json.dumps([{"id": i, "kind": "err" if i % 2 else "ok"} for i in range(6)])
 
     async with _client(tmp_path) as (session, _init):
-        # compress a blob → get a hash
-        comp = _text(await _call(session, "furl_compress", {"content": blob}))
+        # compress a blob → get a hash. F9: this small 6-row array is a router
+        # no-op (below_min_tokens), not stored by default; persist=True forces
+        # the store so the retrieve/search/list/purge lifecycle has a hash.
+        comp = _text(await _call(session, "furl_compress", {"content": blob, "persist": True}))
         hash_key = comp["hash"]
 
         # retrieve it byte-exact

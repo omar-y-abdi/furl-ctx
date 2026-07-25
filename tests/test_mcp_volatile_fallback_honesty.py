@@ -67,7 +67,11 @@ def test_compress_content_veto_returns_retrievable_volatile_hash(server, tmp_pat
     store = _fail_open_store(tmp_path)
     monkeypatch.setattr(server, "_get_local_store", lambda: store)
 
-    out = server._compress_content("plain content for the volatile fallback honesty test")
+    # F9: short control string is a router no-op, not stored by default;
+    # persist=True forces the store so the volatile-fallback veto path runs.
+    out = server._compress_content(
+        "plain content for the volatile fallback honesty test", persist=True
+    )
 
     # The hash is RETURNED and it really resolves right now (same process).
     assert "hash" in out and out["hash"], "veto must surface the volatile retrieval hash"
@@ -128,7 +132,9 @@ def test_compress_content_healthy_shape_unchanged(server, tmp_path, monkeypatch)
     monkeypatch.setattr(server, "_get_local_store", lambda: store)
 
     content = "plain durable control content"
-    out = server._compress_content(content)
+    # F9: short control string no-ops; persist=True keeps the healthy success
+    # shape (hash present, no durably_stored / volatile_hashes) under test.
+    out = server._compress_content(content, persist=True)
 
     assert "hash" in out
     assert "durably_stored" not in out, "healthy success response shape must be unchanged"

@@ -822,6 +822,41 @@ def _list_preview(original: str) -> str:
     )
 
 
+def _rebaselined_counters(base: dict[str, int], counters: dict[str, int]) -> dict[str, int]:
+    """The ``this_session`` baseline, dropped WHOLESALE when the store was reset (F11).
+
+    The lifetime counters are monotonic only while the store lives: ``furl_purge
+    all=true`` -> ``CompressionStore.clear()`` wipes them (``DELETE FROM
+    ccr_counters`` on sqlite, ``_counters.clear()`` in memory) while a live
+    server still holds its pre-purge snapshot. Clamping the negative delta to 0
+    would DETECT nothing and report genuine post-purge events as
+    ``this_session: 0`` until activity climbed back past the stale baseline.
+
+    ONE counter below its snapshot re-baselines ALL of them, which is strictly
+    more accurate than a per-counter rule rather than a trade. The store keeps
+    counters MONOTONIC BETWEEN GLOBAL CLEARS: the only writes are an
+    ``INSERT OR IGNORE ... 0`` + ``UPDATE ... value = value + ?`` upsert and the
+    two unconditional global wipes above, with no per-counter delete, no
+    decrement, and no negative ``amount`` at any call site. So an observed drop
+    implies EVERY counter was cleared, and re-baselining only the counters that
+    happen to still read low would UNDER-count the ones that already climbed
+    back past their stale snapshot before this read.
+
+    A future editor who adds a per-counter reset, a decrement, or a negative
+    ``increment_counter`` amount INVALIDATES that reasoning and must narrow this
+    back to per-counter detection.
+
+    An empty baseline means "count everything visible", which is exactly the
+    post-reset truth and stays correct across any number of later resets. The
+    caller must PERSIST the result: once a counter climbs back past its stale
+    baseline the reset is no longer detectable from the values alone. Returns a
+    new value; ``base`` is never mutated.
+    """
+    if any(value < base.get(name, 0) for name, value in counters.items()):
+        return {}
+    return base
+
+
 class FurlMCPServer:
     """MCP Server exposing Furl's context engineering toolkit.
 
@@ -845,6 +880,15 @@ class FurlMCPServer:
     def __init__(self) -> None:
         self._stats = SessionStats()
         self._local_store: CompressionStore | None = None  # Lazy-initialized
+        # F11: lifetime-counter snapshot taken the first time _hook_activity_block
+        # reads the store, so furl_stats can report a delta (lifetime minus this
+        # start snapshot) alongside the lifetime totals. Because the counters are
+        # cross-process the delta is not strictly this run, so it is labeled as
+        # "since this server first read the counters", not "this session". None
+        # until the first read; a wipe under us by furl_purge(all) drops the
+        # whole snapshot so the delta counts from the reset (see
+        # _rebaselined_counters).
+        self._hook_counters_at_start: dict[str, int] | None = None
         self._compressor_initialized = False
         # File read cache: path → (content_hash, ccr_hash, line_count, token_count)
         self._file_cache: dict[str, tuple[str, str, int, int]] = {}
@@ -950,8 +994,19 @@ class FurlMCPServer:
         content: str,
         mode: CompressionMode = CompressionMode.NORMAL,
         patterns: SectionPatterns | None = None,
+        persist: bool = False,
     ) -> dict[str, Any]:
         """Compress content using Furl's pipeline (NR2-2 feature c aware).
+
+        ``persist`` (F9): when the router returns a NO-OP — it decided not to
+        compress (below_min_tokens / no_savings / no_eligible_content), returning
+        the original unchanged with zero savings — the original is NOT stored by
+        default, since a stored copy identical to what the caller already holds
+        just burns a retrieval cap slot (finding 9). ``persist=True`` forces the
+        store anyway (the pre-F9 always-store behavior). A no-op emits no
+        ``<<ccr:...>>`` markers, so skipping the store can never orphan one. Only
+        the unfiltered path can no-op; ``persist`` has no effect once section
+        ``patterns`` are supplied (that path always stores its eligible runs).
 
         ``mode`` selects the pipeline (``NORMAL`` uses the process default, so
         a default call is byte-identical to before this feature).
@@ -1034,6 +1089,35 @@ class FurlMCPServer:
         compressed_content = result.messages[0].get("content", content)
         input_tokens = result.tokens_before
         output_tokens = result.tokens_after
+
+        # F9: skip storing a router NO-OP unless the caller opted in. The router
+        # tags a no-op decision (below_min_tokens / no_savings /
+        # no_eligible_content) as ``router:noop:<reason>`` in transforms_applied
+        # and returns the ORIGINAL content unchanged; storing that consumes a cap
+        # slot for a copy identical to what the caller already holds (finding 9).
+        # A no-op emits no <<ccr:...>> markers, so nothing needs a backing entry.
+        # The compression attempt is still recorded in session stats (a 0-saving
+        # attempt did happen) — only the pointless store is skipped.
+        is_noop = any(t.startswith("router:noop:") for t in result.transforms_applied)
+        if is_noop and not persist:
+            noop_strategy = (
+                ", ".join(result.transforms_applied) if result.transforms_applied else "passthrough"
+            )
+            self._stats.record_compression(input_tokens, output_tokens, noop_strategy)
+            return {
+                "compressed": compressed_content,
+                "hash": None,
+                "original_tokens": input_tokens,
+                "compressed_tokens": output_tokens,
+                "tokens_saved": 0,
+                "savings_percent": 0,
+                "transforms": result.transforms_applied,
+                "note": (
+                    f"No token savings on this content, so the original was NOT stored "
+                    f"and consumes no retrieval slot. Engine transforms: {noop_strategy}. "
+                    f"Pass persist=true to store it anyway."
+                ),
+            }
 
         # Store original in local store for later retrieval. require_durable:
         # the MCP server's default backend is the durable sqlite store; a write
@@ -1259,7 +1343,13 @@ class FurlMCPServer:
                 # passthrough, matching how a whitespace-only compress no-ops.
                 rendered_parts.append(run.text)
                 continue
-            part = self._compress_content(run.text, mode)
+            # F9: the filtered path's contract is that EVERY eligible run is
+            # stored and retrievable by its run hash — a caller who filtered
+            # explicitly asked for these runs. So force persist=True: a run that
+            # the router no-ops must still be stored here, or its run hash would
+            # come back None and its retrieval would loud-miss. The no-op skip
+            # applies only to the direct furl_compress whole-content path.
+            part = self._compress_content(run.text, mode, persist=True)
             if "error" in part:
                 # A run-level fail-open: surface loudly rather than silently
                 # shipping a partial mix (the whole call reports the failure).
@@ -1532,10 +1622,15 @@ class FurlMCPServer:
                         "Compress content to save context window space. "
                         "Use this on large tool outputs, file contents, search results, "
                         "or any content you want to shrink before reasoning over it. "
-                        f"The original is stored and can be retrieved later via mcp__furl__{CCR_TOOL_NAME}. "
-                        "Returns compressed text + a hash for retrieval. Optional 'mode' "
-                        "controls aggressiveness; optional include/exclude patterns limit "
-                        "which lines are compressed."
+                        "When it compresses, the original is stored and can be retrieved "
+                        f"later via mcp__furl__{CCR_TOOL_NAME}: returns compressed text + a "
+                        "hash for retrieval. When Furl decides NOT to compress (a no-op: "
+                        "the content is too small or would not shrink) it returns the "
+                        "original unchanged with hash null and stores NOTHING, so a no-op "
+                        "does not consume a retrieval slot — pass persist=true to store it "
+                        "anyway and get a hash back. Optional 'mode' controls "
+                        "aggressiveness; optional include/exclude patterns limit which "
+                        "lines are compressed."
                     ),
                     inputSchema={
                         "type": "object",
@@ -1577,6 +1672,17 @@ class FurlMCPServer:
                                     "Glob-or-regex patterns. Any content line matching one is "
                                     "PROTECTED — passed through verbatim, never compressed. "
                                     "Applied on top of include_patterns."
+                                ),
+                            },
+                            "persist": {
+                                "type": "boolean",
+                                "description": (
+                                    "Store the original even when compression is a no-op "
+                                    "(default false). When Furl decides not to compress because "
+                                    "the content is too small or would not shrink, it returns the "
+                                    "original unchanged and, by default, does NOT store it, so a "
+                                    "no-op no longer consumes a retrieval slot. Set true to store "
+                                    "it anyway and get a retrieval hash back."
                                 ),
                             },
                         },
@@ -1978,6 +2084,12 @@ class FurlMCPServer:
         if isinstance(patterns, str):
             return _err(patterns)
 
+        # F9: opt-in to storing a no-op. Non-boolean is a parameter error, not the
+        # generic internal path (API-15), matching the content/mode guards above.
+        persist = arguments.get("persist", False)
+        if not isinstance(persist, bool):
+            return _err(f"persist parameter must be a boolean, got {type(persist).__name__}")
+
         # T11: an include/exclude pattern is matched inside run_in_executor
         # below, off the event loop, where RE2 is the only engine that can
         # bound a crafted pattern (see _refuse_regex_filters). Refuse before
@@ -1987,7 +2099,9 @@ class FurlMCPServer:
 
         # Run compression in thread pool (it's CPU-bound)
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, self._compress_content, content, mode, patterns)
+        result = await loop.run_in_executor(
+            None, self._compress_content, content, mode, patterns, persist
+        )
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -2129,8 +2243,14 @@ class FurlMCPServer:
         # flat top-level counters are THIS process only; the ``store`` block
         # (entries + hook_activity counters) is the shared cross-process picture.
         stats["scopes"] = (
-            "top-level counters = THIS server process this session; "
-            "'store' = shared across all sessions/processes on this project."
+            "SCOPE LEGEND (F11) — read each block by its scope, they do not mix: "
+            "top-level counters = THIS server process, this session; "
+            "'store' = LIVE snapshot of the shared per-project store (all processes); "
+            "'store.hook_activity' = LIFETIME cumulative cross-process counters "
+            "(monotonic), with a 'this_session' delta since this server first read "
+            "the counters, which may include concurrent processes on this project; "
+            "'sub_agents' and 'combined' = a rolling "
+            f"{SESSION_WINDOW_SECONDS}s window across processes."
         )
         # Label the flat counters above as THIS-server-process scope so they are
         # never read as a session-wide total (Finding B): they count only what
@@ -2232,20 +2352,34 @@ class FurlMCPServer:
             block["newest_entry_age_seconds"] = round(min(ages))
         return block
 
-    @staticmethod
-    def _hook_activity_block(store: CompressionStore) -> dict[str, Any]:
+    def _hook_activity_block(self, store: CompressionStore) -> dict[str, Any]:
         """Cross-process hook/pipe counters from the shared store (observability).
 
-        Cumulative and monotonic — they survive entry eviction/expiry (unlike the
-        live-entry stats above), so ``hook_invocations_seen`` rising while your
-        context still shows RAW tool output is the durable signal that Claude Code
-        is dropping the PostToolUse hook's replacement output
-        (anthropics/claude-code#68951). ``hook_compressions_applied`` counts
-        replacements Furl produced (and would have delivered if not dropped); a
-        gap between the two is bucketed no-op reasons. The opt-in FURL_PRETOOL_PIPE
-        path is unaffected by #68951 — its ``pipe_*`` counters appear only once it
-        has run. Empty until the runtime furl-ctx ships the store counter API;
-        FAIL-OPEN (never raises into furl_stats).
+        LIFETIME scope: cumulative and monotonic — they survive entry
+        eviction/expiry (unlike the live-entry stats above), so
+        ``hook_invocations_seen`` rising while your context still shows RAW tool
+        output is the durable signal that Claude Code is dropping the PostToolUse
+        hook's replacement output (anthropics/claude-code#68951).
+        ``hook_compressions_applied`` counts replacements Furl produced (and would
+        have delivered if not dropped); a gap between the two is bucketed no-op
+        reasons. ``hook_size_reroute`` is the subset of those compressions that
+        took the fast reversible CCR offload for an over-threshold blob (F2).
+
+        F11: the counts above are LIFETIME totals across every session on this
+        project and are easy to misread as "this run". ``this_session`` carries
+        the DELTA since this server first read the counters — lifetime minus that
+        start snapshot. Because the counters are cross-process it is not strictly
+        this run: a concurrent process on the same project moves it too. It still
+        separates a rolling lifetime total from recent activity, which is the
+        misread the scope labels prevent. A ``furl_purge all=true`` between two
+        reads resets the lifetime counters, so the delta then counts from that
+        reset rather than from server start (``_rebaselined_counters``).
+
+        The opt-in FURL_PRETOOL_PIPE path is unaffected by #68951 — its ``pipe_*``
+        counters appear only once it has run, and ``pipe_noop_reasons`` are
+        DYNAMIC per-command reasons ONLY (the static gating is the banner's job,
+        see ``pipe_noop_scope``). Empty until the runtime furl-ctx ships the store
+        counter API; FAIL-OPEN (never raises into furl_stats).
         """
         try:
             counters = store.get_counters()
@@ -2254,30 +2388,90 @@ class FurlMCPServer:
         if not isinstance(counters, dict):
             counters = {}
 
-        def _bucketed(prefix: str) -> dict[str, int]:
+        # F11: snapshot the lifetime counters the first time this server reads
+        # them, so ``this_session`` = lifetime - start. Captured lazily (the
+        # store is lazy). ANY counter below its snapshot means the store was
+        # reset under us (furl_purge all=true) — the counters only move by
+        # upsert-add between global wipes — so the WHOLE baseline is dropped and
+        # persisted, see _rebaselined_counters. Every delta below is then
+        # non-negative by construction, with no clamp hiding a reset.
+        if self._hook_counters_at_start is None:
+            self._hook_counters_at_start = dict(counters)
+        base = _rebaselined_counters(self._hook_counters_at_start, counters)
+        self._hook_counters_at_start = base
+        session = {name: value - base.get(name, 0) for name, value in counters.items()}
+
+        def _bucketed(source: dict[str, int], prefix: str) -> dict[str, int]:
             return {
                 name[len(prefix) :]: value
-                for name, value in counters.items()
+                for name, value in source.items()
                 if name.startswith(prefix)
             }
 
         block: dict[str, Any] = {
+            "scope": (
+                "LIFETIME — cumulative across ALL sessions/processes on this "
+                "project, monotonic, survives entry eviction/expiry. See "
+                "this_session for the delta since this server first read the counters."
+            ),
             "note": (
-                "cumulative across all processes on this project, monotonic. "
                 "invocations rising while output still looks raw → the harness "
                 "is dropping replacements (anthropics/claude-code#68951)."
             ),
             "hook_invocations_seen": counters.get("hook_invocations_seen", 0),
             "hook_compressions_applied": counters.get("hook_compressions_applied", 0),
-            "hook_noop_reasons": _bucketed("hook_noop:"),
+            # Addition (a): the size-reroute breadcrumb (rides ALONGSIDE
+            # hook_compressions_applied — it is still a real, marker-emitting
+            # compression, not a no-op), surfaced by name so a processed huge
+            # blob is visible in furl_stats.
+            "hook_size_reroute": counters.get("hook_size_reroute", 0),
+            "hook_noop_reasons": _bucketed(counters, "hook_noop:"),
         }
+        session_block: dict[str, Any] = {
+            "scope": (
+                "delta since this server first read the counters, its start "
+                "snapshot — or since the last store reset (furl_purge all=true "
+                "wipes the lifetime counters and re-baselines this delta). The "
+                "counters are cross-process, so this delta MAY INCLUDE "
+                "concurrent processes on this project; it is not exclusively "
+                "this run."
+            ),
+            "hook_invocations_seen": session.get("hook_invocations_seen", 0),
+            "hook_compressions_applied": session.get("hook_compressions_applied", 0),
+            "hook_size_reroute": session.get("hook_size_reroute", 0),
+            "hook_noop_reasons": _bucketed(session, "hook_noop:"),
+        }
+
         pipe_seen = counters.get("pipe_invocations_seen", 0)
         pipe_applied = counters.get("pipe_compressions_applied", 0)
-        pipe_noop = _bucketed("pipe_noop:")
+        pipe_noop = _bucketed(counters, "pipe_noop:")
         if pipe_seen or pipe_applied or pipe_noop:
             block["pipe_invocations_seen"] = pipe_seen
             block["pipe_compressions_applied"] = pipe_applied
             block["pipe_noop_reasons"] = pipe_noop
+            # Additions (b)+(c): the pipe_noop buckets are DYNAMIC per-command
+            # reasons only. The two STATIC gating reasons — a Bash permission-rule
+            # set being present, or FURL_PRETOOL_PIPE disabled — are deliberately
+            # NOT counted per command (they would fire on nearly every Bash call
+            # and tax the hot path), so their absence here is not "zero
+            # occurrences". The SessionStart banner reads the same Bash rules and
+            # is the authoritative live signal for whether the pipe is gated off;
+            # furl_stats does not duplicate that scan because it lives in the
+            # plugin hook layer outside this package and duplicating it here would
+            # risk drift.
+            block["pipe_noop_scope"] = (
+                "DYNAMIC per-command reasons only: settings-doubt, already-wrapped, "
+                "not-bash, emit-error, and the malformed-input buckets. The STATIC "
+                "gating reasons (a Bash permission-rule set is present, or "
+                "FURL_PRETOOL_PIPE is disabled) are intentionally not counted per "
+                "command; the SessionStart banner reports the live pipe gating state "
+                "and is the authoritative signal for it."
+            )
+            session_block["pipe_invocations_seen"] = session.get("pipe_invocations_seen", 0)
+            session_block["pipe_compressions_applied"] = session.get("pipe_compressions_applied", 0)
+            session_block["pipe_noop_reasons"] = _bucketed(session, "pipe_noop:")
+
+        block["this_session"] = session_block
         return block
 
     @staticmethod
