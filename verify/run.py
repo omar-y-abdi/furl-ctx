@@ -64,6 +64,10 @@ FAMILIES = [
     ("code", (7, 30), False),
     ("multiturn", (90, 900), False),
     ("disk", (9, 90), True),
+    # The whole-blob CCR offload path: reached by NO other family (measured —
+    # opaque_offloads == [] and no router:ccr_offload in all 36 pre-existing
+    # cells). Carries no DEV_CLAIMS entry, so it contributes no degradations.
+    ("opaque", gen.OPAQUE_SIZES, False),
 ]
 
 
@@ -147,6 +151,14 @@ def run_group(family: str, n: int, tier: str, *, needles: bool) -> dict:
         "needles": needle_summary,
         "cache_prefix": cache_prefix_summary,
         "transforms_sample": per_seed[0]["transforms"],
+        # How many of the N_SEEDS runs actually took the whole-blob CCR offload
+        # route. Recorded for EVERY family, because "which families reach this
+        # path" was previously unanswerable from the harness output — that gap
+        # is what let a corrected retrieval charge sit on a path nothing
+        # exercised. 0 is the correct value for every row-shaped family.
+        "ccr_offload_seeds": sum(
+            1 for c in per_seed if any("ccr_offload" in t for t in c["transforms"])
+        ),
         "took_lossy_path_any": any(c["took_lossy_path"] for c in per_seed),
         "used_default_params": used_defaults,
         "per_seed": per_seed,
@@ -342,6 +354,44 @@ def main() -> int:
         ):
             cache_prefix_violations.append({"case_id": g["case_id"], "tier": g["tier"], **cp})
 
+    # The `opaque` family exists to EXERCISE the whole-blob offload. It is the
+    # only family that reaches it, and it only reaches it while the engine
+    # cannot compress its documents (the route needs compression_ratio >= 0.9).
+    # So "the route was taken" is not a safe assumption to leave implicit: any
+    # future improvement in compressing this content class would quietly turn
+    # the family into decoration measuring a path it no longer visits.
+    #
+    # `opaque_route_taken` and `opaque_route_runs` are counted and PINNED on the
+    # summary line (perf.yml asserts both EXACTLY), not just `opaque_route_misses`.
+    # A misses-only assertion is vacuous: delete the family from FAMILIES and there
+    # are no cells to check, so misses is 0 and the check passes while the path goes
+    # unmeasured again. Pinning the POSITIVE count makes "verified" and "vacant"
+    # distinguishable — 36/36 passes, 34/36 fails, and 0/0 fails.
+    #
+    # Enforcement is human-in-the-loop, and the comment says so because it is true:
+    # perf-gate is NOT in the repository's required-checks set, so a red gate here
+    # does not block a merge by itself. It goes red, the orchestrator reads it, the
+    # orchestrator declines to merge.
+    opaque_route_runs = 0
+    opaque_route_taken = 0
+    opaque_route_misses: list[dict] = []
+    for g in groups:
+        if g["family"] != "opaque":
+            continue
+        opaque_route_runs += g["n_seeds"]
+        opaque_route_taken += g["ccr_offload_seeds"]
+        if g["ccr_offload_seeds"] != g["n_seeds"]:
+            opaque_route_misses.append(
+                {
+                    "case_id": g["case_id"],
+                    "tier": g["tier"],
+                    "size": g["size"],
+                    "seeds_taking_route": g["ccr_offload_seeds"],
+                    "n_seeds": g["n_seeds"],
+                    "transforms_sample": g["transforms_sample"],
+                }
+            )
+
     all_defaults = all(g["used_default_params"] for g in groups)
 
     payload = {
@@ -363,13 +413,28 @@ def main() -> int:
         "hash_failures": hash_failures,
         "silent_loss_findings": silent_loss_findings,
         "cache_prefix_violations": cache_prefix_violations,
+        "opaque_route_runs": opaque_route_runs,
+        "opaque_route_taken": opaque_route_taken,
+        "opaque_route_misses": opaque_route_misses,
     }
     RESULTS_JSON.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"\nWrote {RESULTS_JSON}")
+    for miss in opaque_route_misses:
+        print(
+            f"opaque_route_MISS {miss['case_id']} {miss['tier']}: "
+            f"{miss['seeds_taking_route']}/{miss['n_seeds']} seeds took the offload; "
+            f"transforms={miss['transforms_sample']}"
+        )
+    # The route counters live ON the pinned line, not beside it: perf.yml selects
+    # the summary by its `default_params_confirmed=` prefix, so anything printed
+    # on a separate line is read by nobody.
     print(
         f"default_params_confirmed={all_defaults}  degradations={len(degradations)}  "
         f"hash_failures={len(hash_failures)}  silent_loss={len(silent_loss_findings)}  "
         f"cache_prefix_violations={len(cache_prefix_violations)}  "
+        f"opaque_route_runs={opaque_route_runs}  "
+        f"opaque_route_taken={opaque_route_taken}  "
+        f"opaque_route_misses={len(opaque_route_misses)}  "
         f"result_cache_silent_loss={inproc['any_silent_loss']}"
     )
     return 0
