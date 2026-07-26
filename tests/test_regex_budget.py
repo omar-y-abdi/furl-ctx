@@ -14,6 +14,7 @@ screens cannot be the fix.
 
 from __future__ import annotations
 
+import ast
 import re
 import signal
 import threading
@@ -272,6 +273,81 @@ def test_re2_ascii_class_divergence_is_known_and_pinned() -> None:
     assert matches_within_budget(re.compile(r"^\d+$"), arabic_indic) is False
     # ASCII digits agree under both engines -- the common case is unaffected.
     assert matches_within_budget(re.compile(r"^\d+$"), "12345") is True
+
+
+# ---------------------------------------------------------------------------
+# Barrier -- the disclosed divergence stays contained to BOOLEAN-verdict callers
+# ---------------------------------------------------------------------------
+
+# regex_budget entry points that return a BOOLEAN does-a-match-EXIST verdict under
+# the disclosed ASCII/Unicode class divergence (see their docstrings). Correct for
+# a caller that needs yes/no; WRONG for one where which byte matched decides output.
+_BOOLEAN_VERDICT_FUNCS = frozenset({"matches_within_budget", "search_within_budget"})
+
+# Modules whose output depends on WHICH bytes matched (span-sensitive), so the
+# boolean verdict above is the wrong primitive and they must never route through
+# it. redaction is the canonical case: it ``re.sub``s the matched span, so both
+# leftmost-first/longest and the ASCII/Unicode divergence would change which bytes
+# get scrubbed -- and strengthening the guard to close that divergence would drop
+# word-class patterns to the unbudgeted worker-thread residual (#26). Add a module
+# here the moment another span-sensitive surface appears; the barrier guards it too.
+_SPAN_SENSITIVE_MODULES = ("furl_ctx/redaction.py",)
+
+_REGEX_BUDGET_MODULE = "furl_ctx.ccr.regex_budget"
+
+
+def _boolean_verdict_refs(source: str) -> set[str]:
+    """Names in ``_BOOLEAN_VERDICT_FUNCS`` that ``source`` imports from
+    regex_budget or reads as an attribute (``<anything>.matches_within_budget``).
+
+    AST-based on purpose: a name that appears only in a comment or a string does
+    NOT trip the barrier, so a note in ``redaction.py`` explaining why it stays
+    off this path is safe to write. Both routing shapes are caught -- a direct
+    ``from ...regex_budget import matches_within_budget`` (bare-name call) via the
+    import, and ``regex_budget.matches_within_budget`` / ``rb.matches_within_budget``
+    via the attribute access.
+    """
+    hits: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module == _REGEX_BUDGET_MODULE:
+            hits |= {a.name for a in node.names if a.name in _BOOLEAN_VERDICT_FUNCS}
+        elif isinstance(node, ast.Attribute) and node.attr in _BOOLEAN_VERDICT_FUNCS:
+            hits.add(node.attr)
+    return hits
+
+
+def test_span_sensitive_callers_do_not_route_through_boolean_verdict_path() -> None:
+    """Barrier: a span-sensitive caller must never use the BOOLEAN-verdict path.
+
+    ``matches_within_budget`` / ``search_within_budget`` answer does-a-match-EXIST
+    only, under the disclosed ASCII/Unicode class divergence pinned by
+    ``test_re2_ascii_class_divergence_is_known_and_pinned``. That divergence is
+    ACCEPTED because a boolean verdict cannot observe it (it changes which span
+    wins, never whether one exists). Route a caller where WHICH bytes matched
+    decides the output -- redaction ``re.sub``s the matched span -- and the
+    divergence silently redacts the wrong bytes; worse, "fixing" it by refusing
+    RE2 for word-class patterns drops them to the unbudgeted worker-thread
+    residual and reopens the #26 GIL-freeze DoS. So the rule is one line: span-
+    sensitive callers stay off this path, and this test goes red the moment one
+    imports or calls either function -- at the moment the assumption breaks, not
+    after a silent mis-redaction ships.
+
+    Proven able to fail: temporarily adding
+    ``from furl_ctx.ccr.regex_budget import matches_within_budget`` to
+    ``furl_ctx/redaction.py`` turns this red (verified at delivery, then reverted).
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    for rel_path in _SPAN_SENSITIVE_MODULES:
+        source = (repo_root / rel_path).read_text(encoding="utf-8")
+        offending = _boolean_verdict_refs(source)
+        assert not offending, (
+            f"{rel_path} routes through boolean-verdict function(s) "
+            f"{sorted(offending)} from {_REGEX_BUDGET_MODULE}: that path returns "
+            f"does-a-match-EXIST only, under an accepted ASCII/Unicode divergence, "
+            f"and must not back a span-sensitive caller (which byte matched decides "
+            f"its output). See those functions' docstrings -- strengthening the "
+            f"guard to close the divergence would reopen the #26 worker-thread DoS."
+        )
 
 
 # ---------------------------------------------------------------------------
