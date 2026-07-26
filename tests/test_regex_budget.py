@@ -327,7 +327,19 @@ _SPAN_SIGNAL_EXEMPT = {
 # list: adds findall/finditer, which return matched substrings / match objects and
 # would otherwise be a silent gap of exactly the kind the completeness test closes.
 _SPAN_METHOD_NAMES = frozenset(
-    {"sub", "subn", "span", "start", "end", "group", "groups", "groupdict", "expand", "findall", "finditer"}
+    {
+        "sub",
+        "subn",
+        "span",
+        "start",
+        "end",
+        "group",
+        "groups",
+        "groupdict",
+        "expand",
+        "findall",
+        "finditer",
+    }
 )
 
 _REGEX_BUDGET_MODULE = "furl_ctx.ccr.regex_budget"
@@ -402,6 +414,11 @@ def test_span_sensitive_callers_do_not_route_through_boolean_verdict_path() -> N
     ``furl_ctx/redaction.py`` turns this red (verified at delivery, then reverted).
     """
     repo_root = Path(__file__).resolve().parents[1]
+    assert _SPAN_SENSITIVE_MODULES, (
+        "_SPAN_SENSITIVE_MODULES is empty: this barrier would then iterate nothing "
+        "and pass having checked no file -- a vacuous green. It must list the "
+        "span-sensitive floor (the completeness test keeps that floor honest)."
+    )
     for rel_path in _SPAN_SENSITIVE_MODULES:
         module_path = repo_root / rel_path
         assert module_path.exists(), (
@@ -428,10 +445,13 @@ def _derive_span_signal_modules(repo_root: Path) -> set[str]:
     all count, and module-level ``re.sub`` is caught too (it parses to
     ``Attribute(attr="sub")``). A MECHANICAL over-approximation, not a semantic one:
     ``thread.start()`` and ``exc.start`` trip it, which is why ``_SPAN_SIGNAL_EXEMPT``
-    exists. It sees only direct attribute access, so a match handed one call away to
-    a helper is invisible; recall is not the goal. The goal is that a NEW span-reading
-    module cannot enter the tree without a conscious decision -- joining the guarded
-    floor or being exempted with a reason.
+    exists. It sees only DIRECT attribute access: a module that reads spans solely
+    through an imported helper (never calling ``.span()``/``.group()``/``.sub()`` etc.
+    itself) is invisible, and so is ``getattr(m, "group")(1)``. Recall is not the goal.
+    The goal is that a NEW span-reading module cannot enter the tree without a
+    conscious decision -- joining the guarded floor or being exempted with a reason.
+    Separate ``match.start()``/``match.end()`` slicing IS seen: both names are in the
+    set, so ``text[m.start():m.end()]`` trips it like ``.span()`` would.
     """
     span_users: set[str] = set()
     for path in sorted((repo_root / "furl_ctx").rglob("*.py")):
@@ -458,6 +478,13 @@ def test_span_sensitive_module_list_is_complete() -> None:
     """
     repo_root = Path(__file__).resolve().parents[1]
     derived = _derive_span_signal_modules(repo_root)
+    assert derived, (
+        "the span-signal derivation found NO modules: the furl_ctx walk is broken, "
+        "so this test would pass having compared empty sets -- a vacuous green. The "
+        "real tree always has span readers (redaction, marker_grammar, ...). (A stale "
+        "exemption is caught separately; this guards the empty-walk case even if "
+        "_SPAN_SIGNAL_EXEMPT is ever emptied, which would otherwise make it vacuous.)"
+    )
     checked = set(_SPAN_SENSITIVE_MODULES)
     exempt = set(_SPAN_SIGNAL_EXEMPT)
 
