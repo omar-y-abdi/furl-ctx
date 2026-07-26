@@ -9,10 +9,30 @@ name: perf
 # none of these paths simply does not run this workflow, and nothing waits on
 # it. (In ci.yml the same filter would deadlock the required checks, which is
 # why ci.yml must never paths-filter — see tests/test_ci_required_checks_guard.py.)
+#
+# THIS FILE IS IN ITS OWN FILTER, and that is the point of the entry. Without it
+# a PR that changed ONLY this workflow — the `expected` counter dict below, or
+# the assertion logic that reads it — did not run perf-gate, so the one category
+# of change this gate cannot survive being wrong about was the one category it
+# never exercised. Measured when this was found: of the last 40 merged PRs,
+# ZERO had a workflow-only diff. Every PR that ever touched a workflow also
+# touched `verify/**` or `furl_ctx/**`, so the filter matched by accident every
+# single time and the gap never surfaced.
+#
+# WHY `perf.yml` AND NOT `.github/workflows/**`, which is what ci.yml uses:
+# ci.yml holds the REQUIRED checks, and a required check that never starts
+# deadlocks the PR, so ci.yml must run on anything that could alter it — the
+# wide filter there buys deadlock-safety. perf-gate is never required (see
+# above), so the wide filter buys nothing and costs a ~3.5-minute benchmark job
+# on every dependabot action bump and on every ci.yml or release.yml edit, none
+# of which can move the counters or the floor. The narrow entry covers the
+# defect exactly. Do not "fix" the inconsistency with ci.yml by widening this:
+# the two filters differ because the two workflows have different obligations.
 on:
   pull_request:
     branches: [main]
     paths:
+      - ".github/workflows/perf.yml"
       - "crates/**"
       - "furl_ctx/**"
       - "pyproject.toml"
@@ -23,6 +43,7 @@ on:
   push:
     branches: [main]
     paths:
+      - ".github/workflows/perf.yml"
       - "crates/**"
       - "furl_ctx/**"
       - "pyproject.toml"
