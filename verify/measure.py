@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -351,7 +350,6 @@ def effective_savings(
     recovered: dict[str, str],
     tok: Tokenizer,
     rates: tuple[float, ...] = (0.0, 0.25, 0.50),
-    n_dropped_rows: int = 0,
 ) -> dict[str, float]:
     """Effective savings ratio once the model retrieves offloaded content,
     INCLUDING the round-trip cost.
@@ -383,8 +381,8 @@ def effective_savings(
     Each offload sits behind ONE marker with no granular row index, so ANY
     non-zero retrieval pulls the ENTIRE payload back:
 
-        k = ceil(r * n_dropped_rows)
-        retrieval_cost(r > 0) = recovered_payload_tokens + k * per_call_overhead
+        retrieval_cost(r > 0) = recovered_payload_tokens
+                              + n_offloaded_blobs * per_call_overhead
         retrieval_cost(0)     = 0
 
     effective_after = tokens_after + retrieval_cost; savings =
@@ -404,16 +402,43 @@ def effective_savings(
     stored, so whole-blob is the only honest cost. This is why eff@25 / eff@50
     read lower than pre-removal figures — those measured a per-row retrieval the
     model could never perform.
+
+    THE CALL TERM FOLLOWS THE SAME RULE, and until now it did not. #179 fixed the
+    CONTENT half and left ``call_cost = k * overhead`` — k SEPARATE retrievals —
+    alive next to a docstring saying only whole-blob retrieval exists. One marker
+    is one call, whatever ``r`` is, so the charge is ONE call per offloaded blob.
+    Measured consequences of the old term: it OVERCHARGED row-drop families
+    (logs@900 paid k=300 calls at r=0.5, 3600 tokens for retrievals that cannot
+    be issued separately) and UNDERCHARGED zero-drop ones (k=0, so dedup and
+    opaque paid for no call at all).
+
+    A VISIBLE CONSEQUENCE: eff@25 now EQUALS eff@50 for every family. That is not
+    a bug in the table, it is the rate axis telling the truth — any non-zero
+    fraction pulls the whole blob through one call, so 25% and 50% cost the same
+    and only 0-vs-non-zero is a real distinction. The old spread between the two
+    columns was entirely the granular call term.
+
+    KNOWN SIGNED BIAS, measured not modelled: ``recovered`` holds what
+    ``CompressionStore.retrieve`` returns — the byte-exact original. A model does
+    not get that; it gets the MCP ``furl_retrieve`` response, which wraps the
+    content in a JSON envelope. Measured on the opaque family (gpt-4o): the MCP
+    response is 1.86%-3.10% larger than the charge, 342-577 tokens per cell.
+    The harness does NOT model that gap, deliberately — reproducing the handler's
+    response shape here would be a second source of truth that can drift from the
+    handler. So these figures are an UPPER BOUND on savings by ~2-3%, and the
+    real round trip costs slightly more than reported.
     """
     out: dict[str, float] = {}
     # Named for what it holds: the WHOLE retrieved payload. The zero-drop cases
     # this gate exists for (dedup, opaque whole-blob) have no rows at all.
     recovered_payload_tokens = sum(tok.count_text(blob) for blob in recovered.values())
     for r in rates:
-        k = int(math.ceil(r * n_dropped_rows))
         if r > 0.0:
             content_cost = recovered_payload_tokens
-            call_cost = k * RETRIEVE_CALL_OVERHEAD_TOKENS
+            # ONE call per offloaded blob. NOT k: a blob sits behind a single
+            # marker with no row index, so a retrieval of any fraction of it is
+            # the same one call returning the same whole payload.
+            call_cost = len(recovered) * RETRIEVE_CALL_OVERHEAD_TOKENS
         else:
             content_cost = 0
             call_cost = 0
@@ -649,7 +674,7 @@ def _measure_structured(case, result, transforms, tb, ta, tr, tok) -> CaseResult
     retention = (n_visible + n_recoverable) / n if n else 1.0
 
     hc = hash_compare_structured(case.items, output_text, recovered)
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    eff = effective_savings(tb, ta, recovered, tok)
 
     needles: list[dict[str, Any]] = []
     markers = case.meta.get("needle_markers", [])
@@ -745,7 +770,7 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
     reconstructed_sha = _multiset_sha(recon_sigs)
     byte_exact = reconstructed_sha == original_sha and not missing
 
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    eff = effective_savings(tb, ta, recovered, tok)
 
     cp = check_cache_prefix(case.messages, result.messages, case.meta.get("cache_prefix_texts", []))
     cache_prefix = {
@@ -798,7 +823,7 @@ def _measure_code(case, result, transforms, tb, ta, tr, tok) -> CaseResult:
     n_visible = hc.n_reconstructed
     n_dropped = n - n_visible
     retention = n_visible / n if n else 1.0
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    eff = effective_savings(tb, ta, recovered, tok)
     return CaseResult(
         family=case.family,
         tier=case.tier,

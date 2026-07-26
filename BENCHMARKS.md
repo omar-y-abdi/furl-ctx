@@ -129,29 +129,42 @@ cross-message dedup blob, or an opaque code blob — stores its payload behind o
 `<<ccr:HASH>>` marker with no granular row index, so retrieving any of it pulls the
 entire payload back. `verify/measure.py::effective_savings` charges that whole payload at
 any non-zero retrieval rate. PR #172 first charged it for row drops; the zero-drop gap
-described below the table was closed after — the charge now gates on `r > 0`, not on
-`k = ceil(r * n_dropped_rows) > 0`. Effective savings = `1 - (compressed + retrieved) /
-raw`, mean over 6 seeds, real gpt-4o tokens, all six families:
+described below the table was closed after — the charge gates on `r > 0`, not on
+`k = ceil(r * n_dropped_rows) > 0`. The CALL half of the charge kept the granular shape one
+release longer and was corrected last: a blob has no row index, so a retrieval of any
+fraction of it is the same **one call** returning the same whole payload. The charge is
+therefore one call per offloaded blob, not `k` calls — which had over-charged the
+row-dropping families (`logs@900` paid for 300 separate calls at `r=0.5`) exactly as it
+under-charged the zero-drop ones (`k=0`, no call at all). Effective savings =
+`1 - (compressed + retrieved) / raw`, mean over 6 seeds, real gpt-4o tokens, all seven
+families:
 
 | family | raw reduction (eff@0) | effective @25% | effective @50% |
 |---|---:|---:|---:|
-| code | 15.2% | **+10.2%** | **+10.2%** |
-| disk | 83.3% | **-1.3%** | **-4.2%** |
-| logs | 92.0% | +4.8% | +2.3% |
-| multiturn | 78.3% | **-6.4%** | **-9.6%** |
-| repeated_logs | 97.6% | +11.9% | +8.8% |
-| search | 95.6% | +7.4% | +0.7% |
+| code | 15.2% | **+10.1%** | **+10.1%** |
+| disk | 83.3% | **+1.0%** | **+1.0%** |
+| logs | 92.0% | +7.3% | +7.3% |
+| multiturn | 78.3% | **-3.7%** | **-3.7%** |
+| opaque | 87.0% | **-13.0%** | **-13.0%** |
+| repeated_logs | 97.6% | +15.0% | +15.0% |
+| search | 95.6% | +14.0% | +14.0% |
 
-So under realistic partial retrieval, effective savings at 25% and 50% run from about
-**-9.6% to +11.9%** by family and go **NEGATIVE for disk and multiturn** — not the
-"+40-68% at every fraction" the removed model reported.
+**The two retrieval columns are identical, and that is the result, not a copy-paste
+error.** One marker is one call, so 25% and 50% buy the same bytes for the same price:
+the only real distinction on this axis is retrieving versus not retrieving. Every point of
+spread the previous table showed between those columns was the retired per-row call term.
 
-The `code` row's per-family mean (15.2% → 10.2%) averages a tier split, because verify's
+So under realistic retrieval, effective savings run from about **-13.0% to +15.0%** by
+family and go **NEGATIVE for multiturn and opaque** — not the "+40-68% at every fraction"
+the removed model reported. `disk` crosses back to marginally positive (**-1.3% -> +1.0%**)
+because it drops many rows and was the biggest payer of the phantom per-row call fee.
+
+The `code` row's per-family mean (15.2% → 10.1%) averages a tier split, because verify's
 `gen_code` builds N separate real source files, not one blob: at the `low` tier the
 identical files cross-message dedup (raw **69.3%** at `code@30 low`; retrieving the two
-unique blobs is cheap, so it stays net-positive at **+62.7%**), while `medium`/`high` are
+unique blobs is cheap, so it stays net-positive at **+62.6%**), while `medium`/`high` are
 near-unique and pass through at 0%. The one cell that offloads a near-whole payload yet
-drops no rows — `code@7 low` — goes **negative** (+22.0% → **-1.5%** at 25%).
+drops no rows — `code@7 low` — goes **negative** (+22.0% → **-1.8%** at 25%).
 
 **Correcting the record:** an earlier version of this section carried a caveat stating the
 `code` family was "fully offloaded, no rows dropped" and read flat because
@@ -184,20 +197,31 @@ Retrieving any of it pulls the entire payload back.
 | fixture | raw marker reduction | effective @25% | effective @50% | one full retrieval |
 |---|---:|---:|---:|---:|
 | `code`, opaque whole-blob (historical, `benchmarks/code_roundtrip.py`, removed) | 95.9% | **-4.1%** | **-4.2%** | **-4.1%** |
-| `code`, same blob through the corrected `effective_savings` | 95.9% | **-4.0%** | **-4.0%** | **-4.0%** |
+| `code`, same blob through the corrected `effective_savings` | 95.9% | **-4.1%** | **-4.1%** | **-4.1%** |
 
 The historical row is from `benchmarks/code_roundtrip.py`, since removed (see git history),
 so it cannot be refreshed by its own harness. The second row is **independent
 corroboration**: feeding the committed `code.raw.json` blob through the corrected
-`effective_savings` (whole payload charged at any `r > 0`) reproduces it — 95.9% raw,
-**-4.0%** at 25% retrieval — within rounding of the retired harness's -4.1%. gpt-4o tokens,
-the same 12-token per-call overhead as the table above. The 95.9 percent is a marker
+`effective_savings` (whole payload plus one call, charged at any `r > 0`) reproduces it —
+95.9% raw, **-4.1%** at 25% retrieval, now EQUAL to the retired harness's rightmost column
+rather than merely within rounding of it. gpt-4o tokens, the same 12-token per-call
+overhead as the table above.
+
+That equality is the interesting part of this row. The retired harness computed its
+"one full retrieval" column itself — `tokens_after + retrieved_tokens +
+RETRIEVE_CALL_OVERHEAD_TOKENS`, one call, whole blob (see `code_roundtrip.py` before
+`8ce3585d`) — while its @25%/@50% columns came from the shared `effective_savings` with
+`n_dropped_rows`, which is why those two differ (-4.1% / -4.2%) and the one-retrieval
+column does not. So the correct whole-blob model was already written down in this repo,
+beside the granular one, and the shared function kept the granular call term for two more
+releases. The corrected `effective_savings` now reproduces that retired column exactly.
+The 95.9 percent is a marker
 saving, not a token saving: `compress()` moved 41005 of 41025 tokens into the store and
 left a ~1601-token summary, so retrieving the code back costs more than never compressing
 it. This blob shape is why the front-page `code` row leads with a raw reduction that does
 not survive a round trip.
 
-The two `code` numbers do not conflict: the table row (+10.2% at 25%) is verify's
+The two `code` numbers do not conflict: the table row (+10.1% at 25%) is verify's
 multi-file `gen_code`, which dedups identical files at the low tier and passes near-unique
 files through — cheap or free to retrieve — while the single opaque blob here is
 net-negative. Same family name, different fixtures. `compress()` flags the opaque case on
