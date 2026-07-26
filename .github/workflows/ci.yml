@@ -66,6 +66,26 @@ jobs:
               - '.release-please-config.json'
               - 'tests/**'
               - 'scripts/**'
+              # Top-level packages the SUITE IMPORTS, and the suite's own root
+              # config. Omitting them meant a PR touching only these skipped
+              # every heavy step, so the tests that would have caught it never
+              # ran: tests/test_effective_savings_offload_cost.py and
+              # tests/test_retrieve_overhead_drift_pin.py do
+              # `from verify.measure import ...`, tests/test_recheck_unflatten.py
+              # does `from verify.independent_recheck import ...`, and
+              # tests/test_benchmarks_fail_closed.py does `import
+              # benchmarks.metrics` (plus run_bench/needle_recall). conftest.py
+              # is the root pytest config every test in the repo loads.
+              # Not a hand-list to trust by eye: the `code` filter is derived
+              # and pinned by tests/test_ci_required_checks_guard.py, which
+              # walks the suite's real AST imports and fails red on any
+              # top-level package that is imported but unfiltered.
+              # Safe by construction — adding paths can only make `code` true
+              # MORE often, never less, so it cannot re-create the #15/#32/#56
+              # deadlock (which came from job-level `if:`, not from this list).
+              - 'verify/**'
+              - 'benchmarks/**'
+              - 'conftest.py'
               # Conclusion of the required checks (lint/build-wheel/test) no
               # longer depends on this filter: those jobs ALWAYS run and short-
               # circuit their heavy steps when code=='false' (step-level `if`
