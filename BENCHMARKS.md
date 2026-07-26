@@ -71,13 +71,24 @@ All tiers byte-exact. (harness since removed; see git history for
 | disk@90 | — | **95.1%** [93.5–95.8] | **91.5%** high, ~92–95% genuine (CCR offload at size 90) | yes | verify |
 | disk@9 | 50% (small, lossless-only) | **59.7%** | **43.3%** high / **40.6%** genuine (no offload at size 9) | yes | verify + heldout |
 | multiturn@90 | 70.8% (@low/135) | **39.0%** medium | **28.3%** high [22.9–32.5] | yes | heldout |
-| code@7 | 0% (passthrough) | 0% | 0% (66% only when blobs are byte-identical → dedup) | yes | verify |
+| code@7 | 0% (passthrough) | 0% | 0% (66% at `code@7 low`, as measured 2026-06-13, when blobs are byte-identical → dedup) | yes | verify |
 
-> **Update (CCR-offload fallback):** the rows above predate the router's
-> reversible CCR-offload fallback: `code@7` no longer passes through at 0%
-> but offloads to the CCR store (**98.9%**, retention 100%), and multiturn
-> rose 70.6% → **86.5%** (structured-JSON error-protection fix). Current
-> capture: `benchmarks/BASELINE.md`; the tables below are dated records.
+> **Update (CCR-offload fallback) — figures re-derived 2026-07-26 from the
+> committed `benchmarks/baseline_results.json`:** the rows above predate the
+> router's reversible CCR-offload fallback. **Mind the fixture change:** the
+> `code@7` row above is verify's `gen_code` (N separate source files); the
+> figures in this note are the BENCHMARKS harness's `code.raw.json` (7 files
+> concatenated into ONE ~41k-token blob). Same family name, different fixtures
+> — see "Cross-check" below. On that blob `code@7` no longer passes through at
+> 0% but offloads to the CCR store (**95.91%**, retention 100%), and
+> `multiturn@135` rose 70.6% → **85.16%** (structured-JSON error-protection
+> fix). Current capture: `benchmarks/BASELINE.md`.
+>
+> **What is dated and what is live:** every "Phase-N" section from *Phase-7*
+> downward is a DATED RECORD of the engine at that phase and is not re-derived.
+> Everything above *Phase-7* — the headline numbers, this tier table, the
+> effective-savings section and its cross-check — is LIVE and re-derivable from
+> the committed harnesses today.
 
 **Honest reading of the degradations** (vs the dev headline, the POINT of
 the audits):
@@ -223,6 +234,10 @@ is the same bytes.
   (`any_silent_loss=False`).
 
 ---
+
+> **DATED RECORDS BELOW THIS LINE.** Every Phase-N section that follows records
+> the engine as it stood at that phase. These numbers are historical and are
+> deliberately NOT refreshed; do not re-derive them against today's engine.
 
 ## Phase-7: route-by-min-tokens — ship the fewer-token recoverable render (before → after)
 
