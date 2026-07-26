@@ -45,6 +45,14 @@ SEEDS = tuple(1000 + 137 * i for i in range(N_SEEDS))  # deterministic, fixed
 
 # Dev claims under test (token-reduction %, as reported during dev). Used ONLY
 # to flag degradations — never to tune anything.
+#
+# `opaque` is deliberately absent and must stay absent: every key here is a
+# number a HUMAN claimed before this harness existed, and the harness's job is
+# to contradict it. `opaque` was added BY this harness (#189), so any threshold
+# for it would be a figure the harness copied from its own output — a floor that
+# ratifies whatever the engine does today instead of testing a claim. What
+# guards the family instead is `opaque_route_taken`, asserted POSITIVE by
+# .github/workflows/perf.yml, which fails if the path stops being exercised.
 DEV_CLAIMS = {
     "logs@90": 0.930,
     "search@90": 0.927,
