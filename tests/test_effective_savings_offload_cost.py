@@ -227,8 +227,13 @@ def test_cross_message_dedup_emitter_is_sentinelled_and_charged() -> None:
     simply finds nothing to apply:
 
     * smart_crusher is excluded STRUCTURALLY: it needs row/array-shaped content.
-      This payload is plain text. (Measured: the same data as a JSON array trips
-      ``router:smart_crusher`` at 379 tokens; as plain text, nothing fires.)
+      This payload is plain text. (Measured: rendering the SAME data as a JSON
+      array of one row per line with the three fields split out —
+      ``{"test": "test_module_NN::test_case_M", "status": "PASS", "ms": N}`` —
+      is 469 tokens and trips ``router:smart_crusher:0.29`` with one sentinel;
+      as plain text, nothing fires. The array form is named here because the
+      figure is only reproducible against a stated rendering: the minimal
+      ``{"line": "..."}`` form is 344 tokens and also trips it.)
     * ``_ccr_offload`` is excluded by a CHARACTER floor, ``_OFFLOAD_MIN_CHARS``
       (4000). This payload is 733 chars — 18% of the floor, a 5.5x margin.
       Characters are tokenizer-independent, so no tokenizer or model change can
