@@ -365,3 +365,202 @@ def test_required_job_transitive_dependencies_have_no_job_level_if() -> None:
         "gate its heavy steps at the step level instead, exactly like `changes`, "
         "`lint`, `build-wheel`, and `test` already do."
     )
+
+
+# ─── The `code` filter's COVERAGE (distinct from the deadlock invariant above) ──
+#
+# The assertions above keep every required job CONCLUDING. These keep the filter
+# that decides whether those jobs do any real WORK from silently under-covering.
+#
+# `changes.outputs.code` gates the heavy steps. When it is false, the test shards
+# do not run at all — so any path that can change what the suite tests, yet is
+# absent from the filter, is a hole: that PR merges with the tests that would
+# have caught it never executed. `verify/**` and `benchmarks/**` were exactly
+# that hole (the suite imports both as Python packages), and `conftest.py` — the
+# root config every test loads — was a third.
+#
+# Derived, not hand-listed: the coverage test below walks the suite's REAL AST
+# imports. A grep would not do; `tests/test_effective_savings_offload_cost.py`
+# mentions "verify/measure.py" in prose several times AND imports it, while
+# other files only mention it, so only an import graph distinguishes a genuine
+# dependency from a docstring. Add a test that imports a new top-level package
+# and forget the filter, and this goes red naming the package.
+#
+# Deliberately NOT asserted here, each verified rather than assumed:
+#   * `llms.txt` — uncovered on purpose. The `lint` job runs its anchor guard
+#     UNCONDITIONALLY (no `needs.changes.outputs.code` gate) precisely because
+#     llms.txt is not `.md` and would never trip the filter; ci.yml says so.
+#   * `docs/`, `site/` — no test reads them; the apparent hits are incidental
+#     (`tmp_path / "site"` builds a temp directory, not a repo path).
+#   * `rust-toolchain.toml` — ci.yml pins `toolchain: 1.95.0` inline and never
+#     reads the file, so editing it alone cannot change what CI builds.
+
+_ROOT_CONFTEST = "conftest.py"
+
+# Pattern shapes `_path_matches_filter` understands. dorny/paths-filter uses
+# picomatch; this is a deliberate SUBSET covering every shape ci.yml's `code`
+# filter actually uses. An unrecognized shape is a hard failure rather than a
+# silent non-match, so a future pattern this matcher cannot reason about can
+# never make the coverage test pass vacuously.
+_SUFFIX_GLOB_PREFIX = "**/"
+_RECURSIVE_DIR_SUFFIX = "/**"
+
+
+def _code_filter_patterns() -> list[str]:
+    """The `code:` filter's path patterns, parsed out of the `changes` job.
+
+    ``filters:`` is an inline YAML *string* (a block scalar), so it needs a
+    second parse. Every failure mode — missing job, missing step, unparseable
+    inner YAML, absent `code` key — is a hard failure: a coverage guard that
+    silently found no patterns would pass vacuously and defeat itself.
+    """
+    jobs = _jobs(_load_ci_workflow())
+    changes = _job_mapping(jobs, _CHANGES_JOB, "path-filter coverage")
+    steps = changes.get("steps")
+    assert isinstance(steps, list), (
+        f"the {_CHANGES_JOB!r} job has no `steps:` list; cannot read the `code` path filter."
+    )
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        with_block = step.get("with")
+        if not isinstance(with_block, dict) or "filters" not in with_block:
+            continue
+        parsed = yaml.safe_load(str(with_block["filters"]))
+        assert isinstance(parsed, dict) and _CHANGES_OUTPUT in parsed, (
+            "the paths-filter step's `filters:` did not parse to a mapping containing "
+            f"{_CHANGES_OUTPUT!r}; got {parsed!r}."
+        )
+        patterns = parsed[_CHANGES_OUTPUT]
+        assert isinstance(patterns, list) and patterns, (
+            f"the {_CHANGES_OUTPUT!r} filter is empty or not a list: {patterns!r}. An empty "
+            "filter would make `code` false for every PR, skipping all heavy steps silently."
+        )
+        return [str(p) for p in patterns]
+    raise AssertionError(
+        f"no step with a `with.filters:` block found in the {_CHANGES_JOB!r} job; the "
+        "paths-filter action was removed or restructured. This guard reads that block to "
+        "verify the filter covers everything the suite depends on — re-point it."
+    )
+
+
+def _path_matches_filter(path: str, patterns: list[str]) -> bool:
+    """True if *path* is matched by any pattern, over the subset of glob shapes
+    ci.yml uses. Unknown shapes raise rather than silently return False."""
+    for pattern in patterns:
+        if pattern.startswith(_SUFFIX_GLOB_PREFIX):
+            if path.endswith(pattern[len(_SUFFIX_GLOB_PREFIX) + 1 :]):
+                return True
+        elif pattern.endswith(_RECURSIVE_DIR_SUFFIX):
+            if path.startswith(pattern[: -len(_RECURSIVE_DIR_SUFFIX)] + "/"):
+                return True
+        elif "*" in pattern or "?" in pattern or "[" in pattern:
+            raise AssertionError(
+                f"path filter pattern {pattern!r} uses a glob shape this guard cannot "
+                "evaluate. Extend _path_matches_filter to understand it — do not leave it "
+                "unmatched, or the coverage assertions below start passing vacuously."
+            )
+        elif path == pattern:
+            return True
+    return False
+
+
+def _top_level_packages_imported_by_tests() -> dict[str, str]:
+    """Map top-level repo package -> the test file importing it.
+
+    Uses the AST, not text search: a docstring naming ``verify/measure.py`` is not
+    a dependency, an ``import`` of it is. Only names that exist as directories in
+    the repo root count, which excludes stdlib and third-party imports without
+    needing a list of them.
+    """
+    import ast
+
+    found: dict[str, str] = {}
+    for path in sorted((_ROOT / "tests").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError as exc:  # pragma: no cover - a broken test file fails elsewhere
+            raise AssertionError(f"could not parse {path} to collect imports: {exc}") from exc
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module] if node.module and node.level == 0 else []
+            else:
+                continue
+            for name in names:
+                root_name = name.split(".")[0]
+                if (_ROOT / root_name).is_dir() and root_name not in found:
+                    found[root_name] = str(path.relative_to(_ROOT))
+    return found
+
+
+def test_code_filter_covers_every_top_level_package_the_tests_import() -> None:
+    # Assertion 8: every top-level repo package the suite actually imports is
+    # covered by the `code` filter. Derived from the import graph, so a new
+    # dependency that nobody adds to the filter fails here instead of silently
+    # skipping the heavy steps on the PR that introduces it.
+    patterns = _code_filter_patterns()
+    imported = _top_level_packages_imported_by_tests()
+    assert imported, (
+        "no top-level repo packages found imported by tests/ — the import scan is broken, "
+        "and this guard would pass vacuously. Check _top_level_packages_imported_by_tests."
+    )
+    uncovered = {
+        package: importer
+        for package, importer in sorted(imported.items())
+        if not _path_matches_filter(f"{package}/probe.py", patterns)
+    }
+    assert not uncovered, (
+        f"top-level package(s) imported by the test suite but NOT covered by ci.yml's "
+        f"`{_CHANGES_OUTPUT}` path filter: {uncovered}. A PR touching only such a package "
+        f"leaves `{_CHANGES_OUTPUT}` false, so every heavy step short-circuits and the test "
+        "shards never run — the very tests that import it, and would have caught the "
+        f"change, do not execute. Add the package as '<name>/**' to the `{_CHANGES_OUTPUT}` "
+        "filter in .github/workflows/ci.yml. Adding paths only makes the filter true more "
+        "often, so it cannot re-create the #15/#32/#56 required-check deadlock."
+    )
+
+
+def test_code_filter_covers_the_root_conftest() -> None:
+    # Assertion 9: the root conftest.py is covered. It is not a package and so is
+    # invisible to the import scan above, but pytest loads it for EVERY test in the
+    # repo — it holds the unbuilt-extension guard and shared fixtures. A PR editing
+    # only conftest.py could otherwise break or silently disarm collection for the
+    # entire suite while the suite never ran to notice.
+    patterns = _code_filter_patterns()
+    assert _path_matches_filter(_ROOT_CONFTEST, patterns), (
+        f"{_ROOT_CONFTEST!r} is not covered by ci.yml's `{_CHANGES_OUTPUT}` path filter. "
+        "pytest loads the root conftest for every test in the repo, so a change to it can "
+        "alter or disarm the entire suite's collection; leaving it unfiltered means such a "
+        f"PR skips every heavy step. Add '{_ROOT_CONFTEST}' to the `{_CHANGES_OUTPUT}` "
+        "filter in .github/workflows/ci.yml."
+    )
+
+
+def test_verify_and_benchmarks_only_pr_shapes_trigger_the_heavy_steps() -> None:
+    # Assertion 10: the concrete PR shapes this guard exists for. Each of these
+    # diffs touches ONLY a path that the suite imports, and each must set
+    # `code` true so the shards run. Before these paths were filtered, every
+    # shape below yielded false and the heavy steps short-circuited — the
+    # `verify.run` contract (degradations/hash_failures/silent_loss/
+    # cache_prefix_violations) could be edited by a PR whose tests never ran.
+    patterns = _code_filter_patterns()
+    shapes = {
+        "verify/measure.py": "imported by tests/test_effective_savings_offload_cost.py",
+        "verify/run.py": "the tool-regression contract every gate asserts",
+        "verify/independent_recheck.py": "imported by tests/test_recheck_unflatten.py",
+        "benchmarks/metrics.py": "imported by tests/test_benchmarks_fail_closed.py",
+        _ROOT_CONFTEST: "root pytest config loaded by every test",
+    }
+    missed = {
+        path: why
+        for path, why in sorted(shapes.items())
+        if not _path_matches_filter(path, patterns)
+    }
+    assert not missed, (
+        f"single-file PR shape(s) that must run the heavy CI steps but do NOT: {missed}. "
+        f"Each leaves `{_CHANGES_OUTPUT}` false, so the four test shards short-circuit and "
+        "the suite never runs on that PR. Restore the corresponding entries in the "
+        f"`{_CHANGES_OUTPUT}` filter in .github/workflows/ci.yml."
+    )
