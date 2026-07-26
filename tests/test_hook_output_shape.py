@@ -265,6 +265,16 @@ class TestReinjectUnit:
 # ==========================================================================
 
 
+def _preserved_stderr_redacted(resp) -> str | None:
+    """What ``main`` threads into the predicate: the preserved Bash stderr,
+    redacted ONCE (``None`` when the shape has no such field). The predicate no
+    longer re-runs the scanner itself — the credential regexes used to run three
+    times per hook invocation, which multiplied the cost of the quadratic
+    ``jwt`` pattern the redaction budget now bounds."""
+    preserved = hook._preserved_stderr(resp)
+    return None if preserved is None else hook._apply_env_redaction(preserved)
+
+
 class TestRedactionChangedVisibleOutput:
     def test_stderr_only_secret_detected_when_stdout_is_clean(self, monkeypatch) -> None:
         """The leak: a clean stdout is the extracted field, so `redacted == text`,
@@ -277,7 +287,12 @@ class TestRedactionChangedVisibleOutput:
         assert text == "all fine here"  # stdout is the extracted field
         redacted = hook._apply_env_redaction(text)
         assert redacted == text  # the extracted field itself is clean
-        assert hook._redaction_changed_visible_output(resp, text, redacted) is True
+        assert (
+            hook._redaction_changed_visible_output(
+                resp, text, redacted, _preserved_stderr_redacted(resp)
+            )
+            is True
+        )
 
     def test_all_clean_is_no_change_even_with_patterns_set(self, monkeypatch) -> None:
         """Nothing matches -> no change -> caller keeps a byte-identical passthrough."""
@@ -286,7 +301,12 @@ class TestRedactionChangedVisibleOutput:
         resp = bash_response("all fine here", "nothing to see")
         text = hook._extract_text(resp)
         redacted = hook._apply_env_redaction(text)
-        assert hook._redaction_changed_visible_output(resp, text, redacted) is False
+        assert (
+            hook._redaction_changed_visible_output(
+                resp, text, redacted, _preserved_stderr_redacted(resp)
+            )
+            is False
+        )
 
     def test_secret_in_extracted_stdout_detected(self, monkeypatch) -> None:
         monkeypatch.setenv("FURL_REDACT_BUILTINS", "0")
@@ -295,7 +315,12 @@ class TestRedactionChangedVisibleOutput:
         text = hook._extract_text(resp)
         redacted = hook._apply_env_redaction(text)
         assert redacted != text
-        assert hook._redaction_changed_visible_output(resp, text, redacted) is True
+        assert (
+            hook._redaction_changed_visible_output(
+                resp, text, redacted, _preserved_stderr_redacted(resp)
+            )
+            is True
+        )
 
     def test_list_canonicalization_is_not_reported_as_a_change(self, monkeypatch) -> None:
         """Why the predicate is field-aware and not a plain
@@ -311,7 +336,12 @@ class TestRedactionChangedVisibleOutput:
         redacted = hook._apply_env_redaction(text)
         assert redacted == text
         assert hook._reinject(resp, redacted) != resp  # mirror DOES differ (canonicalized)
-        assert hook._redaction_changed_visible_output(resp, text, redacted) is False
+        assert (
+            hook._redaction_changed_visible_output(
+                resp, text, redacted, _preserved_stderr_redacted(resp)
+            )
+            is False
+        )
 
 
 # ==========================================================================
