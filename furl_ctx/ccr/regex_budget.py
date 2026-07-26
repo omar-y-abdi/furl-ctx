@@ -248,6 +248,12 @@ def _re2_sees_same_flags(compiled: re.Pattern[str]) -> bool:
     source alone reproduces the flags, every flag is inline and RE2 sees it.
     Rejecting all flags instead (the obvious fix) would push inline-``(?i)``
     patterns onto the unbudgeted path and reopen B1 for ``(?i)(a|b|ab)+Z``.
+
+    The same shape of trap applies to the ASCII/Unicode class divergence: do NOT
+    add a word-class refusal HERE to "close" it. That drops ``\\b``/``\\w``/``\\d``/
+    ``\\s`` patterns off RE2 onto the unbudgeted worker-thread residual and reopens
+    the #26 GIL-freeze; the full argument, and the barrier that enforces it, live on
+    :func:`search_within_budget`.
     """
     try:
         return re.compile(compiled.pattern).flags == compiled.flags

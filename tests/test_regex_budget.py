@@ -333,6 +333,28 @@ _SPAN_METHOD_NAMES = frozenset(
 _REGEX_BUDGET_MODULE = "furl_ctx.ccr.regex_budget"
 
 
+def _imports_from_regex_budget(node: ast.ImportFrom) -> bool:
+    """Whether an ``ImportFrom`` targets the regex_budget module -- absolute OR
+    relative.
+
+    A relative ``from .regex_budget import matches_within_budget`` parses to
+    ``module="regex_budget", level=1`` -- the relative TAIL, never the full dotted
+    path -- so an absolute-only ``node.module == _REGEX_BUDGET_MODULE`` check is
+    blind to it. That is the idiomatic import inside ``furl_ctx/ccr/`` (see
+    ``compress_modes.py``), exactly where a new span-sensitive module is most likely
+    to land, so the blind spot is load-bearing, not cosmetic. Absolute is matched
+    exactly; relative on the final component (one regex_budget module in the tree,
+    so it cannot collide).
+    """
+    if node.module is None:
+        # ``from . import regex_budget`` binds the module; its use is an attribute
+        # access, caught by the Attribute branch below.
+        return False
+    if node.level == 0:
+        return node.module == _REGEX_BUDGET_MODULE
+    return node.module.split(".")[-1] == "regex_budget"
+
+
 def _boolean_verdict_refs(source: str) -> set[str]:
     """Names in ``_BOOLEAN_VERDICT_FUNCS`` that ``source`` imports from
     regex_budget or reads as an attribute (``<anything>.matches_within_budget``).
@@ -342,13 +364,17 @@ def _boolean_verdict_refs(source: str) -> set[str]:
     off this path is safe to write. Both routing shapes are caught -- a direct
     ``from ...regex_budget import matches_within_budget`` (bare-name call) via the
     import, and ``regex_budget.matches_within_budget`` / ``rb.matches_within_budget``
-    via the attribute access. DIRECT references only: a boolean call reached through
-    a thin wrapper module, or via ``getattr(regex_budget, "matches_within_budget")``,
-    is invisible here -- both are exotic and out of scope for this barrier.
+    via the attribute access. The import is matched by
+    :func:`_imports_from_regex_budget`, which sees the ABSOLUTE
+    ``from furl_ctx.ccr.regex_budget import ...`` and the RELATIVE
+    ``from .regex_budget import ...`` (the idiomatic in-package form) alike. DIRECT
+    references only: a boolean call reached through a thin wrapper module, or via
+    ``getattr(regex_budget, "matches_within_budget")``, is invisible here -- both are
+    exotic and out of scope for this barrier.
     """
     hits: set[str] = set()
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.ImportFrom) and node.module == _REGEX_BUDGET_MODULE:
+        if isinstance(node, ast.ImportFrom) and _imports_from_regex_budget(node):
             hits |= {a.name for a in node.names if a.name in _BOOLEAN_VERDICT_FUNCS}
         elif isinstance(node, ast.Attribute) and node.attr in _BOOLEAN_VERDICT_FUNCS:
             hits.add(node.attr)
