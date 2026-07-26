@@ -58,7 +58,7 @@ from furl_ctx.cache.compression_store import reset_compression_store
 from furl_ctx.transforms.cross_message_dedup import MIN_DEDUP_CHARS, _content_hash
 from furl_ctx.transforms.router_engine import _OFFLOAD_MIN_CHARS
 from verify.measure import (
-    RETRIEVE_CALL_OVERHEAD_TOKENS,
+    RETRIEVE_ROUND_TRIP_TOKENS,
     _canonical,
     _decoded_row_sigs,
     _emitted_drop_hashes,
@@ -67,6 +67,7 @@ from verify.measure import (
     _stringify,
     _tok,
     effective_savings,
+    retrieved_blob_tokens,
 )
 
 MODEL = "gpt-4o"
@@ -85,7 +86,11 @@ def test_dedup_zero_drop_offload_no_longer_reads_flat() -> None:
     -1.5%). Pre-fix eff@25 == eff@0 (the bug); now eff@25 < eff@0."""
     tok = _tok()
     blob = json.dumps([{"i": i, "body": "line " * 20} for i in range(20)])
-    payload = tok.count_text(blob)
+    # The ESCAPED payload: what the model reads out of the retrieve response,
+    # not the raw bytes the library hands back. Strictly larger; pinned against
+    # the real handler in tests/test_retrieval_charge_matches_mcp_surface.py.
+    payload = retrieved_blob_tokens(blob, tok)
+    assert payload > tok.count_text(blob), "escaping is not token-neutral"
     before = 1000
     after = before - payload // 2  # raw saving is HALF the payload a retrieval pays back
     eff = effective_savings(
@@ -94,7 +99,7 @@ def test_dedup_zero_drop_offload_no_longer_reads_flat() -> None:
         recovered={"dead" * 6: blob},
         tok=tok,
     )
-    one_call = RETRIEVE_CALL_OVERHEAD_TOKENS  # one blob in `recovered`
+    one_call = RETRIEVE_ROUND_TRIP_TOKENS  # one blob in `recovered`
     assert eff["0"] == pytest.approx((before - after) / before)  # positive raw reduction
     assert eff["25"] == pytest.approx((before - (after + payload + one_call)) / before)
     assert eff["25"] < eff["0"], "a retrieval must cost something (was flat pre-fix)"
@@ -128,8 +133,8 @@ def test_row_drop_is_charged_one_call_per_blob_not_one_per_row() -> None:
         tok=tok,
     )
 
-    payload = tok.count_text(blob)
-    one_call = len(recovered) * RETRIEVE_CALL_OVERHEAD_TOKENS
+    payload = retrieved_blob_tokens(blob, tok)
+    one_call = len(recovered) * RETRIEVE_ROUND_TRIP_TOKENS
     assert eff["0"] == pytest.approx((before - after) / before), "r=0 pays nothing"
     for r_key in ("25", "50"):
         expected = (before - (after + payload + one_call)) / before
@@ -139,8 +144,8 @@ def test_row_drop_is_charged_one_call_per_blob_not_one_per_row() -> None:
     # The retired per-row term, reconstructed. It must NOT be what we report.
     for r_key, r in (("25", 0.25), ("50", 0.50)):
         k = math.ceil(r * n_dropped)
-        assert k * RETRIEVE_CALL_OVERHEAD_TOKENS > one_call, "fixture must expose the difference"
-        old = (before - (after + payload + k * RETRIEVE_CALL_OVERHEAD_TOKENS)) / before
+        assert k * RETRIEVE_ROUND_TRIP_TOKENS > one_call, "fixture must expose the difference"
+        old = (before - (after + payload + k * RETRIEVE_ROUND_TRIP_TOKENS)) / before
         assert eff[r_key] > old, f"eff@{r_key} still charges {k} calls for a single retrieval"
 
 
@@ -151,18 +156,18 @@ def test_call_term_scales_with_blob_count_not_a_flat_one() -> None:
     This case exists because no single-engine fixture can see it. Measured on the
     real harness (largest size, all three tiers): every family offloads exactly
     ONE blob per case except ``multiturn`` (6, every tier) and ``code`` low (2).
-    A flat ``call_cost = RETRIEVE_CALL_OVERHEAD_TOKENS`` would therefore pass all
+    A flat ``call_cost = RETRIEVE_ROUND_TRIP_TOKENS`` would therefore pass all
     three emitter tests below while undercharging multiturn 5 calls per case.
     """
     tok = _tok()
     blobs = {tag * 12: json.dumps([{"row": i, "tag": tag} for i in range(30)]) for tag in "abc"}
-    payload = sum(tok.count_text(blob) for blob in blobs.values())
+    payload = sum(retrieved_blob_tokens(blob, tok) for blob in blobs.values())
     before, after = 5000, 400
     eff = effective_savings(tokens_before=before, tokens_after=after, recovered=blobs, tok=tok)
 
-    calls = len(blobs) * RETRIEVE_CALL_OVERHEAD_TOKENS
+    calls = len(blobs) * RETRIEVE_ROUND_TRIP_TOKENS
     assert eff["25"] == pytest.approx((before - (after + payload + calls)) / before)
-    flat = (before - (after + payload + RETRIEVE_CALL_OVERHEAD_TOKENS)) / before
+    flat = (before - (after + payload + RETRIEVE_ROUND_TRIP_TOKENS)) / before
     assert eff["25"] < flat, "3 blobs must cost 3 calls, not 1"
 
 
@@ -190,10 +195,11 @@ class _Offloaded:
 
     def charged_at_nonzero_rate(self) -> float:
         """The savings ratio the charge model OWES for this compression: the
-        whole recovered payload plus ONE call per offloaded blob."""
+        whole recovered payload as ESCAPED in the retrieve response, plus ONE
+        round trip per offloaded blob."""
         tok = _tok()
-        payload = sum(tok.count_text(blob) for blob in self.recovered.values())
-        calls = len(self.recovered) * RETRIEVE_CALL_OVERHEAD_TOKENS
+        payload = sum(retrieved_blob_tokens(b, tok) for b in self.recovered.values())
+        calls = len(self.recovered) * RETRIEVE_ROUND_TRIP_TOKENS
         return (self.tokens_before - (self.tokens_after + payload + calls)) / self.tokens_before
 
 

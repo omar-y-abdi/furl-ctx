@@ -93,11 +93,17 @@ _FROZEN_WARN_FRACTION = 0.9
 # handles the "tool" subset). Used by the frozen-prefix conflict detector.
 _TOOL_OUTPUT_ROLES = frozenset({"tool", "function"})
 
-# Per-retrieve token overhead used to price a CCR round trip: the tool name
-# plus the hash argument a retrieve call spends, conservative. Matches the
-# verify harness's RETRIEVE_CALL_OVERHEAD_TOKENS so opaque_offloads economics
-# and the effective-savings benchmark price a round trip the same way.
-_CCR_RETRIEVE_OVERHEAD_TOKENS = 12
+# Per-retrieve token overhead used to price a CCR round trip, beyond the payload
+# itself. MEASURED against the production `furl_retrieve` surface, not assumed:
+# the outgoing call is 31 tokens (median over 3000 random 24-hex hashes), the
+# response's non-payload scaffolding 68 (median over 40 distinct offloads), and
+# the tool-result message envelope 7. Was 12 — "tool name plus hash argument,
+# conservative" — which was a guess, and low by 94.
+#
+# Matches the verify harness's RETRIEVE_ROUND_TRIP_TOKENS so opaque_offloads
+# economics and the effective-savings benchmark price a round trip the same way;
+# `tests/test_retrieve_overhead_drift_pin.py` holds them equal.
+_CCR_RETRIEVE_OVERHEAD_TOKENS = 106
 
 
 @dataclass

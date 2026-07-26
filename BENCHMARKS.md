@@ -135,36 +135,78 @@ release longer and was corrected last: a blob has no row index, so a retrieval o
 fraction of it is the same **one call** returning the same whole payload. The charge is
 therefore one call per offloaded blob, not `k` calls — which had over-charged the
 row-dropping families (`logs@900` paid for 300 separate calls at `r=0.5`) exactly as it
-under-charged the zero-drop ones (`k=0`, no call at all). Effective savings =
+under-charged the zero-drop ones (`k=0`, no call at all).
+
+Two further corrections landed with it, both from measuring the surface a MODEL pays on
+rather than the one the library exposes. `recovered` holds what
+`CompressionStore.retrieve` returns — the byte-exact original — and no model ever receives
+that. A model receives the MCP `furl_retrieve` response, in which the payload sits
+**JSON-escaped** inside a field, wrapped in scaffolding, inside a tool message, after the
+model has spent tokens emitting the call. So:
+
+* **the payload is charged escaped.** Measured over 18 blobs from 76 to 75530 content
+  tokens, charging raw bytes undercharged by 82-2185 tokens per blob (1.94%-6.95%), never
+  once the other way. A fixed correction cannot fix it — the gap spans 2103 tokens and a
+  least-squares fit in content size still leaves 945 of residual, because escaping tracks
+  how many quotes and newlines a payload holds, not how big it is. `json.dumps` performs
+  the identical escaping the handler does, so the term is exact rather than modelled.
+* **the round trip costs 106 tokens, not 12.** The old constant was an unmeasured guess
+  covering "tool name + hash argument". Measured: the outgoing call is **31** (median over
+  3000 random 24-hex hashes; range 26-39), the response's non-payload scaffolding **68**
+  (median over 40 distinct offloads; 64-73), the tool-result message envelope **7**
+  (constant everywhere measured).
+
+All three are pinned against the real handler by
+`tests/test_retrieval_charge_matches_mcp_surface.py`. Effective savings =
 `1 - (compressed + retrieved) / raw`, mean over 6 seeds, real gpt-4o tokens, all seven
 families:
 
 | family | raw reduction (eff@0) | effective @25% | effective @50% |
 |---|---:|---:|---:|
-| code | 15.2% | **+10.1%** | **+10.1%** |
-| disk | 83.3% | **+1.0%** | **+1.0%** |
-| logs | 92.0% | +7.3% | +7.3% |
-| multiturn | 78.3% | **-3.7%** | **-3.7%** |
-| opaque | 87.0% | **-13.0%** | **-13.0%** |
-| repeated_logs | 97.6% | +15.0% | +15.0% |
-| search | 95.6% | +14.0% | +14.0% |
+| code | 15.2% | **+8.5%** | **+8.5%** |
+| disk | 83.3% | **-6.7%** | **-6.7%** |
+| logs | 92.0% | +4.7% | +4.7% |
+| multiturn | 78.3% | **-11.5%** | **-11.5%** |
+| opaque | 87.0% | **-15.6%** | **-15.6%** |
+| repeated_logs | 97.6% | +12.2% | +12.2% |
+| search | 95.6% | +8.0% | +8.0% |
 
 **The two retrieval columns are identical, and that is the result, not a copy-paste
 error.** One marker is one call, so 25% and 50% buy the same bytes for the same price:
 the only real distinction on this axis is retrieving versus not retrieving. Every point of
 spread the previous table showed between those columns was the retired per-row call term.
 
-So under realistic retrieval, effective savings run from about **-13.0% to +15.0%** by
-family and go **NEGATIVE for multiturn and opaque** — not the "+40-68% at every fraction"
-the removed model reported. `disk` crosses back to marginally positive (**-1.3% -> +1.0%**)
-because it drops many rows and was the biggest payer of the phantom per-row call fee.
+The three corrections push in OPPOSITE directions, so which one dominates differs by
+family. Movement in eff@25, each measured by its own sweep of the full matrix:
 
-The `code` row's per-family mean (15.2% → 10.1%) averages a tier split, because verify's
+| family | previous | call term | round-trip constant | escaping | now | dominated by |
+|---|---:|---:|---:|---:|---:|---|
+| code | +10.2% | -0.1 | -0.49 | -1.13 | **+8.5%** | escaping |
+| disk | -1.3% | +2.3 | -5.26 | -2.40 | **-6.7%** | constant |
+| logs | +4.8% | +2.5 | -0.56 | -2.01 | **+4.7%** | call term |
+| multiturn | -6.4% | +2.7 | -4.70 | -3.10 | **-11.5%** | constant |
+| opaque | n/a | n/a | -0.48 | -2.12 | **-15.6%** | escaping |
+| repeated_logs | +11.9% | +3.1 | -0.64 | -2.16 | **+12.2%** | call term |
+| search | +7.4% | +6.6 | -1.29 | -4.67 | **+8.0%** | call term |
+
+The call term is the only one that moves numbers UP: it was an overcharge on families that
+drop many rows. `disk` and `multiturn` are dominated by the round-trip constant because
+they pay it most often relative to their size — `multiturn` offloads six blobs per case,
+so 12→106 costs it 564 tokens where a single-blob family pays 94. `logs`,
+`repeated_logs` and `search` land within a couple of points of where they started, having
+had a large overcharge and two undercharges cancel; that near-cancellation is exactly why
+fixing one of the three alone would have looked like a regression.
+
+So under realistic retrieval, effective savings run from about **-15.6% to +12.2%** by
+family and go **NEGATIVE for disk, multiturn and opaque** — not the "+40-68% at every
+fraction" the removed model reported.
+
+The `code` row's per-family mean (15.2% → 8.5%) averages a tier split, because verify's
 `gen_code` builds N separate real source files, not one blob: at the `low` tier the
 identical files cross-message dedup (raw **69.3%** at `code@30 low`; retrieving the two
-unique blobs is cheap, so it stays net-positive at **+62.6%**), while `medium`/`high` are
+unique blobs is cheap, so it stays net-positive at **+60.0%**), while `medium`/`high` are
 near-unique and pass through at 0%. The one cell that offloads a near-whole payload yet
-drops no rows — `code@7 low` — goes **negative** (+22.0% → **-1.8%** at 25%).
+drops no rows — `code@7 low` — goes **negative** (+22.0% → **-9.1%** at 25%).
 
 **Correcting the record:** an earlier version of this section carried a caveat stating the
 `code` family was "fully offloaded, no rows dropped" and read flat because
@@ -197,31 +239,34 @@ Retrieving any of it pulls the entire payload back.
 | fixture | raw marker reduction | effective @25% | effective @50% | one full retrieval |
 |---|---:|---:|---:|---:|
 | `code`, opaque whole-blob (historical, `benchmarks/code_roundtrip.py`, removed) | 95.9% | **-4.1%** | **-4.2%** | **-4.1%** |
-| `code`, same blob through the corrected `effective_savings` | 95.9% | **-4.1%** | **-4.1%** | **-4.1%** |
+| `code`, same blob through the corrected `effective_savings` | 95.9% | **-21.9%** | **-21.9%** | **-21.9%** |
 
 The historical row is from `benchmarks/code_roundtrip.py`, since removed (see git history),
-so it cannot be refreshed by its own harness. The second row is **independent
-corroboration**: feeding the committed `code.raw.json` blob through the corrected
-`effective_savings` (whole payload plus one call, charged at any `r > 0`) reproduces it —
-95.9% raw, **-4.1%** at 25% retrieval, now EQUAL to the retired harness's rightmost column
-rather than merely within rounding of it. gpt-4o tokens, the same 12-token per-call
-overhead as the table above.
+so it cannot be refreshed by its own harness. **The second row no longer reproduces it, and
+that disagreement is the finding.** The retired harness charged
+`tokens_after + retrieved_tokens + one call` with `retrieved_tokens` counted on the RAW
+original — so it inherited exactly the undercharge described above. This blob is a JSON
+array of real source files, 1830 quotes deep: escaping it costs **7232 tokens, 17.6%**, the
+largest gap measured anywhere. Charge that plus the real 106-token round trip and one
+retrieval of this blob is -21.9%, not -4.1%. The old figure was not a different model
+disagreeing; it was the same content error, five times larger here than on the opaque
+family, because this payload is the most escape-dense one in the repo.
 
-That equality is the interesting part of this row. The retired harness computed its
-"one full retrieval" column itself — `tokens_after + retrieved_tokens +
+What the retired harness DID get right is the structure, and it is worth recording. It
+computed its "one full retrieval" column itself — `tokens_after + retrieved_tokens +
 RETRIEVE_CALL_OVERHEAD_TOKENS`, one call, whole blob (see `code_roundtrip.py` before
 `8ce3585d`) — while its @25%/@50% columns came from the shared `effective_savings` with
-`n_dropped_rows`, which is why those two differ (-4.1% / -4.2%) and the one-retrieval
-column does not. So the correct whole-blob model was already written down in this repo,
-beside the granular one, and the shared function kept the granular call term for two more
-releases. The corrected `effective_savings` now reproduces that retired column exactly.
+`n_dropped_rows`, which is why those two differ (-4.1% / -4.2%) and the one-retrieval column
+does not. So the correct whole-blob CALL structure was already written down in this repo,
+beside the granular one, and the shared function kept the granular term for two more
+releases. Its content term was wrong in both.
 The 95.9 percent is a marker
 saving, not a token saving: `compress()` moved 41005 of 41025 tokens into the store and
 left a ~1601-token summary, so retrieving the code back costs more than never compressing
 it. This blob shape is why the front-page `code` row leads with a raw reduction that does
 not survive a round trip.
 
-The two `code` numbers do not conflict: the table row (+10.1% at 25%) is verify's
+The two `code` numbers do not conflict: the table row (+8.5% at 25%) is verify's
 multi-file `gen_code`, which dedups identical files at the low tier and passes near-unique
 files through — cheap or free to retrieve — while the single opaque blob here is
 net-negative. Same family name, different fixtures. `compress()` flags the opaque case on

@@ -2,9 +2,28 @@
 
 ``furl_ctx/compress.py`` hardcodes ``_CCR_RETRIEVE_OVERHEAD_TOKENS`` to price a
 CCR round trip when it reports opaque-offload economics. ``verify/measure.py``
-independently defines ``RETRIEVE_CALL_OVERHEAD_TOKENS`` for its
-effective-savings-under-retrieval model. Both are 12 today and must stay equal
-so the library and the bench harness price a round trip the same way.
+independently prices the same round trip for its effective-savings model. Both
+are 106 today and must stay equal so the library and the bench harness price a
+round trip the same way.
+
+WHAT THIS PIN COMPARES, AND WHY IT MOVED. The harness used to hold the whole
+per-retrieve overhead in one constant, ``RETRIEVE_CALL_OVERHEAD_TOKENS``, so the
+pin compared against that. The round trip is now decomposed into three MEASURED
+terms — outgoing call 31, response scaffolding 68, tool-result envelope 7 — and
+``RETRIEVE_CALL_OVERHEAD_TOKENS`` is only the FIRST of them. The library's
+constant means "everything a round trip costs beyond the payload", so its
+counterpart is the sum, ``RETRIEVE_ROUND_TRIP_TOKENS``. Comparing it against one
+of three components would be comparing different quantities, and would pass by
+coincidence rather than by agreement.
+
+KNOWN REMAINING DIVERGENCE, deliberately not pinned here because it is a library
+behaviour question and not a drift: the two agree on the round trip but NOT on
+the payload. The harness charges the JSON-escaped payload, which is what a model
+receives from ``furl_retrieve``; the library charges ``offloaded_tokens``, the
+raw count carried in the offload metadata (measured 1.94%-6.95% low, and 17.6%
+low on the most escape-dense blob in this repo). Closing it would move
+``net_negative_on_retrieval`` for callers, so it is reported rather than
+smuggled in behind a constant change.
 
 The library must not import the bench harness to keep them in sync, so the two
 constants can silently drift apart. This test is the guard: it does the
@@ -24,11 +43,11 @@ import ast
 import inspect
 
 from furl_ctx.compress import _CCR_RETRIEVE_OVERHEAD_TOKENS
-from verify.measure import RETRIEVE_CALL_OVERHEAD_TOKENS
+from verify.measure import RETRIEVE_ROUND_TRIP_TOKENS
 
 
 def test_library_and_bench_retrieve_overhead_stay_equal() -> None:
-    assert _CCR_RETRIEVE_OVERHEAD_TOKENS == RETRIEVE_CALL_OVERHEAD_TOKENS
+    assert _CCR_RETRIEVE_OVERHEAD_TOKENS == RETRIEVE_ROUND_TRIP_TOKENS
 
 
 def test_library_does_not_import_the_bench_harness() -> None:
