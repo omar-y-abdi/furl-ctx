@@ -175,3 +175,25 @@ jobs:
             --baseline benchmarks/baseline_results.json \
             --candidate "${RUNNER_TEMP}/bench-now/baseline_results.json" \
             --markdown-summary "$GITHUB_STEP_SUMMARY" $FLAG
+
+      - name: Floor guard — is the floor still the right floor?
+        # compare_baseline above answers "did the candidate REGRESS against the
+        # floor". It cannot see a floor that has stopped describing reality: after
+        # #172 it kept passing while printing five IMPROVED lines that were read
+        # as noise for a night, leaving up to 23.4% silent regression headroom on
+        # repeated_logs@90. DRIFT catches that. DIRECTION is what makes DRIFT's
+        # remedy safe to recommend: regenerating the floor is WHOLESALE, so a PR
+        # that improves one dataset and regresses another would otherwise pass
+        # with failures=0 once regenerated, the regression laundered through the
+        # floor. An upward floor move is allowed only in a baseline-only PR.
+        # Non-blocking by construction: perf is never a required check, so this
+        # is a loud alarm on main rather than a merge blocker.
+        run: |
+          git show origin/main:benchmarks/baseline_results.json \
+            > "${RUNNER_TEMP}/floor-main.json"
+          git diff --name-only origin/main...HEAD > "${RUNNER_TEMP}/changed-files.txt"
+          python -m benchmarks.floor_guard \
+            --floor-main "${RUNNER_TEMP}/floor-main.json" \
+            --floor-pr benchmarks/baseline_results.json \
+            --candidate "${RUNNER_TEMP}/bench-now/baseline_results.json" \
+            --changed-files "${RUNNER_TEMP}/changed-files.txt"
