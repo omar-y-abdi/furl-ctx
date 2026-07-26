@@ -157,6 +157,55 @@ def test_watchdog_restores_the_callers_pending_alarm() -> None:
     not hasattr(signal, "SIGALRM"),
     reason="SIGALRM is POSIX-only; absent on native Windows (the disclosed coverage gap)",
 )
+def test_a_failing_re_arm_of_the_callers_deadline_cannot_escape_either() -> None:
+    """#48. "This function never raises" must hold at EVERY call, not just the disarm.
+
+    ``_restore_after_budget`` makes two kinds of signal call: the disarm-and-restore
+    loop, and the re-arm of a caller deadline that was pending. Only the first was
+    guarded with the full tuple. The second runs from the same ``finally``, so an
+    escape there REPLACES the outcome of the guarded call with an exception the
+    callers do not match on — landing in ``_apply_env_redaction``'s
+    ``except Exception``, which returns the ORIGINAL text. Same fail-open, reached
+    from the re-arm instead of the disarm.
+
+    Reaches the re-arm branch honestly, by arming a real caller deadline first so
+    ``previous_remaining`` is non-zero, then failing the third ``setitimer`` — which
+    is the re-arm, after the arm and the disarm.
+    """
+    real_setitimer = signal.setitimer
+    calls = {"n": 0}
+
+    def setitimer_that_fails_the_re_arm(which: int, seconds: float, interval: float = 0.0) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 3:  # 1 = arm ours, 2 = disarm ours, 3 = re-arm the caller's
+            raise TypeError("an integer is required")
+        return real_setitimer(which, seconds, interval)
+
+    def _on_alarm(signum: int, frame: object) -> None:  # pragma: no cover - never fires
+        raise AssertionError("the caller's alarm should not fire during this test")
+
+    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    real_setitimer(signal.ITIMER_REAL, 5.0)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(signal, "setitimer", setitimer_that_fails_the_re_arm)
+    try:
+        out = redact_within_budget("harmless", lambda t: t.upper(), budget_seconds=5.0)
+    finally:
+        monkey.undo()
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+    assert out == "HARMLESS", (
+        "a failed re-arm must not become the exit path: the redaction itself "
+        "succeeded, and any escape here is a fail-open passthrough at the caller"
+    )
+    assert calls["n"] == 3, "the re-arm must actually have been attempted"
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM"),
+    reason="SIGALRM is POSIX-only; absent on native Windows (the disclosed coverage gap)",
+)
 def test_late_alarm_during_restore_cannot_escape_or_leak_the_handler() -> None:
     """A SIGALRM delivered AFTER the guarded call returned must not become a
     third exit path, and must not leave our handler installed.
@@ -226,19 +275,139 @@ def test_unarmable_watchdog_warns_instead_of_silently_running_unbounded(
     assert "does NOT apply" in err
 
 
-def test_unbudgeted_warning_names_which_of_the_two_causes_applies(
+def test_unbudgeted_warning_names_which_of_the_three_causes_applies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two causes, two operator responses: a platform without SIGALRM cannot be
-    fixed from Python, an off-main-thread call can be moved. One vague line would
-    not tell them apart."""
+    """Three causes, three operator responses. One vague line would not tell them
+    apart, and two of the three are actionable in completely different places: a
+    platform without SIGALRM cannot be fixed from Python at all, an off-main-thread
+    call is the caller's own choice, and an unrestorable handler belongs to the
+    embedding host rather than to this library.
+
+    Each condition is selected explicitly rather than relying on "whatever is left",
+    which is how the previous version of this test went stale: it asserted that with
+    SIGALRM present the ONLY remaining cause was the thread, and that stopped being
+    true the moment a third cause existed.
+    """
     monkeypatch.delattr(signal, "SIGALRM", raising=False)
     assert "native Windows" in redaction_module._unbudgeted_warning()
-
     monkeypatch.undo()
-    if hasattr(signal, "SIGALRM"):
-        # SIGALRM present => the only remaining cause is the thread.
-        assert "main thread" in redaction_module._unbudgeted_warning()
+
+    if not hasattr(signal, "SIGALRM"):
+        pytest.skip("native Windows: the other two causes cannot be selected")
+
+    # Cause 2: off the main thread, where Python signal handlers never run.
+    monkeypatch.setattr(redaction_module.threading, "main_thread", lambda: object())
+    assert "main thread" in redaction_module._unbudgeted_warning()
+    monkeypatch.undo()
+
+    # Cause 3: on the main thread, SIGALRM present, but the current handler is not
+    # an object signal.signal would accept back.
+    monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+    message = redaction_module._unbudgeted_warning()
+    assert "outside Python" in message, "cause 3 must name where the handler came from"
+    assert "exec resets handlers" in message, (
+        "cause 3 must say it needs an embedding host, so nobody hunts for it in a "
+        "normally launched process"
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM"),
+    reason="SIGALRM is POSIX-only; absent on native Windows (the disclosed coverage gap)",
+)
+def test_a_handler_that_cannot_be_restored_is_never_armed_over(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#48. An unrestorable ``previous_handler`` must stop the arm, not be caught later.
+
+    ``signal.getsignal`` returns ``None`` when SIGALRM's disposition was neither
+    ``SIG_DFL`` nor ``SIG_IGN`` as the signal module initialised, and
+    ``signal.signal`` then rejects that value with ``TypeError`` — measured on the
+    project interpreter for ``None``, ``3`` and ``'x'`` alike.
+
+    Arming anyway is the trap. There would be no installable object to put back, so
+    the handler's self-disarm fails, the restore fails, and our raising handler
+    becomes a PERMANENT process-wide fixture instead of a 1-in-16000 one — while
+    also hijacking SIGALRM from whatever C code owned it. Refusing to arm is the
+    only outcome that leaves the process as it was found.
+
+    HONEST REACHABILITY, because this test monkeypatches a state it could not
+    otherwise reach. ``getsignal() -> None`` requires an embedding host: a C-level
+    handler installed before ``Py_Initialize``, or a fork-without-exec from one.
+    It is UNREACHABLE through every entry point in this repository, and that is
+    measured rather than assumed — ``exec`` resets a C-installed handler to
+    ``SIG_DFL`` (verified in-process), ``SIG_IGN`` survives ``exec`` but maps to
+    ``IgnoreHandler`` rather than ``None``, no Rust in this tree installs a signal
+    handler, and no production module imports ``ctypes`` or ``cffi``. The guard is
+    therefore structural rather than a response to an observed failure, exactly as
+    with the outermost fail-closed handler.
+    """
+    monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+    monkeypatch.setattr(redaction_module, "_warned", set())  # defeat warn-once dedupe
+    installed_before = signal.getsignal  # the patched callable; identity is not the point
+
+    out = redact_within_budget("harmless", lambda t: t.upper(), budget_seconds=5.0)
+
+    assert out == "HARMLESS", (
+        "refusing to arm must fall back to running the redactor, not withhold: "
+        "withholding everything on a host that never had a budget is catastrophic"
+    )
+    err = capsys.readouterr().err
+    assert "UNBOUNDED" in err, "an unavailable guarantee must be visible, never assumed"
+    assert "outside Python" in err, "the warning must name THIS cause, not a generic one"
+    assert installed_before is signal.getsignal, "sanity: the patch stayed in place"
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM"),
+    reason="SIGALRM is POSIX-only; absent on native Windows (the disclosed coverage gap)",
+)
+def test_restore_cannot_raise_an_uninstallable_handler_into_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#48. The restore's tuple must not be narrower than the handler's.
+
+    The handler guarded ``signal.signal`` against ``(OSError, ValueError,
+    TypeError)`` while the restore loop guarded the SAME call against
+    ``(RedactionBudgetExceeded, OSError)`` only. So the identical escape was closed
+    in one place and open in the other, and the open one lands exactly where the
+    defect this module exists to fix lands: out through ``_redact_under_watchdog``,
+    past ``redact_within_budget``'s guard, into ``_apply_env_redaction``'s
+    ``except Exception``, which returns the ORIGINAL text.
+
+    Unreachable now that the arm refuses on ``None`` — see the sibling test — so
+    this drives it with a ``signal.signal`` that rejects the restore directly. It
+    pins the ASYMMETRY, not a reachable defect: escaping is fail-open, swallowing is
+    fail-closed, and the cheap insurance belongs on the fail-closed side.
+    """
+    real_signal = signal.signal
+    calls = {"n": 0}
+
+    def signal_that_rejects_the_restore(signalnum: int, handler: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1 = arming ours, 2 = putting the caller's back
+            raise TypeError(
+                "signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object"
+            )
+        return real_signal(signalnum, handler)
+
+    monkeypatch.setattr(signal, "signal", signal_that_rejects_the_restore)
+    try:
+        out = redact_within_budget("harmless", lambda t: t.upper(), budget_seconds=5.0)
+    finally:
+        monkeypatch.undo()
+        leaked = redaction_module._is_budget_handler(signal.getsignal(signal.SIGALRM))
+        if leaked:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+    assert out == "HARMLESS", (
+        "a rejected restore must not escape as TypeError; the caller's generic "
+        "handler would turn that into a fail-open passthrough of unredacted text"
+    )
+    assert calls["n"] >= 3, "the restore must RETRY rather than propagate"
+    assert not leaked, "the raising handler was left installed process-wide"
 
 
 def test_warning_is_emitted_once_per_process_not_per_call(
