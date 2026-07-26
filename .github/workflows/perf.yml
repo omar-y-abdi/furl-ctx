@@ -137,6 +137,18 @@ jobs:
               "hash_failures": 0,
               "silent_loss": 0,
               "cache_prefix_violations": 0,
+              # The whole-blob CCR offload path is reached by exactly one family
+              # (`opaque`) and only while the engine CANNOT compress its documents.
+              # Pin the POSITIVE count, not just the absence of misses: with a
+              # misses-only assertion, deleting the family from verify/run.py's
+              # FAMILIES leaves no cells to check, so misses is 0 and this passes
+              # while the path goes unmeasured again. `runs` and `taken` make
+              # "verified" and "vacant" distinguishable — 36/36 passes, 34/36
+              # fails, 0/0 fails. 36 = 2 sizes x 3 tiers x 6 fixed seeds; changing
+              # that matrix is a deliberate act that must update this pin.
+              "opaque_route_runs": 36,
+              "opaque_route_taken": 36,
+              "opaque_route_misses": 0,
           }
           got: dict[str, int] = {}
           for key in expected:
