@@ -14,6 +14,7 @@ screens cannot be the fix.
 
 from __future__ import annotations
 
+import ast
 import re
 import signal
 import threading
@@ -272,6 +273,240 @@ def test_re2_ascii_class_divergence_is_known_and_pinned() -> None:
     assert matches_within_budget(re.compile(r"^\d+$"), arabic_indic) is False
     # ASCII digits agree under both engines -- the common case is unaffected.
     assert matches_within_budget(re.compile(r"^\d+$"), "12345") is True
+
+
+# ---------------------------------------------------------------------------
+# Barrier -- the disclosed divergence stays contained to BOOLEAN-verdict callers
+# ---------------------------------------------------------------------------
+
+# regex_budget entry points that return a BOOLEAN does-a-match-EXIST verdict under
+# the disclosed ASCII/Unicode class divergence (see their docstrings). Correct for
+# a caller that needs yes/no; WRONG for one where which byte matched decides output.
+_BOOLEAN_VERDICT_FUNCS = frozenset({"matches_within_budget", "search_within_budget"})
+
+# Modules whose output depends on WHICH bytes matched, so the boolean verdict above
+# is the wrong primitive and they must never route through it. redaction and
+# compression_store are the security-critical case: they ``re.sub`` the matched
+# span, so both leftmost-first/longest and the ASCII/Unicode divergence would change
+# which bytes get scrubbed -- and strengthening the guard to close that divergence
+# would drop word-class patterns to the unbudgeted worker-thread residual (#26). The
+# rest read match content to decode/tokenize/score. This is the guarded FLOOR;
+# ``test_span_sensitive_module_list_is_complete`` keeps it honest by deriving the
+# match-span readers mechanically and reddening if a new one is neither listed here
+# nor exempted below. Do NOT shrink it to "just redaction" -- a hand-list of one is
+# exactly the silent-staleness hole that completeness test closes.
+_SPAN_SENSITIVE_MODULES = (
+    "furl_ctx/cache/compression_store.py",
+    "furl_ctx/ccr/marker_grammar.py",
+    "furl_ctx/host_version.py",
+    "furl_ctx/redaction.py",
+    "furl_ctx/relevance/bm25.py",
+    "furl_ctx/retrieve.py",
+    "furl_ctx/tokenizers/estimator.py",
+    "furl_ctx/transforms/code_aware_compressor.py",
+    "furl_ctx/transforms/csv_schema_decoder.py",
+    "furl_ctx/transforms/log_template.py",
+    "furl_ctx/transforms/router_debug.py",
+    "furl_ctx/transforms/router_message_policy.py",
+    "furl_ctx/transforms/router_split.py",
+)
+
+# Mechanically flagged by the deriver but NOT re.Match span reads, so the
+# boolean-verdict path is irrelevant to them. Recorded WITH a reason (not silently
+# omitted from the list) so the completeness test forces this judgement to be
+# revisited if the file changes, and so a stale exemption is caught when its signal
+# later disappears.
+_SPAN_SIGNAL_EXEMPT = {
+    "furl_ctx/cli.py": "exc.start is a UnicodeDecodeError byte offset, not re.Match.start",
+    "furl_ctx/tokenizers/tiktoken_counter.py": "thread.start(), not re.Match.start",
+}
+
+# re.Match / re.Pattern members that expose WHICH bytes matched -- span, position,
+# captured group, or substituted/found substrings -- as opposed to search() /
+# match() / fullmatch(), whose result is only boolean-usable. Superset of the audit
+# list: adds findall/finditer, which return matched substrings / match objects and
+# would otherwise be a silent gap of exactly the kind the completeness test closes.
+_SPAN_METHOD_NAMES = frozenset(
+    {
+        "sub",
+        "subn",
+        "span",
+        "start",
+        "end",
+        "group",
+        "groups",
+        "groupdict",
+        "expand",
+        "findall",
+        "finditer",
+    }
+)
+
+_REGEX_BUDGET_MODULE = "furl_ctx.ccr.regex_budget"
+
+
+def _imports_from_regex_budget(node: ast.ImportFrom) -> bool:
+    """Whether an ``ImportFrom`` targets the regex_budget module -- absolute OR
+    relative.
+
+    A relative ``from .regex_budget import matches_within_budget`` parses to
+    ``module="regex_budget", level=1`` -- the relative TAIL, never the full dotted
+    path -- so an absolute-only ``node.module == _REGEX_BUDGET_MODULE`` check is
+    blind to it. That is the idiomatic import inside ``furl_ctx/ccr/`` (see
+    ``compress_modes.py``), exactly where a new span-sensitive module is most likely
+    to land, so the blind spot is load-bearing, not cosmetic. Absolute is matched
+    exactly; relative on the final component (one regex_budget module in the tree,
+    so it cannot collide).
+    """
+    if node.module is None:
+        # ``from . import regex_budget`` binds the module; its use is an attribute
+        # access, caught by the Attribute branch below.
+        return False
+    if node.level == 0:
+        return node.module == _REGEX_BUDGET_MODULE
+    return node.module.split(".")[-1] == "regex_budget"
+
+
+def _boolean_verdict_refs(source: str) -> set[str]:
+    """Names in ``_BOOLEAN_VERDICT_FUNCS`` that ``source`` imports from
+    regex_budget or reads as an attribute (``<anything>.matches_within_budget``).
+
+    AST-based on purpose: a name that appears only in a comment or a string does
+    NOT trip the barrier, so a note in ``redaction.py`` explaining why it stays
+    off this path is safe to write. Both routing shapes are caught -- a direct
+    ``from ...regex_budget import matches_within_budget`` (bare-name call) via the
+    import, and ``regex_budget.matches_within_budget`` / ``rb.matches_within_budget``
+    via the attribute access. The import is matched by
+    :func:`_imports_from_regex_budget`, which sees the ABSOLUTE
+    ``from furl_ctx.ccr.regex_budget import ...`` and the RELATIVE
+    ``from .regex_budget import ...`` (the idiomatic in-package form) alike. DIRECT
+    references only: a boolean call reached through a thin wrapper module, or via
+    ``getattr(regex_budget, "matches_within_budget")``, is invisible here -- both are
+    exotic and out of scope for this barrier.
+    """
+    hits: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and _imports_from_regex_budget(node):
+            hits |= {a.name for a in node.names if a.name in _BOOLEAN_VERDICT_FUNCS}
+        elif isinstance(node, ast.Attribute) and node.attr in _BOOLEAN_VERDICT_FUNCS:
+            hits.add(node.attr)
+    return hits
+
+
+def test_span_sensitive_callers_do_not_route_through_boolean_verdict_path() -> None:
+    """Barrier: a span-sensitive caller must never use the BOOLEAN-verdict path.
+
+    ``matches_within_budget`` / ``search_within_budget`` answer does-a-match-EXIST
+    only, under the disclosed ASCII/Unicode class divergence pinned by
+    ``test_re2_ascii_class_divergence_is_known_and_pinned``. That divergence is
+    ACCEPTED because a boolean verdict cannot observe it (it changes which span
+    wins, never whether one exists). Route a caller where WHICH bytes matched
+    decides the output -- redaction ``re.sub``s the matched span -- and the
+    divergence silently redacts the wrong bytes; worse, "fixing" it by refusing
+    RE2 for word-class patterns drops them to the unbudgeted worker-thread
+    residual and reopens the #26 GIL-freeze DoS. So the rule is one line: span-
+    sensitive callers stay off this path, and this test goes red the moment one
+    imports or calls either function -- at the moment the assumption breaks, not
+    after a silent mis-redaction ships.
+
+    Proven able to fail: temporarily adding
+    ``from furl_ctx.ccr.regex_budget import matches_within_budget`` to
+    ``furl_ctx/redaction.py`` turns this red (verified at delivery, then reverted).
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    assert _SPAN_SENSITIVE_MODULES, (
+        "_SPAN_SENSITIVE_MODULES is empty: this barrier would then iterate nothing "
+        "and pass having checked no file -- a vacuous green. It must list the "
+        "span-sensitive floor (the completeness test keeps that floor honest)."
+    )
+    for rel_path in _SPAN_SENSITIVE_MODULES:
+        module_path = repo_root / rel_path
+        assert module_path.exists(), (
+            f"{rel_path} is listed in _SPAN_SENSITIVE_MODULES but no longer exists; "
+            f"remove the stale entry"
+        )
+        source = module_path.read_text(encoding="utf-8")
+        offending = _boolean_verdict_refs(source)
+        assert not offending, (
+            f"{rel_path} routes through boolean-verdict function(s) "
+            f"{sorted(offending)} from {_REGEX_BUDGET_MODULE}: that path returns "
+            f"does-a-match-EXIST only, under an accepted ASCII/Unicode divergence, "
+            f"and must not back a span-sensitive caller (which byte matched decides "
+            f"its output). See those functions' docstrings -- strengthening the "
+            f"guard to close the divergence would reopen the #26 worker-thread DoS."
+        )
+
+
+def _derive_span_signal_modules(repo_root: Path) -> set[str]:
+    """furl_ctx modules that mechanically read a regex match's bytes or positions.
+
+    Walks the source tree and flags any attribute access whose name is in
+    ``_SPAN_METHOD_NAMES`` -- ``m.group(1)``, ``pat.sub(...)``, ``pat.findall(...)``
+    all count, and module-level ``re.sub`` is caught too (it parses to
+    ``Attribute(attr="sub")``). A MECHANICAL over-approximation, not a semantic one:
+    ``thread.start()`` and ``exc.start`` trip it, which is why ``_SPAN_SIGNAL_EXEMPT``
+    exists. It sees only DIRECT attribute access: a module that reads spans solely
+    through an imported helper (never calling ``.span()``/``.group()``/``.sub()`` etc.
+    itself) is invisible, and so is ``getattr(m, "group")(1)``. Recall is not the goal.
+    The goal is that a NEW span-reading module cannot enter the tree without a
+    conscious decision -- joining the guarded floor or being exempted with a reason.
+    Separate ``match.start()``/``match.end()`` slicing IS seen: both names are in the
+    set, so ``text[m.start():m.end()]`` trips it like ``.span()`` would.
+    """
+    span_users: set[str] = set()
+    for path in sorted((repo_root / "furl_ctx").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if any(
+            isinstance(node, ast.Attribute) and node.attr in _SPAN_METHOD_NAMES
+            for node in ast.walk(tree)
+        ):
+            span_users.add(path.relative_to(repo_root).as_posix())
+    return span_users
+
+
+def test_span_sensitive_module_list_is_complete() -> None:
+    """R-1: a new span-reading module cannot join the tree unclassified.
+
+    ``_SPAN_SENSITIVE_MODULES`` is a hand-list, and a hand-list goes stale in
+    silence: add a second redaction-like module, route it through the boolean path,
+    and the barrier above stays green because it never opens a file outside the
+    tuple -- the exact "green means nobody looked" failure this suite exists to
+    kill. So the mechanically-derived set of match-span readers must be fully
+    accounted for: each is on the guarded floor OR carries a recorded exemption. A
+    new module that reads a match's bytes reddens THIS test until someone classifies
+    it, forcing the decision rather than allowing a silent gap.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    derived = _derive_span_signal_modules(repo_root)
+    assert derived, (
+        "the span-signal derivation found NO modules: the furl_ctx walk is broken, "
+        "so this test would pass having compared empty sets -- a vacuous green. The "
+        "real tree always has span readers (redaction, marker_grammar, ...). (A stale "
+        "exemption is caught separately; this guards the empty-walk case even if "
+        "_SPAN_SIGNAL_EXEMPT is ever emptied, which would otherwise make it vacuous.)"
+    )
+    checked = set(_SPAN_SENSITIVE_MODULES)
+    exempt = set(_SPAN_SIGNAL_EXEMPT)
+
+    assert checked.isdisjoint(exempt), (
+        f"modules both guarded and exempted (pick one): {sorted(checked & exempt)}"
+    )
+    # Every exemption must correspond to a module the deriver still flags; a stale
+    # exemption (its span signal was removed) must be pruned, not left to mask a
+    # later real hit in the same file.
+    assert exempt <= derived, (
+        f"stale _SPAN_SIGNAL_EXEMPT entries no longer trip a span signal, remove "
+        f"them: {sorted(exempt - derived)}"
+    )
+    unclassified = derived - checked - exempt
+    assert not unclassified, (
+        f"span-reading module(s) neither guarded nor exempted: {sorted(unclassified)}. "
+        f"Each reads a regex match's bytes/positions ({sorted(_SPAN_METHOD_NAMES)}). "
+        f"If it must never source a match from the boolean-verdict path "
+        f"(redaction-like), add it to _SPAN_SENSITIVE_MODULES; if its signal is not "
+        f"an re.Match read (a thread/timer .start, an exception offset), add it to "
+        f"_SPAN_SIGNAL_EXEMPT with the reason."
+    )
 
 
 # ---------------------------------------------------------------------------

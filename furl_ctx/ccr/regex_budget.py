@@ -248,6 +248,12 @@ def _re2_sees_same_flags(compiled: re.Pattern[str]) -> bool:
     source alone reproduces the flags, every flag is inline and RE2 sees it.
     Rejecting all flags instead (the obvious fix) would push inline-``(?i)``
     patterns onto the unbudgeted path and reopen B1 for ``(?i)(a|b|ab)+Z``.
+
+    The same shape of trap applies to the ASCII/Unicode class divergence: do NOT
+    add a word-class refusal HERE to "close" it. That drops ``\\b``/``\\w``/``\\d``/
+    ``\\s`` patterns off RE2 onto the unbudgeted worker-thread residual and reopens
+    the #26 GIL-freeze; the full argument, and the barrier that enforces it, live on
+    :func:`search_within_budget`.
     """
     try:
         return re.compile(compiled.pattern).flags == compiled.flags
@@ -326,6 +332,21 @@ def search_within_budget(
 
     Total: returns a verdict for every input and never raises. See the module
     docstring for the engine order and the disclosed RE2/``re`` divergence.
+
+    BOOLEAN-VERDICT CONTRACT -- do not route a span-sensitive caller here.
+    This answers does-a-match-EXIST only. The disclosed ASCII/Unicode class
+    divergence (module docstring, "Engine-divergence note") is accepted PRECISELY
+    because a boolean verdict cannot observe it: it changes which span wins, never
+    whether one exists. A caller where WHICH bytes matched decides the output --
+    redaction is the canonical case, it ``re.sub``s the matched span -- would
+    silently scrub the wrong bytes if routed through this path. And do NOT try to
+    "fix" the divergence by refusing RE2 for word-class patterns (``\\b \\w \\d
+    \\s``): that drops them to the unbudgeted residual below, and on the MCP
+    worker thread (no SIGALRM; RE2 is the only bound) a word-class AND pathological
+    filter such as ``(\\w|\\w\\w)+Z`` then backtracks unbounded and freezes the
+    whole process -- the #26 GIL-freeze this module exists to prevent. The barrier
+    ``test_span_sensitive_callers_do_not_route_through_boolean_verdict_path`` fails
+    if a span-sensitive module ever imports or calls this.
     """
     engine = _compile_re2(compiled.pattern) if _re2_sees_same_flags(compiled) else None
     if engine is not None:
@@ -363,6 +384,11 @@ def matches_within_budget(
 ) -> bool:
     """Boolean convenience wrapper: a budget overrun counts as NO match.
 
-    Use :func:`search_within_budget` where the overrun needs to be reported.
+    Use :func:`search_within_budget` where the overrun needs to be reported. The
+    same BOOLEAN-VERDICT CONTRACT applies: this answers does-a-match-EXIST only,
+    never which bytes matched, so a span-sensitive caller (e.g. redaction) must
+    not route through it -- see :func:`search_within_budget` for why closing the
+    accepted ASCII/Unicode divergence by strengthening the guard would reopen the
+    #26 worker-thread DoS.
     """
     return search_within_budget(compiled, text, budget_seconds=budget_seconds).is_match
