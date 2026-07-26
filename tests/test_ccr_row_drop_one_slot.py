@@ -321,11 +321,14 @@ def test_cap_inversion_warning_fires_only_when_max_rows_below_max_entries(
     The guard warns IFF the backend's physical row cap sits below the logical
     ``max_entries`` — the config that inverts the documented ordering. Three
     states: it fires for that inversion, stays silent at the defaults, and stays
-    silent for a backend with no physical cap at all (``InMemoryBackend`` — the
-    ``getattr(_max_rows) -> None`` branch the guard's comment claims). The third
-    also guards the structural fragility of reaching a PRIVATE attribute not in
-    the ``CompressionStoreBackend`` Protocol: if ``_max_rows`` is renamed the
-    guard silently degrades to a no-op, and assertion (1) turns red.
+    silent for a backend with no physical cap at all (``InMemoryBackend``, which
+    now DECLARES ``max_rows is None``).
+
+    Case (3)'s silence is necessary but not sufficient on its own — silence looks
+    identical whether the guard checked and found nothing wrong or could not see
+    anything at all. ``test_backends_declare_their_row_cap_observably`` and
+    ``test_undeclared_backend_is_logged_not_silently_skipped`` below carry that
+    distinction; this test carries the warn/no-warn behaviour.
     """
     logger_name = "furl_ctx.cache.compression_store"
     # Neutralize ambient FURL_CCR_SQLITE_MAX_ROWS (L2): case (2) builds a backend
@@ -357,10 +360,106 @@ def test_cap_inversion_warning_fires_only_when_max_rows_below_max_entries(
         "guard fired at the default caps, where the ordering is not inverted"
     )
 
-    # (3) silent for a backend with NO physical cap (getattr(_max_rows) -> None)
+    # (3) silent for a backend that DECLARES no physical cap (max_rows is None)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=logger_name):
         CompressionStore(backend=InMemoryBackend(), max_entries=10, enable_feedback=False)
     assert not any(_CAP_INVERSION_WARNING in r.getMessage() for r in caplog.records), (
         "guard fired for InMemoryBackend, which has no physical cap to invert"
+    )
+
+
+_UNDECLARED_ROW_CAP_LOG = "declares no max_rows"
+
+
+def test_backends_declare_their_row_cap_observably(tmp_path, monkeypatch) -> None:
+    """Both backends DECLARE a physical row cap, and the two declarations are
+    observably DIFFERENT values — not two flavours of silence.
+
+    This is the half the cap-inversion test above cannot prove. The guard used to
+    read ``getattr(backend, "_max_rows", None)``: a private field of one
+    implementation. For every other backend that returned ``None``, which is
+    indistinguishable from a real "no cap" answer — so a rename of SqliteBackend's
+    private field, or any third-party backend, silently disabled the invariant
+    check while every test stayed green. Reading a DECLARED public value makes
+    "no cap" a positive statement (``None``) and makes its absence detectable
+    (see the next test).
+    """
+    monkeypatch.delenv("FURL_CCR_SQLITE_MAX_ROWS", raising=False)
+
+    assert InMemoryBackend().max_rows is None, (
+        "InMemoryBackend must DECLARE that it has no physical row cap"
+    )
+
+    backend = SqliteBackend(db_path=tmp_path / "declared.sqlite3", max_rows=7)
+    try:
+        assert backend.max_rows == 7, "SqliteBackend must declare its real row cap"
+    finally:
+        backend.close()
+
+    # NO third assertion that the two answers "differ". The two positives above
+    # already force it: once one is exactly None and the other is exactly 7, any
+    # comparison between them is a tautology and can never redden. An earlier
+    # version asserted `InMemoryBackend().max_rows != 7` here and a comment called
+    # it the point of the test; it discriminated nothing. Rewriting it to compare
+    # the two live values instead is the SAME tautology wearing better clothes.
+    # The falsifiable content is the two exact positives — a collapse onto one
+    # value necessarily breaks one of them. Do not re-add a difference check: it
+    # would read as rigour and assert nothing.
+
+
+def test_undeclared_backend_is_logged_not_silently_skipped(caplog) -> None:
+    """A backend that declares NOTHING is reported, so "checked and fine" is
+    distinguishable from "could not see anything".
+
+    The old ``getattr(..., "_max_rows", None)`` collapsed these into the same
+    silent skip. That is what made the guard's failure mode invisible: it could
+    stop working entirely and no log, no warning and no test would change.
+    """
+    logger_name = "furl_ctx.cache.compression_store"
+
+    class _NoRowCapDeclaration:
+        """A backend outside the cap-ordering contract: ``max_rows`` is genuinely
+        ABSENT, not declared-None.
+
+        Deliberately does NOT subclass ``InMemoryBackend`` — it would inherit the
+        ``max_rows`` declaration, and a subclass cannot un-declare it (deleting the
+        override just re-exposes the inherited property). Delegates everything
+        else so it behaves like a real backend.
+        """
+
+        def __init__(self) -> None:
+            self._inner = InMemoryBackend()
+
+        def __getattr__(self, name: str):
+            if name in {"_inner", "max_rows"}:
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        CompressionStore(backend=_NoRowCapDeclaration(), max_entries=10, enable_feedback=False)
+    undeclared = [r for r in caplog.records if _UNDECLARED_ROW_CAP_LOG in r.getMessage()]
+    assert undeclared, (
+        "a backend declaring no max_rows must be logged — otherwise the guard "
+        "going blind is indistinguishable from the guard passing"
+    )
+    # Pinned at WARNING, captured at WARNING: a DEBUG record would not survive
+    # this level and the assertion above would fail. That is deliberate — DEBUG
+    # is invisible at production log levels, so reporting an UNCHECKABLE
+    # invariant there would be observably the same as the silent skip this guard
+    # removes, and quieter than the milder inversion case four lines below it.
+    assert undeclared[0].levelno == logging.WARNING, (
+        f"the undeclared-backend report must be WARNING (not quieter than the "
+        f"inversion warning it outranks), got {undeclared[0].levelname}"
+    )
+
+    # And the backend that DOES declare (None) must NOT be reported as undeclared:
+    # that is the difference this whole guard turns on.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
+        CompressionStore(backend=InMemoryBackend(), max_entries=10, enable_feedback=False)
+    assert not any(_UNDECLARED_ROW_CAP_LOG in r.getMessage() for r in caplog.records), (
+        "InMemoryBackend DECLARES max_rows is None; it must not be reported as "
+        "undeclared — captured at DEBUG so even a downgraded record would be seen"
     )

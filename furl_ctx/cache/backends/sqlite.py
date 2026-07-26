@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ... import paths as _paths
+from .base import reject_negative_counter_amount
 from .memory import InMemoryBackend
 
 if TYPE_CHECKING:
@@ -512,6 +513,36 @@ class SqliteBackend:
             "fallback_entry_count": self._memory.count(),
         }
 
+    @property
+    def durable(self) -> bool:
+        """Always ``True``: this backend persists to a shared file that outlives
+        the process and is visible to other processes.
+
+        Declared rather than inferred from the presence of :meth:`set_durable`.
+        Presence could never distinguish this class from a durable third-party
+        backend that had not implemented that undocumented name — both looked
+        alike to the store, and the second silently satisfied ``require_durable``.
+
+        ``True`` here is the class's storage MODEL, not the health of any single
+        write: a degraded instance still declares ``True`` and reports each
+        individual write's real outcome through :meth:`set_durable`, which is what
+        lets ``require_durable`` veto a write that only reached the volatile
+        fallback instead of mistaking the whole backend for a volatile one.
+        """
+        return True
+
+    @property
+    def max_rows(self) -> int:
+        """Physical file-level row cap (oldest-first eviction beyond it).
+
+        The DECLARED half of the cap-ordering contract ``CompressionStore`` checks
+        (F4), replacing the store's reach into this class's private ``_max_rows``.
+        A private field is not a contract: renaming it silently disabled the
+        store's invariant check, and nothing outside this class could tell the
+        difference between "no cap configured" and "cap no longer visible".
+        """
+        return self._max_rows
+
     def increment_counter(self, name: str, amount: int = 1) -> int | None:
         """Atomically add ``amount`` to the named counter in the shared file and
         return its new DURABLE value, or ``None`` when the write did not reach
@@ -522,7 +553,17 @@ class SqliteBackend:
         so concurrent processes serialise and each sees its own post-increment
         value (a ``None`` return means "counted, but only in the volatile fallback
         this process — not durable/cross-process"). Fail-open: never raises out.
+
+        A negative ``amount`` is rejected here, on the DURABLE path, not only in
+        the volatile fallback this method delegates to. The delegation is exactly
+        where a guard added in one place fails to cover the other: a healthy
+        (non-degraded) backend never touches ``self._memory``, so a check living
+        only there would leave the primary path unguarded. Fail-open covers
+        OPERATIONAL failure (locks, I/O), never a caller passing a value a counter
+        cannot represent — that is a bug and is raised, matching ``store()``'s
+        ``ttl``/``explicit_hash`` rejections.
         """
+        reject_negative_counter_amount(name, amount)
         if self._degraded:
             self._memory.increment_counter(name, amount)
             return None
