@@ -577,10 +577,26 @@ def _make_budget_handler(previous_handler: Any) -> Callable[[int, object], None]
     The restore is guarded because a handler that raised anything OTHER than
     ``RedactionBudgetExceeded`` would defeat the fail-closed contract — the callers
     match on that type, and a stray ``OSError`` would sail past every one of them
-    into the hook's generic handler, which returns the ORIGINAL text. ``OSError``
-    is the live one: CPython raises "Signal N ignored due to race condition" from
-    ``signal.signal`` when a tripped signal finds a non-callable handler. The other
-    two are for a ``previous_handler`` that ``getsignal`` could not express.
+    into the hook's generic handler, which returns the ORIGINAL text.
+
+    Of the three, only ``OSError`` is REACHABLE: CPython raises "Signal N ignored
+    due to race condition" from ``signal.signal`` when a tripped signal finds a
+    non-callable handler, which is ``SIG_DFL`` in the hook. ``TypeError`` and
+    ``ValueError`` are UNREACHABLE BY CONSTRUCTION and retained deliberately as
+    backstops, not because they were observed:
+
+    * ``TypeError`` needs ``previous_handler`` to be a value ``signal.signal``
+      rejects, and the only such value ``getsignal`` can produce is ``None`` —
+      which :func:`_can_arm_watchdog` now refuses to arm on, so it cannot reach
+      this closure.
+    * ``ValueError`` needs a non-main thread or a bad signal number, and arming
+      already succeeded from this thread with this number.
+
+    They stay because the failure directions are not symmetric. If the arm-time
+    guard ever regresses, swallowing here yields ``RedactionBudgetExceeded`` and a
+    fail-CLOSED withhold; NOT swallowing yields a raw ``TypeError`` that walks
+    into the hook's ``except Exception`` and returns the ORIGINAL text. A leaked
+    handler is recoverable; a disclosed credential is not.
     """
 
     def _raise_budget_exceeded(signum: int, frame: object) -> None:
@@ -610,8 +626,28 @@ def _can_arm_watchdog() -> bool:
     interpreter. The PostToolUse hook is a subprocess whose redaction runs on its
     main thread, so the watchdog genuinely arms there; the MCP server's worker
     threads are exactly the case it cannot cover (tracked separately).
+
+    ALSO REFUSES WHEN THE CURRENT HANDLER CANNOT BE PUT BACK. ``getsignal``
+    returns ``None`` when SIGALRM's disposition was neither ``SIG_DFL`` nor
+    ``SIG_IGN`` at the moment the signal module initialised — CPython records
+    "not our business" and keeps no object — and ``signal.signal`` rejects
+    ``None`` with ``TypeError``. Arming on top of that value would install a
+    handler that CANNOT be uninstalled: there is no installable object to
+    restore, so the self-disarm fails, the restore fails, and our raising handler
+    becomes a PERMANENT process-wide fixture rather than a 1-in-16000 one. That
+    is strictly worse than having no budget, and it would also hijack SIGALRM
+    from whatever C code owned it.
+
+    Never arming is therefore the only correct answer, and it makes the whole
+    ``TypeError`` family unreachable by construction rather than caught in some
+    places and not others. It reuses the existing unbudgeted fallback, so the
+    operator gets the same loud warning as on a platform without SIGALRM.
     """
-    return threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM")
+    if not hasattr(signal, "SIGALRM"):
+        return False
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    return signal.getsignal(signal.SIGALRM) is not None
 
 
 def _unbudgeted_warning() -> str:
@@ -631,10 +667,20 @@ def _unbudgeted_warning() -> str:
             "to the model. Running the plugin under WSL, macOS or Linux restores the "
             "bound."
         )
+    if threading.current_thread() is not threading.main_thread():
+        return (
+            "redaction is running UNBOUNDED on this call: it is not on the main thread, "
+            "where Python signal handlers never run, so the redaction timeout does NOT "
+            "apply. Call redact_within_budget() from the main thread to get the bound."
+        )
     return (
-        "redaction is running UNBOUNDED on this call: it is not on the main thread, "
-        "where Python signal handlers never run, so the redaction timeout does NOT "
-        "apply. Call redact_within_budget() from the main thread to get the bound."
+        "redaction is running UNBOUNDED on this call: SIGALRM's handler was installed "
+        "outside Python before this interpreter started, so signal.getsignal() cannot "
+        "hand back an object we could restore, and the redaction timeout does NOT "
+        "apply because arming a watchdog we cannot UNINSTALL would hijack SIGALRM "
+        "permanently. This needs an embedding host: no process launched normally can "
+        "be in this state, because exec resets handlers. Install the SIGALRM handler "
+        "from Python, or leave it at its default, to get the bound."
     )
 
 
@@ -818,6 +864,17 @@ def _restore_after_budget(
     the report is ambiguous about whether the swap landed, and both calls below are
     idempotent, so a second pass settles it either way.
 
+    TOLERATES ``TypeError``/``ValueError`` FOR ASYMMETRY, NOT FOR REACHABILITY.
+    Both are unreachable once :func:`_can_arm_watchdog` refuses to arm on a
+    ``previous_handler`` of ``None`` — see :func:`_make_budget_handler` for the
+    full argument, which applies unchanged here. They are caught anyway because
+    escaping this function is a FAIL-OPEN outcome (the hook's generic handler
+    returns the original text) while swallowing is fail-closed, so the cheap
+    insurance is on the correct side. Catching them here also removes an asymmetry
+    that was real: the handler guarded this same call against all three while this
+    loop guarded it against one, so the same escape was closed in one place and
+    open in the other.
+
     TERMINATION, argued without assuming "at most one late alarm". Every iteration
     DISARMS our itimer as its first statement, so after the first successful
     ``setitimer(0)`` the SOURCE of these alarms is switched off and no new one can
@@ -847,7 +904,7 @@ def _restore_after_budget(
         try:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
-        except (RedactionBudgetExceeded, OSError):
+        except (RedactionBudgetExceeded, OSError, TypeError, ValueError):
             continue
         break
     else:
@@ -861,11 +918,23 @@ def _restore_after_budget(
             signal.setitimer(
                 signal.ITIMER_REAL, max(restored, _MIN_RESTORED_TIMER), previous_interval
             )
-        except OSError:
-            # Same discarded-signal report as above, on the re-arm rather than the
-            # disarm. It must not become the function's exit path: this runs from a
-            # ``finally``, so raising here would REPLACE the outcome of the guarded
-            # call, and the callers match on RedactionBudgetExceeded only.
+        except (RedactionBudgetExceeded, OSError, TypeError, ValueError):
+            # THE SAME TUPLE AS THE DISARM LOOP AND THE HANDLER, deliberately, because
+            # "this function never raises" has to hold at EVERY call it makes or it does
+            # not hold at all. This one runs from a ``finally``, so an escape here would
+            # REPLACE the outcome of the guarded call with an exception the callers do
+            # not match on — the fail-open landing again, reached from the re-arm
+            # instead of the disarm.
+            #
+            # Reachability differs from the disarm's and is stated rather than implied.
+            # ``OSError`` is the live one (the discarded-signal report). ``TypeError``
+            # and ``ValueError`` need non-numeric or negative arguments, and both are
+            # excluded by the ``max()`` above and by ``previous_interval`` coming from
+            # ``setitimer``'s own return. ``RedactionBudgetExceeded`` needs the restored
+            # handler to itself be a budget handler, which happens only when a budgeted
+            # pass is NESTED inside another; the outer pass then withholds, which is
+            # fail-closed and correct. Enumerating them was the mistake once already, so
+            # the tuple is uniform and the argument lives in the comment.
             _warn_once(_restore_gave_up_warning())
 
 
