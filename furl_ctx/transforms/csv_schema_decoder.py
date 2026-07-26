@@ -599,7 +599,26 @@ def _parse_header_segment(seg: str) -> ColumnSpec | None:
 
 
 def _is_sentinel_line(line: str) -> bool:
-    """True for the lossy-survivor ``{"_ccr_dropped": ...}`` final line."""
+    """True for a lossy-survivor ``{"_ccr_dropped": ...}`` metadata line.
+
+    POSITION-INDEPENDENT. The decode loop ``continue``s on any line this
+    matches ANYWHERE in the body, and it does so BEFORE ``ordinal`` advances —
+    the same treatment the ``__stats:`` summary line gets — so arithmetic-fold
+    row indexes stay aligned wherever the sentinel sits. Measured: a table with
+    the sentinel appended last and the identical table with it moved mid-body
+    decode to byte-identical rows.
+
+    The real position constraint is the HEADER, not the tail.
+    ``decode_csv_schema_rows`` matches ``_HEADER_RE`` against ``lines[0]``, so a
+    sentinel occupying that first line makes the whole table undecodable (the
+    decode returns ``None``) and never reaches this predicate. Every emitter
+    appends, so that case is unreachable today.
+
+    Earlier wording here said "final line". The code has never enforced that;
+    the emitters merely happen to append. Consumers must not rely on last
+    position — see ``tests/test_ccr_offload_fallback.py``'s text-branch
+    position test, which pins EMITTER shape and says so explicitly.
+    """
     if not line.startswith("{"):
         return False
     try:
