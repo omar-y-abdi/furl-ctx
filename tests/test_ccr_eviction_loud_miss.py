@@ -24,7 +24,6 @@ True cross-call retention (so the data is actually still there) is the open
 from __future__ import annotations
 
 import json
-import re
 import types
 
 import pytest
@@ -35,6 +34,7 @@ from furl_ctx.cache.compression_store import (
     get_compression_store,
     reset_compression_store,
 )
+from furl_ctx.ccr.marker_grammar import hashes_in_text
 from furl_ctx.ccr.mcp_server import FurlMCPServer
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
@@ -127,64 +127,138 @@ def test_capacity_evicted_bulk_retrieval_is_loud_and_cause_honest() -> None:
 
 
 def test_capacity_evicted_granular_offload_retrieval_is_loud() -> None:
-    # Drive a REAL granular `#rows` offload through the engine, then evict it and
-    # confirm the model-facing miss is loud. The bare hash the model retrieves is
-    # backed by a single whole-blob entry (all rows), so eviction is all-or-nothing
-    # — never a silent partial subset.
-    store = get_compression_store(max_entries=8)
+    # Drive a REAL granular row-drop offload through the engine, then evict it
+    # DETERMINISTICALLY and confirm the model-facing miss is loud. The bare hash
+    # the model retrieves is backed by a single whole-blob entry (all rows), so
+    # eviction is all-or-nothing — never a silent partial subset.
+    #
+    # Every precondition below is an ASSERTION, never a skip. The two facts the
+    # old skips guarded — a sentinel was emitted, and the victim was evicted — are
+    # exactly what a routing or eviction regression perturbs, so skipping on them
+    # is how this test would go green on the very build that silences the loud
+    # miss. If the sentinel is absent or the victim survives, that IS the failure.
+    cap = 8
+    store = get_compression_store(max_entries=cap)
     router = ContentRouter(ContentRouterConfig())
     items = [
         {"id": i, "user": f"u{i % 9}", "msg": f"event {i} payload {'x' * 12}", "ok": True}
         for i in range(240)
     ]
+    # Scan with the PRODUCTION grammar (``hashes_in_text``), not a hand-rolled
+    # regex. A local ``[a-f0-9]{6,}(?:[ ,>])`` diverges from DOUBLE_ANGLE_DELIM
+    # in both directions: too tight on '#' (a '#'-delimited shape is
+    # grammar-legal but returns nothing, producing a red that misdiagnoses the
+    # offload path when the real fault is a stale test regex) and too loose on
+    # width (an 18-hex hash would satisfy the "stored under its marker hash"
+    # precondition below while ``resolve_markers`` could never match it, so the
+    # precondition would close "not stored" but not "not resolvable").
+    # ``hashes_in_text`` enforces the strict {12, 24} consumer widths.
     res = router.compress(json.dumps(items, ensure_ascii=False))
-    bare = re.findall(r"<<ccr:([a-f0-9]{6,})(?:[ ,>])", res.compressed)
-    if not bare:
-        pytest.skip("engine emitted no CCR sentinel for this input on this build")
+    bare = hashes_in_text(res.compressed)
+    assert bare, (
+        "the granular row-drop offload emitted no <<ccr:...>> sentinel for the "
+        "240-item fixture: the engine's routing/offload path regressed (the "
+        "behaviour under test) — a failure, not a reason to skip"
+    )
     victim = bare[0]
 
-    # Overflow the small cap so the granular whole-blob entry is evicted.
-    for c in range(20):
-        rows = [{"c": c, "j": j, "d": f"r_{c}_{j}_{'y' * 7}"} for j in range(60)]
-        router.compress(json.dumps(rows, ensure_ascii=False))
+    # The emitted marker MUST be backed by a live entry under its own hash, or the
+    # model could never resolve it. Assert the offload actually stored it BEFORE we
+    # evict — otherwise a never-stored victim would "miss loudly" for the wrong
+    # reason and this test would pass vacuously.
+    assert store.retrieve(victim) is not None, (
+        f"granular offload emitted <<ccr:{victim} ...>> but stored no retrievable "
+        f"entry under that hash — the marker is a dead pointer (a marker/store-key "
+        f"regression)"
+    )
 
-    if store.retrieve(victim) is not None:
-        pytest.skip("victim survived eviction on this build; loudness is unobservable here")
+    # Drive eviction DETERMINISTICALLY rather than hoping the router's own overflow
+    # happens to evict the victim: fill the cap with strictly-newer entries.
+    # Eviction is oldest-created-first (wall-clock ordered) — the same mechanism the
+    # bulk test above relies on — so the real granular victim, older than every
+    # filler, is guaranteed out.
+    #
+    # The 'f' prefix is load-bearing. The eviction heap holds (created_at, hash_key),
+    # so equal timestamps break the tie LEXICOGRAPHICALLY on the hash. A plain
+    # f"{i:024x}" filler has 21 leading zeros and sorts BELOW any realistic victim
+    # hash, so on a tie the loop would evict the fillers it just inserted and the
+    # victim would SURVIVE — a false red. Proven with a frozen clock: constant
+    # now_fn evicted an all-zero hash while the victim and an all-f hash both
+    # survived. 'f' puts every filler at the TOP of the lexicographic order so the
+    # victim loses the tie-break too, making eviction correct even if the clock's
+    # resolution ever coarsens. (Not currently active: time.time() resolves to ~1us
+    # and the measured victim-to-filler gap is ~26ms, zero ties in 2000 stores.)
+    for i in range(2 * cap):
+        filler = f"f{i:023x}"
+        store.store(
+            original=json.dumps([{"evict_filler": i}]),
+            compressed=f"<<ccr:{filler}>>",
+            original_item_count=1,
+            explicit_hash=filler,
+        )
+
+    assert store.retrieve(victim) is None, (
+        f"granular victim <<ccr:{victim} ...>> survived {2 * cap} strictly-newer "
+        f"stores into a max_entries={cap} store: capacity eviction "
+        f"(oldest-created-first) regressed — a failure, not a reason to skip"
+    )
 
     success, payload = _model_sees(store, victim)
+    # concern #2: the miss is LOUD — explicit error reaches the model, no silent None.
     assert success is False, "evicted granular offload must miss loudly, not silently"
     assert "error" in payload and payload["hash"] == victim
+    err = payload["error"].lower()
+    assert "evict" in err and "capacity" in err, (
+        f"granular miss must be cause-honest: {payload['error']!r}"
+    )
 
 
-def test_fixture_actually_fires_granular_sentinel() -> None:
-    """Prove that the 240-item fixture does emit a CCR sentinel on this build.
+def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
+    # The model-facing retrieval surface (MCP tool) must report a miss as an
+    # explicit `error`, cause-honest, never a silent empty result. Exercise the
+    # real method without the MCP SDK by binding a duck-typed `self` (the miss
+    # path only needs `_get_local_store` + no proxy).
 
-    ``test_capacity_evicted_granular_offload_retrieval_is_loud`` skips when
-    the engine emits no sentinel for the 240-item payload.  This companion
-    asserts the skip precondition never silently hides the gap: if the engine
-    stops emitting sentinels for this fixture, THIS test fails loudly instead
-    of the main test going green-via-skip.
-    """
-    get_compression_store(max_entries=8)
-    router = ContentRouter(ContentRouterConfig())
-    items = [
-        {"id": i, "user": f"u{i % 9}", "msg": f"event {i} payload {'x' * 12}", "ok": True}
-        for i in range(240)
-    ]
-    res = router.compress(json.dumps(items, ensure_ascii=False))
-    bare = re.findall(r"<<ccr:([a-f0-9]{6,})(?:[ ,>])", res.compressed)
-    assert bare, (
-        "engine emitted no CCR sentinel for the 240-item fixture — "
-        "the granular eviction tests will skip silently; fix the fixture size"
+    store = get_compression_store(max_entries=4)
+    victim = "bbbbbbbbbbbb"
+    store.store(
+        original=json.dumps([{"id": 0, "v": "needle"}]),
+        compressed=f"<<ccr:{victim}>>",
+        original_item_count=1,
+        explicit_hash=victim,
+    )
+    for i in range(8):
+        h = f"{i:012x}"
+        store.store(
+            original=json.dumps([{"id": i + 1}]),
+            compressed=f"<<ccr:{h}>>",
+            original_item_count=1,
+            explicit_hash=h,
+        )
+    assert store.retrieve(victim) is None, "precondition: victim evicted"
+
+    stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
+    result = FurlMCPServer._retrieve_content_sync(stub, victim, None)
+
+    assert "error" in result and result["hash"] == victim, "MCP miss must be loud"
+    err = result["error"].lower()
+    assert "evict" in err and "capacity" in err, (
+        f"MCP miss must be cause-honest: {result['error']!r}"
     )
 
 
 def test_fixture_actually_fires_eviction() -> None:
-    """Prove that the overflow loop does evict the victim on this build.
+    """Integration pin: the router's OWN overflow evicts a real granular victim.
 
-    ``test_capacity_evicted_granular_offload_retrieval_is_loud`` skips when
-    the victim survives eviction.  This companion asserts the eviction actually
-    occurs so the skip cannot silently disable the loudness check.
+    ``test_capacity_evicted_granular_offload_retrieval_is_loud`` drives eviction
+    deterministically through direct ``store.store`` fillers, which makes THIS the
+    only remaining coverage that the router's real overflow path evicts at all.
+    Both preconditions are assertions — a missing sentinel or a surviving victim
+    points at the engine (offload routing / store eviction), never a reason to skip.
+
+    (A third companion asserting only the sentinel precondition was pruned: it was
+    byte-identical to the main test's opening lines plus the same assert, so it
+    added no detection power in either direction.)
     """
     store = get_compression_store(max_entries=8)
     router = ContentRouter(ContentRouterConfig())
@@ -193,9 +267,14 @@ def test_fixture_actually_fires_eviction() -> None:
         for i in range(240)
     ]
     res = router.compress(json.dumps(items, ensure_ascii=False))
-    bare = re.findall(r"<<ccr:([a-f0-9]{6,})(?:[ ,>])", res.compressed)
-    if not bare:
-        pytest.skip("no sentinel emitted — fixture_actually_fires_granular_sentinel handles this")
+    # Production grammar, not a hand-rolled regex — see the main test for why a
+    # local `[a-f0-9]{6,}(?:[ ,>])` is wrong in both directions.
+    bare = hashes_in_text(res.compressed)
+    assert bare, (
+        "engine emitted no CCR sentinel for the 240-item fixture — the engine's "
+        "granular row-drop/offload routing regressed; look at the offload path, "
+        "not the fixture"
+    )
     victim = bare[0]
 
     for c in range(20):
@@ -203,6 +282,7 @@ def test_fixture_actually_fires_eviction() -> None:
         router.compress(json.dumps(rows, ensure_ascii=False))
 
     assert store.retrieve(victim) is None, (
-        "victim was NOT evicted after 20 overflow batches in a max_entries=8 store; "
-        "the loudness test skips silently — increase the overflow batch count"
+        "granular victim was NOT evicted after 20 router-overflow batches into a "
+        "max_entries=8 store: capacity eviction (oldest-created-first) regressed in "
+        "the store/router — the loudness check would be unobservable"
     )

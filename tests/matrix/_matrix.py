@@ -95,6 +95,30 @@ def assert_text_lossless_byte_exact(content: str, *, salt: str = ""):
     Path-agnostic on purpose — it proves the PROMISE (no silent loss + byte-exact
     recovery), not a specific route, so it stays green if a family's routing
     shifts as long as recovery remains byte-exact. Returns the ``CompressResult``.
+
+    DELIBERATE, DO NOT NARROW GLOBALLY. The passthrough branch below accepts
+    ``out == content``, which a backend that MANGLES everything also satisfies:
+    the router's offload does a store round-trip verify and, on readback
+    mismatch, keeps the ORIGINAL as a passthrough (``router_engine``, the
+    ``entry.original_content != content`` branch). So a mangling backend
+    degrades to passthrough and this helper goes green — measured, not
+    theorised: with the offload call sites' ``assert result.ccr_hashes`` removed
+    and the sqlite backend NUL-truncating, the suite reported 105 passed.
+
+    The fix belongs at the CALL SITES, not here. A caller whose fixture is
+    SUPPOSED to offload adds ``assert result.ccr_hashes`` of its own (see
+    ``test_encoding_shapes.py``); a caller whose fixture legitimately passes
+    through does not. Narrowing this helper to demand a hash would break the
+    thirteen tests that are correctly passthrough — the passthrough shapes,
+    the tiny/empty inputs, the deeply-nested-JSON case, the two fail-open cases
+    (which store NOTHING by contract) and the bytes-content totality gap — in
+    order to fix the nine that offload. That would look like rigour while
+    removing coverage.
+
+    Byte-exactness at full retrieve is also split by ROUTE, not content type:
+    whole-blob offloads store verbatim, structurally-crushed arrays store the
+    canonical re-serialization. Pinned by
+    ``tests/test_retrieve_route_split_byte_exactness.py``.
     """
     content = salted(content, salt)
     result = run(content)

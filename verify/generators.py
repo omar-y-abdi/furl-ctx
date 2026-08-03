@@ -51,7 +51,7 @@ class Case:
 
     Attributes:
         family: "logs" | "search" | "code" | "multiturn" | "repeated_logs"
-                | "disk" — the dev-claim family this case probes.
+                | "disk" | "opaque" — the family this case probes.
         tier: entropy tier ("low"/"medium"/"high").
         size: nominal item count.
         seed: RNG seed (re-runnable).
@@ -534,6 +534,95 @@ def gen_disk(seed: int, n: int, tier: str) -> Case:
         seed=seed,
         query=query,
         items=items,
+        messages=messages,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OPAQUE — the whole-blob CCR offload path (reached by NO other family).
+# ---------------------------------------------------------------------------
+
+# One document's size in chars. Any N of these clears the router's
+# ``_OFFLOAD_MIN_CHARS`` (4000) many times over; the binding constraint is N,
+# not this.
+OPAQUE_DOC_CHARS = 6000
+
+# Row counts that actually REACH ``router_engine._ccr_offload``. The route is
+# only taken inside a BOUNDED regime whose two edges are both
+# ``SmartCrusherConfig`` constants — measured on d02778b6, not assumed:
+#
+#   n <  min_items_to_analyze  (5)  the crusher does not analyse the array and
+#                                   compresses it anyway  -> no offload
+#                                   (measured: n=3, n=4 take smart_crusher)
+#   n >  max_items_after_crush (15) the crusher can drop down to that cap, which
+#                                   beats offloading      -> no offload
+#                                   (measured: n=16,17,18,22,26,30)
+#   5 <= n <= 15                    the crusher correctly declines (unique, huge
+#                                   cells, nothing folds) and the router's
+#                                   last-resort offload runs
+#
+# 7 and 10 sit two and five clear of the lower edge, eight and five clear of the
+# upper. Both verified to take the route in ALL 6 fixed seeds x 3 tiers.
+OPAQUE_SIZES = (7, 10)
+
+
+def gen_opaque(seed: int, n: int, tier: str) -> Case:
+    """N large documents in ONE tool message — the whole-blob offload shape.
+
+    Mirrors a ``read_files``/``fetch_docs`` result: a JSON array of
+    ``{path, content}`` objects where every ``content`` is a large, distinct
+    document. Nothing folds across rows (each cell is unique and huge) and
+    dropping rows does not beat offloading, so the router's last-resort
+    reversible offload stores the WHOLE blob behind one ``<<ccr:HASH>>``
+    marker. This is the same shape as the committed
+    ``benchmarks/data/code.raw.json`` that BENCHMARKS.md records at -4.0%.
+
+    Tiers vary the entropy of the documents, but NEVER by making them
+    duplicates of each other:
+
+    low    : low entropy INSIDE each document (a short line set repeated), the
+             documents still distinct. Identical documents would simply fold —
+             an offload that correctly declines is a cell that measures nothing.
+    medium : distinct consecutive slices of the real capture.
+    high   : random slices with a fresh uuid appended per line.
+
+    Load-bearing and fragile BY NATURE: this path only fires for content the
+    engine CANNOT compress (gate ``compression_ratio >= 0.9``). Any improvement
+    in compressing this content class silently removes the route — which is why
+    ``verify/run.py`` counts, per seed, whether the offload actually ran, rather
+    than trusting that it did.
+    """
+    rng = random.Random(seed)
+    raw = _load_text("macos_install.log.txt")
+
+    docs: list[dict[str, Any]] = []
+    for i in range(n):
+        if tier == "low":
+            base = [ln for ln in raw[:2000].split("\n") if ln][:6]
+            reps = (OPAQUE_DOC_CHARS // max(1, sum(len(x) + 1 for x in base))) + 1
+            content = "\n".join(f"[{i:03d}] {ln}" for _ in range(reps) for ln in base)
+            content = content[:OPAQUE_DOC_CHARS]
+        elif tier == "medium":
+            off = (i * OPAQUE_DOC_CHARS) % max(1, len(raw) - OPAQUE_DOC_CHARS)
+            content = raw[off : off + OPAQUE_DOC_CHARS]
+        else:  # high
+            off = rng.randrange(0, len(raw) - OPAQUE_DOC_CHARS)
+            lines = raw[off : off + OPAQUE_DOC_CHARS].split("\n")
+            content = "\n".join(f"{ln} trace={_fresh_uuid(rng)}" for ln in lines)
+        docs.append({"path": f"logs/install-{i:03d}.log", "content": content})
+
+    query = "Summarise the install failures across these log files."
+    messages = [
+        {"role": "user", "content": query},
+        {"role": "tool", "content": json.dumps(docs, ensure_ascii=False)},
+    ]
+    return Case(
+        family="opaque",
+        tier=tier,
+        size=n,
+        seed=seed,
+        query=query,
+        items=docs,
         messages=messages,
     )
 

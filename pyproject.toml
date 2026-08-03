@@ -129,10 +129,59 @@ dev = [
     # construction; tests/test_security_suite_requires_re2.py turns its absence
     # into a hard failure rather than a silent skip.
     "furl-ctx[re2]",
+    # The MCP feature suites — 30 test files, every one gated on
+    # pytest.importorskip("mcp") — only EXECUTE when the `mcp` SDK is importable.
+    # Because that guard fires during COLLECTION, a gated module's tests are not
+    # even counted: measured on an idle machine at base b1eae3ca, dropping the
+    # SDK moves the suite from 2870 passed to 2515 passed / 34 skipped /
+    # 1 failed — 354 tests STOP RUNNING, only 34 surface as skips, the other
+    # 320 vanish from the totals entirely (2870 total − 2550 still collected =
+    # 320; 320 + 34 = the 354). The absolute pair moves whenever tests are
+    # added or removed; the 354/34/320 split is the invariant worth trusting —
+    # measured identical across two independent base moves, one that REMOVED
+    # 2 tests (721a3826 -> fa64bada, pair 2842->2487 then 2840->2485) and one
+    # that ADDED 30 (fa64bada -> b1eae3ca). If the pair looks stale, re-measure
+    # before assuming rot: only the split going means something changed.
+    # The single red is the tripwire below firing by design;
+    # without it nothing would turn red at all. The SDK was previously carried
+    # only by remembering to also install
+    # `[mcp]`. Pull it into `dev` — exactly as re2 was decoupled above — so every
+    # test install carries the whole furl_ctx.ccr.mcp_server contract's coverage
+    # by construction; tests/test_optional_suites_not_silently_disarmed.py turns
+    # its absence into a hard failure rather than a silent skip.
+    "furl-ctx[mcp]",
+    # The AST code-aware suite (tests/test_code_aware_compressor.py, 15 tests
+    # gated on find_spec("tree_sitter_language_pack")) SILENTLY SKIPS without the
+    # `code` extra. Measured on an idle machine at base b1eae3ca: WITH
+    # tree-sitter 2870 passed / 0 skipped / 0 failed; WITHOUT it 2854 passed /
+    # 15 skipped / 1 failed, that 1 being the tripwire below firing by design.
+    # Reconciles exactly against a constant collection of 2870: 2854+15+1 —
+    # unlike the mcp case above, no test vanishes, because these skips are
+    # decorator-level rather than collection-level. Note this is NOT "0 red" for
+    # the full suite: the tripwire below converts the silent skip into a named
+    # red, which is the whole point of it. "0 red" was only ever true of the
+    # code-aware suite in ISOLATION — i.e. the silent-skip failure mode itself.
+    # Without the pull below, CI's `[dev,mcp]` (see .github/workflows/ci.yml)
+    # would carry no `code` and those tests would skip in CI — a live gap.
+    # Pulling `[code]` into `dev` makes the grammar pack present by construction
+    # in every test install, INCLUDING CI's `[dev,mcp]`, which now transitively
+    # carries tree-sitter (verified: `pip install "wheel[dev,mcp]"` alone
+    # resolves it) so the suite runs there too. This adds the ~50MB pack to
+    # TEST/DEV installs only — core stays lean (end users still opt in via
+    # `[code]`/`[all]`). Same guard file as mcp above.
+    "furl-ctx[code]",
 ]
-# All optional dependencies (everything the compression library can use)
+# All optional dependencies (everything the compression library can use).
+# Must reach EVERY feature extra (re2, mcp, code): `mcp` already pulls `re2`,
+# so `mcp` + `code` covers the set. `furl-ctx[all]` previously listed only
+# `mcp`, silently omitting `code` — so `pip install furl-ctx[all]` did NOT get
+# the AST code-aware compressor. Not a hand-list to trust by eye:
+# tests/test_optional_suites_not_silently_disarmed.py derives the extras from
+# this table and fails red if `all` can't reach one, so a new feature extra
+# can't land without a conscious decision about `all`.
 all = [
     "furl-ctx[mcp]",
+    "furl-ctx[code]",
 ]
 
 # Maturin builds a single wheel containing both the Python source under

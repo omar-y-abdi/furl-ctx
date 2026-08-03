@@ -177,6 +177,13 @@ _DURABLE_RETRY_MAX_BACKOFF_SECONDS = 0.20
 # hashes, well clear of it.
 _MIN_EXPLICIT_HASH_LEN = 6
 
+# Sentinel for "this backend does not declare a ``max_rows`` at all", kept
+# distinct from a declared ``None`` ("no physical row cap"). The cap-ordering
+# guard (F4) treats both as "nothing to check", but only one of them means the
+# guard is BLIND — conflating them is what let the old private-attribute reach
+# no-op silently for every backend that did not expose ``_max_rows``.
+_ROW_CAP_UNDECLARED: Final = object()
+
 _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
 # Preview-snippet length for cross-store search (``search_all``) hits. Short by
 # design: the snippet is a disambiguation preview so the caller can pick a hash
@@ -514,6 +521,33 @@ class CompressionStore:
         self._max_entries = max_entries
         self._default_ttl = default_ttl
 
+        # Durability contract, checked HERE rather than at first write. The
+        # durability path now reaches ``durable``/``set_durable`` by direct
+        # attribute access (that is what makes it type-checked at all — a
+        # ``getattr`` reads as ``Any`` and mypy stays silent). Backends loaded
+        # through the ``furl_ctx.ccr_backend`` entry point group are duck-typed at
+        # runtime and never see that check, so a non-conforming one would other-
+        # wise surface as a bare ``AttributeError`` from inside a persist, on some
+        # later ``store()`` call, naming a member the author never knew existed.
+        #
+        # This is a deliberate behaviour change at a supported extension seam: the
+        # old code answered "durability satisfied" for such a backend and shipped a
+        # ``<<ccr:HASH>>`` marker for content whose durability was never checked,
+        # which is the defect being closed. Failing is correct; failing EARLY and
+        # LEGIBLY — at the moment the operator wires the backend up, naming the
+        # contract — is the part worth spending ten lines on.
+        missing = [
+            member for member in ("durable", "set_durable") if not hasattr(self._backend, member)
+        ]
+        if missing:
+            raise TypeError(
+                f"CCR backend {type(self._backend).__name__!r} is missing required "
+                f"CompressionStoreBackend member(s): {', '.join(missing)}. The store "
+                f"cannot report durability for it, and treating that as 'durable' "
+                f"would let a require_durable write pass unchecked. See "
+                f"furl_ctx.cache.backends.base.CompressionStoreBackend."
+            )
+
         # Cap-ordering guard (F4). The documented invariant — the logical
         # ``max_entries`` cap binds before the backend's physical file-row cap —
         # holds only AT THE DEFAULTS (1000 << 10 000). Both caps are configurable
@@ -521,9 +555,59 @@ class CompressionStore:
         # ``SqliteBackend``), so a ``max_rows`` set below ``max_entries`` inverts
         # it: the file cap would then evict oldest-first with NO TTL ordering
         # before the logical cap ever binds. Warn loudly rather than let a
-        # documented invariant flip silently. InMemoryBackend has no ``_max_rows``
-        # (getattr -> None), so this fires only for a mis-sized durable backend.
-        backend_max_rows = getattr(self._backend, "_max_rows", None)
+        # documented invariant flip silently.
+        #
+        # Reads the backend's DECLARED public ``max_rows``, not a private field of
+        # one implementation. The old form — ``getattr(backend, "_max_rows", None)``
+        # — reached through the backend protocol into ``SqliteBackend``'s internals
+        # and collapsed three different situations into the same silent skip: a
+        # backend with no physical cap, a backend that renamed the field, and a
+        # backend that never had it. Any rename would have disabled this invariant
+        # permanently and invisibly. Backends now declare: an ``int`` (a real cap
+        # to check), or ``None`` (explicitly no physical cap — InMemoryBackend).
+        # A backend declaring NEITHER is outside the contract and is logged, so
+        # "guard checked and found nothing wrong" is distinguishable from "guard
+        # could not see anything at all".
+        #
+        # WHY THIS STAYS A ``getattr`` while ``durable``/``set_durable`` below use
+        # DIRECT attribute access — this is a decision, not an inconsistency. The
+        # criterion is whether the member is a CORRECTNESS GATE or an ADVISORY
+        # signal. ``durable`` decides whether a marker may ship for content whose
+        # durability was never verified, so a backend missing it is rejected at
+        # construction and mypy enforces the call site. ``max_rows`` only orders
+        # two caps against each other; a backend missing it loses a diagnostic,
+        # not an invariant. Direct access cannot express the three states this
+        # needs — undeclared / declared-None / declared-int — it collapses the
+        # first two, and the third state is the whole reason the sentinel exists.
+        # Buying static enforcement here would mean CRASHING a duck-typed backend
+        # from the ``furl_ctx.ccr_backend`` entry point over an advisory ordering
+        # check, at a supported extension seam. That is a worse outcome than the
+        # enforcement is worth.
+        #
+        # The consequence, stated plainly so nobody reads more safety into this
+        # line than it has: removing ``max_rows`` from the Protocol does NOT fail
+        # mypy, because mypy types a ``getattr`` result as ``Any``. The Protocol
+        # declaration here is documentation and a contract for authors; it is not
+        # statically enforced. That is true of THIS member only.
+        declared_max_rows = getattr(self._backend, "max_rows", _ROW_CAP_UNDECLARED)
+        if declared_max_rows is _ROW_CAP_UNDECLARED:
+            # WARNING, not DEBUG, and deliberately at the SAME level as the
+            # inversion warning below. "The invariant cannot be checked at all"
+            # is strictly less knowable than "checked and found inverted", so
+            # reporting it more quietly would inverts the severities. DEBUG is
+            # invisible at any production log level, which would leave this case
+            # observably indistinguishable from the silent skip this whole guard
+            # exists to eliminate. It costs nothing: it fires once per store
+            # construction, not on any hot path. The Protocol makes an undeclared
+            # backend a TYPE error, so the only way to reach this at runtime is a
+            # duck-typed or third-party backend that was never type-checked —
+            # exactly the case that has had no other warning.
+            logger.warning(
+                "CompressionStore backend %s declares no max_rows; the cap-ordering "
+                "invariant cannot be verified for it",
+                type(self._backend).__name__,
+            )
+        backend_max_rows = None if declared_max_rows is _ROW_CAP_UNDECLARED else declared_max_rows
         if isinstance(backend_max_rows, int) and backend_max_rows < max_entries:
             logger.warning(
                 "CompressionStore max_entries=%d exceeds the backend physical "
@@ -806,16 +890,29 @@ class CompressionStore:
     def _persist_and_report_durability(self, hash_key: str, entry: CompressionEntry) -> bool:
         """Write ``entry`` and report whether it reached a DURABLE backend.
 
-        A backend that distinguishes durable from volatile writes exposes
-        ``set_durable`` (the ``SqliteBackend`` does); its bool is returned
-        verbatim. A backend without it (the in-memory default) is treated as
-        durability-satisfied — the operator chose volatile storage, so
-        ``require_durable`` has nothing to veto. Must be called with the store
-        lock held.
+        Gates on the backend's DECLARED ``durable``, not on whether it happens to
+        expose a ``set_durable`` attribute. Presence-as-proxy collapsed two
+        opposite situations into "durability satisfied": a deliberately volatile
+        backend (the in-memory default), and a genuinely DURABLE third-party
+        backend that never implemented an undocumented name — the second silently
+        disabled ``require_durable``, so a ``<<ccr:HASH>>`` marker could ship for
+        content whose durability was never checked. Third-party backends are a
+        supported configuration (the ``furl_ctx.ccr_backend`` entry point group),
+        and a backend author reading the Protocol could not have known the name
+        existed, because it was not declared there.
+
+        Both members are now on the Protocol and reached by DIRECT ATTRIBUTE
+        ACCESS. That second half is load-bearing: mypy types a ``getattr`` result
+        as ``Any`` and reports nothing, so declaring the name while still reaching
+        it through ``getattr`` would restore documentation without restoring
+        enforcement.
+
+        A backend declaring ``durable=False`` is durability-satisfied by
+        construction — the operator chose volatile storage, so ``require_durable``
+        has nothing to veto. Must be called with the store lock held.
         """
-        set_durable = getattr(self._backend, "set_durable", None)
-        if set_durable is not None:
-            return bool(set_durable(hash_key, entry))
+        if self._backend.durable:
+            return bool(self._backend.set_durable(hash_key, entry))
         self._backend.set(hash_key, entry)
         return True
 
@@ -1614,7 +1711,39 @@ class CompressionStore:
         otherwise (unsupported backend, or a volatile fallback write). The hook's
         once-per-namespace first-run note reads a ``1`` here (see
         ``counters_durable``); furl_stats reads the totals via ``get_counters``.
+
+        A negative ``amount`` raises ``ValueError``. That rejection is deliberately
+        OUTSIDE the fail-open ``try`` below: fail-open exists so an operational
+        counter failure (a lock lost, a degraded file) never breaks a tool call,
+        and it catches ``Exception`` broadly. A caller bug raised by the backend
+        would be caught by that same handler and returned as an indistinguishable
+        silent ``None`` — so the guard would exist in the backends yet be invisible
+        through this, the public surface every caller actually uses. Validating
+        here keeps the caller bug loud and the operational failure quiet.
         """
+        # From ``backends.base``, beside the contract it validates — NOT from a
+        # concrete backend. Importing it out of ``memory.py`` would be this
+        # module reaching past the protocol into one implementation, the same
+        # defect the ``max_rows`` declaration removes one field up. Local import
+        # mirrors this module's other backend imports (line ~517): ``backends``
+        # TYPE_CHECKING-imports from here, and the lazy form avoids that edge.
+        from .backends.base import reject_negative_counter_amount
+
+        # POSITION IS LOAD-BEARING: this call must stay OUTSIDE the ``try`` below.
+        # Measured both ways. Moving it inside the try, OR deleting it and relying
+        # on the backends' own identical check, each turn a negative amount into a
+        # silent ``None`` with the tally unchanged — indistinguishable from an
+        # unsupported backend, because the broad ``except Exception`` eats the
+        # ValueError either way. Caller bugs stay loud here; only OPERATIONAL
+        # counter failures fail open.
+        #
+        # This is not left to a comment to enforce. Moving this line inside the
+        # try reddens exactly one test, with "DID NOT RAISE ValueError"
+        # (measured: 1 failed, 2875 passed):
+        #   test_store_surface_rejects_negative_counter_amount_despite_fail_open
+        # A tidier who moves it gets a red test naming the reason, not a silent
+        # regression.
+        reject_negative_counter_amount(name, amount)
         inc = getattr(self._backend, "increment_counter", None)
         if inc is None:
             return None
@@ -1647,15 +1776,24 @@ class CompressionStore:
     def counters_durable(self) -> bool:
         """True iff this store's backend persists counters DURABLY (cross-process).
 
-        A durable counter backend exposes BOTH ``increment_counter`` and
-        ``set_durable`` — the SqliteBackend does; the in-memory default does not
-        (its counters are process-local). The hook uses this to gate its
-        once-per-namespace first-run note so a per-process ``1`` from the volatile
-        backend (library / unit tests) never fires it.
+        A durable counter backend DECLARES ``durable`` and offers the optional
+        ``increment_counter`` extra — the SqliteBackend does both; the in-memory
+        default declares itself volatile (its counters are process-local). The
+        hook uses this to gate its once-per-namespace first-run note so a
+        per-process ``1`` from the volatile backend (library / unit tests) never
+        fires it.
+
+        The durability half reads the DECLARATION, closing the same collapse
+        ``_persist_and_report_durability`` had: a durable third-party backend
+        without a ``set_durable`` attribute used to report its counters as
+        non-durable, and a volatile one that happened to define the name would
+        have reported them as durable. ``increment_counter`` stays a ``getattr``
+        on purpose — it is a genuinely OPTIONAL ARCH-10 observability extra, not a
+        Protocol member, and its absence is a documented fail-open no-op rather
+        than a silently disabled invariant.
         """
         return (
-            getattr(self._backend, "increment_counter", None) is not None
-            and getattr(self._backend, "set_durable", None) is not None
+            self._backend.durable and getattr(self._backend, "increment_counter", None) is not None
         )
 
     def delete(self, hash_key: str) -> bool:

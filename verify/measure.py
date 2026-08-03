@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,15 +43,50 @@ BENCH_MODEL = "gpt-4o"
 CCR_PREFIX = "<<ccr:"
 CCR_SENTINEL_KEY = "_ccr_dropped"
 
-# Round-trip overhead model for effective-savings-under-retrieval. A retrieval
-# the model issues costs (a) a tool-call to fetch the dropped blob and (b) the
-# retrieved content's tokens re-entering context. We charge a fixed per-call
-# overhead plus the real token cost of the retrieved original.
-RETRIEVE_CALL_OVERHEAD_TOKENS = 12  # tool name + hash argument, conservative
+# Round-trip cost model for effective-savings-under-retrieval, MEASURED against
+# the production `furl_retrieve` surface rather than assumed. A retrieval costs
+# the model three things, and this harness used to charge a fraction of one:
+#
+#   1. the payload AS THE MODEL RECEIVES IT — JSON-escaped inside the response's
+#      `original_content` field, not the raw bytes `CompressionStore.retrieve`
+#      hands a library caller. See `retrieved_blob_tokens`.
+#   2. the response's other fields, plus the tool-result message envelope.
+#   3. the tool call the model must emit to ask for it.
+#
+# Every figure below was measured over 18 offloaded blobs spanning 76..75530
+# content tokens (opaque, logs, repeated_logs, search, multiturn, disk, code) and
+# is pinned against the real handler by
+# `tests/test_retrieval_charge_matches_mcp_surface.py`, which fails if the
+# response shape drifts away from these numbers.
+RETRIEVE_CALL_OVERHEAD_TOKENS = 31  # {"name":"furl_retrieve","arguments":{"hash":…}}; 28-34
+MCP_RESPONSE_SCAFFOLD_TOKENS = 68  # response minus escaped payload; 64-73 over 40, median 68
+TOOL_RESULT_ENVELOPE_TOKENS = 7  # role/framing of the tool message; 7 in every case
+# What ONE retrieval costs beyond the payload itself.
+RETRIEVE_ROUND_TRIP_TOKENS = (
+    RETRIEVE_CALL_OVERHEAD_TOKENS + MCP_RESPONSE_SCAFFOLD_TOKENS + TOOL_RESULT_ENVELOPE_TOKENS
+)
 
 
 def _tok() -> Tokenizer:
     return Tokenizer(get_tokenizer(BENCH_MODEL), BENCH_MODEL)
+
+
+def retrieved_blob_tokens(blob: str, tok: Tokenizer) -> int:
+    """Tokens the model pays to READ one retrieved blob.
+
+    NOT ``count_text(blob)``. The model never sees the raw original: the MCP
+    handler serialises its response with ``json.dumps(..., indent=2)``, so the
+    payload arrives JSON-ESCAPED — every newline a ``\\n``, every quote a
+    ``\\"`` — and escaping is not token-neutral. ``json.dumps(blob)`` performs
+    the identical escaping (``indent`` does not affect string values, and both
+    default to ``ensure_ascii=True``), so this term is EXACT rather than an
+    approximation of the handler, and it cannot drift from the handler without
+    the handler abandoning JSON.
+
+    Measured cost of getting this wrong: charging the raw bytes undercharges by
+    82 to 2185 tokens per blob, 1.94%-6.95%, always in the same direction.
+    """
+    return tok.count_text(json.dumps(blob))
 
 
 def _canonical(item: Any) -> str:
@@ -351,22 +385,51 @@ def effective_savings(
     recovered: dict[str, str],
     tok: Tokenizer,
     rates: tuple[float, ...] = (0.0, 0.25, 0.50),
-    n_dropped_rows: int = 0,
 ) -> dict[str, float]:
-    """Effective savings ratio once the model retrieves a fraction of the
-    DROPPED ROWS, INCLUDING round-trip overhead.
+    """Effective savings ratio once the model retrieves offloaded content,
+    INCLUDING the round-trip cost.
 
-    The engine offloads dropped rows behind ONE whole-blob recovery pointer, so
-    ANY non-zero retrieval pays back the entire offloaded payload — the
-    conservative whole-blob model, which never flatters the engine:
+    Every offload the engine makes is emitted behind a
+    ``{"_ccr_dropped": "<<ccr:HASH>>"}`` sentinel, so ``_retrieve_originals``
+    puts the WHOLE payload into ``recovered`` for every one of them. That
+    sentinel invariant is load-bearing: it is why a single ``recovered``-based
+    charge is COMPLETE, with no separate opaque path to read — there is no
+    offload the harness sees that is absent from ``recovered``.
 
-        k = ceil(r * n_dropped_rows)
-        retrieval_cost(r) = (total_offloaded_tokens if k > 0 else 0)
-                            + k * per_call_overhead
+    ``_ccr_dropped`` is a CROSS-MODULE contract, not one function's private
+    detail. THREE independent emitters construct it, one per offload path:
+
+    * row-drop (Rust)   — ``crates/furl-core/src/transforms/smart_crusher/
+      persist.rs::ccr_sentinel_map``, appended to the crushed rendering.
+    * cross-message dedup — ``furl_ctx/transforms/cross_message_dedup.py::
+      duplicate_sentinel`` (exact duplicate) and ``::near_duplicate_rendering``
+      (shared rows elided).
+    * opaque whole-blob  — ``furl_ctx/transforms/router_engine.py::_ccr_offload``.
+
+    and the key is READ back by ``furl_ctx/transforms/smart_crusher.py`` and
+    ``furl_ctx/transforms/csv_schema_decoder.py``. All three emitters are pinned
+    by real ``compress()`` calls in
+    ``tests/test_effective_savings_offload_cost.py``, so a bare-marker offload
+    on ANY of the three turns that suite RED instead of being silently
+    mispriced here.
+
+    Each offload sits behind ONE marker with no granular row index, so ANY
+    non-zero retrieval pulls the ENTIRE payload back:
+
+        retrieval_cost(r > 0) = recovered_payload_tokens
+                              + n_offloaded_blobs * per_call_overhead
+        retrieval_cost(0)     = 0
 
     effective_after = tokens_after + retrieval_cost; savings =
     (before - effective_after) / before. At r=0 cost is 0 (savings == raw
     reduction); at r>0 you pay back the whole offloaded payload.
+
+    The gate is ``r > 0``, not the old ``k > 0``. A family that offloads with
+    ZERO dropped rows — cross-message dedup, or an opaque code blob — has k=0 at
+    every rate, so the old gate charged it nothing and it read flat across rates
+    (raw reduction reported as the effective number at 25% and 50%, a retrieval
+    that costs a full payload priced at zero). For a row-DROPPING family
+    ``k > 0`` iff ``r > 0``, so those families' numbers are unchanged.
 
     A granular per-row model was once also computed here (charging only the
     ``k`` retrieved chunks), but the unconsumable ``_ccr_rows`` index it read was
@@ -374,13 +437,64 @@ def effective_savings(
     stored, so whole-blob is the only honest cost. This is why eff@25 / eff@50
     read lower than pre-removal figures — those measured a per-row retrieval the
     model could never perform.
+
+    THE CALL TERM FOLLOWS THE SAME RULE, and until now it did not. #179 fixed the
+    CONTENT half and left ``call_cost = k * overhead`` — k SEPARATE retrievals —
+    alive next to a docstring saying only whole-blob retrieval exists. One marker
+    is one call, whatever ``r`` is, so the charge is ONE call per offloaded blob.
+    Measured consequences of the old term: it OVERCHARGED row-drop families
+    (logs@900 paid k=300 calls at r=0.5, 3600 tokens for retrievals that cannot
+    be issued separately) and UNDERCHARGED zero-drop ones (k=0, so dedup and
+    opaque paid for no call at all).
+
+    A VISIBLE CONSEQUENCE: eff@25 now EQUALS eff@50 for every family. That is not
+    a bug in the table, it is the rate axis telling the truth — any non-zero
+    fraction pulls the whole blob through one call, so 25% and 50% cost the same
+    and only 0-vs-non-zero is a real distinction. The old spread between the two
+    columns was entirely the granular call term.
+
+    THE OTHER HALF OF THE SAME ERROR, AND IT PUSHES THE OPPOSITE WAY. The call
+    term above overcharged row-dropping families; the CONTENT term undercharged
+    everyone, because ``recovered`` holds what ``CompressionStore.retrieve``
+    returns — the byte-exact original — and no model ever receives that. A model
+    receives the MCP ``furl_retrieve`` response, in which the payload sits
+    JSON-ESCAPED inside a field, wrapped in scaffolding, inside a tool message,
+    after the model has spent tokens emitting the call. Measured over 18 blobs
+    from 76 to 75530 content tokens, charging the raw bytes undercharged by
+    82-2185 tokens per blob (1.94%-6.95%), never once in the other direction.
+    ``retrieved_blob_tokens`` now charges the escaped form, and
+    ``RETRIEVE_ROUND_TRIP_TOKENS`` the rest.
+
+    A fixed fudge factor was NOT good enough here and the numbers say why: the
+    gap ranges over 2103 tokens across those blobs and a least-squares fit in
+    content size still leaves 945 tokens of residual, because escaping cost
+    depends on how many quotes and newlines a payload contains, not on its size.
+    Recomputing the escaping is what makes the term exact.
+
+    REMAINING KNOWN BIAS, stated because it is not modelled: the charge assumes a
+    hash-only retrieve, the call that works. The marker text, the tool schema and
+    this harness all invite a ``query`` argument, and on the MCP surface that
+    argument currently returns nothing (#47) — so a model following the prompt
+    pays for one wasted round trip before the one charged here. That is an open
+    product question about which surface is correct, not a constant to add, so
+    these figures remain an upper bound on savings by one round trip per blob.
     """
     out: dict[str, float] = {}
-    total_offloaded_tokens = sum(tok.count_text(blob) for blob in recovered.values())
+    # The WHOLE retrieved payload, priced as the model receives it (JSON-escaped
+    # inside the response) rather than as the library hands it over. The
+    # zero-drop cases this gate exists for (dedup, opaque whole-blob) have no
+    # rows at all.
+    recovered_payload_tokens = sum(retrieved_blob_tokens(b, tok) for b in recovered.values())
     for r in rates:
-        k = int(math.ceil(r * n_dropped_rows))
-        content_cost = total_offloaded_tokens if k > 0 else 0
-        call_cost = k * RETRIEVE_CALL_OVERHEAD_TOKENS
+        if r > 0.0:
+            content_cost = recovered_payload_tokens
+            # ONE round trip per offloaded blob. NOT k: a blob sits behind a
+            # single marker with no row index, so a retrieval of any fraction of
+            # it is the same one call returning the same whole payload.
+            call_cost = len(recovered) * RETRIEVE_ROUND_TRIP_TOKENS
+        else:
+            content_cost = 0
+            call_cost = 0
         effective_after = tokens_after + content_cost + call_cost
         savings = (tokens_before - effective_after) / tokens_before if tokens_before else 0.0
         out[f"{int(r * 100)}"] = savings
@@ -613,7 +727,7 @@ def _measure_structured(case, result, transforms, tb, ta, tr, tok) -> CaseResult
     retention = (n_visible + n_recoverable) / n if n else 1.0
 
     hc = hash_compare_structured(case.items, output_text, recovered)
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    eff = effective_savings(tb, ta, recovered, tok)
 
     needles: list[dict[str, Any]] = []
     markers = case.meta.get("needle_markers", [])
@@ -709,7 +823,7 @@ def _measure_conversation(case, result, transforms, tb, ta, tr, tok) -> CaseResu
     reconstructed_sha = _multiset_sha(recon_sigs)
     byte_exact = reconstructed_sha == original_sha and not missing
 
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    eff = effective_savings(tb, ta, recovered, tok)
 
     cp = check_cache_prefix(case.messages, result.messages, case.meta.get("cache_prefix_texts", []))
     cache_prefix = {
@@ -762,7 +876,7 @@ def _measure_code(case, result, transforms, tb, ta, tr, tok) -> CaseResult:
     n_visible = hc.n_reconstructed
     n_dropped = n - n_visible
     retention = n_visible / n if n else 1.0
-    eff = effective_savings(tb, ta, recovered, tok, n_dropped_rows=n_dropped)
+    eff = effective_savings(tb, ta, recovered, tok)
     return CaseResult(
         family=case.family,
         tier=case.tier,

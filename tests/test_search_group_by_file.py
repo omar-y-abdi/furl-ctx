@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from furl_ctx.cache.backends.sqlite import SqliteBackend
 from furl_ctx.cache.compression_store import (
     CompressionStore,
     clear_request_compression_store,
@@ -28,13 +29,25 @@ from furl_ctx.transforms.search_compressor import (
 
 
 @pytest.fixture(autouse=True)
-def isolated_store():
-    """Fresh request-scoped CompressionStore per test (never pollutes the
-    global singleton). Mirrors test_diff_compressor_sidecar_persist.py."""
-    fresh = CompressionStore(max_entries=500, enable_feedback=False)
+def isolated_store(tmp_path):
+    """Fresh request-scoped, DURABLE (sqlite-backed) CompressionStore per test.
+
+    The round-trip test asserts the byte-exact ORIGINAL comes back from the
+    store; production runs the ``SqliteBackend`` (the MCP server's default),
+    whose ``surrogatepass`` BLOB round-trip is the operation under test — not the
+    in-memory raw-``str`` identity that made ``require_durable`` a no-op. Its own
+    per-test ``ccr.sqlite3`` under ``tmp_path`` keeps it isolated and never
+    pollutes the global singleton. Mirrors test_diff_compressor_sidecar_persist.py.
+    """
+    fresh = CompressionStore(
+        max_entries=500,
+        enable_feedback=False,
+        backend=SqliteBackend(db_path=tmp_path / "ccr.sqlite3"),
+    )
     set_request_compression_store(fresh)
     yield fresh
     clear_request_compression_store()
+    fresh.close()  # release the sqlite fds this store opened
 
 
 def _flat_content(files: int = 1, matches: int = 3) -> str:

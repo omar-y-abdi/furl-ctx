@@ -106,6 +106,73 @@ def test_offload_fires_on_incompressible_plain_text():
     assert _recover(result.compressed) == blob
 
 
+def _is_sentinel_line(line: str) -> bool:
+    """True for a ``{"_ccr_dropped": ...}`` line. Local on purpose: this test
+    must not import the decoder's private predicate, whose position semantics
+    are exactly what the docstring below distinguishes itself from."""
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(obj, dict) and "_ccr_dropped" in obj
+
+
+def test_offload_text_branch_sentinel_is_final_line():
+    """SHAPE guard for the NON-ARRAY offload branch. Read this before "fixing" a red.
+
+    The text branch of ``router_engine._ccr_offload`` ships
+    ``preview + "\\n" + {"_ccr_dropped": ...}`` — sentinel as the FINAL LINE.
+    Three of the four sentinel-emitting paths already have their position
+    pinned from Python: the offload ARRAY branch and the near-duplicate
+    rendering (both via ``rows[-1]``), and the Rust lossy path via
+    ``test_ccr_recovery_invariant``'s ``split("\\n")[-1]``. This branch had NO
+    pin: relocating its sentinel to the first line left the FULL suite green at
+    2865 passed / 0 failed. This test closes that asymmetry.
+
+    WHAT THIS PINS: the current emitter's output shape.
+    WHAT IT DOES NOT PIN: any decoder requirement. ``csv_schema_decoder``
+    skips a sentinel ANYWHERE in the body (``_is_sentinel_line`` + ``continue``,
+    before ``ordinal`` advances); a mid-body sentinel decodes to byte-identical
+    rows. Its only true constraint is that the sentinel must not occupy
+    ``lines[0]``, where it would break the ``_HEADER_RE`` match.
+
+    So a deliberate relocation WILL redden this test without breaking any
+    consumer. If that happens, decide whether the new shape is intended and
+    update this pin — do NOT weaken it back to a position-blind
+    ``"_ccr_dropped" in compressed`` check, which is the exact blindness it was
+    added to remove (the sibling test above still covers that weaker property).
+    """
+    blob = "\n".join(hashlib.sha256(f"pos{i}".encode()).hexdigest() for i in range(200))
+    result = ContentRouter().compress(blob)
+    assert result.strategy_used == CompressionStrategy.CCR_OFFLOAD
+
+    lines = result.compressed.split("\n")
+    # Anti-vacuity: a single-line output — or one where the sentinel is the ONLY
+    # content — cannot express a position error at all, so the assertions below
+    # would be decoration. Fail loudly if the fixture ever degrades to that.
+    assert len(lines) > 1, (
+        f"preview collapsed to {len(lines)} line(s): this position pin is vacuous "
+        f"unless the output carries preview lines AND the sentinel"
+    )
+    # Locate the sentinel by PREDICATE before parsing, so any relocation —
+    # head, mid-body, or duplicated — reports its actual index instead of
+    # blowing up on json.loads of a preview line that is not JSON.
+    sentinel_at = [i for i, line in enumerate(lines) if _is_sentinel_line(line)]
+    assert len(sentinel_at) == 1, (
+        f"expected exactly one sentinel line, found {len(sentinel_at)} at {sentinel_at}"
+    )
+    assert sentinel_at[0] == len(lines) - 1, (
+        f"sentinel must be the FINAL line, found at index {sentinel_at[0]} "
+        f"of {len(lines)} lines — the emitter moved it off the tail"
+    )
+
+    sentinel = json.loads(lines[-1])
+    assert set(sentinel) == {"_ccr_dropped"}, (
+        f"final line must be the drop sentinel object, got keys {sorted(sentinel)}"
+    )
+    assert "<<ccr:" in sentinel["_ccr_dropped"], "sentinel carries the recovery pointer"
+
+
 def test_offload_fires_on_code_benchmark_snapshot_default_config():
     """The committed code@7 snapshot (7 real source files as one JSON tool
     output) previously shipped at 0% reduction; it must offload under the

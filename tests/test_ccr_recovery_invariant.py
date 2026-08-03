@@ -31,7 +31,8 @@ import re
 
 import pytest
 
-from furl_ctx.cache.compression_store import get_compression_store
+import furl_ctx.compress as _compress_mod
+from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
 from furl_ctx.ccr import marker_grammar
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
@@ -95,11 +96,30 @@ def _collect(node: object, scalars: set[str], hashes: set[str]) -> None:
         scalars.add(_repr(node))
 
 
-def _recover_from_output(items: list, *, ccr_enabled: bool, ccr_inject_marker: bool) -> set[str]:
+def _recover_from_output(
+    items: list,
+    *,
+    ccr_enabled: bool,
+    ccr_inject_marker: bool,
+    store_scope: str = "union",
+) -> set[str]:
     """Run the PUBLIC ``compress()`` path and return the set of distinct
     input reprs recoverable from the OUTPUT ALONE: kept scalars, lossless
     CSV rows, and CCR-store payloads keyed by a hash found in the output.
-    Recovery is checked against BOTH the Rust store and the Python store.
+
+    ``store_scope`` selects which store(s) a surfaced hash may recover from:
+
+    * ``"python"`` — the Python ``CompressionStore`` ONLY. This is the
+      PRODUCTION path: MCP ``furl_retrieve`` (``ccr/mcp_server.py``) and
+      ``furl_ctx.retrieve`` read ``store.retrieve(hash)`` and NOTHING else, so a
+      recovery scored this way cannot be masked by a value that only survives in
+      the process-local Rust crusher store.
+    * ``"rust"`` — the Rust crusher store ONLY (``crusher.ccr_get``).
+    * ``"union"`` — either store (the historical default). Strictly WEAKER than
+      ``"python"`` for a production-fidelity claim: a Python (production) miss
+      passes as long as the Rust copy happens to hold the value. Kept only for
+      callers that assert "recoverable from somewhere", never for a production
+      invariant.
     """
     cfg = ContentRouterConfig(ccr_enabled=ccr_enabled, ccr_inject_marker=ccr_inject_marker)
     router = ContentRouter(cfg)
@@ -123,10 +143,11 @@ def _recover_from_output(items: list, *, ccr_enabled: bool, ccr_inject_marker: b
 
     crusher = router._get_smart_crusher()
     for h in hashes:
-        sources = [
-            crusher.ccr_get(h) if crusher is not None else None,
-            _py_payload(py_store, h),
-        ]
+        sources: list[str | None] = []
+        if store_scope in ("union", "rust"):
+            sources.append(crusher.ccr_get(h) if crusher is not None else None)
+        if store_scope in ("union", "python"):
+            sources.append(_py_payload(py_store, h))
         for src in sources:
             if src is None:
                 continue
@@ -160,36 +181,75 @@ _NON_DICT_CASES = {
 }
 
 
+@pytest.fixture(params=["memory", "sqlite"])
+def production_store(request, tmp_path, monkeypatch):
+    """Score recovery against the Python ``CompressionStore`` production reads —
+    under BOTH its in-memory backend AND the durable ``sqlite`` backend that
+    production actually runs (``FURL_CCR_BACKEND=sqlite``, the MCP server's
+    default). ``furl_retrieve`` resolves the Python store and NOTHING else, so
+    this is the store whose miss the invariant must catch.
+
+    Sandbox ``FURL_WORKSPACE_DIR`` (a per-test ``ccr.sqlite3``) and drop the
+    store singleton + compression pipeline before and after, so the backend
+    switch is clean, the sqlite leg is isolated, and no entry leaks across
+    tests or backends. Yields the backend name for assertion messages.
+    """
+    monkeypatch.setenv("FURL_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("FURL_CCR_BACKEND", request.param)
+    _compress_mod._pipeline = None
+    reset_compression_store()
+    yield request.param
+    reset_compression_store()
+    _compress_mod._pipeline = None
+
+
 @pytest.mark.parametrize("ccr_enabled, ccr_inject_marker", _MARKER_OFF_MATRIX)
 @pytest.mark.parametrize("shape", sorted(_NON_DICT_CASES))
 def test_non_dict_drop_recovers_100pct_with_marker_off(
-    shape: str, ccr_enabled: bool, ccr_inject_marker: bool
+    shape: str, ccr_enabled: bool, ccr_inject_marker: bool, production_store: str
 ) -> None:
+    # PRODUCTION-FIDELITY: score recovery against the Python store ALONE (the
+    # store furl_retrieve reads), under both its memory and sqlite backends. The
+    # old Rust-OR-Python union could pass while the Python (production) mirror
+    # had regressed, whenever the process-local Rust copy still held the value —
+    # `store_scope="python"` removes that mask.
     items = _NON_DICT_CASES[shape]
     recovered = _recover_from_output(
-        items, ccr_enabled=ccr_enabled, ccr_inject_marker=ccr_inject_marker
+        items,
+        ccr_enabled=ccr_enabled,
+        ccr_inject_marker=ccr_inject_marker,
+        store_scope="python",
     )
     distinct = {_repr(x) for x in items}
     lost = distinct - recovered
     assert not lost, (
-        f"{shape}: {len(lost)} of {len(distinct)} distinct items unrecoverable "
-        f"(enabled={ccr_enabled}, marker={ccr_inject_marker}); first: {list(lost)[:3]}"
+        f"{shape}: {len(lost)} of {len(distinct)} distinct items unrecoverable from the "
+        f"PRODUCTION Python store alone (backend={production_store}, enabled={ccr_enabled}, "
+        f"marker={ccr_inject_marker}); first: {list(lost)[:3]}"
     )
 
 
 @pytest.mark.parametrize("ccr_enabled, ccr_inject_marker", _MARKER_OFF_MATRIX)
 def test_dict_array_recovers_100pct_with_marker_off(
-    ccr_enabled: bool, ccr_inject_marker: bool
+    ccr_enabled: bool, ccr_inject_marker: bool, production_store: str
 ) -> None:
-    # Short distinct dict rows take the lossless:table path (CSV) — every
-    # row is present verbatim in the output, recoverable without CCR.
+    # Short distinct dict rows take the lossless:table path (CSV) — every row is
+    # present verbatim in the output, recoverable without CCR. Scored Python-only
+    # against both backends (production fidelity): even where survivors carry the
+    # rows, the invariant must never depend on the Rust store to pass.
     items = [{"id": i, "msg": f"record-{i}-distinct-payload"} for i in range(1000)]
     recovered = _recover_from_output(
-        items, ccr_enabled=ccr_enabled, ccr_inject_marker=ccr_inject_marker
+        items,
+        ccr_enabled=ccr_enabled,
+        ccr_inject_marker=ccr_inject_marker,
+        store_scope="python",
     )
     distinct = {_repr(x) for x in items}
     lost = distinct - recovered
-    assert not lost, f"dict: {len(lost)} of {len(distinct)} rows unrecoverable; {list(lost)[:3]}"
+    assert not lost, (
+        f"dict: {len(lost)} of {len(distinct)} rows unrecoverable from the PRODUCTION "
+        f"Python store alone (backend={production_store}); {list(lost)[:3]}"
+    )
 
 
 def test_marker_off_actually_surfaces_pointer_in_output() -> None:
@@ -265,36 +325,55 @@ def test_opaque_blob_recovers_from_output_marker(
 
 
 @pytest.mark.parametrize("ccr_enabled, ccr_inject_marker", _MARKER_OFF_MATRIX)
-def test_lossy_survivor_table_recovers_100pct(ccr_enabled: bool, ccr_inject_marker: bool) -> None:
+def test_lossy_survivor_table_recovers_100pct(
+    ccr_enabled: bool, ccr_inject_marker: bool, production_store: str
+) -> None:
     # The lossy-survivor CSV rendering (drop + sentinel LINE inside a JSON
     # string) must satisfy the same invariant as every other shape: every
     # distinct dropped row recoverable from the output alone.
+    #
+    # Scored PYTHON-ONLY, like the scalar/dict legs: the union would pass this
+    # test even with ``CompressionStore.retrieve`` — the exact call production's
+    # ``furl_retrieve`` makes — returning None for EVERYTHING, because the
+    # process-local Rust store still answers ``ccr_get``. That is a TOTAL
+    # production-retrieval failure going green, so the union has no place in a
+    # recovery invariant.
     items = _log_shaped_rows()
     recovered = _recover_from_output(
-        items, ccr_enabled=ccr_enabled, ccr_inject_marker=ccr_inject_marker
+        items,
+        ccr_enabled=ccr_enabled,
+        ccr_inject_marker=ccr_inject_marker,
+        store_scope="python",
     )
     distinct = {_repr(x) for x in items}
     lost = distinct - recovered
     assert not lost, (
         f"lossy-survivor table: {len(lost)} of {len(distinct)} rows unrecoverable "
-        f"(enabled={ccr_enabled}, marker={ccr_inject_marker}); first: {list(lost)[:3]}"
+        f"from the PRODUCTION Python store alone (backend={production_store}, "
+        f"enabled={ccr_enabled}, marker={ccr_inject_marker}); first: {list(lost)[:3]}"
     )
 
 
-def test_row_drop_recovers_from_python_store_only() -> None:
+def test_row_drop_recovers_from_python_store_only(production_store: str) -> None:
     # PRODUCTION-FIDELITY recovery check for the lossy row-drop path.
     #
-    # The either-store helper ``_recover_from_output`` accepts a hit from the
-    # Rust store (``crusher.ccr_get``) OR the Python store, so the row-drop
-    # tests above pass even if the Python mirror regressed — but production
-    # retrieval (MCP ``furl_retrieve``, ``ccr/mcp_server.py:362``;
-    # ``compression_store.py:32``) reads ONLY the Python ``CompressionStore``
-    # via ``store.retrieve(hash)``. The OPAQUE path already pins this
-    # (``test_opaque_blob_recovers_from_output_marker`` asserts
-    # ``blobs <= py_recovered``); the ROW-DROP path did not. This test closes
-    # that blind spot: it drives the same lossy drop the survivor tests use and
+    # Production retrieval (MCP ``furl_retrieve``, ``ccr/mcp_server.py``;
+    # ``compression_store.py``) reads ONLY the Python ``CompressionStore`` via
+    # ``store.retrieve(hash)`` — never the Rust crusher store. The recovery
+    # helper ``_recover_from_output`` CAN score against either (``store_scope``);
+    # its callers above now all pass ``store_scope="python"`` precisely so a
+    # Python-mirror regression cannot hide behind the Rust copy. This test is the
+    # direct, helper-free form of that same check: it drives the lossy drop the
+    # survivor tests use and
     # asserts the dropped rows recover BYTE-EXACT through the Python store
     # ALONE — the exact call production makes — never touching ``ccr_get``.
+    #
+    # Runs on BOTH store backends (``production_store``). Python-scoping alone
+    # left this on the in-memory backend — a raw-``str`` identity — so the
+    # row-drop path, which IS the lossy path this whole file exists to guard,
+    # had never been proven through the ``surrogatepass`` BLOB round-trip the
+    # durable backend performs. Scope and backend are independent axes; fixing
+    # one does not cover the other.
     items = _log_shaped_rows()
     router = ContentRouter()
     py_store = get_compression_store()
@@ -363,12 +442,23 @@ def test_opaque_blob_default_config_recovers() -> None:
     items = _opaque_rows()
     blobs = {it["data"] for it in items}
     router = ContentRouter()
+    py_store = get_compression_store()
     result = router.compress(json.dumps(items))
     hashes = set(_OPAQUE_RE.findall(result.compressed))
     assert hashes
     crusher = router._get_smart_crusher()
     recovered = {crusher.ccr_get(h) for h in hashes if crusher.ccr_get(h) is not None}
+    py_recovered = {p for h in hashes if (p := _py_payload(py_store, h)) is not None}
     assert blobs <= recovered
+    # The PRODUCTION-default config asserted only the Rust store, so a total
+    # failure of ``CompressionStore.retrieve`` — the single call production's
+    # ``furl_retrieve`` makes — passed here while its marker-off sibling
+    # (which already carries this assertion) went red. The default config is
+    # the one shipping to users; it must pin the production store too.
+    assert blobs <= py_recovered, (
+        f"{len(blobs - py_recovered)} opaque blobs unrecoverable from the PRODUCTION "
+        f"Python compression_store under the DEFAULT config"
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -44,6 +44,8 @@ def build_case(spec: dict) -> object:
         case = gen.gen_multiturn(seed, n, tier)
     elif family == "disk":
         case = gen.gen_disk(seed, n, tier)
+    elif family == "opaque":
+        case = gen.gen_opaque(seed, n, tier)
     else:
         raise ValueError(f"unknown family {family!r}")
 

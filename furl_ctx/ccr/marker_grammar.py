@@ -316,7 +316,9 @@ def hash_of_match(match: re.Match[str]) -> str:
 #
 # Only ``GENERIC_BRACKET_PATTERN`` needs the automaton. ``BRACKET_RETRIEVE_PATTERN``
 # and ``DOUBLE_ANGLE_PATTERN`` are literal-anchored and linear under ``re``, so
-# they keep the exact ``re`` engine and are intentionally NOT twinned. When RE2
+# they keep the exact ``re`` engine and are intentionally NOT twinned. The
+# wildcard-bearing ``DOUBLE_ANGLE_FULL_PATTERN`` is also untwinned, but by its
+# ``[^>]{0,64}`` bound (see above), not by literal-anchoring. When RE2
 # is absent, a base install without the ``re2``/``mcp`` extra, the scan falls back
 # to the residual ``re`` engine: Ctrl-C-interruptible on the main thread, the same
 # residual tier ``regex_budget`` documents. A supported MCP deployment always

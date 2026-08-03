@@ -66,19 +66,26 @@ jobs:
               - '.release-please-config.json'
               - 'tests/**'
               - 'scripts/**'
-              # Test-collection and harness inputs. `conftest.py` configures the
-              # whole pytest run (fixtures, collection, markers), so a PR that
-              # edits ONLY it used to leave code=='false' and short-circuit all
-              # four `test` shards to green without executing a single test —
-              # a change to how every test runs, validated by nothing.
-              # `verify/` and `benchmarks/` are linted by the `lint` job and are
-              # the compression-floor harnesses; `Makefile` drives the local and
-              # CI entry points. Listing them only makes the heavy steps run MORE
-              # often, never less, so it cannot re-create the #15/#32/#56 deadlock.
-              - 'conftest.py'
+              # Top-level packages the SUITE IMPORTS, and the suite's own root
+              # config. Omitting them meant a PR touching only these skipped
+              # every heavy step, so the tests that would have caught it never
+              # ran: tests/test_effective_savings_offload_cost.py and
+              # tests/test_retrieve_overhead_drift_pin.py do
+              # `from verify.measure import ...`, tests/test_recheck_unflatten.py
+              # does `from verify.independent_recheck import ...`, and
+              # tests/test_benchmarks_fail_closed.py does `import
+              # benchmarks.metrics` (plus run_bench/needle_recall). conftest.py
+              # is the root pytest config every test in the repo loads.
+              # Not a hand-list to trust by eye: the `code` filter is derived
+              # and pinned by tests/test_ci_required_checks_guard.py, which
+              # walks the suite's real AST imports and fails red on any
+              # top-level package that is imported but unfiltered.
+              # Safe by construction — adding paths can only make `code` true
+              # MORE often, never less, so it cannot re-create the #15/#32/#56
+              # deadlock (which came from job-level `if:`, not from this list).
               - 'verify/**'
               - 'benchmarks/**'
-              - 'Makefile'
+              - 'conftest.py'
               # Conclusion of the required checks (lint/build-wheel/test) no
               # longer depends on this filter: those jobs ALWAYS run and short-
               # circuit their heavy steps when code=='false' (step-level `if`
@@ -294,19 +301,30 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           WHEEL="$(ls dist/*.whl)"
-          # mcp + google-re2 alongside dev: without them every test gated on
-          # pytest.importorskip("mcp") or skipif(not re2_available()) silently
-          # skips here, so a regression in furl_ctx/ccr/mcp_server.py or the
+          # mcp + code + google-re2 alongside dev: without them every test gated
+          # on pytest.importorskip("mcp"), skipif(not _HAS_TREE_SITTER) or
+          # skipif(not re2_available()) silently skips here, so a regression in
+          # furl_ctx/ccr/mcp_server.py, the AST code-aware compressor, or the
           # RE2 regex-budget path could merge with green CI and zero signal.
-          # google-re2 is listed explicitly even though the mcp extra already
-          # depends on furl-ctx[re2] and self-referential extras do resolve
-          # it transitively for this wheel-based install, so the requirement
-          # reads directly off this line instead of through pyproject.toml's
-          # extras graph, and it matches the local gate's install command
-          # exactly. See docs/audits/IMPROVEMENT-LEDGER.md rows #119/#139 and
-          # the "CI test job installs only the [dev] extra" open candidate
-          # this closes.
-          pip install "${WHEEL}[dev,mcp]" pytest-split google-re2
+          # Dating this precisely, because "already" depends on where you look:
+          # BEFORE #178 the `dev` extra did NOT carry mcp/code, this line read
+          # `[dev,mcp]`, and the AST code suite genuinely DID skip in CI — the
+          # live gap #178 was written to close. SINCE #178 (721a3826) `dev`
+          # itself declares furl-ctx[mcp] and furl-ctx[code], so `[dev,mcp]`
+          # resolves tree-sitter transitively and the suite runs here. Verified
+          # against a wheel built from a pristine 721a3826 checkout: its
+          # METADATA carries `furl-ctx[code] ; extra == "dev"`, installing
+          # `[dev,mcp]` yields tree_sitter_language_pack, and the suite runs 31
+          # passed / 0 skipped. So naming `code` below adds no coverage today;
+          # it is named anyway, exactly as google-re2 is listed
+          # explicitly despite the mcp extra depending on furl-ctx[re2]: the
+          # requirement then reads directly off this line, matches the local
+          # gate's install command, and survives a change to the dev extra.
+          # tests/test_optional_suites_not_silently_disarmed.py pins this line
+          # so code can't be silently stripped. See docs/audits/
+          # IMPROVEMENT-LEDGER.md rows #119/#139 and the "CI test job installs
+          # only the [dev] extra" open candidate this closes.
+          pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2
           # cwd's ./furl_ctx source tree shadows the installed wheel; copy the
           # compiled extension in so tests import it (no second cargo build).
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"

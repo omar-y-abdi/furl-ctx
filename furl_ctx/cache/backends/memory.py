@@ -10,6 +10,8 @@ import sys
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
+from .base import reject_negative_counter_amount
+
 if TYPE_CHECKING:
     from ..compression_store import CompressionEntry
 
@@ -47,6 +49,50 @@ class InMemoryBackend:
         # durable SqliteBackend persists the same names to the shared file, which
         # is what lets furl_stats see the hook's cross-process increments.
         self._counters: Counter[str] = Counter()
+
+    @property
+    def max_rows(self) -> int | None:
+        """Physical row cap for this backend — always ``None``: there is none.
+
+        The DECLARED half of the cap-ordering contract ``CompressionStore`` checks
+        (F4). ``None`` is a positive statement — "this backend imposes no physical
+        row limit, so the logical ``max_entries`` cap always binds first" — not an
+        absence. The store distinguishes this declaration from a backend that
+        declares nothing at all, so its guard staying silent here is observably
+        different from its guard being unable to see anything.
+
+        Replaces the store reaching for a private ``_max_rows`` that this class
+        never had: that ``getattr(..., None)`` could not tell "no cap" from "cap
+        renamed / not exposed", so the invariant check silently no-opped for every
+        backend but one.
+        """
+        return None
+
+    @property
+    def durable(self) -> bool:
+        """Always ``False``: this backend is volatile by construction.
+
+        A positive declaration, not an omission. The store used to infer
+        durability from whether a backend happened to define ``set_durable``,
+        which read this class's silence as "durability satisfied" — the same
+        answer it gave a genuinely durable third-party backend that never
+        implemented that undocumented name. Declaring ``False`` says what is
+        true, and leaves no way for another backend's silence to mean the same
+        thing.
+        """
+        return False
+
+    def set_durable(self, hash_key: str, entry: CompressionEntry) -> bool:
+        """Store *entry* and report ``False`` — this backend has no durable tier.
+
+        The store does not consult this result while :attr:`durable` is ``False``
+        (a volatile backend is what the operator asked for, so ``require_durable``
+        has nothing to veto). It is implemented, and answers honestly, so the
+        method is never the thing that distinguishes a durable backend from a
+        volatile one — the declaration above is.
+        """
+        self.set(hash_key, entry)
+        return False
 
     def get(self, hash_key: str) -> CompressionEntry | None:
         """Retrieve an entry by hash key.
@@ -108,8 +154,12 @@ class InMemoryBackend:
         convenience extra for observability, mirroring ``exists``/``keys``. The
         in-memory tally is process-local; the durable SqliteBackend persists the
         same names to the shared file for the cross-process furl_stats picture.
+
+        A negative ``amount`` raises ``ValueError`` — see
+        :func:`~furl_ctx.cache.backends.base.reject_negative_counter_amount`.
         """
-        self._counters[name] += amount
+        reject_negative_counter_amount(name, amount)
+        self._counters[name] = self._counters.get(name, 0) + amount
         return self._counters[name]
 
     def get_counters(self) -> dict[str, int]:

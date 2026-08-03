@@ -9,10 +9,30 @@ name: perf
 # none of these paths simply does not run this workflow, and nothing waits on
 # it. (In ci.yml the same filter would deadlock the required checks, which is
 # why ci.yml must never paths-filter — see tests/test_ci_required_checks_guard.py.)
+#
+# THIS FILE IS IN ITS OWN FILTER, and that is the point of the entry. Without it
+# a PR that changed ONLY this workflow — the `expected` counter dict below, or
+# the assertion logic that reads it — did not run perf-gate, so the one category
+# of change this gate cannot survive being wrong about was the one category it
+# never exercised. Measured when this was found: of the last 40 merged PRs,
+# ZERO had a workflow-only diff. Every PR that ever touched a workflow also
+# touched `verify/**` or `furl_ctx/**`, so the filter matched by accident every
+# single time and the gap never surfaced.
+#
+# WHY `perf.yml` AND NOT `.github/workflows/**`, which is what ci.yml uses:
+# ci.yml holds the REQUIRED checks, and a required check that never starts
+# deadlocks the PR, so ci.yml must run on anything that could alter it — the
+# wide filter there buys deadlock-safety. perf-gate is never required (see
+# above), so the wide filter buys nothing and costs a ~3.5-minute benchmark job
+# on every dependabot action bump and on every ci.yml or release.yml edit, none
+# of which can move the counters or the floor. The narrow entry covers the
+# defect exactly. Do not "fix" the inconsistency with ci.yml by widening this:
+# the two filters differ because the two workflows have different obligations.
 on:
   pull_request:
     branches: [main]
     paths:
+      - ".github/workflows/perf.yml"
       - "crates/**"
       - "furl_ctx/**"
       - "pyproject.toml"
@@ -23,6 +43,7 @@ on:
   push:
     branches: [main]
     paths:
+      - ".github/workflows/perf.yml"
       - "crates/**"
       - "furl_ctx/**"
       - "pyproject.toml"
@@ -137,6 +158,18 @@ jobs:
               "hash_failures": 0,
               "silent_loss": 0,
               "cache_prefix_violations": 0,
+              # The whole-blob CCR offload path is reached by exactly one family
+              # (`opaque`) and only while the engine CANNOT compress its documents.
+              # Pin the POSITIVE count, not just the absence of misses: with a
+              # misses-only assertion, deleting the family from verify/run.py's
+              # FAMILIES leaves no cells to check, so misses is 0 and this passes
+              # while the path goes unmeasured again. `runs` and `taken` make
+              # "verified" and "vacant" distinguishable — 36/36 passes, 34/36
+              # fails, 0/0 fails. 36 = 2 sizes x 3 tiers x 6 fixed seeds; changing
+              # that matrix is a deliberate act that must update this pin.
+              "opaque_route_runs": 36,
+              "opaque_route_taken": 36,
+              "opaque_route_misses": 0,
           }
           got: dict[str, int] = {}
           for key in expected:
@@ -175,3 +208,25 @@ jobs:
             --baseline benchmarks/baseline_results.json \
             --candidate "${RUNNER_TEMP}/bench-now/baseline_results.json" \
             --markdown-summary "$GITHUB_STEP_SUMMARY" $FLAG
+
+      - name: Floor guard — is the floor still the right floor?
+        # compare_baseline above answers "did the candidate REGRESS against the
+        # floor". It cannot see a floor that has stopped describing reality: after
+        # #172 it kept passing while printing five IMPROVED lines that were read
+        # as noise for a night, leaving up to 23.4% silent regression headroom on
+        # repeated_logs@90. DRIFT catches that. DIRECTION is what makes DRIFT's
+        # remedy safe to recommend: regenerating the floor is WHOLESALE, so a PR
+        # that improves one dataset and regresses another would otherwise pass
+        # with failures=0 once regenerated, the regression laundered through the
+        # floor. An upward floor move is allowed only in a baseline-only PR.
+        # Non-blocking by construction: perf is never a required check, so this
+        # is a loud alarm on main rather than a merge blocker.
+        run: |
+          git show origin/main:benchmarks/baseline_results.json \
+            > "${RUNNER_TEMP}/floor-main.json"
+          git diff --name-only origin/main...HEAD > "${RUNNER_TEMP}/changed-files.txt"
+          python -m benchmarks.floor_guard \
+            --floor-main "${RUNNER_TEMP}/floor-main.json" \
+            --floor-pr benchmarks/baseline_results.json \
+            --candidate "${RUNNER_TEMP}/bench-now/baseline_results.json" \
+            --changed-files "${RUNNER_TEMP}/changed-files.txt"

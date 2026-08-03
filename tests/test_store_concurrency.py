@@ -52,6 +52,21 @@ class _FlakyDurableBackend:
         self._fail_times = fail_times
         self.durable_calls = 0
 
+    @property
+    def durable(self) -> bool:
+        """Declares itself DURABLE, which is what makes this stub a stand-in for
+        a durable backend at all.
+
+        Required since ``durable`` joined the Protocol. Before that, this stub
+        emulated a durable backend purely by DEFINING ``set_durable`` and
+        delegating everything else to an in-memory backend — exactly the
+        presence-as-proxy inference the store no longer makes. Without this
+        declaration the delegation below would forward ``durable`` to the wrapped
+        volatile backend, the store would take its volatile path, and
+        ``set_durable`` would never be called.
+        """
+        return True
+
     def set_durable(self, hash_key: str, entry: Any) -> bool:
         self.durable_calls += 1
         self._mem.set(hash_key, entry)

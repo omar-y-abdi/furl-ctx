@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from furl_ctx.cache.backends.sqlite import SqliteBackend
 from furl_ctx.cache.compression_store import (
     CompressionStore,
     clear_request_compression_store,
@@ -103,11 +104,26 @@ def tokenizer() -> Tokenizer:
 
 
 @pytest.fixture
-def working_store() -> Any:
-    real = CompressionStore(max_entries=500, enable_feedback=False)
+def working_store(tmp_path: Any) -> Any:
+    """The DURABLE store production runs — a sqlite-backed ``CompressionStore``.
+
+    The round-trip tests assert recovery "in the production store"; production is
+    the ``SqliteBackend`` (the MCP server's default), whose ``surrogatepass``
+    BLOB round-trip is a different operation from the in-memory raw-``str``
+    identity. Injecting it here makes that claim literally true AND makes the
+    producer's ``require_durable=True`` persist (``_ccr_persist``) a real durable
+    write instead of a no-op, so a lost/degraded write would veto the marker.
+    Its own per-test ``ccr.sqlite3`` under ``tmp_path`` keeps it isolated.
+    """
+    real = CompressionStore(
+        max_entries=500,
+        enable_feedback=False,
+        backend=SqliteBackend(db_path=tmp_path / "ccr.sqlite3"),
+    )
     set_request_compression_store(real)
     yield real
     clear_request_compression_store()
+    real.close()  # release the sqlite fds this store opened
 
 
 def _filler_messages() -> list[dict[str, Any]]:

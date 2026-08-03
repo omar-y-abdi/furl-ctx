@@ -259,8 +259,21 @@ def _arm_size_reroute(text_len: int) -> bool:
 def _extract_text(tool_response: Any) -> str | None:
     """Pull compressible plain text out of a ``tool_response``.
 
-    Handles the shapes Claude Code actually emits for the matched tools, verified
-    against live PostToolUse payloads (Claude Code 2.1.x):
+    PROVENANCE OF THE SHAPE LIST — read this before leaning on it, because a
+    security argument was once built on the old wording. The list below was
+    derived by observing live PostToolUse payloads during development (Claude Code
+    2.1.x). NO PAYLOAD FIXTURES ARE COMMITTED ANYWHERE IN THIS REPOSITORY, so this
+    sentence is the SOLE record of that observation and it cannot be re-verified
+    from the tree. Treat it as "these shapes were seen", NOT as "no other shape
+    can occur" and NOT as an enumeration that proves a shape unreachable: the
+    branches below deliberately handle more than the list names (a dict ``content``
+    recurses, for instance), and that extra tolerance is load-bearing for a host
+    whose shapes have changed before (anthropics/claude-code#68951). The stock
+    ``hooks.json`` registers ONE PostToolUse matcher, ``Bash|WebFetch|WebSearch|
+    Task``, which is a host-level allow-list — an operator who widens it, or a tool
+    added later, extends the producer set beyond anything recorded here.
+
+    The shapes observed:
 
       * ``str``                        -> plain tool output.
       * ``[{"type":"text","text":.}]`` -> MCP-style content blocks.
@@ -349,7 +362,9 @@ def _extract_text(tool_response: Any) -> str | None:
     return None
 
 
-def _reinject(tool_response: Any, compressed: str) -> Any | None:
+def _reinject(
+    tool_response: Any, compressed: str, redacted_stderr: str | None = None
+) -> Any | None:
     """Mirror *tool_response*'s shape with the compressed text swapped in.
 
     The dual of :func:`_extract_text`: whatever shape the host handed this hook is
@@ -388,7 +403,10 @@ def _reinject(tool_response: Any, compressed: str) -> Any | None:
     if isinstance(tool_response, dict):
         content = tool_response.get("content")
         if content is not None and _extract_text(content) is not None:
-            replaced = _reinject(content, compressed)
+            # Thread ``redacted_stderr`` DOWN the recursion. The preserved stderr
+            # can live in a nested ``{"content": {"stdout", "stderr"}}`` frame, and
+            # dropping it here left that inner field holding its ORIGINAL bytes.
+            replaced = _reinject(content, compressed, redacted_stderr)
             if replaced is not None:
                 return {**tool_response, "content": replaced}
 
@@ -397,12 +415,15 @@ def _reinject(tool_response: Any, compressed: str) -> Any | None:
             if stdout:
                 updated: dict[str, Any] = {**tool_response, "stdout": compressed}
                 stderr = tool_response.get("stderr")
-                if isinstance(stderr, str) and stderr:
+                if isinstance(stderr, str) and stderr and redacted_stderr is not None:
                     # The preserved (non-compressed) field must still honor
                     # FURL_REDACT_PATTERNS: the legacy merge ran the whole blob
                     # through redaction, so the mirrored stderr may not weaken that
                     # guarantee. Identity when no patterns are configured.
-                    updated["stderr"] = _apply_env_redaction(stderr)
+                    # Redacted ONCE by ``main`` and threaded in, never rescanned
+                    # here — and because a budget overrun withholds before any
+                    # emit, this can never receive an unredacted value.
+                    updated["stderr"] = redacted_stderr
                 return updated
             stderr = tool_response.get("stderr")
             if isinstance(stderr, str) and stderr.strip():
@@ -518,8 +539,26 @@ def _passthrough(reason: str | None = None) -> NoReturn:
     sys.exit(0)
 
 
-def _apply_env_redaction(text: str) -> str:
-    """Scrub credentials from *text* before any gate.
+def _redaction_budget_seconds() -> float:
+    """The active redaction budget, for the withheld message and the stderr note.
+
+    Resolved through ``furl_ctx.redaction`` so the hook and the library cannot
+    disagree about the number the user is told. Falls back to the same shipped
+    default when ``furl_ctx`` is not importable — in that degraded env
+    ``_apply_env_redaction`` returns the text unchanged and no budget is ever
+    applied, so this value is only ever used for reporting. Never raises."""
+    try:
+        from furl_ctx.redaction import redact_budget_seconds
+    except Exception:
+        return 5.0
+    try:
+        return redact_budget_seconds()
+    except Exception:
+        return 5.0
+
+
+def _apply_env_redaction(text: str) -> str | None:
+    """Scrub credentials from *text* before any gate, under a time budget.
 
     Applies the ON-by-default built-in credential patterns AND
     ``FURL_REDACT_PATTERNS`` here (not only inside ``compress()``) so a
@@ -529,26 +568,86 @@ def _apply_env_redaction(text: str) -> str:
     ``furl_ctx.redaction`` builder governs the hook, the MCP server, and the
     library identically; disable the built-ins with ``FURL_REDACT_BUILTINS=0``.
 
-    Fail-open and total: if ``furl_ctx`` is not importable (the same degraded
-    env where compression itself no-ops) or every redactor is off, the text is
-    returned unchanged. Never raises."""
+    Returns ``None`` when the redaction BUDGET was exceeded. That is the
+    fail-CLOSED signal and every caller must withhold the output rather than fall
+    back to the original: the built-in ``jwt`` pattern is quadratic on adversarial
+    input, and before the budget existed a wedged pass ran past the hooks.json
+    30 s timeout, got the process killed, and the host's fail-open contract then
+    handed the model the ORIGINAL UNREDACTED output. The unredacted text is never
+    returned in that case, so it cannot be emitted by mistake.
+
+    Fail-open (returns *text* unchanged) remains the posture for the DEGRADED
+    cases that are not a wedge: ``furl_ctx`` not importable (the same degraded env
+    where compression itself no-ops), every redactor off, or an unexpected
+    redactor exception. Never raises."""
     try:
-        from furl_ctx.redaction import build_store_redactor
+        from furl_ctx.redaction import (
+            RedactionBudgetExceeded,
+            build_store_redactor,
+            redact_budget_seconds,
+            redact_within_budget,
+        )
     except Exception:
         return text
     try:
         redactor = build_store_redactor()
         if redactor is None:
             return text
-        return redactor(text)
+        return redact_within_budget(text, redactor, budget_seconds=redact_budget_seconds())
+    except RedactionBudgetExceeded:
+        # FAIL CLOSED on the module's own control-flow signal. ``redact_within_budget``
+        # guarantees this never escapes, so this is the second layer behind that
+        # guarantee, not the primary defence — but it must come BEFORE the generic
+        # catch below: folding a budget overrun into "return the original text"
+        # would fail OPEN on precisely the signal that means "this content could
+        # not be scanned safely", which is the leak this whole module closes.
+        return None
     except Exception:
         # Compiled-pattern re.sub does not raise, but stay fail-open on any
-        # surprise: the durable copy is redacted by compress() downstream, and a
-        # broken hook must never break the tool call.
+        # OTHER surprise: the durable copy is redacted by compress() downstream,
+        # and a broken hook must never break the tool call.
         return text
 
 
-def _redaction_changed_visible_output(tool_response: Any, text: str, redacted: str) -> bool:
+def _preserved_stderr(tool_response: Any) -> str | None:
+    """The Bash-shaped ``stderr`` when it is the PRESERVED (non-extracted) field.
+
+    ``_extract_text`` reads ``stdout`` when ``stdout`` is non-empty, so in that
+    shape ``stderr`` rides alongside the replaced field and must honor the same
+    redaction. Any other shape either has no second text field or extracts
+    ``stderr`` itself, in which case it is already covered as the extracted text.
+    Returns ``None`` when there is no such preserved field.
+
+    MIRRORS :func:`_reinject`'s branch order exactly, INCLUDING its ``content``
+    recursion, because the field this returns must be the field ``_reinject``
+    will actually write to. A Bash-shaped response wrapped as
+    ``{"content": {"stdout", "stderr"}}`` keeps its stderr one frame down, and a
+    top-level-only lookup silently returned ``None`` for it — so nothing was
+    redacted for a field that ``_reinject`` does replace.
+
+    Exactly ONE such field exists per payload: ``_reinject`` writes stderr in a
+    single place (the non-empty-``stdout`` branch) and returns as soon as the
+    ``content`` branch succeeds, so the recursion cannot find two. That is what
+    keeps the budget argument at "at most twice per invocation" regardless of
+    nesting depth.
+    """
+    if not isinstance(tool_response, dict):
+        return None
+    # ``content`` first, exactly as ``_reinject`` does: when that branch is taken
+    # the sibling stdout/stderr on THIS frame are never written.
+    content = tool_response.get("content")
+    if content is not None and _extract_text(content) is not None:
+        return _preserved_stderr(content)
+    stdout = tool_response.get("stdout")
+    stderr = tool_response.get("stderr")
+    if isinstance(stdout, str) and stdout and isinstance(stderr, str) and stderr:
+        return stderr
+    return None
+
+
+def _redaction_changed_visible_output(
+    tool_response: Any, text: str, redacted: str, redacted_stderr: str | None
+) -> bool:
     """True iff redaction changed a field the model would see on a NON-compressing
     passthrough (below-min-chars / no-savings), so the gate must emit the scrubbed
     mirror instead of passing the original through.
@@ -565,21 +664,28 @@ def _redaction_changed_visible_output(tool_response: Any, text: str, redacted: s
     wrapper with NO redaction at all, breaking "zero change when nothing was
     redacted". Non-Bash shapes carry no second independent text field, so the
     extracted-field check governs them alone. Total and fail-open:
-    ``_apply_env_redaction`` never raises, so neither does this."""
+    ``_apply_env_redaction`` never raises, so neither does this.
+
+    *redacted_stderr* is the ALREADY-redacted preserved stderr computed once by
+    ``main`` (``None`` when there is no such field). It is threaded in rather than
+    recomputed here so the credential scanner runs exactly once per field per hook
+    invocation — it used to run again here and a third time inside ``_reinject``,
+    which multiplied the cost of the very pattern this change bounds."""
     if redacted != text:
         return True
-    if isinstance(tool_response, dict):
-        stdout = tool_response.get("stdout")
-        stderr = tool_response.get("stderr")
-        # Only when stdout is the extracted field (non-empty) is stderr the
-        # *preserved* one; an stderr-only output extracts stderr itself and is
-        # already covered by ``redacted != text`` above.
-        if isinstance(stdout, str) and stdout and isinstance(stderr, str) and stderr:
-            return _apply_env_redaction(stderr) != stderr
+    preserved = _preserved_stderr(tool_response)
+    if preserved is not None and redacted_stderr is not None:
+        return redacted_stderr != preserved
     return False
 
 
-def _emit(tool_response: Any, output_text: str, *, compressed: bool) -> NoReturn:
+def _emit(
+    tool_response: Any,
+    output_text: str,
+    *,
+    compressed: bool,
+    redacted_stderr: str | None,
+) -> NoReturn:
     """Replace the model-visible tool output with *output_text* and exit 0.
 
     The single writer of the PostToolUse ``updatedToolOutput`` contract, used by
@@ -599,7 +705,7 @@ def _emit(tool_response: Any, output_text: str, *, compressed: bool) -> NoReturn
     around *output_text* so the emitted value passes that validation by
     construction; if the shape cannot be mirrored the hook passes through rather
     than emit a value the host would reject (fail-open)."""
-    updated = _reinject(tool_response, output_text)
+    updated = _reinject(tool_response, output_text, redacted_stderr)
     if updated is None:
         _passthrough("reinject-unmatched")
     output = {
@@ -616,6 +722,78 @@ def _emit(tool_response: Any, output_text: str, *, compressed: bool) -> NoReturn
         _record_compression()
     else:
         _record_noop("redaction-only")
+    sys.exit(0)
+
+
+# Outcome bucket for a budget overrun. Distinct from every no-op reason so the
+# counters can tell "nothing to compress" apart from "output withheld".
+_REDACTION_WITHHELD_BUCKET = "redaction-budget-exceeded"
+
+# What replaces the stderr field when the output is withheld. The real stderr
+# could not be scanned, so it must not be mirrored through.
+_STDERR_WITHHELD = "[furl] stderr withheld: secret redaction did not complete."
+
+
+def _withheld_message(budget_seconds: float) -> str:
+    """The model-visible replacement when redaction could not complete.
+
+    Explicit on purpose. A silent drop would lose the user's tool output with no
+    explanation, which is its own silent-failure defect; the user must be able to
+    tell "nothing to compress" apart from "output withheld because redaction could
+    not finish safely".
+    """
+    return (
+        "[furl] TOOL OUTPUT WITHHELD — secret redaction did not complete within its "
+        f"{budget_seconds:g}s safety budget, so the original output was NOT shown and "
+        "was NOT stored.\n"
+        "This means the output contains input that is pathological for the "
+        "credential scanner (a long unbroken url-safe-base64 run densely seeded "
+        "with '-eyJ' is the known shape). Showing it unredacted could disclose "
+        "credentials the scanner never got to mask, so it is withheld instead.\n"
+        "Options: re-run the command with narrower output; raise the budget with "
+        "FURL_REDACT_BUDGET_SECONDS; or disable the built-in credential patterns "
+        "with FURL_REDACT_BUILTINS=0 (NOT recommended — that removes the scrubbing, "
+        "it does not make it safe)."
+    )
+
+
+def _withhold_for_redaction_budget(tool_response: Any, budget_seconds: float) -> NoReturn:
+    """FAIL-CLOSED exit: replace the model-visible output with an explanation.
+
+    Deliberately does NOT route through :func:`_emit`, because ``_emit`` falls back
+    to ``_passthrough`` when a shape cannot be mirrored — and a passthrough here
+    would hand the model exactly the unredacted bytes this path exists to withhold.
+
+    ``_reinject`` returns ``None`` only when ``_extract_text`` does (its documented
+    oracle), and this path is reachable only after ``_extract_text`` returned a
+    string, so the mirror is guaranteed. The defensive branch is kept anyway and
+    is LOUD on stderr rather than silently emitting: if we genuinely cannot build a
+    replacement, the host keeps the original and the operator must be told.
+    """
+    _record_noop(_REDACTION_WITHHELD_BUCKET)
+    updated = _reinject(tool_response, _withheld_message(budget_seconds), _STDERR_WITHHELD)
+    if updated is not None:
+        try:
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PostToolUse",
+                            "updatedToolOutput": updated,
+                        }
+                    }
+                )
+            )
+        except Exception:
+            updated = None
+    sys.stderr.write(
+        "furl: redaction budget exceeded; tool output withheld "
+        f"(budget {budget_seconds:g}s, FURL_REDACT_BUDGET_SECONDS)\n"
+        if updated is not None
+        else "furl: redaction budget exceeded AND the output shape could not be "
+        "mirrored — the host will keep the ORIGINAL, UNREDACTED output. "
+        "Set FURL_REDACT_BUILTINS=0 only if you accept that.\n"
+    )
     sys.exit(0)
 
 
@@ -718,7 +896,38 @@ def main() -> None:
     # Scrub configured secrets from what the model sees even when the output is
     # too small to compress. With no patterns set this returns text unchanged,
     # so the hook stays byte-identical when redaction is off.
+    #
+    # ORDERING IS LOAD-BEARING AND MUST NOT BE FLIPPED. The gate below is
+    # ``_min_chars()`` — a MINIMUM ("too small to bother compressing"), not a cap.
+    # Moving it above this line would stop redacting every below-threshold output
+    # and reinstate exactly the leak review Finding 1 closed, and the gate itself
+    # reads ``len(redacted)`` and the redacted mirror, so it cannot run first.
+    # Pinned by ``test_redaction_runs_before_the_min_chars_gate``.
+    #
+    # A size cap could not substitute for the budget either. At worst-case seeding
+    # density the quadratic term measures 0.165 s at 16 KB, 0.590 s at 32 KB,
+    # 2.635 s at 64 KB and 10.656 s at 128 KB (exponent 2.02), so it blows any
+    # realistic budget while still FAR below any cap that would admit ordinary tool
+    # output — a 5 MB legitimate blob costs about 0.5-1.2 s on the same box. Cost
+    # scales with density as well as size, so no size threshold separates the two
+    # cases. Bounding TIME is the only bound that holds, which is what
+    # ``_apply_env_redaction`` now applies. (An earlier revision of this comment
+    # cited 0.101 s at 64 KB and ~500 s at 5 MB; those came from a sparsely seeded
+    # corpus and were ~25x low. The conclusion strengthened — it trips sooner.)
+    _budget_seconds = _redaction_budget_seconds()
     redacted = _apply_env_redaction(text)
+    if redacted is None:
+        _withhold_for_redaction_budget(tool_response, _budget_seconds)
+
+    # The Bash-shaped preserved stderr is a second model-visible field. Redact it
+    # ONCE here so the scanner runs at most once per field, and fail closed on it
+    # too — a wedge hiding in stderr is the same disclosure path as one in stdout.
+    _preserved = _preserved_stderr(tool_response)
+    redacted_stderr: str | None = None
+    if _preserved is not None:
+        redacted_stderr = _apply_env_redaction(_preserved)
+        if redacted_stderr is None:
+            _withhold_for_redaction_budget(tool_response, _budget_seconds)
 
     # --- size gate ---
     if len(redacted) < _min_chars():
@@ -726,8 +935,8 @@ def main() -> None:
         # field — the extracted one OR a preserved Bash stderr — emit the fully
         # scrubbed mirror so no secret reaches the model (review Finding 1);
         # otherwise keep a byte-identical passthrough.
-        if _redaction_changed_visible_output(tool_response, text, redacted):
-            _emit(tool_response, redacted, compressed=False)
+        if _redaction_changed_visible_output(tool_response, text, redacted, redacted_stderr):
+            _emit(tool_response, redacted, compressed=False, redacted_stderr=redacted_stderr)
         _passthrough("below-min-chars")
 
     # --- size reroute (F2): above the hook threshold, force the engine's fast
@@ -748,8 +957,8 @@ def main() -> None:
         # changed any model-visible field (extracted OR a preserved Bash stderr —
         # review Finding 1); otherwise leave the original untouched (byte-identical
         # passthrough).
-        if _redaction_changed_visible_output(tool_response, text, redacted):
-            _emit(tool_response, redacted, compressed=False)
+        if _redaction_changed_visible_output(tool_response, text, redacted, redacted_stderr):
+            _emit(tool_response, redacted, compressed=False, redacted_stderr=redacted_stderr)
         _passthrough(compress_fail_reason or "no-savings")
 
     # Record the reroute only once it PRODUCED output (compressed is not None);
@@ -766,7 +975,7 @@ def main() -> None:
         )
 
     # --- replace the tool output the model sees ---
-    _emit(tool_response, compressed, compressed=True)
+    _emit(tool_response, compressed, compressed=True, redacted_stderr=redacted_stderr)
 
 
 if __name__ == "__main__":
