@@ -20,10 +20,10 @@ slipped past release once already; see CONTRIBUTING.md "Releasing / version bump
 The SessionStart status line names the engine alongside the plugin
 (``furl X.Y.Z · engine furl-ctx A.B.C``), so its engine half MUST equal it as well.
 
-PLUGIN version (``plugin.json`` ``version``): the marketplace metadata + entry
-versions, the skill frontmatter, and the plugin half of the baked SessionStart
-status-line version MUST all equal it, because the plugin cache is version-keyed and
-the status line advertises the running plugin build.
+PLUGIN version (both host ``plugin.json`` manifests): the Claude marketplace metadata +
+entry versions, Codex manifest, skill frontmatter, and plugin half of the baked
+SessionStart status-line version MUST all agree, because plugin caches are version-keyed
+and the status line advertises the running plugin build.
 
 Pure stdlib (json, re, tomllib) — no furl_ctx import — so the guard runs even without
 the built extension.
@@ -49,6 +49,7 @@ _PRETOOL_SCRIPT = _PLUGIN_DIR / "hooks" / "pretool_pipe.py"
 _SESSION_START_SCRIPT = _PLUGIN_DIR / "hooks" / "session_start_banner.py"
 _MCP_JSON = _PLUGIN_DIR / ".mcp.json"
 _PLUGIN_JSON = _PLUGIN_DIR / ".claude-plugin" / "plugin.json"
+_CODEX_PLUGIN_JSON = _PLUGIN_DIR / ".codex-plugin" / "plugin.json"
 _SKILL_MD = _PLUGIN_DIR / "skills" / "furl" / "SKILL.md"
 _PLUGIN_README = _PLUGIN_DIR / "README.md"
 _SECURITY_MD = _ROOT / "SECURITY.md"
@@ -187,6 +188,11 @@ def test_marketplace_versions_match_plugin_version() -> None:
     entries = market["plugins"]
     assert len(entries) == 1
     assert entries[0]["version"] == plugin_version
+
+
+def test_codex_manifest_version_matches_plugin_version() -> None:
+    codex_version = str(json.loads(_read(_CODEX_PLUGIN_JSON))["version"])
+    assert codex_version == _plugin_version()
 
 
 def test_skill_frontmatter_matches_plugin_version() -> None:

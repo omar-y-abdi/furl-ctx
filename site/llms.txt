@@ -1,6 +1,6 @@
 # furl
 
-furl is context compression, prompt compression, and token optimization for AI agents that reduces Claude Code token usage. It folds repeated tool output into a small hash-addressed marker, keeps the lines that matter so an agent spends fewer tokens, and returns any original the moment the agent asks, byte-exact for raw text and a semantically-complete re-serialization for structured JSON arrays. furl ships as a Claude Code plugin and an MCP server, and nothing is ever thrown away.
+furl is context compression, prompt compression, and token optimization for AI agents. It folds repeated tool output into a small hash-addressed marker, keeps the lines that matter so an agent spends fewer tokens, and returns any original the moment the agent asks, byte-exact for raw text and a semantically-complete re-serialization for structured JSON arrays. furl ships as plugins for Claude Code and Codex plus a standalone MCP server, and nothing is ever thrown away.
 
 ## Six real captures
 

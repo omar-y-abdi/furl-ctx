@@ -1,16 +1,18 @@
 ---
 name: furl
-description: How the Furl context-compression plugin works — the furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list MCP tools, the PostToolUse hook that shrinks large tool outputs, the <<ccr:HASH>> retrieval flow, and the FURL_* environment knobs to tune or disable it. Use when the user asks what Furl is doing, why a tool output looks compressed or contains <<ccr:...>> markers, how to retrieve original content, how to tune compression thresholds, or how to turn the hook off.
+description: How the Furl context-compression plugin works in Claude Code and Codex — the furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list MCP tools, the <<ccr:HASH>> retrieval flow, and Claude Code's optional automatic hooks. Use when the user asks what Furl is doing, how to compress or retrieve content, why Claude Code output looks compressed, or how to tune or disable Furl.
 version: 1.3.2
 ---
 
-# Furl — context compression for Claude Code
+# Furl — context compression for Claude Code and Codex
 
 Furl reduces the tokens large tool outputs cost by compressing them, while keeping
-every dropped byte **retrievable on demand**. It ships two things to this session:
+every dropped byte **retrievable on demand**. It ships these capabilities:
 
-1. An **MCP server** (`furl`) exposing six tools.
-2. A **PostToolUse hook** that compresses big tool outputs automatically.
+1. An **MCP server** (`furl`) exposing six tools in Claude Code and Codex.
+2. A retrieval-aware **skill** in both hosts.
+3. **Automatic hooks in Claude Code only.** Codex uses explicit `furl_compress` calls;
+   its validated plugin manifest does not currently install Furl's hooks.
 
 **Retrieval is pull-based, not push-based.** The compressed text you read does not
 contain the dropped rows. To inspect a specific dropped item, call `furl_retrieve` for
@@ -37,11 +39,15 @@ for surfacing an anomaly you were not already looking for.
 
 ## Current harness status
 
-Automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `updatedToolOutput` mirrored to the originating tool's output shape; Claude Code 2.1.163 and newer validate that replacement against the tool's schema, and the mirrored shape passes, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. Shape-mirroring was built for [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. `WebSearch` still passes through uncompressed, because its whole-object result has no single text field to mirror onto. Unaffected on every version: the manual MCP tools furl_compress, furl_retrieve, and the rest, and durable `<<ccr:HASH>>` storage and retrieval. Below 2.1.163 the SessionStart status line and the first-run note say so directly instead of claiming PostToolUse compression is active, naming the detected version; the PreToolUse pipe (below) is unaffected either way. LIBRARY.md carries the canonical harness status.
+**Codex:** call `furl_compress` explicitly. Prefer its `file_path` input for a large
+artifact so only compressed content enters context. The Codex plugin installs the MCP
+server and this skill, not automatic hooks.
+
+**Claude Code:** automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `updatedToolOutput` mirrored to the originating tool's output shape; Claude Code 2.1.163 and newer validate that replacement against the tool's schema, and the mirrored shape passes, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. Shape-mirroring was built for [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. `WebSearch` still passes through uncompressed, because its whole-object result has no single text field to mirror onto. Unaffected on every version: the manual MCP tools furl_compress, furl_retrieve, and the rest, and durable `<<ccr:HASH>>` storage and retrieval. Below 2.1.163 the SessionStart status line and the first-run note say so directly instead of claiming PostToolUse compression is active, naming the detected version; the PreToolUse pipe (below) is unaffected either way. LIBRARY.md carries the canonical harness status.
 
 **Counters:** `furl_stats` shows `store.hook_activity.hook_invocations_seen` and `hook_compressions_applied`, cross-process and cumulative. A rising `hook_compressions_applied` confirms the hook is compressing and, on 2.1.163 and newer, delivering the shorter output the model reads; below the floor it stops incrementing instead, bucketed under `hook_noop:below-version-floor`. `store.post_tool_use_compression` reports the detected host version and whether it can receive a replacement at all, independent of the counters.
 
-**Real savings now (enabled by default):** a **PreToolUse** pipe compresses a `Bash`
+**Claude Code real savings now (enabled by default):** a **PreToolUse** pipe compresses a `Bash`
 command's stdout at the source (so the tool result *is* the compressed form, original
 retrievable via `furl_retrieve`) — it doesn't use `updatedToolOutput`, so it works
 today. Disable it with `FURL_PRETOOL_PIPE=0` (`false`/`off`/`no`/`disabled` also work,
@@ -104,7 +110,7 @@ bounds): see the plugin README.
 
 A seventh tool, `furl_read`, exists but is off by default — enable with `FURL_MCP_READ=1` (see [The `furl_read` tool](#the-furl_read-tool-opt-in) below).
 
-## When the hook fires
+## When the Claude Code hook fires
 
 The hook runs **after** a tool returns, on external-output tools: `Bash`,
 `WebFetch`, `WebSearch`, `Task`. (Your own `Read`/`Grep`/`Glob` file access is left
@@ -247,7 +253,8 @@ furl_read(file_path="/abs/path/to/big_file.py")
 
 ## Tuning (environment variables)
 
-Set these in the plugin's `hooks/hooks.json` / `.mcp.json` env, or your shell:
+MCP/store rows apply to both hosts. Hook, pipe, and status-line rows apply only to
+Claude Code. Set values in `.mcp.json`, Claude Code's `hooks/hooks.json`, or your shell:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -271,15 +278,15 @@ is in [`LIBRARY.md`](../../../../LIBRARY.md) → "Configuration".
 
 ## How to disable
 
-- **Just the hook:** set `FURL_HOOK_ENABLED=0` (leaves the MCP tools available).
-- **Everything:** disable the `furl` plugin in Claude Code.
+- **Just the Claude Code hook:** set `FURL_HOOK_ENABLED=0` (leaves MCP tools available).
+- **Everything:** disable the `furl` plugin in Claude Code or remove it from Codex.
 
 ## Prerequisite
 
-Both the hook and the MCP server launch through [`uv`](https://docs.astral.sh/uv/)
+The MCP server and Claude Code hooks launch through [`uv`](https://docs.astral.sh/uv/)
 (`uv run --with "furl-ctx[mcp]==1.3.2" …`), which fetches Furl from PyPI on first use — no
 `pip install`, no Rust toolchain. The version is pinned so every launch resolves the same
 wheel deterministically instead of whatever `uv`'s cache last held; upgrades arrive through
 plugin updates, which bump the pin. The
-only requirement is `uv` on the PATH. If `uv` is missing, the MCP server won't start
-and the hook fails open (passes output through unchanged).
+only requirement is `uv` on the PATH. If `uv` is missing, the MCP server won't start;
+Claude Code's hook fails open (passes output through unchanged).

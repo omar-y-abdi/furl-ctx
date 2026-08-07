@@ -15,7 +15,7 @@
 
 
 <p align="center"><strong>0–54% token savings on real high-entropy content · reaching 95% on repetitive logs/fixtures (<a href="#proof">honest read</a>)</strong></p>
-<p align="center"><strong>Claude Code plugin · MCP server usable by any MCP host · Reversible compression</strong></p>
+<p align="center"><strong>Claude Code + Codex plugins · MCP server usable by any MCP host · Reversible compression</strong></p>
 
 <p align="center">
   <a href="https://github.com/omar-y-abdi/furl-ctx/releases/latest"><img src="https://img.shields.io/github/v/release/omar-y-abdi/furl-ctx?sort=semver&color=blue" alt="Release"></a>
@@ -31,7 +31,7 @@
 
 ---
 
-> **What works today:** furl-ctx is context compression for AI agents that reduces Claude Code token usage while every original byte stays retrievable, and install is two commands. Automatic hands-off compression works on Claude Code 2.1.163 and newer: the PostToolUse hook mirrors each replacement to the tool's output shape, so the harness honors it, verified live by both external audits on 2.1.212. This shape-mirroring was built in response to upstream issue [#68951](https://github.com/anthropics/claude-code/issues/68951), where an unmirrored replacement was dropped. The manual MCP tools furl_compress, furl_retrieve, and furl_search work on every version, and the opt-out PreToolUse pipe adds automatic Bash savings when no Bash permission rules are configured. furl-ctx never touches your Read, Grep, or Glob file reads by design. See [LIBRARY.md](LIBRARY.md) for the canonical harness status.
+> **What works today:** Claude Code gets the MCP tools, skill, and automatic compression hooks. Codex gets the same MCP tools and retrieval-aware skill; use `furl_compress` on demand because Codex plugins do not yet expose Furl's output-replacement hook. Automatic hands-off compression works on Claude Code 2.1.163 and newer: the PostToolUse hook mirrors each replacement to the tool's output shape, so the harness honors it, verified live by both external audits on 2.1.212. This shape-mirroring was built in response to upstream issue [#68951](https://github.com/anthropics/claude-code/issues/68951), where an unmirrored replacement was dropped. The manual MCP tools furl_compress, furl_retrieve, and furl_search work in both hosts. furl-ctx never touches your Read, Grep, or Glob file reads by design. See [LIBRARY.md](LIBRARY.md) for the canonical harness status.
 
 **Keep finding yourself waiting on the next usage limit reset?** 
 
@@ -41,7 +41,7 @@
 
 **Prerequisite:** [`uv`](https://docs.astral.sh/uv/) on your PATH (same as the official [serena](https://github.com/oraios/serena) plugin).
 
-Then two commands inside Claude Code:
+Claude Code — run inside Claude Code:
 
 ```
 /plugin marketplace add omar-y-abdi/furl-ctx
@@ -49,6 +49,16 @@ Then two commands inside Claude Code:
 ```
 
 That's it — this installs the compression hook, the MCP tools, and the skill. No `pip install`, no setup: Furl fetches itself on first use.
+
+Codex — run in your terminal:
+
+```bash
+codex plugin marketplace add omar-y-abdi/furl-ctx
+codex plugin add furl@furl
+```
+
+Start a new Codex thread after installation. This installs the MCP tools and skill; automatic
+hooks remain Claude Code-only.
 
 ## Furl also works as a Python library
 
@@ -94,8 +104,8 @@ Furl is a hard fork of [Headroom](https://github.com/headroomlabs-ai/headroom)'s
 
 ## **What you get**
 
-- **Auto-compression hook** — shrinks large `Bash` / `WebFetch` / `WebSearch` / `Task` (sub-agent) outputs before they enter context. Fail-open: never breaks a tool call. **It does *not* touch your `Read` / `Grep` / `Glob` file reads — by design**, so a later `Edit` still sees exact file bytes; those reads (often a coding agent's largest context cost) pass through uncompressed ([why](#proof)). One honest limit: when an output is so large that Claude Code itself persists it to a file and hands the model only a file reference, there is no inline output for the hook to compress.
-- **PreToolUse Bash pipe** — on by default, but it rewrites a `Bash` command only when you have **no** Bash permission rules configured; with any Bash allow, deny, or ask rule it stays out of the way so your rules apply exactly as native. Disable it with `FURL_PRETOOL_PIPE=0`.
+- **Auto-compression hook (Claude Code)** — shrinks large `Bash` / `WebFetch` / `WebSearch` / `Task` (sub-agent) outputs before they enter context. Fail-open: never breaks a tool call. **It does *not* touch your `Read` / `Grep` / `Glob` file reads — by design**, so a later `Edit` still sees exact file bytes; those reads (often a coding agent's largest context cost) pass through uncompressed ([why](#proof)). One honest limit: when an output is so large that Claude Code itself persists it to a file and hands the model only a file reference, there is no inline output for the hook to compress.
+- **PreToolUse Bash pipe (Claude Code)** — on by default, but it rewrites a `Bash` command only when you have **no** Bash permission rules configured; with any Bash allow, deny, or ask rule it stays out of the way so your rules apply exactly as native. Disable it with `FURL_PRETOOL_PIPE=0`.
 - **Signal-aware offload + sliceable retrieval** — a payload too big to compress inline (e.g. a 33 MB trace) comes back as a structured summary (schema, per-field value histograms, example rows) instead of a truncated head/tail, and the agent pulls a narrow slice on demand — `retrieve(hash, select_field="name", select_equals="DroppedFrame")` or a numeric range — without materializing the whole thing.
 - **MCP tools** — `furl_compress`, `furl_retrieve`, `furl_stats`, `furl_purge` (erase stored originals), `furl_search` (find by content substring), `furl_list` (list stored entries). A seventh tool, `furl_read`, exists but is off by default — enable with `FURL_MCP_READ=1` (see [LIBRARY.md](LIBRARY.md)).
 - **Skill** — explains the `<<ccr:HASH>>` retrieval flow and how to tune or disable it.
@@ -106,12 +116,12 @@ Tuning, disabling with `FURL_HOOK_ENABLED=0`, and the full reference live in [`p
 |---|---|
 | Library | 30 minutes |
 | `furl` CLI | 24 hours |
-| Claude Code plugin | 24 hours |
+| Claude Code / Codex plugin | 24 hours |
 | Bare MCP server | 1 hour session, plus 30 minutes for dropped-row originals |
 
 The plugin sets `FURL_CCR_TTL_SECONDS=86400`, which governs both the hook's offloads and the MCP tools' stores; the full 24 hour window needs that env set, as the plugin ships it.
 
-**A note on version numbers:** the Claude Code plugin versions independently from the `furl-ctx` engine it pins — a plugin release doesn't always mean an engine release, and vice versa. `/plugin` shows the plugin version; GitHub Releases and `CHANGELOG.md` track the engine version; the SessionStart banner shows both together (`furl <plugin> · engine furl-ctx <engine>`), which is the quickest way to see both numbers at once.
+**A note on version numbers:** the Claude Code and Codex plugin manifests version independently from the `furl-ctx` engine they pin — a plugin release doesn't always mean an engine release, and vice versa. `/plugin` or `codex plugin list` shows the plugin version; GitHub Releases and `CHANGELOG.md` track the engine version; Claude Code's SessionStart banner shows both together (`furl <plugin> · engine furl-ctx <engine>`).
 
 # Proof
 

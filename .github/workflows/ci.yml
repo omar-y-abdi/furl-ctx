@@ -98,6 +98,7 @@ jobs:
               # Deadlock history — do NOT re-add job-level gating: #15, #32, #56.
               - '.github/workflows/**'
               - 'plugins/**'
+              - '.agents/**'
               - '.claude-plugin/**'
               - '**/*.md'
 
