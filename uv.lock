@@ -474,6 +474,8 @@ dependencies = [
 all = [
     { name = "google-re2" },
     { name = "mcp" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
 ]
 code = [
     { name = "tree-sitter" },
@@ -481,6 +483,7 @@ code = [
 ]
 dev = [
     { name = "google-re2" },
+    { name = "mcp" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -488,6 +491,8 @@ dev = [
     { name = "pytest-cov" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
 ]
 mcp = [
     { name = "google-re2" },
@@ -499,11 +504,14 @@ re2 = [
 
 [package.metadata]
 requires-dist = [
+    { name = "furl-ctx", extras = ["code"], marker = "extra == 'all'" },
+    { name = "furl-ctx", extras = ["code"], marker = "extra == 'dev'" },
     { name = "furl-ctx", extras = ["mcp"], marker = "extra == 'all'" },
+    { name = "furl-ctx", extras = ["mcp"], marker = "extra == 'dev'" },
     { name = "furl-ctx", extras = ["re2"], marker = "extra == 'dev'" },
     { name = "furl-ctx", extras = ["re2"], marker = "extra == 'mcp'" },
     { name = "google-re2", marker = "extra == 're2'", specifier = ">=1.1" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.28.1" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.28.1,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.1" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },

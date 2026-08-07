@@ -178,6 +178,18 @@ def test_dev_extra_declares_mcp_so_the_mcp_suites_are_present_by_construction() 
     )
 
 
+def test_mcp_extra_stays_on_v1_until_server_is_migrated() -> None:
+    """Keep fresh installs on the low-level SDK API the server implements."""
+    optional_deps = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"][
+        "optional-dependencies"
+    ]
+    requirement = next(dep for dep in optional_deps["mcp"] if dep.startswith("mcp"))
+    assert "<2" in requirement, (
+        "furl_ctx.ccr.mcp_server uses the MCP v1 low-level Server decorators, so its mcp "
+        f"requirement must exclude the incompatible v2 SDK; got {requirement!r}"
+    )
+
+
 def test_dev_extra_declares_code_so_the_code_aware_suite_is_present_by_construction() -> None:
     """Pin the declaration that makes the code runtime guard pass in every test
     install — including CI's ``[dev,mcp]``, which carries ``code`` only
