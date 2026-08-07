@@ -93,17 +93,18 @@ until they agree:
 - **Library version** (`pyproject.toml` `project.version`): release-please bumps it on the
   release PR. release-please has **no updater that can rewrite a version embedded inside a
   shell command**, so hand-sync the `furl-ctx[mcp]==X.Y.Z` pins in
-  `plugins/furl/hooks/hooks.json`, `plugins/furl/.mcp.json`, and `_FURL_CTX_PIN` in
-  `plugins/furl/hooks/pretool_pipe.py`, the same pin in the prose
-  examples of `plugins/furl/skills/furl/SKILL.md`, `plugins/furl/README.md`, and the
-  repo-root `SECURITY.md` supply-chain section, and
+  `plugins/furl/hooks/hooks.json`, both `plugins/furl/.mcp.json` and
+  `plugins/furl-codex/.mcp.json`, and `_FURL_CTX_PIN` in
+  `plugins/furl/hooks/pretool_pipe.py`, the same pin in the prose examples of both
+  `plugins/furl/skills/furl/SKILL.md` and `plugins/furl-codex/skills/furl/SKILL.md`,
+  `plugins/furl/README.md`, and the repo-root `SECURITY.md` supply-chain section, and
   `_ENGINE_VERSION` in `plugins/furl/hooks/session_start_banner.py` (the engine half of
   the SessionStart status line — moved out of `hooks.json` in the T7 version-gating fix),
   to the new version on that same PR before merging.
 - **Plugin version** (`plugins/furl/.claude-plugin/plugin.json` and
-  `plugins/furl/.codex-plugin/plugin.json` `version`): bump both together with both
-  `version` fields in `.claude-plugin/marketplace.json`, the `version:` in
-  `plugins/furl/skills/furl/SKILL.md` frontmatter, and `_PLUGIN_VERSION` in
+  `plugins/furl-codex/.codex-plugin/plugin.json` `version`): bump both together with both
+  `version` fields in `.claude-plugin/marketplace.json`, the `version:` in both host
+  copies of `skills/furl/SKILL.md` frontmatter, and `_PLUGIN_VERSION` in
   `plugins/furl/hooks/session_start_banner.py` (the plugin half of the same
   `furl <version> · engine furl-ctx <version>` string).
 

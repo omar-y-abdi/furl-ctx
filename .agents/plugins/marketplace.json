@@ -8,7 +8,7 @@
       "name": "furl",
       "source": {
         "source": "local",
-        "path": "./plugins/furl"
+        "path": "./plugins/furl-codex"
       },
       "policy": {
         "installation": "AVAILABLE",

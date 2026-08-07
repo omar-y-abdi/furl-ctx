@@ -22,11 +22,12 @@ compressed view unless someone knows to query for it.
 ## Current harness status
 
 **Codex:** the installed plugin exposes Furl's MCP tools and skill. Automatic hook
-compression is not advertised or installed: Codex's validated plugin contract does not
-currently accept a `hooks` manifest field, and its PostToolUse runtime cannot replace
-ordinary tool output. Call `furl_compress` explicitly, or pass `file_path` so Codex never
-has to ingest a large file before compression. Start a new thread after install/update so
-Codex loads the plugin capabilities.
+compression is not advertised or installed. Codex default-loads `hooks/hooks.json` from a
+plugin root, but Furl's hooks emit Claude Code-specific output fields that Codex cannot use;
+the Codex marketplace therefore points at a separate hook-free package root. Call
+`furl_compress` explicitly, or pass `file_path` so Codex never has to ingest a large file
+before compression. Start a new thread after install/update so Codex loads the plugin
+capabilities.
 
 **Claude Code:** automatic, hands-off compression works on Claude Code 2.1.163 and newer. The PostToolUse hook emits `hookSpecificOutput.updatedToolOutput` mirrored to the originating tool's output shape, and because Claude Code 2.1.163 and newer validate that replacement against the tool's schema, the mirrored shape is honored, so the compressed output reaches the model. Both external audits confirmed this live on 2.1.212. This shape-mirroring was built for upstream issue [anthropics/claude-code#68951](https://github.com/anthropics/claude-code/issues/68951), where an earlier bare-string replacement was dropped on a schema mismatch. The one shape still passing through uncompressed is `WebSearch`, whose whole-object result has no single text field to mirror onto.
 
@@ -202,9 +203,10 @@ codex plugin add furl@furl
 ```
 
 This registers the repository's `.agents/plugins/marketplace.json`, then installs the
-Codex manifest, shared MCP server, and shared skill. Start a new thread so Codex loads
-them. Verify with `codex plugin list`, then ask Codex to use `$furl` and call
-`furl_stats`.
+hook-free `plugins/furl-codex` package containing the Codex manifest, MCP server config,
+and skill. Its MCP config and skill are byte-identical copies of Claude's, guarded by CI;
+Claude-only hooks stay outside the Codex package root. Start a new thread so Codex loads
+them. Verify with `codex plugin list`, then ask Codex to use `$furl` and call `furl_stats`.
 
 The Codex plugin intentionally does not claim automatic hook compression; call
 `furl_compress` explicitly. For a local clone:
@@ -325,12 +327,10 @@ retrieve originals, or how to tune/disable it.
 .claude-plugin/
 └── marketplace.json         # repo-root marketplace → source ./plugins/furl
 .agents/plugins/
-└── marketplace.json         # repo-root Codex marketplace → source ./plugins/furl
+└── marketplace.json         # repo-root Codex marketplace → source ./plugins/furl-codex
 plugins/furl/
 ├── .claude-plugin/
 │   └── plugin.json          # plugin manifest (name, version, skills)
-├── .codex-plugin/
-│   └── plugin.json          # Codex manifest (MCP server + skill)
 ├── .mcp.json                # registers the `furl` MCP server
 ├── hooks/
 │   ├── hooks.json           # PostToolUse + PreToolUse + SessionStart registration
@@ -342,4 +342,9 @@ plugins/furl/
 │   └── furl/
 │       └── SKILL.md         # how-it-works skill
 └── README.md
+plugins/furl-codex/           # separate root prevents Codex hook auto-discovery
+├── .codex-plugin/
+│   └── plugin.json          # Codex manifest (MCP server + skill)
+├── .mcp.json                # byte-identical copy, guarded by CI
+└── skills/furl/SKILL.md      # byte-identical copy, guarded by CI
 ```

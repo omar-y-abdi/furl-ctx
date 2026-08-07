@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "furl": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "PATH=\"$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\" exec uv run --no-project --with 'furl-ctx[mcp]==1.3.2' python -m furl_ctx.ccr.mcp_server"
+      ],
+      "env": {
+        "FURL_CCR_BACKEND": "sqlite",
+        "FURL_CCR_SPILL": "1",
+        "FURL_CCR_TTL_SECONDS": "86400"
+      }
+    }
+  }
+}
