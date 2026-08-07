@@ -21,7 +21,7 @@ The SessionStart status line names the engine alongside the plugin
 (``furl X.Y.Z · engine furl-ctx A.B.C``), so its engine half MUST equal it as well.
 
 PLUGIN version (both host ``plugin.json`` manifests): the Claude marketplace metadata +
-entry versions, Codex manifest, skill frontmatter, and plugin half of the baked
+entry versions, Codex manifest, shared skill frontmatter, and plugin half of the baked
 SessionStart status-line version MUST all agree, because plugin caches are version-keyed
 and the status line advertises the running plugin build.
 
@@ -44,12 +44,13 @@ import tomllib
 _ROOT = Path(__file__).resolve().parents[1]
 _PYPROJECT = _ROOT / "pyproject.toml"
 _PLUGIN_DIR = _ROOT / "plugins" / "furl"
+_CODEX_PLUGIN_DIR = _ROOT / "plugins" / "furl-codex"
 _HOOKS_JSON = _PLUGIN_DIR / "hooks" / "hooks.json"
 _PRETOOL_SCRIPT = _PLUGIN_DIR / "hooks" / "pretool_pipe.py"
 _SESSION_START_SCRIPT = _PLUGIN_DIR / "hooks" / "session_start_banner.py"
 _MCP_JSON = _PLUGIN_DIR / ".mcp.json"
 _PLUGIN_JSON = _PLUGIN_DIR / ".claude-plugin" / "plugin.json"
-_CODEX_PLUGIN_JSON = _PLUGIN_DIR / ".codex-plugin" / "plugin.json"
+_CODEX_PLUGIN_JSON = _CODEX_PLUGIN_DIR / ".codex-plugin" / "plugin.json"
 _SKILL_MD = _PLUGIN_DIR / "skills" / "furl" / "SKILL.md"
 _PLUGIN_README = _PLUGIN_DIR / "README.md"
 _SECURITY_MD = _ROOT / "SECURITY.md"

@@ -57,8 +57,8 @@ codex plugin marketplace add omar-y-abdi/furl-ctx
 codex plugin add furl@furl
 ```
 
-Start a new Codex thread after installation. This installs the MCP tools and skill; automatic
-hooks remain Claude Code-only.
+Start a new Codex thread after installation. This installs the MCP tools and skill from a
+Codex-only package root; Claude Code's incompatible automatic hooks are not bundled.
 
 ## Furl also works as a Python library
 
