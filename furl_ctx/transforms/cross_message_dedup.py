@@ -446,16 +446,15 @@ class CrossMessageDeduper(Transform):
         a single text part carrying the sentinel, so strict clients keep
         seeing the parts-list they sent.
         """
-        texts: list[str] = []
-        for part in parts:
-            if (
-                not isinstance(part, dict)
-                or part.get("type") != "text"
-                or "cache_control" in part
-                or not isinstance(part.get("text"), str)
-            ):
-                return None
-            texts.append(part["text"])
+        if not all(
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and "cache_control" not in part
+            and isinstance(part.get("text"), str)
+            for part in parts
+        ):
+            return None
+        texts: list[str] = [part["text"] for part in parts]
         if not texts:
             return None
         unit = "\n".join(texts)

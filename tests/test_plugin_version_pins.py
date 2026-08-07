@@ -38,6 +38,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import tomllib
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -141,44 +142,31 @@ def test_pretool_pin_matches_pyproject_version() -> None:
     assert _extract(_PIN_RE, _pretool_command(), "furl-ctx[mcp] pin") == _pyproject_version()
 
 
-def test_pretool_pipe_script_pin_matches_pyproject_version() -> None:
-    # pretool_pipe.py BAKES the pin into the rewritten command (the compressor the
-    # rewrite pipes through), so it MUST equal pyproject too — a separate pin from
-    # the hooks.json command above and, like the prose pins, invisible to
-    # release-please's updaters. See _FURL_CTX_PIN in pretool_pipe.py.
-    pins = _pins_in(_read(_PRETOOL_SCRIPT))
-    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_PRETOOL_SCRIPT}"
+@pytest.mark.parametrize(
+    "path",
+    [
+        # pretool_pipe.py BAKES the pin into the rewritten command (the compressor
+        # the rewrite pipes through), so it MUST equal pyproject too — a separate
+        # pin from the hooks.json command above and, like the prose pins below,
+        # invisible to release-please's updaters. See _FURL_CTX_PIN in
+        # pretool_pipe.py.
+        _PRETOOL_SCRIPT,
+        _SKILL_MD,
+        _PLUGIN_README,
+        # SECURITY.md's supply-chain section documents the plugin's `uv run` pin
+        # twice (once as a plain example, once in the hardening-path paragraph);
+        # like the SKILL.md/README prose pins, release-please cannot rewrite either
+        # and nothing else in the guard suite reads this file, so a stale example
+        # here was invisible to CI until this test.
+        _SECURITY_MD,
+    ],
+    ids=lambda p: p.name,
+)
+def test_baked_and_prose_pins_match_pyproject_version(path) -> None:
+    pins = _pins_in(_read(path))
+    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {path}"
     assert all(pin == _pyproject_version() for pin in pins), (
-        f"{_PRETOOL_SCRIPT} pin(s) {pins} != pyproject version {_pyproject_version()!r}"
-    )
-
-
-def test_skill_prose_pin_matches_pyproject_version() -> None:
-    pins = _pins_in(_read(_SKILL_MD))
-    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_SKILL_MD}"
-    assert all(pin == _pyproject_version() for pin in pins), (
-        f"{_SKILL_MD} prose pin(s) {pins} != pyproject version {_pyproject_version()!r}"
-    )
-
-
-def test_plugin_readme_prose_pins_match_pyproject_version() -> None:
-    pins = _pins_in(_read(_PLUGIN_README))
-    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_PLUGIN_README}"
-    assert all(pin == _pyproject_version() for pin in pins), (
-        f"{_PLUGIN_README} prose pin(s) {pins} != pyproject version {_pyproject_version()!r}"
-    )
-
-
-def test_security_md_prose_pins_match_pyproject_version() -> None:
-    # SECURITY.md's supply-chain section documents the plugin's `uv run` pin twice
-    # (once as a plain example, once in the hardening-path paragraph); like the
-    # SKILL.md/README prose pins above, release-please cannot rewrite either and
-    # nothing else in the guard suite reads this file, so a stale example here was
-    # invisible to CI until this test.
-    pins = _pins_in(_read(_SECURITY_MD))
-    assert pins, f"no furl-ctx[mcp]==X.Y.Z pin found in {_SECURITY_MD}"
-    assert all(pin == _pyproject_version() for pin in pins), (
-        f"{_SECURITY_MD} prose pin(s) {pins} != pyproject version {_pyproject_version()!r}"
+        f"{path} pin(s) {pins} != pyproject version {_pyproject_version()!r}"
     )
 
 

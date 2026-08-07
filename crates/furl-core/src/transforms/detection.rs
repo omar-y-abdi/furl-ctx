@@ -19,32 +19,25 @@
 //! backstop in `furl_ctx/transforms/content_router.py`.) The dispatch
 //! is the unidiff parser + fallthrough only.
 //!
-//! # SearchResults / BuildOutput
+//! # Search / build output
 //!
 //! The retired regex detector recognized grep-style search output
-//! (`file:line:`) and CMake/log output as their own [`ContentType`]
-//! variants. The deterministic chain has no equivalent labels, so
-//! these now route to [`ContentType::PlainText`] — we prefer
-//! passthrough to misroute. If a benchmark later shows real
-//! compression loss on grep/build outputs, we add a focused detector
-//! for those specifically; not preemptively.
+//! (`file:line:`) and CMake/log output as their own content types. The
+//! deterministic chain has no equivalent labels, so these now route to
+//! [`ContentType::PlainText`] — we prefer passthrough to misroute. If a
+//! benchmark later shows real compression loss on grep/build outputs,
+//! we add a focused detector for those specifically; not preemptively.
 
 use serde_json::{Map, Value};
 
 use crate::transforms::unidiff_detector::is_diff;
 
-/// Content types recognized by detection. String tags match Python's
-/// `ContentType` enum values 1:1 (`furl_ctx/transforms/content_detector.py`);
-/// the PyO3 boundary ships the tag and the Python wrapper rebuilds its
-/// enum from it. The Rust chain itself only ever produces
-/// [`ContentType::GitDiff`] or [`ContentType::PlainText`]; the other
-/// variants exist to keep the cross-language tag contract total.
+/// Content types the detection chain can produce. String tags match
+/// Python's `ContentType` enum values (`furl_ctx/transforms/
+/// content_detector.py`); the PyO3 boundary ships the tag and the
+/// Python wrapper rebuilds its enum from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentType {
-    JsonArray,
-    SourceCode,
-    SearchResults,
-    BuildOutput,
     GitDiff,
     PlainText,
 }
@@ -53,10 +46,6 @@ impl ContentType {
     /// Stable string tag — matches Python's `ContentType.<NAME>.value`.
     pub fn as_str(&self) -> &'static str {
         match self {
-            ContentType::JsonArray => "json_array",
-            ContentType::SourceCode => "source_code",
-            ContentType::SearchResults => "search",
-            ContentType::BuildOutput => "build",
             ContentType::GitDiff => "diff",
             ContentType::PlainText => "text",
         }
@@ -169,8 +158,8 @@ mod tests {
     fn build_log_output_routes_to_plain_text() {
         // Build/test log output has no explicit detector on the Rust
         // side and is not a diff, so the deterministic chain routes it
-        // to the safe-default PlainText passthrough rather than a
-        // degenerate type like JsonArray or GitDiff.
+        // to the safe-default PlainText passthrough rather than the
+        // degenerate GitDiff.
         let log = "[INFO] Building target foo\n\
                    [WARN] Deprecated API usage in foo.cpp:45\n\
                    [ERROR] Compilation failed: undefined reference\n";

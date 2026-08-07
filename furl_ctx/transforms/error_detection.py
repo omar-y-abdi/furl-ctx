@@ -1,8 +1,8 @@
 """Centralized error/importance detection — thin Python shim over Rust.
 
-Phase 3e.1 ported the keyword data + scoring logic to
+The keyword data + scoring logic live in
 ``crates/furl-core/src/signals/`` (see the trait architecture in
-``signals/README.md``). This module is now a compatibility surface that:
+``signals/README.md``). This module is a compatibility surface that:
 
 1. Pulls the keyword tables out of Rust via
    ``furl_ctx._core.keyword_registry_snapshot()`` so the Python side
@@ -11,31 +11,26 @@ Phase 3e.1 ported the keyword data + scoring logic to
 2. Re-exports the legacy ``frozenset`` and compiled-regex names
    (``ERROR_KEYWORDS``, ``ERROR_PATTERN``, ``PRIORITY_PATTERNS_TEXT``,
    …) so the existing callers in ``search_compressor``,
-   ``diff_compressor``, and ``intelligent_context`` keep working
-   without same-PR refactors.
+   ``diff_compressor``, and ``intelligent_context`` keep working.
 3. Delegates ``content_has_error_indicators`` to the Rust
    aho-corasick automaton.
 
-Caller migration to the trait API happens in the per-compressor port
-PRs that follow (Phase 3e.2 onward); this shim is the bridge until
-those land.
+# Keyword-set invariants
 
-# Bug fixes baked in
-
-The Rust implementation fixes two bugs the Python originals carried:
-
-* ``ERROR_KEYWORDS`` listed ``timeout``/``abort``/``denied``/
-  ``rejected`` but ``ERROR_PATTERN`` regex omitted them. The
-  recompiled pattern below now includes all four — lines like
-  ``"FATAL: timeout connecting upstream"`` now flag as errors via
-  the regex too.
-* ``token`` was dropped from ``SECURITY_KEYWORDS`` (it false-positived
-  on every reference to LLM tokens — input_tokens, tokens_saved, …).
+* ``ERROR_PATTERN`` must cover every word in ``ERROR_KEYWORDS`` —
+  including ``timeout``/``abort``/``denied``/``rejected`` — so lines
+  like ``"FATAL: timeout connecting upstream"`` flag as errors via
+  the regex too. The pattern below is recompiled from the keyword
+  list precisely so the two cannot diverge.
+* ``token`` is deliberately NOT in ``SECURITY_KEYWORDS``: it
+  false-positives on every reference to LLM tokens — input_tokens,
+  tokens_saved, ….
 """
 
 from __future__ import annotations
 
 import re
+from itertools import islice
 from typing import cast
 
 from furl_ctx._core import (
@@ -163,13 +158,8 @@ def content_has_strong_error_indicators(text: str) -> bool:
     error lines.
     """
     lowered = text.lower()
-    hits = 0
-    for keyword in ERROR_INDICATOR_KEYWORDS:
-        if keyword in lowered:
-            hits += 1
-            if hits >= 2:
-                return True
-    return False
+    # islice stops the scan at the second hit — no full pass over the keywords.
+    return sum(1 for _ in islice((kw for kw in ERROR_INDICATOR_KEYWORDS if kw in lowered), 2)) >= 2
 
 
 __all__ = [

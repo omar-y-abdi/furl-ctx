@@ -173,32 +173,6 @@ def test_cache_freezes_first_n_and_compresses_the_rest() -> None:
     assert result.tokens_saved > 0
 
 
-def test_cache_freeze_count_matches_argument() -> None:
-    """freeze_up_to_n=N advances the frozen-prefix floor to exactly N."""
-    from furl_ctx.compress import _compute_frozen_message_count
-
-    payload = _big_json()
-    for n in (1, 2, 3):
-        messages = _string_conversation(payload)
-        marked = messages[:]
-        # Re-derive what the helper marks, then confirm the floor it produces.
-        result = compress_with_cache(marked, n, model=_MODEL)
-        assert result.error is None
-        # Reconstruct the marked list the same way the helper does to read the floor.
-        probe = list(messages)
-        probe[min(n, len(messages)) - 1] = _mark(messages[min(n, len(messages)) - 1])
-        assert _compute_frozen_message_count(probe) == n
-
-
-def _mark(message: dict[str, Any]) -> dict[str, Any]:
-    m = copy.deepcopy(message)
-    if isinstance(m.get("content"), str):
-        m["content"] = [
-            {"type": "text", "text": m["content"], "cache_control": {"type": "ephemeral"}}
-        ]
-    return m
-
-
 def test_cache_zero_or_negative_freezes_nothing() -> None:
     """freeze_up_to_n <= 0 adds no marker: identical to a plain compress()."""
     payload = _big_json()

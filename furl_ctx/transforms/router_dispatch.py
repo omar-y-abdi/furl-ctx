@@ -4,8 +4,7 @@ Owns the body of :meth:`ContentRouter._apply_strategy_to_content`: the
 per-strategy compressor dispatch (SMART_CRUSHER / SEARCH / LOG / DIFF /
 TEXT / PASSTHROUGH) and the no-savings fallback chain (SMART_CRUSHER -> LOG,
 then passthrough). The TEXT arm dispatches to the deterministic
-TextCrusher (Engine P2-11 — the passthrough that replaced the excised ML
-text compressor is itself replaced); when the arm is gated off
+TextCrusher (Engine P2-11); when the arm is gated off
 (``enable_text_crusher=False`` or ``lossless_only``) it resolves to
 passthrough, so the dispatch stays total.
 
@@ -384,9 +383,7 @@ class StrategyDispatcher:
             ):
                 if compressed_tokens > original_tokens:
                     # Never ship an EXPANDED result — revert to the original
-                    # bytes. (Historically the not-installed ML fallback
-                    # returned the original here and won the token
-                    # comparison; the revert is now explicit.)
+                    # bytes.
                     strategy_chain.append(CompressionStrategy.PASSTHROUGH.value)
                     compressed = content
                     compressed_tokens = original_tokens

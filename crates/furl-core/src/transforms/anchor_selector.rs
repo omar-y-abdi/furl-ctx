@@ -396,22 +396,6 @@ impl RegionProfile {
 /// - 0.3: content length (relative to the corpus).
 /// - 0.3: structural uniqueness (rare/missing fields).
 ///
-/// Direct port of `calculate_information_score`
-/// (Python `anchor_selector.py:132-175`). Thin wrapper over
-/// [`RegionProfile`] — builds the region aggregates then scores `item`, so
-/// a single-item caller stays byte-identical while the hot region loop
-/// ([`AnchorSelector::select_by_density`]) reuses one profile across
-/// candidates.
-pub fn calculate_information_score(item: &Value, all_items: &[Value]) -> f64 {
-    if all_items.is_empty() {
-        return 0.0;
-    }
-    let Some(_) = item.as_object() else {
-        return 0.0;
-    };
-    RegionProfile::build(all_items).score(item)
-}
-
 /// Stringification used for uniqueness counting. Python:
 ///   `json.dumps(value, sort_keys=True) if not isinstance(value, str) else value`
 /// Mirror that exactly: bare strings stay bare; everything else uses the
@@ -1116,39 +1100,6 @@ mod tests {
             anchors.len() <= 3,
             "duplicate items should dedup: got {} anchors",
             anchors.len()
-        );
-    }
-
-    // ---------- information density helpers ----------
-
-    #[test]
-    fn info_score_zero_for_non_dict() {
-        let item = json!("string");
-        let all = vec![json!({"a": 1})];
-        assert_eq!(calculate_information_score(&item, &all), 0.0);
-    }
-
-    #[test]
-    fn info_score_in_zero_one_range() {
-        let item = json!({"a": 1, "b": 2});
-        let all: Vec<Value> = (0..10).map(|i| json!({"a": i})).collect();
-        let s = calculate_information_score(&item, &all);
-        assert!((0.0..=1.0).contains(&s));
-    }
-
-    #[test]
-    fn info_score_higher_for_unique_values() {
-        // Item with rare value should score higher than item with common.
-        let common: Vec<Value> = (0..10).map(|_| json!({"status": "ok"})).collect();
-        let mut all = common.clone();
-        all.push(json!({"status": "error"}));
-        let common_score = calculate_information_score(&common[0], &all);
-        let rare_score = calculate_information_score(&all[10], &all);
-        assert!(
-            rare_score > common_score,
-            "rare-value item should score higher: rare={}, common={}",
-            rare_score,
-            common_score
         );
     }
 }

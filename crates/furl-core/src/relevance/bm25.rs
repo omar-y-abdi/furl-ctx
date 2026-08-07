@@ -56,15 +56,6 @@ impl Default for BM25Scorer {
 }
 
 impl BM25Scorer {
-    pub fn new(k1: f64, b: f64, normalize_score: bool, max_score: f64) -> Self {
-        BM25Scorer {
-            k1,
-            b,
-            normalize_score,
-            max_score,
-        }
-    }
-
     /// Tokenize text per Python's `_tokenize`: lowercase + regex
     /// `findall`. Returns lowercase tokens in document order.
     fn tokenize(&self, text: &str) -> Vec<String> {
@@ -376,10 +367,5 @@ mod tests {
         // Even with similar BM25 raw scores, long_match adds +0.3.
         // We just assert long >= short here (bonus applies to long only).
         assert!(long.score >= short.score);
-    }
-
-    #[test]
-    fn is_available_is_true() {
-        assert!(scorer().is_available());
     }
 }

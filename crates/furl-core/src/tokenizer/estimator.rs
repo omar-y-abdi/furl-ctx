@@ -38,10 +38,6 @@ impl EstimatingCounter {
         );
         Self { chars_per_token }
     }
-
-    pub fn chars_per_token(&self) -> f64 {
-        self.chars_per_token
-    }
 }
 
 impl Tokenizer for EstimatingCounter {

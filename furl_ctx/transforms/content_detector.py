@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 
@@ -190,7 +192,7 @@ def _try_detect_json(content: str) -> DetectionResult | None:
     if not content.startswith("["):
         return None
 
-    try:
+    with suppress(json.JSONDecodeError):
         parsed = json.loads(content)
         if isinstance(parsed, list):
             # Check if it's a list of dicts (SmartCrusher compatible)
@@ -206,8 +208,6 @@ def _try_detect_json(content: str) -> DetectionResult | None:
                 0.8,
                 {"item_count": len(parsed), "is_dict_array": False},
             )
-    except json.JSONDecodeError:
-        pass
 
     return None
 
@@ -244,14 +244,8 @@ def _try_detect_diff(content: str) -> DetectionResult | None:
     """
     lines = content.split("\n")[:500]
 
-    header_matches = 0
-    change_matches = 0
-
-    for line in lines:
-        if _DIFF_HEADER_PATTERN.match(line):
-            header_matches += 1
-        if _DIFF_CHANGE_PATTERN.match(line):
-            change_matches += 1
+    header_matches = sum(bool(_DIFF_HEADER_PATTERN.match(line)) for line in lines)
+    change_matches = sum(bool(_DIFF_CHANGE_PATTERN.match(line)) for line in lines)
 
     if header_matches == 0:
         return None
@@ -302,10 +296,9 @@ def _try_detect_search(content: str) -> DetectionResult | None:
     if not lines:
         return None
 
-    matching_lines = 0
-    for line in lines:
-        if line.strip() and _SEARCH_RESULT_PATTERN.match(line):
-            matching_lines += 1
+    matching_lines = sum(
+        bool(line.strip() and _SEARCH_RESULT_PATTERN.match(line)) for line in lines
+    )
 
     if matching_lines == 0:
         return None
@@ -379,21 +372,21 @@ def _try_detect_code(content: str) -> DetectionResult | None:
     if not lines:
         return None
 
-    language_scores: dict[str, int] = {}
-
-    for line in lines:
-        for lang, patterns in _CODE_PATTERNS.items():
-            for pattern in patterns:
-                if pattern.match(line):
-                    language_scores[lang] = language_scores.get(lang, 0) + 1
-                    break  # One pattern per language per line
+    # ``any`` short-circuits on the first hit: one increment per language per
+    # line.
+    language_scores = Counter(
+        lang
+        for line in lines
+        for lang, patterns in _CODE_PATTERNS.items()
+        if any(pattern.match(line) for pattern in patterns)
+    )
 
     if not language_scores:
         return None
 
-    # Find best matching language
-    best_lang = max(language_scores, key=lambda k: language_scores[k])
-    best_score = language_scores[best_lang]
+    # Find best matching language. ``most_common`` breaks ties toward the
+    # first-inserted language.
+    best_lang, best_score = language_scores.most_common(1)[0]
 
     # Need at least 3 pattern matches to be confident
     if best_score < 3:

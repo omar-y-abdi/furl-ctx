@@ -291,10 +291,6 @@ impl SearchCompressor {
         }
     }
 
-    pub fn config(&self) -> &SearchCompressorConfig {
-        &self.config
-    }
-
     /// Compress without persisting CCR. Returns the parity-equal result
     /// plus sidecar stats.
     pub fn compress(

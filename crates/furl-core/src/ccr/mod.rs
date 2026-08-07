@@ -15,26 +15,28 @@
 //!
 //! # Backend
 //!
-//! - [`backends::InMemoryCcrStore`] — process-local, sharded `DashMap`.
+//! - [`InMemoryCcrStore`] — process-local, sharded `DashMap`.
 //!   Constructed once at startup, shared across worker threads behind an
 //!   `Arc`; entries are lost on restart. CCR recovery is scoped to the
 //!   process / request window (see `CCR-RETENTION.md`).
 //!
 //! [`CompressionStore`]: ../../../../furl_ctx/cache/compression_store.py
 
-pub mod backends;
+pub mod in_memory;
 mod markers;
 pub(crate) mod persist;
 
 use std::time::Duration;
 
-pub use backends::InMemoryCcrStore;
+pub use in_memory::InMemoryCcrStore;
 pub(crate) use markers::{
     marker_for_diff, marker_for_opaque, marker_for_rows_offloaded, RetrieveUnit,
 };
 
 /// Pluggable CCR storage backend. `Send + Sync` so it can sit behind an
 /// `Arc` and be shared across threads in the engine.
+// `len` is a telemetry counter, not a container length — no `is_empty`.
+#[allow(clippy::len_without_is_empty)]
 pub trait CcrStore: Send + Sync {
     /// Stash `payload` under `hash`. The store is content-addressed, so
     /// `hash` should uniquely determine `payload`:
@@ -60,18 +62,6 @@ pub trait CcrStore: Send + Sync {
     /// store) may return 0 — see backend-specific docs. (The in-memory
     /// store is the ONLY Rust backend today; no remote one ships.)
     fn len(&self) -> usize;
-
-    /// Capacity bound of the backend — the maximum number of live
-    /// entries before eviction kicks in. Producers use this to bound
-    /// how many entries a single persist may write: the SmartCrusher
-    /// skips per-row granular chunking when the chunk count would flood
-    /// the store and evict whole-blob entries the SAME document's
-    /// markers still reference (silent-loss class COR-4).
-    fn capacity(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// Default capacity — matches Python's `CompressionStore` default.

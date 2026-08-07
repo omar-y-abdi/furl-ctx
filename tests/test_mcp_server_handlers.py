@@ -42,7 +42,10 @@ from furl_ctx.ccr import mcp_server  # noqa: E402
 from furl_ctx.ccr.mcp_server import (  # noqa: E402
     CCR_TOOL_NAME,
     COMPRESS_TOOL_NAME,
+    LIST_TOOL_NAME,
+    PURGE_TOOL_NAME,
     READ_TOOL_NAME,
+    SEARCH_TOOL_NAME,
     STATS_TOOL_NAME,
     FurlMCPServer,
 )
@@ -306,11 +309,23 @@ async def test_call_tool_routes_and_rejects_unknown(server) -> None:
     assert again["original_content"] == "round trip me"
 
 
-def test_read_tool_name_is_distinct_constant() -> None:
-    # Guard the four tool-name constants are distinct (a copy/paste collision
-    # would silently misroute call_tool).
-    names = {COMPRESS_TOOL_NAME, CCR_TOOL_NAME, STATS_TOOL_NAME, READ_TOOL_NAME}
-    assert len(names) == 4
+def test_tool_names_are_distinct_constants() -> None:
+    # Every tool-name constant ``call_tool``'s dispatch chain (mcp_server.py:2236+)
+    # compares against must be distinct: the chain is an if/elif on ``name``, so a
+    # copy/paste collision between ANY two silently misroutes the later one to the
+    # earlier one's handler. Only four of the seven were guarded; furl_purge,
+    # furl_search and furl_list have no test driving call_tool by name either, so a
+    # collision among them was invisible.
+    names = [
+        COMPRESS_TOOL_NAME,
+        CCR_TOOL_NAME,
+        STATS_TOOL_NAME,
+        PURGE_TOOL_NAME,
+        SEARCH_TOOL_NAME,
+        LIST_TOOL_NAME,
+        READ_TOOL_NAME,
+    ]
+    assert len(set(names)) == len(names) == 7, f"tool-name collision among {names}"
 
 
 # ─── COR-32 / COR-51 / COR-54 — retrieve-plane data-integrity regressions ───

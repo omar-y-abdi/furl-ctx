@@ -1,28 +1,27 @@
 """Rust-backed log/build-output compressor.
 
-Phase 3e.5 ported the implementation to
+The implementation lives in
 `crates/furl-core/src/transforms/log_compressor.rs`. This module
-is now a thin shim that:
+is a thin shim that:
 
 1. Keeps the public dataclass and enum surface (`LogLevel`,
    `LogFormat`, `LogLine`, `LogCompressorConfig`,
    `LogCompressionResult`) so existing call sites (`ContentRouter`,
    tests) don't change.
 2. Routes `LogCompressor.compress()` entirely through the Rust
-   implementation, picking up the bug fixes (chained-exception trace
-   survival, conservative warning dedupe, loud CCR failures). The Rust
+   implementation. The Rust
    crate owns format detection, line classification/scoring, dedupe,
    selection, and output formatting; their behavior is pinned by the
    `log_compressor.rs` unit tests.
 
-# Bug fixes the Rust port carries (and this shim therefore inherits)
+# Behaviors the Rust implementation guarantees
 
-* **Stack-trace state machine.** Pre-3e.5 Python terminated on any
-  blank line, dropping mid-trace lines from chained-exception traces.
+* **Stack-trace state machine.** Terminating on any blank line drops
+  mid-trace lines from chained-exception traces.
   Rust dispatches per language flavor so blank lines stay inside
   Python tracebacks.
-* **Conservative dedupe.** Pre-3e.5 normalised digits/paths/hex
-  globally, collapsing distinct error categories that shared a
+* **Conservative dedupe.** Normalising digits/paths/hex
+  globally collapses distinct error categories that share a
   trailing variable shape. Rust splits on the first `:`/`=` and only
   normalises the trailing region — message identifiers stay distinct.
 * **Loud CCR failures.** Storage failures are logged at warning level
@@ -153,11 +152,9 @@ def _format_from_str(name: str) -> LogFormat:
 class LogCompressor:
     """Rust-backed log compressor.
 
-    Drop-in replacement for the retired Python class: `compress()`
-    delegates to Rust end-to-end. The retired class's internal parsing
-    helpers were NOT preserved; the only Python-side additions are the
-    CCR persistence bridge (`_persist_to_python_ccr`) and the
-    passthrough result builder.
+    `compress()` delegates to Rust end-to-end; the only Python-side
+    additions are the CCR persistence bridge (`_persist_to_python_ccr`)
+    and the passthrough result builder.
     """
 
     def __init__(self, config: LogCompressorConfig | None = None) -> None:
@@ -198,8 +195,8 @@ class LogCompressor:
     # ─── Public API ─────────────────────────────────────────────────────
 
     def compress(self, content: str, context: str = "", bias: float = 1.0) -> LogCompressionResult:
-        # `context` is unused upstream and unused here (Python original
-        # also didn't use it). Kept in the signature for drop-in compat.
+        # `context` is unused upstream and unused here.
+        # Kept in the signature for drop-in compat.
         del context
         rust_result = self._rust.compress(content, bias)
         cache_key: str | None = rust_result.cache_key

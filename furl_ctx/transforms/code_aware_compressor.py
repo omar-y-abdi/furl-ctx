@@ -1,12 +1,10 @@
-"""AST-verified, CCR-backed code compression (Engine P2-12) — OPT-IN.
+"""AST-verified, CCR-backed code compression — OPT-IN.
 
-Restored from the archived pre-excision module (``archive/headroom/
-transforms/code_compressor.py``) as a gated capability: tree-sitter parses
+A gated capability: tree-sitter parses
 source code into an AST, function bodies are truncated statement-by-
 statement under a relevance-weighted line budget, and the render ships
 ONLY if it still parses and the FULL ORIGINAL is retrievable behind the
-emitted marker. This is distinct from the retired ast-grep code path
-(owner decision Q3) — different engine, different guarantees.
+emitted marker.
 
 Gating (default behavior unchanged):
 
@@ -56,6 +54,7 @@ import hashlib
 import logging
 import re
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -331,12 +330,8 @@ _LANGUAGE_PREFILTER: dict[CodeLanguage, list[re.Pattern[str]]] = {
 
 def _count_error_nodes(node: Any) -> int:
     """Count ERROR and MISSING nodes in a tree-sitter AST."""
-    count = 0
-    if node.type == "ERROR" or node.is_missing:
-        count += 1
-    for child in node.children:
-        count += _count_error_nodes(child)
-    return count
+    own = 1 if node.type == "ERROR" or node.is_missing else 0
+    return own + sum(map(_count_error_nodes, node.children))
 
 
 def detect_language(code: str) -> tuple[CodeLanguage, float]:
@@ -790,9 +785,7 @@ class CodeAwareCompressor:
             body_line_counts[qname] = max(1, len(node_text.split("\n")) - 2)
 
         # Reference counts: subtract definition occurrences
-        short_name_def_count: dict[str, int] = {}
-        for short in bare_names.values():
-            short_name_def_count[short] = short_name_def_count.get(short, 0) + 1
+        short_name_def_count = Counter(bare_names.values())
 
         ref_counts: dict[str, int] = {}
         for qname in definitions:
@@ -1098,11 +1091,7 @@ class CodeAwareCompressor:
             return node_text
 
         # Find the body node using AST (not string scanning)
-        body_node = None
-        for child in node.children:
-            if child.type in lang_config.body_node_types:
-                body_node = child
-                break
+        body_node = next((c for c in node.children if c.type in lang_config.body_node_types), None)
 
         if body_node is None:
             return node_text
@@ -1337,11 +1326,7 @@ class CodeAwareCompressor:
         node_text = "\n".join(node_lines)
 
         # Find the body node
-        body_node = None
-        for child in node.children:
-            if child.type in lang_config.body_node_types:
-                body_node = child
-                break
+        body_node = next((c for c in node.children if c.type in lang_config.body_node_types), None)
 
         if body_node is None:
             return node_text
@@ -1525,20 +1510,14 @@ def _make_omitted_comment(
 
 def _detect_indent(lines: list[str]) -> str:
     """Detect the indentation used in a list of code lines."""
-    for line in lines:
-        if line.strip():
-            return line[: len(line) - len(line.lstrip())]
-    return "    "
+    return next((line[: len(line) - len(line.lstrip())] for line in lines if line.strip()), "    ")
 
 
 def _has_syntax_issues(node: Any) -> bool:
     """Check if AST contains ERROR or MISSING nodes."""
     if node.type == "ERROR" or node.is_missing:
         return True
-    for child in node.children:
-        if _has_syntax_issues(child):
-            return True
-    return False
+    return any(map(_has_syntax_issues, node.children))
 
 
 __all__ = [

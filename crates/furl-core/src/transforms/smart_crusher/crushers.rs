@@ -185,9 +185,10 @@ pub fn crush_string_array(
                 break;
             }
             if !keep_indices.contains(&i) {
-                if !seen.contains(items[i]) {
+                // `insert` reports whether the value was new — same
+                // predicate the `contains` probe computed.
+                if seen.insert(items[i]) {
                     keep_indices.insert(i);
-                    seen.insert(items[i]);
                 } else {
                     dedup_count += 1;
                 }
@@ -329,9 +330,7 @@ pub fn crush_number_array(
             if keep_indices.len() >= cap {
                 break;
             }
-            if !keep_indices.contains(&i) {
-                keep_indices.insert(i);
-            }
+            keep_indices.insert(i);
             i += stride;
         }
     }

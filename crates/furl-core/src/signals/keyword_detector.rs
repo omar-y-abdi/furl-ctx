@@ -233,10 +233,6 @@ impl KeywordDetector {
         self.indicators.is_match(text)
     }
 
-    pub fn registry(&self) -> &KeywordRegistry {
-        &self.registry
-    }
-
     fn match_in_context(
         &self,
         line: &str,

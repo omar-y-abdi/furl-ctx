@@ -256,10 +256,6 @@ impl DiffCompressor {
         Self { config }
     }
 
-    pub fn config(&self) -> &DiffCompressorConfig {
-        &self.config
-    }
-
     /// Compress `content`. `context` is an optional user-query string used
     /// for relevance scoring when `max_hunks_per_file` fires; pass `""` if
     /// not applicable. Parity-only API: discards the granular sidecar
@@ -954,25 +950,18 @@ fn score_hunks(files: &mut [DiffFile], context: &str) {
 /// SOMETHING to display, and the fallbacks can't accidentally match a
 /// lockfile basename check because they carry their prefixes.
 fn file_display_path(file: &DiffFile) -> String {
-    if let Some(caps) = diff_git_regex().captures(&file.header) {
-        if let Some(m) = caps.get(2) {
-            return m.as_str().to_string();
-        }
-    }
-    if let Some(caps) = diff_combined_regex().captures(&file.header) {
-        if let Some(m) = caps.get(1) {
-            return m.as_str().to_string();
-        }
-    }
-    if let Some(caps) = diff_cc_regex().captures(&file.header) {
-        if let Some(m) = caps.get(1) {
-            return m.as_str().to_string();
-        }
-    }
-    if let Some(rest) = file.new_file.strip_prefix("+++ b/") {
-        return rest.to_string();
-    }
-    file.header.clone()
+    // `or_else` keeps the fall-through lazy: a later regex only runs
+    // when every earlier one missed, same as the `return`-on-hit chain.
+    let capture = |re: &Regex, group: usize| {
+        re.captures(&file.header)
+            .and_then(|caps| caps.get(group))
+            .map(|m| m.as_str().to_string())
+    };
+    capture(diff_git_regex(), 2)
+        .or_else(|| capture(diff_combined_regex(), 1))
+        .or_else(|| capture(diff_cc_regex(), 1))
+        .or_else(|| file.new_file.strip_prefix("+++ b/").map(str::to_string))
+        .unwrap_or_else(|| file.header.clone())
 }
 
 /// True when the path's basename is one of [`NOISE_LOCKFILE_BASENAMES`].
@@ -1047,11 +1036,7 @@ fn select_hunks(hunks: Vec<DiffHunk>, max_per_file: usize) -> (Vec<DiffHunk>, Ve
     let mut indexed: Vec<(usize, DiffHunk)> = hunks.into_iter().enumerate().collect();
 
     let first = indexed.remove(0);
-    let last = if !indexed.is_empty() {
-        Some(indexed.pop().unwrap())
-    } else {
-        None
-    };
+    let last = indexed.pop();
     let middle: Vec<(usize, DiffHunk)> = indexed;
 
     let remaining_slots = if last.is_some() {
@@ -1102,14 +1087,11 @@ fn extract_line_number(header: &str) -> usize {
     // The previous implementation captured group(1) of the hunk-header
     // regex, which was the line number for `@@` only; under the new combined
     // diff regex, group(1) is the `@`-prefix.
-    if let Some(caps) = hunk_new_range_regex().captures(header) {
-        if let Some(m) = caps.get(1) {
-            if let Ok(n) = m.as_str().parse::<usize>() {
-                return n;
-            }
-        }
-    }
-    0
+    hunk_new_range_regex()
+        .captures(header)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 // ─── Context trimming ──────────────────────────────────────────────────────

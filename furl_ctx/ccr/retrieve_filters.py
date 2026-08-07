@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from itertools import chain
 from typing import Any, TypeGuard
 
 from furl_ctx.ccr.compress_modes import (
@@ -371,8 +372,7 @@ def _parse_select(arguments: dict[str, Any], *, fields_present: bool) -> _Select
     (``fields_present``): a select without an explicit ``limit`` defaults to
     :data:`_DEFAULT_SELECT_LIMIT`, while a ``fields`` projection stays unbounded
     unless a ``limit`` is given. A ``limit`` with neither a ``select_field`` nor
-    ``fields`` (nothing to bound) is a truthful ``FilterError`` — no longer the
-    old "select_field is required" message that misdescribed the real constraint.
+    ``fields`` (nothing to bound) is a truthful ``FilterError``.
     """
     field_raw = arguments.get("select_field")
     equals_present = "select_equals" in arguments
@@ -752,11 +752,9 @@ def _project_fields(
             f"is a JSON {_json_kind(parsed)}"
         )
 
-    projected: list[dict[str, Any]] = []
-    for element in parsed:
-        if not isinstance(element, dict):
-            continue
-        projected.append(_project_row(element, fields))
+    projected: list[dict[str, Any]] = [
+        _project_row(element, fields) for element in parsed if isinstance(element, dict)
+    ]
 
     matched_count = len(projected)
     if limit is not None and matched_count > limit:
@@ -895,9 +893,8 @@ def _absent_select_field(field: str, rows: list[dict[str, Any]]) -> AbsentSelect
     :func:`_cap_known_fields` so the hint stays small and safe to render; the
     requested ``field`` is sanitized the same way before it is echoed back.
     """
-    known: set[str] = set()
-    for row in rows:
-        known.update(row.keys())
+    # Iterating a dict yields its keys, so this is the union of the rows' keys.
+    known: set[str] = set(chain.from_iterable(rows))
     if field in known:
         return None
     shown, elided = _cap_known_fields(sorted(known))

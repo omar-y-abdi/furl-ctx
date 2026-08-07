@@ -370,13 +370,7 @@ def _pattern_lines(raw: str) -> list[str]:
             return []
     else:
         lines = raw.splitlines()
-    out: list[str] = []
-    for line in lines:
-        text = line.strip()
-        if not text or text.startswith("#"):
-            continue
-        out.append(text)
-    return out
+    return [text for line in lines if (text := line.strip()) and not text.startswith("#")]
 
 
 def _compile(patterns: list[str]) -> list[tuple[str, re.Pattern[str]]]:

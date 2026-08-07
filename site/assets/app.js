@@ -122,7 +122,6 @@
   function buildCode(sample) {
     var code = el("div", "code");
     var lines = sample.before_lines;
-    var bands = [];
     var i = 0, n = lines.length;
     var largest = null, largestLen = -1;
     while (i < n) {
@@ -141,7 +140,6 @@
         }
         band.appendChild(bandInner);
         code.appendChild(band);
-        bands.push(band);
         if (count > largestLen) { largestLen = count; largest = band; }
       }
     }
@@ -243,7 +241,6 @@
       ' lines</span><span class="lbl-after">after furl</span>';
     stage.appendChild(labels);
     var viewport = el("div", "viewport");
-    viewport.setAttribute("data-mode", sample.fold_mode);
     viewport.appendChild(buildCode(sample));
     stage.appendChild(viewport);
     panel.appendChild(stage);

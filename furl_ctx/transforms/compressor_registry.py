@@ -7,7 +7,7 @@ TextCrusher, and CodeAwareCompressor.
 
 Each factory is a plain lazy-init-and-cache: it reads only from the router's
 ``ContentRouterConfig`` and memoizes the constructed compressor in a private
-slot, which is exactly why they extract cleanly out of the router god-object.
+slot.
 
 This registry is INTERNAL — it is not part of ``furl_ctx.__all__``. The
 ``ContentRouter`` holds one instance (``self._registry``) and its public
@@ -45,7 +45,7 @@ class CompressorRegistry:
     Construct with the router's :class:`ContentRouterConfig`; each ``get_*``
     method lazy-imports and instantiates its compressor on first call and
     caches it for subsequent calls. Missing optional dependencies are handled
-    exactly as before (debug log + ``None`` return) so callers keep their
+    with a debug log + ``None`` return so callers keep their
     graceful-skip behaviour — the ``| None`` in a getter's return type marks
     exactly the getters with that failure mode (SmartCrusher / Search / Log);
     the Rust-backed hard imports (Diff / Text) and the pure-Python
@@ -114,8 +114,8 @@ class CompressorRegistry:
         return self._log_compressor
 
     def get_diff_compressor(self) -> DiffCompressor:
-        """Get DiffCompressor (lazy load). Rust-only — Python implementation
-        retired in Stage 3b. The wheel (`furl_ctx._core`) is a hard import.
+        """Get DiffCompressor (lazy load). Rust-only — the wheel
+        (`furl_ctx._core`) is a hard import.
         """
         if self._diff_compressor is None:
             from .diff_compressor import DiffCompressor
@@ -124,7 +124,7 @@ class CompressorRegistry:
         return self._diff_compressor
 
     def get_text_crusher(self) -> TextCrusher:
-        """Get TextCrusher (lazy load). Rust-only (Engine P2-11) — the
+        """Get TextCrusher (lazy load). Rust-only — the
         wheel (`furl_ctx._core`) is a hard import. Size floors and the
         CCR-or-passthrough discipline live in the compressor itself;
         `enable_text_crusher` / `lossless_only` gating happens in the
@@ -137,7 +137,7 @@ class CompressorRegistry:
         return self._text_crusher
 
     def get_code_aware_compressor(self) -> CodeAwareCompressor:
-        """Get CodeAwareCompressor (lazy load, Engine P2-12). Pure Python;
+        """Get CodeAwareCompressor (lazy load). Pure Python;
         the tree-sitter grammars are an OPTIONAL extra (`furl-ctx[code]`)
         imported lazily inside `compress()`, which fails open to
         passthrough when they are missing — so construction never gates

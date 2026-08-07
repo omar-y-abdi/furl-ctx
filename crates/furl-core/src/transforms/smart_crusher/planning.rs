@@ -36,7 +36,6 @@ use super::anchors::{extract_query_anchors, item_matches_anchors};
 use super::config::SmartCrusherConfig;
 use super::field_detect::detect_score_field_statistically;
 use super::field_role::compute_exclude_set;
-use super::hashing::hash_field_name;
 use super::orchestration::{prioritize_indices, PrioritizeParams};
 use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
 use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldStats, FieldType};
@@ -236,15 +235,21 @@ impl<'a> SmartCrusherPlanner<'a> {
     ) -> CompressionPlan {
         // Locate the highest-confidence score field. If none, fall back
         // to plan_smart_sample.
-        let mut score_field: Option<&str> = None;
-        let mut max_confidence = 0.0_f64;
-        for (name, stats) in &analysis.field_stats {
-            let (is_score, confidence) = detect_score_field_statistically(stats, items);
-            if is_score && confidence > max_confidence {
-                score_field = Some(name);
-                max_confidence = confidence;
-            }
-        }
+        // `is_score` implies `confidence >= 0.4`, so it subsumes the old
+        // `confidence > 0.0` seed. `.rev()` is load-bearing: `max_by`
+        // returns the LAST maximum, the old `confidence > max` kept the
+        // FIRST. `total_cmp` is safe here — `confidence` is a sum of
+        // literal constants clamped by `min(0.95)`, never NaN.
+        let score_field = analysis
+            .field_stats
+            .iter()
+            .filter_map(|(name, stats)| {
+                let (is_score, confidence) = detect_score_field_statistically(stats, items);
+                is_score.then_some((name, confidence))
+            })
+            .rev()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(name, _)| name.as_str());
 
         let Some(score_field) = score_field else {
             return self.plan_smart_sample(
@@ -396,17 +401,17 @@ impl<'a> SmartCrusherPlanner<'a> {
         keep.extend(detect_structural_outliers(items));
 
         // 3. Cluster by message-like field (highest unique_ratio > 0.3).
-        let mut message_field: Option<&str> = None;
-        let mut max_uniqueness = 0.0_f64;
-        for (name, stats) in &analysis.field_stats {
-            if stats.field_type == FieldType::String
-                && stats.unique_ratio > max_uniqueness
-                && stats.unique_ratio > 0.3
-            {
-                message_field = Some(name);
-                max_uniqueness = stats.unique_ratio;
-            }
-        }
+        // Same shape as the TopN score-field pick: `> 0.3` subsumes the
+        // `0.0` seed, `.rev()` restores first-wins tie-breaking, and
+        // `unique_ratio` is `unique_count / len` with `len >= 1`, so it is
+        // never NaN.
+        let message_field = analysis
+            .field_stats
+            .iter()
+            .filter(|(_, stats)| stats.field_type == FieldType::String && stats.unique_ratio > 0.3)
+            .rev()
+            .max_by(|a, b| a.1.unique_ratio.total_cmp(&b.1.unique_ratio))
+            .map(|(name, _)| name.as_str());
 
         if let Some(field) = message_field {
             plan.cluster_field = Some(field.to_string());
@@ -623,6 +628,28 @@ pub fn map_to_anchor_pattern(strategy: CompressionStrategy) -> DataPattern {
     }
 }
 
+/// SHA-256 of the UTF-8 bytes, hex-encoded, truncated to **8** chars.
+///
+/// Python equivalent: `hashlib.sha256(field_name.encode()).hexdigest()[:8]`.
+/// Rust is the SOLE owner of this hash — the Python `_hash_field_name`
+/// it was ported from no longer exists, so the unit tests below are the
+/// only thing pinning the digest. `preserve_fields` entries are stored
+/// as SHA-256[:8], so lookups silently miss if the truncation length
+/// drifts (an early version used `[:16]` and matched nothing).
+pub fn hash_field_name(field_name: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(field_name.as_bytes());
+    let digest = hasher.finalize();
+    // Truncate to first 8 hex chars (4 bytes of digest).
+    //
+    // Per-byte `{:02x}` (same pattern as walker.rs/compactor.rs/crusher.rs)
+    // instead of `format!("{:x}", digest)`: digest 0.11 returns
+    // `hybrid_array::Array`, which does not implement `LowerHex` (the old
+    // `GenericArray` did). Byte-identical output — `LowerHex` on the array
+    // was zero-padded per-byte hex, exactly what `{:02x}` produces.
+    digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
 /// Check if any of an item's preserve_field values matches the query.
 ///
 /// Direct port of `_item_has_preserve_field_match` (Python line 289-315).
@@ -663,11 +690,7 @@ pub fn item_has_preserve_field_match(
 }
 
 fn query_or_none(q: &str) -> Option<&str> {
-    if q.is_empty() {
-        None
-    } else {
-        Some(q)
-    }
+    (!q.is_empty()).then_some(q)
 }
 
 fn for_each_anomaly(
@@ -1104,5 +1127,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── hash_field_name (SHA-256[:8], pinned against Python) ──
+
+    #[test]
+    fn hash_field_name_matches_python_sha256_truncated_to_8() {
+        // Verified against Python: hashlib.sha256(b"customer_id").hexdigest()[:8]
+        assert_eq!(hash_field_name("customer_id"), "1e38d67d");
+        // hashlib.sha256(b"").hexdigest()[:8]
+        assert_eq!(hash_field_name(""), "e3b0c442");
+        // hashlib.sha256("café".encode()).hexdigest()[:8] — UTF-8 bytes
+        // for "café" are 63 61 66 c3 a9; must encode the same way.
+        assert_eq!(hash_field_name("café"), "850f7dc4");
+    }
+
+    #[test]
+    fn hash_field_name_is_deterministic_and_always_8_chars() {
+        assert_eq!(hash_field_name("test"), hash_field_name("test"));
+        // Must match Python's `[:8]`; if you change it, every
+        // preserve-field lookup silently misses.
+        assert_eq!(hash_field_name("a").len(), 8);
+        assert_eq!(hash_field_name(&"x".repeat(1000)).len(), 8);
     }
 }

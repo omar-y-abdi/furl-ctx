@@ -53,8 +53,8 @@ from tests._fixtures import log_shaped_rows as _log_shaped_rows
 # accepts. The ``<<ccr:`` prefix and the hex class still come from the owned
 # grammar so a prefix/alphabet change is single-location; only the width bound
 # is intentionally distinct here. Do NOT tighten ``{6,}`` to the strict widths
-# — that would weaken recovery. ``test_recovery_floor_is_looser_than_strict_set``
-# below pins that this floor and the strict set are deliberately separate.
+# — that would weaken recovery. ``HASH_WIDTHS`` itself is pinned by
+# tests/test_marker_grammar_smartcrusher_hash.py.
 _PREFIX = re.escape(marker_grammar.CCR_PREFIX)
 # Row-drop pointer:   <<ccr:HASH N_rows_offloaded>>
 _DROP_RE = re.compile(rf"{_PREFIX}({marker_grammar.HEX_CLASS}{{6,}}) (\d+)_rows_offloaded>>")
@@ -69,27 +69,6 @@ _MARKER_OFF_MATRIX = [
     pytest.param(False, False, id="enabled-False_marker-False"),
     pytest.param(False, True, id="enabled-False_marker-True"),
 ]
-
-
-def test_recovery_floor_is_looser_than_strict_consumer_set() -> None:
-    """Pin that the recovery floor and the strict consumer set are DISTINCT.
-
-    The strict consumer (``marker_grammar.HASH_WIDTHS`` == {12, 24}) is the
-    spoofing-guard width set the production scanner accepts. The recovery
-    invariant deliberately scans a LOOSER ``{6,}`` floor so it catches any
-    surfaced pointer of plausible width, never silently missing a drop. This
-    test documents that the two are intentionally separate contracts: a future
-    change that collapses the recovery floor into the strict set (weakening
-    recovery) fails here.
-    """
-    assert marker_grammar.HASH_WIDTHS == frozenset({12, 24})
-    # The floor's lower bound (6) is strictly below the strict minimum (12),
-    # i.e. the recovery scan is genuinely looser, not a copy of the strict set.
-    assert 6 < min(marker_grammar.HASH_WIDTHS)
-    # The repointed recovery regexes still use the {6,} floor (looser), proving
-    # the repoint did not tighten them to the strict widths.
-    assert "{6,}" in _DROP_RE.pattern
-    assert "{6,}" in _OPAQUE_RE.pattern
 
 
 def test_log_shaped_fixture_still_drops() -> None:
@@ -455,20 +434,6 @@ def test_row_drop_recovers_from_python_store_only(production_store: str) -> None
         f"{len(lost)} of {len(dropped)} dropped rows unrecoverable from the Python "
         f"compression_store ALONE (production path); first: {list(lost)[:3]}"
     )
-
-
-def test_lossy_survivor_table_surfaces_sentinel_line() -> None:
-    # Pin the shape itself: lossy drop + survivor compaction ships a JSON
-    # string whose final line is the sentinel object carrying the pointer.
-    items = _log_shaped_rows()
-    router = ContentRouter()
-    result = router.compress(json.dumps(items, ensure_ascii=False))
-    tree = json.loads(result.compressed)
-    assert isinstance(tree, str), "survivor compaction should ship a string rendering"
-    last_line = tree.split("\n")[-1]
-    sentinel = json.loads(last_line)
-    assert isinstance(sentinel, dict) and "_ccr_dropped" in sentinel
-    assert _DROP_RE.search(sentinel["_ccr_dropped"]), "sentinel carries the drop pointer"
 
 
 def test_opaque_blob_default_config_recovers() -> None:

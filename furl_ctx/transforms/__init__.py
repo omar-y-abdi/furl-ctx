@@ -81,7 +81,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # Base
     "Transform": ("furl_ctx.transforms.base", "Transform"),
     "TransformPipeline": ("furl_ctx.transforms.pipeline", "TransformPipeline"),
-    # Anchor selection
     # JSON compression
     "SmartCrusher": ("furl_ctx.transforms.smart_crusher", "SmartCrusher"),
     "SmartCrusherConfig": ("furl_ctx.transforms.smart_crusher", "SmartCrusherConfig"),
@@ -117,7 +116,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "furl_ctx.transforms.content_router",
         "RouterCompressionResult",
     ),
-    # API-12: bind the enum to its 115-line OWNER (router_policy), not the
+    # Bind the enum to its 115-line OWNER (router_policy), not the
     # content_router facade — touching CompressionStrategy must not import
     # the whole router + Rust chain. content_router re-exports the same
     # object, so both import paths resolve to one canonical enum.

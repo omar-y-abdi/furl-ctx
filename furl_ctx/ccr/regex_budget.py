@@ -35,8 +35,7 @@ Engine strategy (in order)
 
 Why the residual is closed at INGRESS (review B1)
 -------------------------------------------------
-The residual is not merely "a slow match", which is how an earlier revision of
-this docstring framed it. Because CPython's ``sre`` holds the GIL for the whole
+The residual is not merely "a slow match". Because CPython's ``sre`` holds the GIL for the whole
 match, a wedged worker thread starves the ENTIRE asyncio event loop: measured on
 the MCP server, 1 event-loop tick during a 1.48 s match where a healthy loop
 ticks ~30. Every session served by the process freezes until the match ends, and
@@ -112,6 +111,7 @@ import re
 import signal
 import threading
 import time
+from contextlib import suppress
 from enum import Enum
 from functools import lru_cache
 from types import FrameType
@@ -350,10 +350,9 @@ def search_within_budget(
     """
     engine = _compile_re2(compiled.pattern) if _re2_sees_same_flags(compiled) else None
     if engine is not None:
-        try:
+        # Fall back rather than fail the filter.
+        with suppress(Exception):
             return MatchVerdict.MATCH if engine.search(text) else MatchVerdict.NO_MATCH
-        except Exception:  # noqa: BLE001 - fall back rather than fail the filter
-            pass
     if _can_use_sigalrm():
         return _search_with_watchdog(compiled, text, budget_seconds)
     # THE RESIDUAL (see module docstring): off the main thread with no RE2 form of

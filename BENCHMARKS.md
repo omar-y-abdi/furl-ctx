@@ -21,8 +21,8 @@ reconciliation; the site and the `llms.txt` files point back here.
   for the low-entropy, highly repetitive case. Treat it as a headline ceiling, not
   a typical result. It is a lossless-reduction number: individual repetitive
   datasets in the tables below read a few points higher, and a CCR-offload
-  visibility figure like code@7 at 98.9% is a different metric, not lossless
-  in-place compression.
+  visibility figure like code@7 at 95.9% (`benchmarks/baseline_results.json`)
+  is a different metric, not lossless in-place compression.
 - **91.5% is the six-capture site subset.** It is the aggregate of the six real
   captures published on the site, which total 22,630 tokens in and 1,922 out.
   All six are repetitive machine output, so this figure sits near the ceiling
@@ -338,7 +338,7 @@ is the same bytes.
   lossless (more rows visible). Under `LosslessFirst` the legacy
   byte-ratio gate is kept (used by the lossless round-trip suite, which
   asserts the lossless rendering directly). The decision is in
-  `crusher.rs::crush_array` (lossless candidate + lossy candidate built,
+  `route.rs::crush_array` (lossless candidate + lossy candidate built,
   then `render_token_count` compares the two final model-visible
   strings). The lossless encoder/decoder and the canonical CCR hash are
   UNCHANGED — only the CHOICE between two existing renders changed.
@@ -467,7 +467,6 @@ fixtures untouched (`cross_message_dedup_enabled=True` config gate).
   has nothing real to measure against and Phase-4 already established
   the survivor set as the principled floor. Deferred until a real
   capture exercises the lossy path again.
-- `code@7` stays 0% — entropy floor; no fake gains.
 
 ## Phase-5: reversible column encodings — reconstruction-aware lossless (before → after)
 
@@ -546,7 +545,6 @@ disk 9/9).
 - `logs` residual (38.6% vs theoretical): commit hashes (true entropy,
   see above) and 90 distinct subjects (true content). The date and
   email/author columns — the structured redundancy — are now encoded.
-- `code@7` stays 0% — distinct source files at the entropy floor.
 - The recovery-invariant lossy-survivor fixture gained microsecond
   timestamps (realistic; strict encoder honestly refuses fractional
   seconds) so it keeps pinning the lossy sentinel path; its assertions
@@ -619,8 +617,6 @@ both regimes, even while the generic budget halves.
   it would flip lossless-routed arrays to lossy drops, breaking the
   pinned lossless round-trip suite (`test_lossless_column_encodings`) and
   the lossless-first design contract. Deferred as a product decision.
-- `code@7` stays 0% — distinct source files at the entropy floor; no
-  fake gains.
 
 ## Phase-3: lossless column encodings (before → after)
 

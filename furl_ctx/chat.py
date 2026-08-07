@@ -7,11 +7,7 @@ Two library-only helpers for compressing a full multi-turn conversation
   ``compress_user_messages=True`` (user turns often carry the biggest tool
   outputs across a conversation), ``protect_recent=2`` (keep the live tail
   intact), and the router's retrieval-feedback loop on (adaptive routing from
-  the CCR store's own retrieval bookkeeping). Feeding the FULL history through
-  this path is also what *activates* :class:`ReadLifecycleManager` — it is
-  already wired at ``router_engine`` and enabled by default, but stale/
-  superseded Read detection is a no-op on a single message and only has
-  something to do once multi-turn history is present.
+  the CCR store's own retrieval bookkeeping).
 
 * :func:`compress_with_cache` — a prompt-cache-aware helper: freeze the first
   ``freeze_up_to_n`` messages (the provider's stable prefix) so Furl never

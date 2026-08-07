@@ -218,25 +218,26 @@ class TestReinjectUnit:
         out = hook._reinject(bash_response("data"), "C")
         assert out["stderr"] == ""
 
-    def test_plain_string(self) -> None:
-        assert hook._reinject("big text", "C") == "C"
-
-    def test_content_str_wrapper(self) -> None:
-        assert hook._reinject({"content": "big", "meta": 1}, "C") == {"content": "C", "meta": 1}
-
-    def test_content_blocks_wrapper(self) -> None:
-        resp = {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}
-        assert hook._reinject(resp, "C") == {"content": [{"type": "text", "text": "C"}]}
-
-    def test_result_field(self) -> None:
-        assert hook._reinject({"result": "page", "url": "u"}, "C") == {"result": "C", "url": "u"}
-
-    def test_text_field(self) -> None:
-        assert hook._reinject({"text": "t", "k": 2}, "C") == {"text": "C", "k": 2}
-
-    def test_blocks_list(self) -> None:
-        resp = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
-        assert hook._reinject(resp, "C") == [{"type": "text", "text": "C"}]
+    @pytest.mark.parametrize(
+        ("shape", "expected"),
+        [
+            ("big text", "C"),
+            ({"content": "big", "meta": 1}, {"content": "C", "meta": 1}),
+            (
+                {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+                {"content": [{"type": "text", "text": "C"}]},
+            ),
+            ({"result": "page", "url": "u"}, {"result": "C", "url": "u"}),
+            ({"text": "t", "k": 2}, {"text": "C", "k": 2}),
+            (
+                [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+                [{"type": "text", "text": "C"}],
+            ),
+        ],
+        ids=["plain_string", "content_str", "content_blocks", "result", "text", "blocks_list"],
+    )
+    def test_wrapper_shapes_reinject_in_place(self, shape: Any, expected: Any) -> None:
+        assert hook._reinject(shape, "C") == expected
 
     def test_content_takes_precedence_over_stdout(self) -> None:
         resp = {"content": "inner", "stdout": "raw", "stderr": "", "interrupted": False}
@@ -413,17 +414,6 @@ class TestExtractReinjectDuality:
             if out is not None:
                 json.dumps(out)
 
-    def test_websearch_whole_object_is_both_none(self) -> None:
-        """R1 pin (required): WebSearch's whole-object shape has no single field to
-        mirror, so it stays a both-None case — extract None, reinject None — and the
-        duality invariant holds. This is the shape the upstream 1.3.0 branch tried
-        to extract as ``json.dumps`` (Bug-14); on this path that was only ever
-        emitted as a host-dropped bare string, so R1 is a zero-regression
-        restoration of the invariant, not a lost capability."""
-        websearch = {"query": "claude code hooks", "results": [{"title": "t", "url": "u"}]}
-        assert hook._extract_text(websearch) is None
-        assert hook._reinject(websearch, "C") is None
-
 
 # ==========================================================================
 # INTEGRATION — real hook subprocess with the locally-built engine
@@ -519,7 +509,14 @@ class TestHookProcessIntegration:
     def test_websearch_shape_passes_through(self) -> None:
         """R1 at the process level: a real WebSearch payload is matched by the hook
         but has no mirrorable field, so it passes through (no emission) rather than
-        emit a host-rejected value."""
+        emit a host-rejected value.
+
+        It stays a both-None case — ``_extract_text`` None, ``_reinject`` None —
+        which the SHAPE_CORPUS duality test pins at unit level. This is the shape
+        the upstream 1.3.0 branch tried to extract as ``json.dumps`` (Bug-14); on
+        this path that was only ever emitted as a host-dropped bare string, so R1
+        is a zero-regression restoration of the invariant, not a lost capability.
+        """
         result, _ = run_hook(
             payload("WebSearch", {"query": "q", "results": [{"title": "t", "url": "u"}] * 200})
         )

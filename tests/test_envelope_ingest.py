@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from furl_ctx.cache.compression_store import (
     get_compression_store,
     reset_compression_store,
@@ -43,28 +45,20 @@ def test_sniff_hits_single_data_array() -> None:
     assert view.other == {"total": 60, "next_cursor": "cursor-xyz"}
 
 
-def test_sniff_misses_plain_array() -> None:
-    assert sniff_envelope('[{"id": 1}]') is None
-
-
-def test_sniff_misses_no_wrapper_key() -> None:
-    assert sniff_envelope('{"status": "ok", "meta": {"total": 5}}') is None
-
-
-def test_sniff_misses_empty_array() -> None:
-    assert sniff_envelope('{"data": []}') is None
-
-
-def test_sniff_misses_non_dict_items() -> None:
-    assert sniff_envelope('{"data": [1, 2, 3]}') is None
-
-
-def test_sniff_ambiguous_two_arrays_fails_open() -> None:
-    assert sniff_envelope('{"data": [{"a": 1}], "results": [{"b": 2}]}') is None
-
-
-def test_sniff_misses_non_json() -> None:
-    assert sniff_envelope("not json") is None
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        ('[{"id": 1}]', "plain array: no wrapper object"),
+        ('{"status": "ok", "meta": {"total": 5}}', "no array-valued wrapper key"),
+        ('{"data": []}', "empty array"),
+        ('{"data": [1, 2, 3]}', "non-dict items"),
+        ('{"data": [{"a": 1}], "results": [{"b": 2}]}', "ambiguous: two arrays, fail open"),
+        ("not json", "not JSON at all"),
+    ],
+    ids=lambda v: v if " " in str(v) and not str(v).startswith(("[", "{")) else None,
+)
+def test_sniff_misses(raw: str, why: str) -> None:
+    assert sniff_envelope(raw) is None, f"sniff_envelope must miss — {why}"
 
 
 # ── detection routes the envelope through the JSON_ARRAY / SmartCrusher path ──

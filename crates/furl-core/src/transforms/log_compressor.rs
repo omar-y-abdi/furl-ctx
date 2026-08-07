@@ -94,20 +94,6 @@ pub enum LogLevel {
     Unknown,
 }
 
-impl LogLevel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            LogLevel::Error => "error",
-            LogLevel::Fail => "fail",
-            LogLevel::Warn => "warn",
-            LogLevel::Info => "info",
-            LogLevel::Debug => "debug",
-            LogLevel::Trace => "trace",
-            LogLevel::Unknown => "unknown",
-        }
-    }
-}
-
 /// One classified log line.
 ///
 /// `Eq`/`Hash` are based on `line_number` only (matches Python's custom
@@ -286,22 +272,20 @@ impl FormatDetector {
 
     fn detect(&self, lines: &[&str]) -> LogFormat {
         let sample: Vec<&str> = lines.iter().take(100).copied().collect();
-        let mut best: Option<(LogFormat, usize)> = None;
-        for (fmt, ac) in &self.matchers {
-            let mut score = 0;
-            for line in &sample {
-                // Python's per-format inner loop counts at most ONE hit
-                // per line ("for pattern in patterns: ... break"). Mirror
-                // that: aho-corasick's `is_match` is sufficient.
-                if ac.is_match(*line) {
-                    score += 1;
-                }
-            }
-            if score > 0 && best.map(|(_, s)| score > s).unwrap_or(true) {
-                best = Some((*fmt, score));
-            }
-        }
-        best.map(|(f, _)| f).unwrap_or(LogFormat::Generic)
+        // Python's per-format inner loop counts at most ONE hit per line
+        // ("for pattern in patterns: ... break"), so `is_match` suffices.
+        //
+        // `.rev()` is load-bearing: `max_by_key` returns the LAST maximum,
+        // while the original `score > best` kept the FIRST. Reversing the
+        // iteration restores first-format-wins tie-breaking.
+        self.matchers
+            .iter()
+            .map(|(fmt, ac)| (*fmt, sample.iter().filter(|l| ac.is_match(l)).count()))
+            .filter(|&(_, score)| score > 0)
+            .rev()
+            .max_by_key(|&(_, score)| score)
+            .map(|(fmt, _)| fmt)
+            .unwrap_or(LogFormat::Generic)
     }
 }
 
@@ -659,10 +643,6 @@ impl LogCompressor {
         }
     }
 
-    pub fn config(&self) -> &LogCompressorConfig {
-        &self.config
-    }
-
     pub fn compress(&self, content: &str, bias: f64) -> (LogCompressionResult, LogCompressorStats) {
         self.compress_with_store(content, bias, None)
     }
@@ -919,11 +899,6 @@ impl LogCompressor {
         out
     }
 
-    /// Per-line scoring. Pure function exposed for the Python shim.
-    pub fn score_line(&self, line: &LogLine) -> f32 {
-        score_log_line(line)
-    }
-
     pub fn select_lines(
         &self,
         log_lines: &[LogLine],
@@ -993,15 +968,11 @@ impl LogCompressor {
         } else {
             warnings
         };
-        for &i in warnings.iter().take(self.config.max_warnings) {
-            selected.insert(i);
-        }
+        selected.extend(warnings.iter().take(self.config.max_warnings));
 
         for stack in stack_traces.iter().take(self.config.max_stack_traces) {
             stats.stack_traces_kept += 1;
-            for &i in stack.iter().take(self.config.stack_trace_max_lines) {
-                selected.insert(i);
-            }
+            selected.extend(stack.iter().take(self.config.stack_trace_max_lines));
         }
 
         if self.config.keep_summary_lines {
@@ -1043,13 +1014,10 @@ impl LogCompressor {
             }
         }
 
-        // Rarest first, ties by line order: the cap keeps the most
-        // unexpected lines and ties resolve deterministically.
-        unique_candidates.sort_by(|&a, &b| {
-            let count_a = template_counts.get(&unique_norms[a]).unwrap_or(&0);
-            let count_b = template_counts.get(&unique_norms[b]).unwrap_or(&0);
-            count_a.cmp(count_b).then_with(|| a.cmp(&b))
-        });
+        // Rarest first, ties by line order: `unique_candidates` is built in
+        // ascending index order and `sort_by_key` is stable, so ties keep
+        // that order — same result as the explicit `a.cmp(&b)` tie-break.
+        unique_candidates.sort_by_key(|&a| *template_counts.get(&unique_norms[a]).unwrap_or(&0));
 
         let mut unique_templates_selected: BTreeSet<String> = BTreeSet::new();
         let mut unique_kept = 0;
@@ -1423,24 +1391,11 @@ fn is_iso8601_prefix(b: &[u8]) -> bool {
 /// 8-4-4-4-12 hex UUID.
 fn is_uuid_token(s: &str) -> bool {
     let b = s.as_bytes();
-    if b.len() != 36 {
-        return false;
-    }
-    for (i, &c) in b.iter().enumerate() {
-        match i {
-            8 | 13 | 18 | 23 => {
-                if c != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                if !c.is_ascii_hexdigit() {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, &c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 /// A run of >=12 hex digits (commit hashes, request ids).

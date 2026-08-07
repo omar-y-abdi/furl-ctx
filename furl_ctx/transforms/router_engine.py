@@ -1,10 +1,10 @@
 """Content-level compression engine for the content router.
 
-Extracted from ``content_router.py`` (§4.1 S5). :class:`ContentCompressionEngine`
+:class:`ContentCompressionEngine`
 owns compressing ONE string: strategy determination, the pure/mixed paths, the
 per-strategy dispatch (via the owned :class:`StrategyDispatcher` +
 :class:`CompressorRegistry`), the empty-output guard, the reversible CCR-offload
-fallback, and the observer plumbing (the TOIN successor — one
+fallback, and the observer plumbing (one
 ``record_compression`` per routing decision). That class has zero message/dict
 knowledge and is stateless per call. The engine's result types
 (:class:`RoutingDecision` / :class:`RouterCompressionResult`) live here and are
@@ -40,8 +40,8 @@ Two injection planes keep every existing monkeypatch biting:
   ``content_router`` module globals
   (``monkeypatch.setattr(content_router_module, "is_mixed_content", ...)``);
   a module-level ``from .content_router import is_mixed_content`` here would
-  leave those patches silently non-biting (the §4.1 design hole, called out
-  in the plan). The function-local import also breaks the load-time cycle:
+  leave those patches silently non-biting. The function-local import also
+  breaks the load-time cycle:
   ``content_router`` imports this module at top level.
 """
 
@@ -49,9 +49,11 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from itertools import accumulate, islice
 from typing import TYPE_CHECKING, Any
 
 from ..config import (
@@ -189,10 +191,8 @@ def _huge_content_bytes() -> int:
 
     raw = os.environ.get("FURL_MAX_COMPRESS_BYTES")
     if raw:
-        try:
+        with suppress(ValueError):
             return max(1, int(raw))
-        except ValueError:
-            pass
     return _HUGE_CONTENT_BYTES_DEFAULT
 
 
@@ -322,8 +322,7 @@ class ContentCompressionEngine:
         # ``_apply_strategy_to_content`` delegator, so monkeypatching those
         # router methods still takes effect. Only the lifetime-stable deps
         # (config + the module-level debug helpers/logger) ride the
-        # constructor — resolved once here, exactly when the router used to
-        # resolve them in its own ``__init__``.
+        # constructor — resolved once here.
         cr = _cr()
         self._dispatcher = StrategyDispatcher(
             config,
@@ -345,7 +344,7 @@ class ContentCompressionEngine:
     ) -> RouterCompressionResult:
         """Compress content using optimal strategy based on content detection.
 
-        The body of ``ContentRouter.compress`` (a pure move); see the facade
+        The body of ``ContentRouter.compress``; see the facade
         docstring for the public contract. ``hooks`` is the router facade —
         strategy selection and the pure/mixed paths resolve through it.
 
@@ -836,20 +835,14 @@ class ContentCompressionEngine:
         """
         n = len(rows)
         # --- Pass 1: per-field aggregates (single scan over rows). ---
-        type_counts: dict[str, Counter[str]] = {}
-        value_counts: dict[str, Counter[Any]] = {}
+        type_counts: defaultdict[str, Counter[str]] = defaultdict(Counter)
+        value_counts: defaultdict[str, Counter[Any]] = defaultdict(Counter)
         numeric_ranges: dict[str, tuple[float, float]] = {}
         for row in rows:
             for field_name, value in row.items():
-                tc = type_counts.get(field_name)
-                if tc is None:
-                    tc = type_counts[field_name] = Counter()
-                tc[self._type_name(value)] += 1
+                type_counts[field_name][self._type_name(value)] += 1
                 if self._is_hashable_scalar(value):
-                    vc = value_counts.get(field_name)
-                    if vc is None:
-                        vc = value_counts[field_name] = Counter()
-                    vc[value] += 1
+                    value_counts[field_name][value] += 1
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     lo, hi = numeric_ranges.get(field_name, (value, value))
                     numeric_ranges[field_name] = (min(lo, value), max(hi, value))
@@ -1001,12 +994,9 @@ class ContentCompressionEngine:
         count = min(_SUMMARY_SAMPLE_ROWS, n)
         if count == 1:
             return [0]
-        seen: list[int] = []
-        for step in range(count):
-            index = step * (n - 1) // (count - 1)
-            if index not in seen:
-                seen.append(index)
-        return seen
+        # dict.fromkeys dedups preserving first-occurrence order (the indices are
+        # already non-decreasing), without the O(n²) ``not in`` list scan.
+        return list(dict.fromkeys(step * (n - 1) // (count - 1) for step in range(count)))
 
     @staticmethod
     def _extract_error_lines(omitted: list[str]) -> list[str]:
@@ -1023,13 +1013,18 @@ class ContentCompressionEngine:
         surfaced line can carry a masked ``[REDACTED:...]`` token but never a
         live secret.
         """
-        surfaced: list[str] = []
-        for line in omitted:
-            if _OFFLOAD_SEVERITY_RE.search(line):
-                surfaced.append(line[:_OFFLOAD_ERROR_LINE_MAX_CHARS])
-                if len(surfaced) >= _OFFLOAD_ERROR_LINES_MAX:
-                    break
-        return surfaced
+        # ``islice`` pulls exactly _OFFLOAD_ERROR_LINES_MAX matches then stops,
+        # so no line past the last surfaced one is ever scanned.
+        return list(
+            islice(
+                (
+                    line[:_OFFLOAD_ERROR_LINE_MAX_CHARS]
+                    for line in omitted
+                    if _OFFLOAD_SEVERITY_RE.search(line)
+                ),
+                _OFFLOAD_ERROR_LINES_MAX,
+            )
+        )
 
     def _build_offload_preview(self, content: str) -> tuple[list[Any] | str, int]:
         """Identity preview of *content*: for a JSON array of objects, and for a
@@ -1382,10 +1377,9 @@ def run_router_passes(
         min_tokens = compress_request.min_tokens_to_compress
     else:
         # Raw ContentRouter.apply() (no pipeline boundary, e.g. low-level
-        # tests): preserve the historical direct-caller floor of 50. This
-        # path is behavior-identical to before — the worker-options pinning
-        # test compresses 122-token fixtures through it and depends on the
-        # 50 floor letting compression happen.
+        # tests): preserve the historical direct-caller floor of 50. The
+        # worker-options pinning test compresses 122-token fixtures through
+        # it and depends on the 50 floor letting compression happen.
         min_tokens = kwargs.get("min_tokens_to_compress", 50)
     # Cache-safety knobs for content-block (Anthropic-format) handling:
     compress_assistant_text_blocks = kwargs.get(
@@ -1435,11 +1429,10 @@ def run_router_passes(
     suffix_tokens: list[int] | None = None
     if hooks.config.enable_net_mutation_gate:
         per_msg = [tokenizer.count_messages([m]) for m in messages]
-        suffix_tokens = [0] * num_messages
-        running = 0
-        for j in range(num_messages - 1, -1, -1):
-            suffix_tokens[j] = running
-            running += per_msg[j]
+        # accumulate over the reversed list gives suffix sums INCLUDING each
+        # element; `initial=0` prepends the empty suffix and `[-2::-1]` drops the
+        # total and re-reverses, so suffix_tokens[j] == sum(per_msg[j + 1 :]).
+        suffix_tokens = list(accumulate(reversed(per_msg), initial=0))[-2::-1]
 
     # Adaptive Read protection: protect a fraction of recent messages
     if hooks.config.protect_recent_reads_fraction > 0:
@@ -1659,7 +1652,7 @@ def run_router_passes(
                 )
 
     # --- Pass 2/3: parallel compression of all cache-miss messages,
-    # merged back in message order (extracted executor — §4.1 S6).
+    # merged back in message order.
     if pending_tasks:
         hooks._compress_pending(
             pending_tasks,

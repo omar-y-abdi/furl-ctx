@@ -449,9 +449,9 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
                     },
                 })
                 .collect();
-            for (offset, cell) in expanded.into_iter().enumerate() {
-                row.0.insert(i + offset, cell);
-            }
+            // Same insertion order as the old per-cell shift loop, but
+            // one memmove instead of one per expanded cell.
+            row.0.splice(i..i, expanded);
         }
 
         // Refine type tags + nullability from data.
@@ -1317,6 +1317,10 @@ mod tests {
         CompactConfig::default()
     }
 
+    fn field_names(schema: &Schema) -> Vec<&str> {
+        schema.fields.iter().map(|f| f.name.as_str()).collect()
+    }
+
     #[test]
     fn empty_or_single_is_untouched() {
         let items: Vec<Value> = vec![];
@@ -1346,7 +1350,7 @@ mod tests {
             } => {
                 assert_eq!(original_count, 3);
                 assert_eq!(rows.len(), 3);
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(names.contains(&"id"));
                 assert!(names.contains(&"name"));
                 assert!(names.contains(&"status"));
@@ -1367,7 +1371,7 @@ mod tests {
         ];
         match compact(&items, &cfg()) {
             Compaction::Table { schema, rows, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(names.contains(&"meta.region"), "got {names:?}");
                 assert!(names.contains(&"meta.tier"), "got {names:?}");
                 assert!(!names.contains(&"meta"));
@@ -1386,7 +1390,7 @@ mod tests {
         ];
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 // No flatten — all-different key sets per row
                 assert!(names.contains(&"meta"));
                 assert!(!names.iter().any(|n| n.starts_with("meta.")));
@@ -1405,7 +1409,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, rows, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(
                     names.contains(&"payload"),
                     "payload column vanished: {names:?}"
@@ -1459,7 +1463,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 let dotted = names.iter().filter(|n| **n == "m.k").count();
                 assert_eq!(dotted, 1, "duplicate m.k columns synthesized: {names:?}");
                 assert!(
@@ -1482,7 +1486,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(
                     !names.contains(&"a.b.c"),
                     "ambiguous a.b.c column synthesized: {names:?}"
@@ -1504,7 +1508,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(
                     !names.contains(&"a.b.c"),
                     "ambiguous a.b.c column synthesized: {names:?}"
@@ -1525,7 +1529,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(
                     !names.iter().any(|n| n.starts_with("p.")),
                     "prefix-overlapping inners flattened: {names:?}"
@@ -1547,7 +1551,7 @@ mod tests {
                 .collect();
             match compact(&items, &cfg()) {
                 Compaction::Table { schema, .. } => {
-                    let names = schema.field_names();
+                    let names = field_names(&schema);
                     assert!(
                         !names.iter().any(|n| n.starts_with("p.")),
                         "empty-segment inner flattened: {names:?}"
@@ -1569,7 +1573,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(
                     !names.contains(&".k"),
                     "empty parent flattened to `.k`: {names:?}"
@@ -1590,7 +1594,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(names.contains(&"m.cpu.usage"), "got {names:?}");
                 assert!(names.contains(&"m.mem.rss"), "got {names:?}");
                 assert!(!names.contains(&"m"), "flatten declined: {names:?}");
@@ -1610,7 +1614,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(names.contains(&"a.b.c"), "flatten declined: {names:?}");
                 assert!(names.contains(&"a.b.c.d"), "got {names:?}");
                 assert!(names.contains(&"a.j"), "got {names:?}");
@@ -1752,7 +1756,7 @@ mod tests {
             .collect();
         match compact(&items, &cfg()) {
             Compaction::Table { schema, .. } => {
-                let names = schema.field_names();
+                let names = field_names(&schema);
                 assert!(names.contains(&"cfg"), "cfg must stay nested: {names:?}");
                 assert!(
                     names.iter().all(|n| !n.contains(':')),

@@ -1,43 +1,40 @@
 """Rust-backed search-results compressor.
 
-Phase 3e.2 ported the implementation to
+The implementation lives in
 `crates/furl-core/src/transforms/search_compressor.rs`. This module
-is now a thin shim that:
+is a thin shim that:
 
 1. Keeps the public dataclass surface (`SearchMatch`, `FileMatches`,
    `SearchCompressorConfig`, `SearchCompressionResult`) so existing
    call sites (`ContentRouter._get_search_compressor`) and tests don't
    change.
 2. Routes `SearchCompressor.compress()` entirely through the Rust
-   implementation, picking up the parser bug fixes and the
+   implementation and the
    `signals::LineImportanceDetector` trait consumer pattern. The Rust
    crate owns parsing, scoring, selection, and output formatting; their
-   behavior (including the Windows-path and dashed-filename fixes) is
+   behavior (including the Windows-path and dashed-filename handling) is
    pinned by the `search_compressor.rs` unit tests.
 
-# Bug fixes the Rust port carries (and this shim therefore inherits)
+# Parsing rules the Rust implementation guarantees
 
-* **Windows paths.** Pre-3e.2 `_GREP_PATTERN`/`_RG_CONTEXT_PATTERN`
-  regexes treated the drive-letter colon (`C:\\Users\\…`) as the
-  line-number-marker separator and silently dropped every Windows-
-  formatted line from `file_matches`. The Rust parser detects the
-  drive prefix and starts the line-number scan after it.
-* **Filenames with `-`.** Pre-3e.2 `_RG_CONTEXT_PATTERN` excluded
-  dashes from the path (`[^:-]+`), so legitimate names like
-  `pre-commit-config.yaml-42-line` parsed wrong. The Rust parser
-  anchors on the *line-number marker* — earliest `<sep>\\d+<sep>` in
-  the line — so paths can contain dashes.
-* **CCR storage failures are loud.** The previous Python class
-  swallowed all exceptions from the compression store. Storage
-  failures now surface to logs.
+* **Windows paths.** A regex that treats the drive-letter colon
+  (`C:\\Users\\…`) as the line-number-marker separator silently drops
+  every Windows-formatted line from `file_matches`. The Rust parser
+  detects the drive prefix and starts the line-number scan after it.
+* **Filenames with `-`.** Excluding dashes from the path (`[^:-]+`)
+  parses legitimate names like `pre-commit-config.yaml-42-line` wrong.
+  The Rust parser anchors on the *line-number marker* — earliest
+  `<sep>\\d+<sep>` in the line — so paths can contain dashes.
+* **CCR storage failures are loud.** Storage failures surface to logs
+  rather than being swallowed.
 
 # CCR plumbing note
 
 The Rust crate carries an internal CCR store for unit testing, but
 the production CCR path remains the Python `CompressionStore`. The
 shim picks up the Rust-emitted `cache_key` and writes the original
-through to the Python store, so retrievability semantics match
-exactly what the previous Python implementation provided.
+through to the Python store, so a marker emitted by Rust always
+resolves against the production store.
 """
 
 from __future__ import annotations
@@ -131,12 +128,9 @@ class SearchCompressionResult:
 class SearchCompressor:
     """Compresses grep/ripgrep search results via the Rust port.
 
-    Drop-in replacement for the retired Python class: `compress()`
-    delegates to Rust end-to-end (the Rust parser owns the bug fixes —
-    Windows paths, dashes-in-filename). The retired class's internal
-    parsing helpers were NOT preserved; the only Python-side additions
-    are the CCR persistence bridge (`_persist_to_python_ccr`) and the
-    passthrough result builder.
+    `compress()` delegates to Rust end-to-end; the only Python-side
+    additions are the CCR persistence bridge (`_persist_to_python_ccr`)
+    and the passthrough result builder.
     """
 
     def __init__(self, config: SearchCompressorConfig | None = None) -> None:

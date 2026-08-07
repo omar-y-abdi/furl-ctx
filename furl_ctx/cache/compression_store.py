@@ -49,6 +49,7 @@ import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -295,9 +296,7 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
     quote the TTL and age. A ``missing`` status is genuinely ambiguous without
     per-eviction tracking — the entry may have been evicted under capacity
     pressure, expired-then-reaped, or never stored — so we name every real cause
-    instead of implying TTL alone (the old "Entry not found (CCR TTL: ...)"
-    wording misattributed capacity evictions to the TTL, which is misleading for
-    the common 1000-entry-overflow case).
+    instead of implying TTL alone.
     """
     default_ttl = status.get("default_ttl_seconds", DEFAULT_CCR_TTL_SECONDS)
     ttl_seconds = status.get("ttl_seconds", default_ttl)
@@ -373,7 +372,7 @@ class CompressionEntry:
     created_at: float
     ttl: int = DEFAULT_CCR_TTL_SECONDS
 
-    compression_strategy: str | None = None  # Strategy used for compression
+    compression_strategy: str | None = None
 
     # Access tracking
     retrieval_count: int = 0
@@ -729,15 +728,10 @@ class CompressionStore:
             )
 
         # Generate hash from original content. Default: SHA-256[:24] of the
-        # original. When the caller provides `explicit_hash`, use it
-        # verbatim — required when the hash that ends up in the prompt
-        # marker is produced by another component (e.g. the Rust
-        # SmartCrusher row-drop path emits SHA-256[:24] for new content, and
-        # SHA-256[:12] for legacy keys only, which the Python store has to
-        # mirror so the MCP furl_retrieve tool resolves it).
+        # original; `explicit_hash` is used verbatim (see the arg docs above).
         # 24 chars (96 bits) was chosen for collision resistance under the
         # birthday bound: 50% collision probability at ~280 trillion entries
-        # (2^48), versus ~4 billion (2^32) for the previous 16-char default.
+        # (2^48).
         if explicit_hash is not None:
             # Validate as hex and bail LOUDLY on a bad key: silently falling back
             # to the computed default when the caller asked for a specific key
@@ -1109,15 +1103,10 @@ class CompressionStore:
         item_strs = [json.dumps(item, default=str) for item in items]
         scores = self._scorer.score_batch(item_strs, query)
 
-        # Filter and sort by score
-        scored_items = [
-            (items[i], scores[i].score)
-            for i in range(len(items))
-            if scores[i].score >= score_threshold
-        ]
-        scored_items.sort(key=lambda x: x[1], reverse=True)
-
-        results = [item for item, _ in scored_items[:max_results]]
+        # Filter and take the top max_results by score. nlargest breaks ties
+        # toward the earlier item, exactly as the stable sort-then-slice did.
+        scored = ((i, s.score) for i, s in zip(items, scores) if s.score >= score_threshold)
+        results = [item for item, _ in heapq.nlargest(max_results, scored, key=itemgetter(1))]
 
         # COR-37: record the access only AFTER results are known, and only
         # when the search actually returned items. A zero-result probe must
@@ -1230,14 +1219,16 @@ class CompressionStore:
         documents = [entry.original_content for _hash, entry in live_entries]
         scores = self._scorer.score_batch(documents, query)
 
-        ranked = sorted(
+        # nlargest breaks ties toward the earlier element, exactly as the
+        # stable ``sorted(..., reverse=True)[:max_results]`` it replaces.
+        ranked = heapq.nlargest(
+            max_results,
             (
-                (live_entries[i][0], live_entries[i][1], scores[i].score)
-                for i in range(len(live_entries))
-                if scores[i].score > score_threshold
+                (hash_key, entry, score.score)
+                for (hash_key, entry), score in zip(live_entries, scores)
+                if score.score > score_threshold
             ),
-            key=lambda triple: triple[2],
-            reverse=True,
+            key=itemgetter(2),
         )
 
         return [
@@ -1247,7 +1238,7 @@ class CompressionStore:
                 preview=self._cross_store_preview(entry.original_content),
                 tool_name=entry.tool_name,
             )
-            for hash_key, entry, score in ranked[:max_results]
+            for hash_key, entry, score in ranked
         ]
 
     @staticmethod
@@ -1502,10 +1493,6 @@ class CompressionStore:
         hash_key: str,
     ) -> CompressionEntry | None:
         """Get entry without logging retrieval or recording an access.
-
-        CRITICAL FIX #4: Returns a copy of the entry to prevent race conditions.
-        The caller may use the entry after we release the lock, and another thread
-        could modify or evict the original entry.
 
         COR-37: this read is side-effect-free (beyond expiry reaping) — the
         access bump happens in ``_record_search_access`` only after search
@@ -1861,17 +1848,15 @@ class CompressionStore:
         """
         with self._lock:
             items = list(self._backend.items())
-        for key, entry in items:
-            if key == nested_hash or key in ignoring:
-                continue
-            for text in (entry.compressed_content, entry.original_content):
-                if not isinstance(text, str) or not _may_reference_marker(text):
-                    continue
-                from furl_ctx.ccr.marker_grammar import hashes_in_text
+        from furl_ctx.ccr.marker_grammar import hashes_in_text
 
-                if nested_hash in hashes_in_text(text):
-                    return True
-        return False
+        return any(
+            nested_hash in hashes_in_text(text)
+            for key, entry in items
+            if key != nested_hash and key not in ignoring
+            for text in (entry.compressed_content, entry.original_content)
+            if isinstance(text, str) and _may_reference_marker(text)
+        )
 
     def delete_cascade(self, hash_key: str) -> tuple[bool, int]:
         """Delete *hash_key* AND every nested blob only it referenced.

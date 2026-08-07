@@ -345,10 +345,6 @@ impl CcrStore for InMemoryCcrStore {
             .filter(|kv| kv.value().inserted.elapsed() <= self.ttl)
             .count()
     }
-
-    fn capacity(&self) -> usize {
-        self.capacity
-    }
 }
 
 #[cfg(test)]
@@ -472,7 +468,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(25));
         // No get() has touched the entries; the raw map still holds 2.
         assert_eq!(store.len(), 0, "len() must not count expired entries");
-        assert!(store.is_empty());
     }
 
     #[test]
@@ -496,7 +491,6 @@ mod tests {
         let store: Box<dyn CcrStore> = Box::new(InMemoryCcrStore::new());
         store.put("h", "v");
         assert_eq!(store.get("h"), Some("v".to_string()));
-        assert!(!store.is_empty());
     }
 
     /// ABA test: refreshing a key (idempotent same-payload re-put) must NOT

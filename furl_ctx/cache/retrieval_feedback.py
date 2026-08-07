@@ -7,11 +7,7 @@ scoped to real hits) feeds an in-process aggregator, and the router consults
 it at routing time — content shapes under recent retrieval pressure get a
 higher keep budget or skip compression entirely.
 
-Lineage and constraints: the original ``cache/compression_feedback.py`` (613
-lines, ACON-style retrieval-rate hints) was deleted in the Great Excision as
-part of the telemetry plane — it consumed TOIN. This rebuild keeps the useful
-ideas (skip-compression hint, minimum-sample hysteresis, a global accessor
-mirroring the store singleton) under today's constraints:
+Constraints:
 
 * LOCAL-ONLY — no telemetry, no cross-user plane, no disk ledger beyond what
   the store already keeps. State is one bounded in-memory dict.
@@ -20,9 +16,9 @@ mirroring the store singleton) under today's constraints:
   ``retrieval_count`` (zero-result search probes never emit, per COR-37);
   engine-internal verification reads opt out
   (``retrieve(..., record_feedback_signal=False)``).
-* Window hysteresis instead of a retrieval-RATE denominator — the old module
-  divided retrievals by recorded compressions, a second bookkeeping plane this
-  rebuild deliberately does not keep. A hint fires only after
+* Window hysteresis instead of a retrieval-RATE denominator — dividing
+  retrievals by recorded compressions would need a second bookkeeping plane
+  this module deliberately does not keep. A hint fires only after
   ``hint_min_retrievals`` retrievals of a shape within ``window_seconds``, and
   DECAYS as events age out of the sliding window. Time is monotonic and the
   clock is injectable for deterministic tests.

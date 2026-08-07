@@ -1,8 +1,4 @@
-"""Token counting wrapper for Furl SDK.
-
-This module provides a unified interface for token counting that
-delegates to provider-specific implementations.
-"""
+"""Token counting wrapper for Furl SDK."""
 
 from __future__ import annotations
 

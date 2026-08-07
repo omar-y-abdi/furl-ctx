@@ -1,6 +1,6 @@
 """Pure routing-policy mappings for the ContentRouter.
 
-Extracted from ``content_router.py``. Everything here is a pure function of
+Everything here is a pure function of
 its arguments — config thresholds + a content/strategy value — with no access
 to router runtime state, the result cache, or thread-locals.
 
@@ -75,8 +75,7 @@ def strategy_from_detection(
 
 
 def _source_code_strategy(config: ContentRouterConfig) -> CompressionStrategy:
-    """SOURCE_CODE routing: PASSTHROUGH by default — code ships unmangled,
-    exactly the behavior the retired AST/ML code compressors left behind.
+    """SOURCE_CODE routing: PASSTHROUGH by default — code ships unmangled.
     The opt-in CodeAwareCompressor (``enable_code_aware=True``, Engine
     P2-12) claims the arm instead; its dispatch arm applies the
     ``lossless_only`` gate."""
@@ -177,11 +176,9 @@ def noop_transform(route_counts: Mapping[str, int]) -> str:
     input) falls through to ``router:noop:no_eligible_content`` — the same
     umbrella reason the transform-less shape/pinning lanes map to.
     """
-    dominant = "no_eligible_content"
-    best = 0
-    for counter, reason in _NOOP_REASON_BY_COUNTER:
-        count = route_counts.get(counter, 0)
-        if count > best:
-            best = count
-            dominant = reason
+    # ``max`` keeps the FIRST maximum, matching the strict ``>`` update. The
+    # explicit ``> 0`` re-check is load-bearing: with every count zero the old
+    # scan never fired, so the umbrella reason must win over the first row.
+    counter, reason = max(_NOOP_REASON_BY_COUNTER, key=lambda pair: route_counts.get(pair[0], 0))
+    dominant = reason if route_counts.get(counter, 0) > 0 else "no_eligible_content"
     return f"router:noop:{dominant}"

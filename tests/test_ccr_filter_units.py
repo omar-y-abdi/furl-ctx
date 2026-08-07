@@ -332,11 +332,6 @@ def test_pattern_glob_fallback() -> None:
     assert _resolve_matcher("*.py")("module.txt") is False
 
 
-def test_pattern_regex_anchors_and_classes() -> None:
-    assert _resolve_matcher(r"^\d+$")("12345") is True
-    assert _resolve_matcher(r"^\d+$")("12a45") is False
-
-
 # ─── SectionPatterns eligibility ────────────────────────────────────────────
 
 

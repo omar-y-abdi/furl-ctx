@@ -14,6 +14,30 @@ No real row is replayed verbatim as a test payload.
 
 Captured: 2026-06-13 (UTC). Platform: macOS (darwin 24.6.0).
 
+## Which captures are still on disk (read this before the tables)
+
+`verify/generators.py` loads exactly five files from `verify/data/`:
+`slugify_gitlog.raw.txt`, `slugify_index.js`, `isplainobj_index.js`, and
+`threejs_devtools_package-lock.json`, and `macos_install.log.txt` (plus
+`heldout/data/express_rg.raw.jsonl`). Those six are committed and live.
+
+The other two captures listed below — `github_commits_slugify.json` (source 3)
+and `npm_registry_slugify.json` (source 4) — were read by NO code in the repo,
+and have been **removed from the tree** as dead weight. Source 4 was only ever a
+provenance reference ("additional real JSON-API dump"); source 3's vocabulary
+contribution is described below in the `logs` bullet, but the generator in fact
+seeds only from `slugify_gitlog.raw.txt`.
+
+They are not lost: recover any of them from git history at the commit *before*
+this branch's removal, e.g.
+
+    git show HEAD:verify/data/github_commits_slugify.json
+
+The provenance tables below are **kept intact and unedited** as the record of
+exactly what was fetched for this verification run. A row describing a file that
+is no longer in the tree is a historical citation, not a promise that the file is
+on disk. `REPORT.md` — the findings this data produced — is unchanged.
+
 ## Real external (freshly cloned / fetched over the network)
 
 | # | Source | Type | Exact citation | Used for | File |
@@ -32,7 +56,7 @@ make the source bytes reproducible.
 | # | Source | Type | Exact citation | Used for | File |
 |---|--------|------|----------------|----------|------|
 | 5 | `threejs-devtools-mcp/package-lock.json` | real lockfile (a DIFFERENT project on disk, not Furl) | `cp /Users/k/dev/threejs-devtools-mcp/package-lock.json` → 122,205 bytes | `disk`-case directory-entry vocabulary (real dependency names) | `threejs_devtools_package-lock.json` |
-| 6 | macOS `/var/log/install.log` | real OS log | `tail -c 400000 /var/log/install.log` → 400,000 bytes, 2,796 lines (committed as `.txt` because the repo `.gitignore` excludes `*.log`) | provenance / real-log reference (local-real) | `macos_install.log.txt` |
+| 6 | macOS `/var/log/install.log` | real OS log | `tail -c 400000 /var/log/install.log` → 400,000 bytes, 2,796 lines (committed as `.txt` because the repo `.gitignore` excludes `*.log`) | opaque whole-blob offload documents (local-real) | `macos_install.log.txt` |
 
 Sources 5–6 are **local-real**: genuine real-world artifacts that already
 existed on this machine, NOT freshly cloned over the network and NOT project
@@ -59,6 +83,9 @@ fixtures. They are clearly labelled as such.
 - **disk** — seed real dependency names from the real lockfile; synthesize
   `ls -la`-shaped rows (perms, links, owner, size, ISO mtime, name) with fresh
   per-row sizes/mtimes (`medium`) or unique inodes/owners (`high`).
+- **opaque** — seed large, distinct install-log documents from the real macOS
+  capture; synthesize low-, medium-, and high-entropy document sets that exercise
+  whole-blob CCR offload.
 
 ## Engine surface used (no re-implementation)
 

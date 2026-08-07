@@ -44,8 +44,10 @@ from __future__ import annotations
 import fnmatch
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
+from itertools import groupby
 from typing import Any
 
 from .regex_budget import Boundability, classify_boundability, matches_within_budget
@@ -63,9 +65,7 @@ from .regex_budget import Boundability, classify_boundability, matches_within_bu
 # The budget is what actually makes this safe. The first two layers are
 # SYNTACTIC, and syntax cannot bound backtracking: ``(a|b|ab)+Z`` has no nested
 # quantifier, no optional chain, and is 10 characters long, yet it backtracks for
-# minutes against an 80-character line -- well inside the input cap. An earlier
-# revision of this comment claimed the input cap made "worst-case backtracking
-# finite and small"; that was wrong, and RG1 replaced the claim with the budget.
+# minutes against an 80-character line -- well inside the input cap.
 #
 # All three bounds sit far past realistic filter usage, so normal patterns and
 # normal content are matched byte-identically to before.
@@ -81,7 +81,7 @@ _MAX_PATTERN_CHARS = 200
 _NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
 
 # Bound on the number of variable-length quantifiers a single pattern may apply
-# (review A12, widened to ``+`` by RG1). An "optional chain" such as ``.?``
+# (review A12). An "optional chain" such as ``.?``
 # repeated dozens of times carries NO nested quantifier and stays under
 # ``_MAX_PATTERN_CHARS``, yet backtracks exponentially on any line WITHIN the
 # input cap — the cap bounds input length, not backtracking width, so a short
@@ -177,9 +177,8 @@ class CompressionMode(Enum):
         if not isinstance(value, str):
             return f"mode must be a string, got {type(value).__name__}"
         normalized = value.strip().lower()
-        for member in cls:
-            if member.value == normalized:
-                return member
+        with suppress(ValueError):
+            return cls(normalized)
         valid = ", ".join(member.value for member in cls)
         return f"unknown mode {value!r}; valid modes: {valid}"
 
@@ -403,12 +402,7 @@ def _resolve_matcher(pattern: str) -> Callable[[str], bool]:
 
 @dataclass(frozen=True)
 class _ResolvedMatchers:
-    """Include/exclude patterns compiled to line matchers once (SEC-1).
-
-    Built by :meth:`SectionPatterns._resolve_matchers` and threaded through the
-    per-line loop so the compilation cost (and the input-cap wrapper) is paid a
-    single time per ``partition_content`` call, not once per line.
-    """
+    """Include/exclude patterns compiled to line matchers once (SEC-1)."""
 
     include: tuple[Callable[[str], bool], ...]
     exclude: tuple[Callable[[str], bool], ...]
@@ -431,20 +425,11 @@ def partition_content(content: str, patterns: SectionPatterns) -> list[_LineRun]
     """
     lines = content.split("\n")
     matchers = patterns._resolve_matchers()  # compile once, reuse per line (SEC-1)
-    runs: list[_LineRun] = []
-    current_eligible: bool | None = None
-    current: list[str] = []
-
-    for line in lines:
-        eligible = patterns.line_is_eligible(line, matchers)
-        if current_eligible is None:
-            current_eligible = eligible
-        if eligible != current_eligible:
-            runs.append(_LineRun(eligible=current_eligible, text="\n".join(current)))
-            current = []
-            current_eligible = eligible
-        current.append(line)
-
-    if current_eligible is not None:
-        runs.append(_LineRun(eligible=current_eligible, text="\n".join(current)))
-    return runs
+    # ``groupby`` calls the key exactly once per line (same matcher-call count as
+    # the hand-rolled scan) and yields maximal runs of equal eligibility.
+    return [
+        _LineRun(eligible=eligible, text="\n".join(run))
+        for eligible, run in groupby(
+            lines, key=lambda line: patterns.line_is_eligible(line, matchers)
+        )
+    ]

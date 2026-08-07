@@ -174,74 +174,77 @@ def test_legend_names_input_shape_for_each_output() -> None:
 # re-verified — these tests are that forcing function.
 
 
-def test_legend_claim_decimal_scale_critical_example() -> None:
-    # "float%k: cell/10^k (53 at %3 = 0.053, not 53)"
-    rows = decode_csv_schema_rows("[2]{time_ms:float%3}\n53\n1200")
-    assert rows == [{"time_ms": 0.053}, {"time_ms": 1.2}]
-
-
-def test_legend_claim_constant_fold() -> None:
-    # "type=V: constant V" — the column is re-attached to every row.
-    rows = decode_csv_schema_rows("[2]{status:string=ok,name:string}\nalice\nbob")
-    assert rows == [
-        {"status": "ok", "name": "alice"},
-        {"status": "ok", "name": "bob"},
-    ]
-
-
-def test_legend_claim_arithmetic_fold_zero_based() -> None:
-    # "int=B+S: row i = B+S*i (i from 0)".
-    rows = decode_csv_schema_rows("[3]{seq:int=7+2,name:string}\na\nb\nc")
-    assert [r["seq"] for r in rows] == [7, 9, 11]
-
-
-def test_legend_claim_ditto_repeats_cell_above() -> None:
-    # "= alone repeats the cell above" (same column, previous row).
-    rows = decode_csv_schema_rows("[2]{name:string}\nalpha\n=")
-    assert rows == [{"name": "alpha"}, {"name": "alpha"}]
-
-
-def test_legend_claim_iso_delta() -> None:
-    # "string~: full ISO timestamp first, then ±seconds[/tz] deltas".
-    rows = decode_csv_schema_rows("[2]{ts:string~}\n2024-01-02T03:04:05Z\n+60")
-    assert rows == [
-        {"ts": "2024-01-02T03:04:05Z"},
-        {"ts": "2024-01-02T03:05:05Z"},
-    ]
-
-
-def test_legend_claim_affix_fold() -> None:
-    # "string^ + __affix:col=P,S: value = P+cell+S".
-    rows = decode_csv_schema_rows("[2]{path:string^}\n__affix:path=api/,.json\nusers\norders")
-    assert rows == [{"path": "api/users.json"}, {"path": "api/orders.json"}]
-
-
-def test_legend_claim_head_dict_fold() -> None:
-    # "string@ + __head:col=<d>h0,h1: cell 1<d>tail = h1+tail" — heads
-    # carry their trailing delimiter; the cell's index picks the head.
-    rows = decode_csv_schema_rows(
-        "[2]{url:string@}\n__head:url=/api/v1/,static/\n0/users\n1/app.js"
-    )
-    assert rows == [{"url": "api/v1/users"}, {"url": "static/app.js"}]
-
-
-def test_legend_claim_dict_column() -> None:
-    # "__dict:col=v0,v1: cells index the list".
-    rows = decode_csv_schema_rows("[3]{env:string}\n__dict:env=prod,dev\n0\n1\n0")
-    assert [r["env"] for r in rows] == ["prod", "dev", "prod"]
-
-
-def test_legend_claim_null_missing_and_nullable() -> None:
-    # "__null__ null, __missing__ absent key, ? nullable".
-    rows = decode_csv_schema_rows("[3]{v:string?}\n__null__\n__missing__\nreal")
-    assert rows == [{"v": None}, {}, {"v": "real"}]
-
-
-def test_legend_claim_kept_total_header() -> None:
-    # F4: "`[kept/total]` when rows dropped: total = original count". The body
-    # carries the KEPT rows; the total is metadata (recoverable from the text).
-    rows = decode_csv_schema_rows("[2/9]{name:string}\nalice\nbob")
-    assert rows == [{"name": "alice"}, {"name": "bob"}]
+@pytest.mark.parametrize(
+    ("claim", "encoded", "expected"),
+    [
+        (
+            # "float%k: cell/10^k (53 at %3 = 0.053, not 53)"
+            "decimal scale (critical example)",
+            "[2]{time_ms:float%3}\n53\n1200",
+            [{"time_ms": 0.053}, {"time_ms": 1.2}],
+        ),
+        (
+            # "type=V: constant V" — the column is re-attached to every row.
+            "constant fold",
+            "[2]{status:string=ok,name:string}\nalice\nbob",
+            [{"status": "ok", "name": "alice"}, {"status": "ok", "name": "bob"}],
+        ),
+        (
+            # "int=B+S: row i = B+S*i (i from 0)".
+            "arithmetic fold, zero-based",
+            "[3]{seq:int=7+2,name:string}\na\nb\nc",
+            [{"seq": 7, "name": "a"}, {"seq": 9, "name": "b"}, {"seq": 11, "name": "c"}],
+        ),
+        (
+            # "= alone repeats the cell above" (same column, previous row).
+            "ditto repeats the cell above",
+            "[2]{name:string}\nalpha\n=",
+            [{"name": "alpha"}, {"name": "alpha"}],
+        ),
+        (
+            # "string~: full ISO timestamp first, then ±seconds[/tz] deltas".
+            "ISO delta",
+            "[2]{ts:string~}\n2024-01-02T03:04:05Z\n+60",
+            [{"ts": "2024-01-02T03:04:05Z"}, {"ts": "2024-01-02T03:05:05Z"}],
+        ),
+        (
+            # "string^ + __affix:col=P,S: value = P+cell+S".
+            "affix fold",
+            "[2]{path:string^}\n__affix:path=api/,.json\nusers\norders",
+            [{"path": "api/users.json"}, {"path": "api/orders.json"}],
+        ),
+        (
+            # "string@ + __head:col=<d>h0,h1: cell 1<d>tail = h1+tail" — heads
+            # carry their trailing delimiter; the cell's index picks the head.
+            "head dict fold",
+            "[2]{url:string@}\n__head:url=/api/v1/,static/\n0/users\n1/app.js",
+            [{"url": "api/v1/users"}, {"url": "static/app.js"}],
+        ),
+        (
+            # "__dict:col=v0,v1: cells index the list".
+            "dict column",
+            "[3]{env:string}\n__dict:env=prod,dev\n0\n1\n0",
+            [{"env": "prod"}, {"env": "dev"}, {"env": "prod"}],
+        ),
+        (
+            # "__null__ null, __missing__ absent key, ? nullable".
+            "null / missing / nullable",
+            "[3]{v:string?}\n__null__\n__missing__\nreal",
+            [{"v": None}, {}, {"v": "real"}],
+        ),
+        (
+            # F4: "`[kept/total]` when rows dropped: total = original count". The
+            # body carries the KEPT rows; the total is metadata (recoverable from
+            # the text).
+            "kept/total header",
+            "[2/9]{name:string}\nalice\nbob",
+            [{"name": "alice"}, {"name": "bob"}],
+        ),
+    ],
+    ids=lambda v: v if isinstance(v, str) and not v.startswith("[") else None,
+)
+def test_legend_claim_decodes_as_documented(claim: str, encoded: str, expected: list[dict]) -> None:
+    assert decode_csv_schema_rows(encoded) == expected, f"legend claim broke: {claim}"
 
 
 def test_legend_claim_json_container_envelope() -> None:

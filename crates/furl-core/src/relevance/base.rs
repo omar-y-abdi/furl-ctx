@@ -55,12 +55,6 @@ pub trait RelevanceScorer {
     fn score_batch(&self, items: &[&str], context: &str) -> Vec<RelevanceScore> {
         items.iter().map(|item| self.score(item, context)).collect()
     }
-
-    /// Whether this scorer is available in the current environment.
-    /// Override for scorers with optional deps (e.g. ONNX embeddings).
-    fn is_available(&self) -> bool {
-        true
-    }
 }
 
 #[cfg(test)]

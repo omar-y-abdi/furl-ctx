@@ -20,6 +20,32 @@ uuids, sha1 hashes). No real row is replayed verbatim as a test payload.
 
 Captured: 2026-06-13 (UTC). Platform: macOS (darwin 24.6.0).
 
+## Where the raw captures live now (read this before the tables)
+
+The held-out harness (`verify/heldout/run.py`, `generators.py`, `measure.py`) was
+deleted in commit `8ce3585` ("refactor: lazy-dev deletion sweep"). With it gone,
+every raw capture in the tables below except `express_rg.raw.jsonl` became
+unreferenced by any code in the repo, and those nine files
+(`express_gitlog.raw.txt`, `express_application.js`, `express_commit.txt`,
+`chalk_index.js`, `chalk_commit.txt`, `github_commits_express.json`,
+`npm_registry_express.json`, `npm_cli_package-lock.json`,
+`macos_install.log.txt`) were **removed from the tree** as dead weight (~2.0 MB).
+
+They are not lost: recover any of them from git history at the commit *before*
+this branch's removal, e.g.
+
+    git show 8ce3585^:verify/heldout/data/express_gitlog.raw.txt
+
+`verify/heldout/data/express_rg.raw.jsonl` is the ONE capture still committed —
+it is live, loaded by `verify/generators.py` (`_load_heldout_text`) for the
+first run's `search` family.
+
+The provenance tables below are **kept intact and unedited** as the record of
+exactly what was fetched and measured for the held-out audit. A row describing a
+file that is no longer in the tree is a historical citation, not a promise that
+the file is on disk. `REPORT.md` — the findings this data produced — is
+unchanged and remains the audit's result of record.
+
 ## Real external (freshly cloned / fetched over the network)
 
 | # | Source | Type | Exact citation | Used for | File |

@@ -152,9 +152,8 @@ fn fill_remaining_slots_memo(
             }
             let idx = candidates[i];
             let h = memo.hash_at(idx);
-            if !seen.contains(&h) {
+            if seen.insert(h) {
                 result.insert(idx);
-                seen.insert(h);
                 added += 1;
             }
             i += step;
@@ -350,19 +349,15 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
 
     // First 3 / last 2 anchors if we have room.
     let mut remaining = effective_max.saturating_sub(prioritized.len());
-    if remaining > 0 {
-        for i in 0..3.min(n) {
-            if !prioritized.contains(&i) && remaining > 0 {
-                prioritized.insert(i);
-                remaining -= 1;
-            }
+    // The two ranges overlap when `n <= 4`; a repeat visit is a no-op
+    // because `BTreeSet::insert` reports it as already-present, exactly
+    // like the old `!contains` guard.
+    for i in (0..3.min(n)).chain(n.saturating_sub(2)..n) {
+        if remaining == 0 {
+            break;
         }
-        let last_start = n.saturating_sub(2);
-        for i in last_start..n {
-            if !prioritized.contains(&i) && remaining > 0 {
-                prioritized.insert(i);
-                remaining -= 1;
-            }
+        if prioritized.insert(i) {
+            remaining -= 1;
         }
     }
 

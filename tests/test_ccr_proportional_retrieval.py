@@ -33,7 +33,6 @@ the production store serves — not an estimate.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -42,6 +41,9 @@ import pytest
 
 from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
+from tests._fixtures import hash_from_marker as _hash_from_marker
+from tests._fixtures import high_entropy_logs as _high_entropy_logs
+from tests._fixtures import sentinel_from_output as _sentinel_from_output
 
 tiktoken = pytest.importorskip("tiktoken")
 _ENC = tiktoken.get_encoding("o200k_base")
@@ -49,78 +51,6 @@ _ENC = tiktoken.get_encoding("o200k_base")
 
 def _toks(text: str) -> int:
     return len(_ENC.encode(text))
-
-
-def _high_entropy_logs(n: int, seed: int) -> list[dict]:
-    """Deterministic, real-shaped, NEAR-UNIQUE log rows — the exact tier where
-    the single-blob model collapsed (fresh uuid-ish id + random sha-ish commit +
-    per-row service/level/message). Generated from a seeded SHA stream so it is
-    reproducible without a committed fixture.
-    """
-    rows: list[dict] = []
-    services = ["api", "worker", "scheduler", "auth", "billing", "ingest"]
-    levels = ["INFO", "WARN", "ERROR", "DEBUG"]
-    for i in range(n):
-        h = hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()
-        rows.append(
-            {
-                "id": h[:32],
-                "commit": h[32:72] if len(h) >= 72 else (h + h)[32:72],
-                "service": services[int(h[:2], 16) % len(services)],
-                "level": levels[int(h[2:4], 16) % len(levels)],
-                "latency_ms": int(h[4:8], 16) % 5000,
-                "message": f"request {h[8:20]} handled in span {h[20:28]}",
-            }
-        )
-    return rows
-
-
-def _find_sentinel(node: object) -> dict | None:
-    """Return the ``{"_ccr_dropped": ...}`` sentinel object from the parsed
-    output tree, if present."""
-    if isinstance(node, dict):
-        if "_ccr_dropped" in node:
-            return node
-        for v in node.values():
-            found = _find_sentinel(v)
-            if found is not None:
-                return found
-    elif isinstance(node, list):
-        for x in node:
-            found = _find_sentinel(x)
-            if found is not None:
-                return found
-    return None
-
-
-def _sentinel_from_output(compressed: str) -> dict | None:
-    """Locate the ``{"_ccr_dropped": ...}`` sentinel in a compressed output.
-    Two renders are possible: a JSON array/object tree whose last element is the
-    sentinel (the plain lossy row-drop path), or a JSON STRING wrapping a
-    CSV-schema table whose LAST LINE is the sentinel (the survivor-compaction
-    path).
-    """
-    tree = json.loads(compressed)
-    found = _find_sentinel(tree)
-    if found is not None:
-        return found
-    if isinstance(tree, str):
-        last_line = tree.strip().rsplit("\n", 1)[-1]
-        try:
-            obj = json.loads(last_line)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        if isinstance(obj, dict) and "_ccr_dropped" in obj:
-            return obj
-    return None
-
-
-def _hash_from_marker(marker: str) -> str:
-    """Pull the KEY out of ``<<ccr:KEY <sep>...>>``."""
-    start = marker.index("<<ccr:") + len("<<ccr:")
-    rest = marker[start:]
-    end = rest.index(" ")
-    return rest[:end]
 
 
 def _count_from_marker(marker: str, suffix: str) -> int:

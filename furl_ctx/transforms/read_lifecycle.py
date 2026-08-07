@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, NamedTuple
@@ -168,8 +169,7 @@ class ReadLifecycleManager:
         """Build tool_call_id → :class:`_ToolCallMeta` in one pass.
 
         Scans assistant messages for tool calls, extracting name, file_path,
-        read range AND the containing message index (ARCH-9 — the index used
-        to be re-derived by a per-tool-call rescan of all messages). Handles
+        read range AND the containing message index (ARCH-9). Handles
         both OpenAI and Anthropic formats.
         """
         metadata: dict[str, _ToolCallMeta] = {}
@@ -195,13 +195,11 @@ class ReadLifecycleManager:
                 file_path = None
                 offset = None
                 limit = None
-                try:
+                with suppress(json.JSONDecodeError, TypeError):
                     args = json.loads(func.get("arguments", "{}"))
                     file_path = args.get("file_path") or args.get("path")
                     offset = args.get("offset")
                     limit = args.get("limit")
-                except (json.JSONDecodeError, TypeError):
-                    pass
                 metadata[tc_id] = _ToolCallMeta(name, file_path, offset, limit, msg_index)
 
             # Anthropic format: content blocks with type=tool_use
@@ -349,10 +347,8 @@ class ReadLifecycleManager:
         result_messages: list[dict[str, Any]] = []
         transforms: list[str] = []
         ccr_hashes: list[str] = []
-        counts = {ReadState.FRESH: 0, ReadState.STALE: 0, ReadState.SUPERSEDED: 0}
-
-        for c in classifications:
-            counts[c.state] += 1
+        # Read only by subscript below; Counter yields 0 for an absent state.
+        counts = Counter(c.state for c in classifications)
 
         for msg in messages:
             role = msg.get("role", "")

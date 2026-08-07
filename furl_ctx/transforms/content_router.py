@@ -1,6 +1,6 @@
 """Content router for intelligent compression strategy selection.
 
-This module is the FACADE of the router decomposition (§4.1): it owns the
+This module is the FACADE of the router decomposition: it owns the
 configuration surface (``ContentRouterConfig`` / ``_APPLY_ALLOWED_KWARGS``),
 the ``apply()`` message-walk orchestration, the two-tier cache gate
 (``_lookup_cached_disposition`` / ``_store_disposition``), and thin delegators
@@ -79,7 +79,7 @@ from .content_detector import ContentType, DetectionResult
 from .content_detector import detect_content_type as _regex_detect_content_type
 from .net_mutation_gain import MutationContext, net_mutation_gain
 
-# Extracted seams (pure moves — §4.1 S1-S6). Re-imported here so that:
+# Extracted seams. Re-imported here so that:
 #   * existing ``from ...content_router import X`` imports keep resolving,
 #   * the package lazy-export in ``transforms/__init__.py`` keeps working,
 #   * in-module callers reference these as module globals, and — load-bearing —
@@ -185,7 +185,7 @@ def _word_count(text: str) -> int:
 
 
 def _compress_worker_count() -> int:
-    """Parse ``FURL_COMPRESS_WORKERS`` (default 4) — the ONE place (§4.1 S6).
+    """Parse ``FURL_COMPRESS_WORKERS`` (default 4) — the ONE place.
 
     Read at call time on every ``apply()`` so a changed environment is
     honored; an unparsable value warns once per apply and falls back to 4.
@@ -210,8 +210,7 @@ def _result_cache_key(content: str, bias: float) -> CacheKey:
       share both a 64-bit ``hash`` and an exact length. That is astronomically
       unlikely (a 64-bit SipHash collision, further constrained to equal length),
       but if it ever occurred the cache would serve the other content's compressed
-      bytes. It is not the byte-for-byte "collision -> cache miss" guarantee this
-      comment previously claimed. (The compressed bytes served are always a valid,
+      bytes. (The compressed bytes served are always a valid,
       recoverable compression of SOME content, and the CCR backing is re-verified
       against the current context on a Tier-2 hit.)
     * The rounded ``bias`` changes what ``compress()`` would produce, so a
@@ -505,9 +504,9 @@ class ContentRouterConfig:
 #      (positionals). These are valid, just not consumed here.
 #      (``record_metrics`` is NOT accepted: the pipeline pops it before the
 #      broadcast, so it can never legitimately arrive here. ``output_buffer``
-#      and ``tool_profiles`` were removed with their dead docstring bullets —
+#      and ``tool_profiles`` are NOT accepted either —
 #      per-tool profiles are configured via ``ContentRouterConfig
-#      .tool_profiles``; passing either kwarg now fails loudly instead of
+#      .tool_profiles``; passing either kwarg fails loudly instead of
 #      being silently ignored, API-16.)
 _APPLY_ALLOWED_KWARGS: frozenset[str] = frozenset(
     {
@@ -595,7 +594,7 @@ class ContentRouter(Transform):
         self.config = config or ContentRouterConfig()
         self._observer = observer
 
-        # Content-level compression engine (§4.1 S5): owns the lifetime-stable
+        # Content-level compression engine: owns the lifetime-stable
         # machinery — the lazy ``CompressorRegistry`` and the
         # ``StrategyDispatcher`` — and the body of ``compress()``. It holds no
         # router reference between calls: every engine method takes
@@ -605,8 +604,8 @@ class ContentRouter(Transform):
         # reads through the hooks).
         self._engine = ContentCompressionEngine(self.config)
         # Back-compat aliases: the ``_get_*`` delegators resolve compressors
-        # through ``self._registry`` exactly as before the extraction (the
-        # registry/dispatcher OBJECTS are the engine's).
+        # through ``self._registry`` (the registry/dispatcher OBJECTS are the
+        # engine's).
         self._registry = self._engine._registry
         self._dispatcher = self._engine._dispatcher
         # CCR-backing seam for the result-cache HIT path. Holds no router
@@ -699,19 +698,18 @@ class ContentRouter(Transform):
             # them). Each submission copies its own Context: a single Context
             # object cannot be entered by two threads concurrently.
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = []
-                for _, task_content, task_ctx, task_bias, _, task_detection in pending_tasks:
-                    futures.append(
-                        executor.submit(
-                            contextvars.copy_context().run,
-                            self._timed_compress,
-                            task_content,
-                            task_ctx,
-                            task_bias,
-                            token_counter,
-                            task_detection,
-                        )
+                futures = [
+                    executor.submit(
+                        contextvars.copy_context().run,
+                        self._timed_compress,
+                        task_content,
+                        task_ctx,
+                        task_bias,
+                        token_counter,
+                        task_detection,
                     )
+                    for _, task_content, task_ctx, task_bias, _, task_detection in pending_tasks
+                ]
                 task_results = [f.result() for f in futures]
 
         parallel_ms = (time.perf_counter() - t_parallel_start) * 1000
@@ -947,15 +945,6 @@ class ContentRouter(Transform):
             get_smart_crusher=self._get_smart_crusher,
         )
 
-    @staticmethod
-    def _extract_ccr_hashes(text: str) -> set[str]:
-        """Collect every distinct ``<<ccr:HASH...>>`` hash in *text*.
-
-        Thin delegator to :meth:`CcrMirror.extract_ccr_hashes` (kept as a
-        static back-compat seam).
-        """
-        return CcrMirror.extract_ccr_hashes(text)
-
     def _get_search_compressor(self) -> SearchCompressor | None:
         """Get SearchCompressor (lazy load).
 
@@ -1100,7 +1089,7 @@ class ContentRouter(Transform):
         Every cache mutation and routing-counter bump lives HERE, so the
         data-loss guard — never serve a ``<<ccr:HASH>>`` sentinel whose CCR
         backing has expired — is provable in one place. The five outcomes and
-        their counter effects (identical on both former copies):
+        their counter effects:
 
           * Tier-1 skip hit            → ServeOriginal (ratio_too_high, cache_hit)
           * Tier-2 tightened→skip      → ServeOriginal (ratio_too_high, cache_hit)
@@ -1160,7 +1149,7 @@ class ContentRouter(Transform):
         The store-half twin of :meth:`_lookup_cached_disposition` — the single
         home of the accept/reject cache mutation that the string path (Pass-3
         merge in ``apply``) and the content-block path
-        (``_compress_content_block``) both ran as duplicated copies:
+        (``_compress_content_block``) both run:
 
           * ACCEPT (``compression_ratio`` strictly below ``min_ratio``) → the
             compressed bytes enter the Tier-2 result cache; returns ``True``.

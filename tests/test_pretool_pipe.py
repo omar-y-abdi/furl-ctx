@@ -112,33 +112,10 @@ def _pretool(payload: dict, flag: str | None) -> subprocess.CompletedProcess[str
     )
 
 
-def test_pipe_on_by_default_unset_env_rewrites() -> None:
-    """S1 pin (SMART DEFAULT, user-approved): with FURL_PRETOOL_PIPE UNSET the
-    pipe must REWRITE — on unless explicitly disabled. Pre-flip, unset meant the
-    opt-in OFF default (empty stdout), so this fails on pre-flip code."""
-    proc = _pretool({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}, flag=None)
-    assert proc.returncode == 0
-    assert "updatedInput" in proc.stdout, "unset env must leave the pipe ON"
-
-
-def test_pipe_on_for_empty_and_unknown_values() -> None:
-    """S1 pin: empty and UNKNOWN non-falsy values leave the pipe ON ("on unless
-    explicitly disabled") — a typo like 'fasle' must not silently disable
-    savings. Pre-flip these were all OFF."""
-    for value in ("", "garbage", "fasle", "2"):
-        proc = _pretool({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}, flag=value)
-        assert proc.returncode == 0
-        assert "updatedInput" in proc.stdout, f"{value!r} must leave the pipe ON"
-
-
-def test_pipe_explicit_falsy_disables() -> None:
-    """The documented falsy set — 0/false/off/no/disabled, case-insensitive,
-    whitespace-stripped — is the ONLY way to turn the pipe off. (A guard, not a
-    flip pin: these values were also off pre-flip, then as unrecognized values;
-    now they are the explicit opt-out set.)"""
-    for value in ("0", "false", "OFF", " no ", "disabled"):
-        proc = _pretool({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}, flag=value)
-        assert proc.returncode == 0 and proc.stdout == "", f"flag {value!r} must disable"
+# The FURL_PRETOOL_PIPE flag gate (unset/empty/truthy/falsy/junk spellings) is
+# pinned over its full enumeration — for the python gate AND the shipped hooks.json
+# SHELL gate — by test_plugin_hooks_manifest.py::test_pretool_gate_parity_shell_and_python
+# (_GATE_PARITY_CASES). This file covers the rewrite itself, not the flag gate.
 
 
 def test_enabled_rewrites_bash_with_transparent_marker() -> None:
@@ -368,17 +345,6 @@ def test_trailing_comment_command_survives_rewrite(tmp_path) -> None:
     proc = _run(cmd)
     assert proc.returncode == 0
     assert proc.stdout.strip() == "done"
-
-
-def test_truthy_flag_variants_enable_python_gate() -> None:
-    """Review F3 parity (python half): ``_flag_enabled`` accepts case-insensitive,
-    whitespace-stripped truthy values. The hooks.json SHELL gate must accept the
-    same set — pinned in test_plugin_hooks_manifest.py
-    ::test_pretool_gate_accepts_python_equivalent_variants."""
-    for value in ("TRUE", "On", " 1", "YES", "Enabled"):
-        proc = _pretool({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}, flag=value)
-        assert proc.returncode == 0
-        assert "updatedInput" in proc.stdout, f"python gate must enable for {value!r}"
 
 
 # --- full pipe: real compressor against local furl_ctx --------------------------

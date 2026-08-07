@@ -119,9 +119,10 @@ auditable and re-derivable. Capture commands:
 
 ## Honest read
 
-- **Deletion-backed savings**: 10/10 datasets (code@7, logs@90, search@90, repeated_logs@90, disk@9, multiturn@135, ci_log@212, grep_raw@300, diff_raw@238, markdown_doc@62) ship with rows dropped from the visible
+- **Deletion-backed savings**: 9/10 datasets (code@7, logs@90, search@90, repeated_logs@90, multiturn@135, ci_log@212, grep_raw@300, diff_raw@238, markdown_doc@62) ship with rows dropped from the visible
   output — their savings are NOT free; every drop must be (and is)
   covered by a CCR recovery pointer.
+- **True zero-loss savings**: disk@9 (drop ratio 0.0% — the only rows where the reduction is free).
 - **Retention floor**: 100.0% — every dataset's dropped rows
   resolve through the emitted recovery pointers (sentinel `<<ccr:HASH>>`
   or the raw-text `Retrieve …: hash=…` marker) against the live store.

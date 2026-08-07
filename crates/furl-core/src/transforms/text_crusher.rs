@@ -476,10 +476,6 @@ impl TextCrusher {
         }
     }
 
-    pub fn config(&self) -> &TextCrusherConfig {
-        &self.config
-    }
-
     /// Compress without CCR persistence — always a passthrough for any
     /// input the selector would want to drop from (see module docs).
     /// Exists for parity with siblings; production callers use
@@ -514,7 +510,7 @@ impl TextCrusher {
         // Protection rail: swap custom workflow tags for placeholders
         // BEFORE segmentation so a tag block is opaque (and atomic) to
         // the splitter.
-        let (cleaned, blocks, _protect_stats) = protect_tags(content, false);
+        let (cleaned, blocks) = protect_tags(content, false);
         stats.protected_tag_blocks = blocks.len();
 
         let mut segments = segment_text(&cleaned);
@@ -1092,23 +1088,12 @@ fn shannon_entropy_bits(bytes: &[u8]) -> f64 {
 /// runs (`aaaa…`, repeated words) never trigger.
 fn has_high_entropy_run(text: &str) -> bool {
     let is_b64 = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'-' | b'_');
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if !is_b64(bytes[i]) {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < bytes.len() && is_b64(bytes[i]) {
-            i += 1;
-        }
-        let run = &bytes[start..i];
-        if base64_run_is_secret(run) || hex_subruns_are_secret(run) {
-            return true;
-        }
-    }
-    false
+    // `split` also yields empty runs (adjacent/leading/trailing
+    // separators); both gates below start with a `len() >= MIN` check,
+    // so an empty run short-circuits to false before any entropy math.
+    text.as_bytes()
+        .split(|&b| !is_b64(b))
+        .any(|run| base64_run_is_secret(run) || hex_subruns_are_secret(run))
 }
 
 /// Base64 gate: length + all three of upper/lower/digit + entropy.
@@ -1122,26 +1107,12 @@ fn base64_run_is_secret(run: &[u8]) -> bool {
 
 /// Hex gate over maximal hex sub-runs: length + digit AND letter + entropy.
 fn hex_subruns_are_secret(run: &[u8]) -> bool {
-    let mut i = 0usize;
-    while i < run.len() {
-        if !run[i].is_ascii_hexdigit() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < run.len() && run[i].is_ascii_hexdigit() {
-            i += 1;
-        }
-        let sub = &run[start..i];
-        if sub.len() >= SECRET_HEX_MIN_LEN
+    run.split(|b: &u8| !b.is_ascii_hexdigit()).any(|sub| {
+        sub.len() >= SECRET_HEX_MIN_LEN
             && sub.iter().any(u8::is_ascii_digit)
             && sub.iter().any(u8::is_ascii_alphabetic)
             && shannon_entropy_bits(sub) >= SECRET_HEX_MIN_ENTROPY
-        {
-            return true;
-        }
-    }
-    false
+    })
 }
 
 #[cfg(test)]

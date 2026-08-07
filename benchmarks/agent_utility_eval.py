@@ -4,19 +4,18 @@ Measures whether furl's compressed output retains enough information for an agen
 to answer realistic questions WITHOUT re-reading the source. If the agent must
 re-grep the file, the tool is net-negative.
 
-Assembles 6 corpora, computes deterministic ground-truth, compresses each with
+Assembles 4 corpora, computes deterministic ground-truth, compresses each with
 furl, and emits benchmarks/agent_utility_baseline.json + a summary table.
 
 Usage:
     uv run python benchmarks/agent_utility_eval.py [--out PATH] [--seed N]
 
-Corpora (see _eval_corpora.py for builders + GT logic):
-    1. chrome_trace_full  — 33MB Chrome trace (offload path: above 8MB guard)
-    2. chrome_trace_slice — first 8000 events, in-memory (crush path: ~4MB)
-    3. app_log            — ~5000-line app log, deterministically generated
-    4. source_file        — real furl source file (compress.py)
-    5. json_api           — paginated API dump, 500 records
-    6. stacktrace         — realistic deep Python traceback
+Corpora — this list mirrors _eval_corpora.CORPUS_BUILDERS exactly; keep the two
+in lockstep (see _eval_corpora.py for builders + GT logic):
+    1. app_log     — ~5000-line app log, deterministically generated
+    2. source_file — real furl source file (compress.py), read repo-relative
+    3. json_api    — paginated API dump, 500 records
+    4. stacktrace  — realistic deep Python traceback
 """
 
 from __future__ import annotations
@@ -49,15 +48,10 @@ DEFAULT_OUT = BENCHMARKS_DIR / "agent_utility_baseline.json"
 
 
 # ---------------------------------------------------------------------------
-# Per-corpus query text (3 archetypes × 6 corpora)
+# Per-corpus query text (3 archetypes × 4 corpora)
 # ---------------------------------------------------------------------------
 
 CORPUS_QUERIES: dict[str, dict[str, str]] = {
-    "chrome_trace_full": {
-        "anomaly": "Find all DroppedFrame events and list their timestamps.",
-        "locality": "What events occur immediately around the middle DroppedFrame event?",
-        "aggregate": "What is the per-name event histogram (top 10) over all trace events?",
-    },
     "app_log": {
         "anomaly": "Find all ERROR and WARN log entries and report their line numbers.",
         "locality": "What log lines appear immediately around line 2001?",
@@ -354,13 +348,6 @@ def main() -> int:
     print(f"\nBaseline written: {out_path}  ({out_path.stat().st_size:,} bytes)")
 
     print_summary(all_records)
-
-    # Blob preview for the trace corpus (required by spec)
-    for cid in ("chrome_trace_full",):
-        recs = [r for r in all_records if r["corpus_id"] == cid]
-        if recs:
-            print(f"\n=== BLOB PREVIEW: {cid} (first 1500 chars) ===")
-            print(recs[0]["blob"][:1500])
 
     return 0
 

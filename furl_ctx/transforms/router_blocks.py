@@ -1,6 +1,6 @@
 """Anthropic content-block walker for the content router.
 
-Extracted from ``content_router.py`` (§4.1 S4). Owns the block plane:
+Owns the block plane:
 :meth:`ContentBlockWalker.process_content_blocks` (the per-block cache-safety
 walk), :meth:`ContentBlockWalker._compress_content_block` (the shared
 two-tier-cache compression of one ``tool_result``/``text`` block), and
@@ -286,8 +286,6 @@ class ContentBlockWalker:
                     # ``content: [{"type":"text","text": …}]`` shape (COR-47).
                     # Route each inner text part through the same two-tier
                     # cache; non-text parts (images, …) ship untouched.
-                    # Previously this shape was booked as route_counts["small"]
-                    # and never compressed.
                     new_block, did = self._compress_nested_tool_result(
                         block,
                         tool_content,

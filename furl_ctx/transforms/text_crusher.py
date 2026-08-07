@@ -1,8 +1,7 @@
-"""Rust-backed deterministic prose compressor for PLAIN_TEXT (Engine P2-11).
+"""Rust-backed deterministic prose compressor for PLAIN_TEXT.
 
 Thin shim over ``crates/furl-core/src/transforms/text_crusher.rs`` —
-the extractive, ML-free segment selector that fills the capability gap
-left by the ML-compressor excision (PLAIN_TEXT was a passthrough).
+the extractive, ML-free segment selector for PLAIN_TEXT.
 
 The Rust crate owns the whole pipeline: tag protection
 (``tag_protector`` placeholder-substitute → crush → restore),

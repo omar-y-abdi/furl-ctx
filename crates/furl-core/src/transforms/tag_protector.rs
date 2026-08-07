@@ -245,22 +245,6 @@ fn known_html_tags() -> &'static HashSet<&'static str> {
 const DEFAULT_PREFIX: &str = "{{FURL_TAG_";
 const PLACEHOLDER_SUFFIX: &str = "}}";
 
-/// Sidecar diagnostics — same shape every Rust transform uses.
-#[derive(Debug, Default, Clone)]
-pub struct ProtectStats {
-    pub tags_seen: usize,
-    pub html_tags_skipped: usize,
-    pub custom_blocks_protected: usize,
-    pub self_closing_protected: usize,
-    /// Closes that didn't match any open on the stack (malformed input
-    /// or HTML interleaving). Emitted verbatim. Non-zero is a smell
-    /// worth tracking but not necessarily a bug.
-    pub orphan_closes: usize,
-    /// True iff the placeholder prefix had to be salted because the
-    /// input contained a literal `{{FURL_TAG_` substring.
-    pub placeholder_collision_avoided: bool,
-}
-
 /// Case-insensitive HTML tag check. Lowercases the input lazily so we
 /// don't allocate for the common ASCII-lowercase case.
 pub fn is_known_html_tag(tag_name: &str) -> bool {
@@ -273,12 +257,6 @@ pub fn is_known_html_tag(tag_name: &str) -> bool {
         return set.contains(lower.as_str());
     }
     false
-}
-
-/// Iterate the canonical HTML tag list. Used by the PyO3 shim to
-/// expose `KNOWN_HTML_TAGS` to Python without re-declaring the set.
-pub fn known_html_tag_names() -> &'static [&'static str] {
-    HTML5_TAGS
 }
 
 /// Pick a placeholder prefix that doesn't collide with anything in
@@ -443,19 +421,6 @@ fn is_name_cont(b: u8) -> bool {
 struct Span {
     start: usize,
     end: usize,
-    kind: SpanKind,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum SpanKind {
-    /// Whole `<custom>…</custom>` block (block mode).
-    Block,
-    /// Self-closing `<custom/>` (block mode).
-    SelfClosing,
-    /// Opening `<custom>` marker (marker-only mode).
-    OpenMarker,
-    /// Closing `</custom>` marker (marker-only mode).
-    CloseMarker,
 }
 
 /// Protect custom workflow tags from text compression.
@@ -469,26 +434,21 @@ enum SpanKind {
 ///   (open and close emitted as separate placeholders) so the
 ///   compressor can squash content while the tag boundaries survive.
 ///
-/// Returns `(cleaned, blocks, stats)` where `blocks` is a list of
+/// Returns `(cleaned, blocks)` where `blocks` is a list of
 /// `(placeholder, original)` pairs for [`restore_tags`]. The blocks
 /// are listed in left-to-right order of appearance in the input, which
 /// keeps the restore step trivial.
-pub fn protect_tags(
-    text: &str,
-    compress_tagged_content: bool,
-) -> (String, Vec<(String, String)>, ProtectStats) {
-    let mut stats = ProtectStats::default();
+pub fn protect_tags(text: &str, compress_tagged_content: bool) -> (String, Vec<(String, String)>) {
     if text.is_empty() || !text.contains('<') {
-        return (text.to_string(), Vec::new(), stats);
+        return (text.to_string(), Vec::new());
     }
 
-    let (prefix, salted) = pick_placeholder_prefix(text);
-    stats.placeholder_collision_avoided = salted;
+    let (prefix, _salted) = pick_placeholder_prefix(text);
 
     // Phase 1: walk once, classify every tag, build a list of spans
     // worth replacing. No output emitted yet — this is purely
     // discovery so we can decide which byte ranges to swap.
-    let spans = identify_spans(text, compress_tagged_content, &mut stats);
+    let spans = identify_spans(text, compress_tagged_content);
 
     // Phase 2: emit. Walk the input once more, splicing placeholders
     // for span bytes and copying everything else verbatim. Because
@@ -497,19 +457,15 @@ pub fn protect_tags(
     // emits open/close markers that are byte-disjoint by construction)
     // this is a straightforward scan.
     match emit_output(text, &spans, &prefix) {
-        Some((cleaned, blocks)) => (cleaned, blocks, stats),
+        Some((cleaned, blocks)) => (cleaned, blocks),
         // Should be unreachable — `identify_spans` returns spans whose
         // bytes are slices of `text`. If we ever fail to splice them
         // back, fall back to emitting the original.
-        None => (text.to_string(), Vec::new(), stats),
+        None => (text.to_string(), Vec::new()),
     }
 }
 
-fn identify_spans(
-    text: &str,
-    compress_tagged_content: bool,
-    stats: &mut ProtectStats,
-) -> Vec<Span> {
+fn identify_spans(text: &str, compress_tagged_content: bool) -> Vec<Span> {
     let bytes = text.as_bytes();
     let n = bytes.len();
     let mut spans: Vec<Span> = Vec::new();
@@ -535,10 +491,8 @@ fn identify_spans(
                 tag_end,
                 is_self_closing,
             } => {
-                stats.tags_seen += 1;
                 let name = &text[i + 1..name_end];
                 if is_known_html_tag(name) {
-                    stats.html_tags_skipped += 1;
                     i = tag_end;
                     continue;
                 }
@@ -546,9 +500,7 @@ fn identify_spans(
                     spans.push(Span {
                         start: i,
                         end: tag_end,
-                        kind: SpanKind::SelfClosing,
                     });
-                    stats.self_closing_protected += 1;
                     i = tag_end;
                     continue;
                 }
@@ -559,7 +511,6 @@ fn identify_spans(
                     spans.push(Span {
                         start: i,
                         end: tag_end,
-                        kind: SpanKind::OpenMarker,
                     });
                 }
                 // Both modes push to the stack so close-matching works.
@@ -570,10 +521,8 @@ fn identify_spans(
                 i = tag_end;
             }
             TagParse::Close { name_end, tag_end } => {
-                stats.tags_seen += 1;
                 let close_name = &text[i + 2..name_end];
                 if is_known_html_tag(close_name) {
-                    stats.html_tags_skipped += 1;
                     i = tag_end;
                     continue;
                 }
@@ -599,7 +548,6 @@ fn identify_spans(
                             spans.push(Span {
                                 start: i,
                                 end: tag_end,
-                                kind: SpanKind::CloseMarker,
                             });
                         } else {
                             // Block mode: collapse [open..close] into
@@ -615,14 +563,11 @@ fn identify_spans(
                             spans.push(Span {
                                 start: open_start,
                                 end: tag_end,
-                                kind: SpanKind::Block,
                             });
-                            stats.custom_blocks_protected += 1;
                         }
                         i = tag_end;
                     }
                     None => {
-                        stats.orphan_closes += 1;
                         i = tag_end;
                     }
                 }
@@ -662,7 +607,6 @@ fn emit_output(
         blocks.push((placeholder.clone(), original.to_string()));
         out.push_str(&placeholder);
         cursor = span.end;
-        let _ = span.kind; // SpanKind is informational only at this layer
     }
     out.push_str(&text[cursor..]);
     Some((out, blocks))
@@ -844,7 +788,7 @@ mod tests {
     use super::*;
 
     fn protect(text: &str) -> (String, Vec<(String, String)>) {
-        let (cleaned, blocks, _stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         (cleaned, blocks)
     }
 
@@ -983,7 +927,7 @@ mod tests {
     #[test]
     fn compress_tagged_content_true_emits_marker_placeholders() {
         let text = "Before <system-reminder>Compressible content</system-reminder> After";
-        let (cleaned, blocks, _stats) = protect_tags(text, true);
+        let (cleaned, blocks) = protect_tags(text, true);
         assert!(!cleaned.contains("<system-reminder>"));
         assert!(!cleaned.contains("</system-reminder>"));
         assert!(cleaned.contains("Compressible content"));
@@ -1008,7 +952,7 @@ mod tests {
         // close outer) with the body text left inline — and NO raw tag
         // may survive in the cleaned output.
         let text = "<outer><inner>x</inner>y</outer>";
-        let (cleaned, blocks, _stats) = protect_tags(text, true);
+        let (cleaned, blocks) = protect_tags(text, true);
 
         assert_eq!(
             blocks.len(),
@@ -1034,7 +978,7 @@ mod tests {
     #[test]
     fn restore_basic() {
         let original = "Before <system-reminder>Rule</system-reminder> After";
-        let (cleaned, blocks, _stats) = protect_tags(original, false);
+        let (cleaned, blocks) = protect_tags(original, false);
         let restored = restore_tags(&cleaned, &blocks);
         assert_eq!(restored, original);
     }
@@ -1177,7 +1121,7 @@ mod tests {
     fn restore_roundtrip_preserves_content() {
         let original = "Start <system-reminder>Rule 1: validate</system-reminder> middle \
              <tool_call>search(q='test')</tool_call> end";
-        let (cleaned, blocks, _stats) = protect_tags(original, false);
+        let (cleaned, blocks) = protect_tags(original, false);
         let restored = restore_tags(&cleaned, &blocks);
         assert_eq!(restored, original);
     }
@@ -1193,7 +1137,7 @@ mod tests {
         // duplicate of the second block in the output.
         let text = "<system-reminder>same</system-reminder> middle \
              <system-reminder>same</system-reminder>";
-        let (cleaned, blocks, _stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         // BOTH blocks should be replaced by DIFFERENT placeholders.
         assert_eq!(blocks.len(), 2);
         assert!(!cleaned.contains("<system-reminder>"));
@@ -1218,7 +1162,7 @@ mod tests {
         for _ in 0..depth {
             text.push_str("</lvl>");
         }
-        let (cleaned, blocks, _stats) = protect_tags(&text, false);
+        let (cleaned, blocks) = protect_tags(&text, false);
         // The outermost span eats everything: one placeholder, no
         // residual `<lvl>` markers in the cleaned text.
         assert!(!cleaned.contains("<lvl>"));
@@ -1233,7 +1177,7 @@ mod tests {
         // Bug #4: same first-occurrence-replace bug for self-closing
         // tags. `<marker/>` appearing twice would collapse.
         let text = "<marker/> middle <marker/>";
-        let (cleaned, blocks, _stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         assert_eq!(blocks.len(), 2);
         assert_ne!(blocks[0].0, blocks[1].0);
         assert!(!cleaned.contains("<marker/>"));
@@ -1243,12 +1187,10 @@ mod tests {
     #[test]
     fn fixed_in_3e4_placeholder_collision_is_avoided() {
         // Bug #5: input contains literal `{{FURL_TAG_…}}`. The
-        // walker should pick a salted prefix and report the collision
-        // in stats.
+        // walker should pick a salted prefix.
         let text = "User wrote {{FURL_TAG_0}} on purpose. \
              <system-reminder>real one</system-reminder>";
-        let (_cleaned, blocks, stats) = protect_tags(text, false);
-        assert!(stats.placeholder_collision_avoided);
+        let (_cleaned, blocks) = protect_tags(text, false);
         assert_eq!(blocks.len(), 1);
         // Placeholder used must NOT collide with the user's literal.
         assert_ne!(blocks[0].0, "{{FURL_TAG_0}}");
@@ -1259,11 +1201,10 @@ mod tests {
     #[test]
     fn orphan_close_tag_emitted_verbatim() {
         let text = "no opener </ghost> here";
-        let (cleaned, blocks, stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         // Nothing protected; close stays in the cleaned text.
         assert_eq!(blocks.len(), 0);
         assert!(cleaned.contains("</ghost>"));
-        assert_eq!(stats.orphan_closes, 1);
     }
 
     #[test]
@@ -1271,7 +1212,7 @@ mod tests {
         // An open with no matching close should round-trip exactly —
         // no protection, no data loss.
         let text = "<ghost>dangling content with no close";
-        let (cleaned, blocks, _stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         assert!(blocks.is_empty());
         assert_eq!(cleaned, text);
     }
@@ -1279,7 +1220,7 @@ mod tests {
     #[test]
     fn malformed_lone_lt_emitted_verbatim() {
         let text = "if a < b then c";
-        let (cleaned, blocks, _stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         assert_eq!(cleaned, text);
         assert!(blocks.is_empty());
     }
@@ -1291,7 +1232,7 @@ mod tests {
         // bounds-check now returns NotTag and the function falls
         // through to emitting `</` verbatim.
         for text in ["</", "<", "<a/", "<a", "<a /", "</a"] {
-            let (cleaned, blocks, _stats) = protect_tags(text, false);
+            let (cleaned, blocks) = protect_tags(text, false);
             assert_eq!(cleaned, text);
             assert!(blocks.is_empty());
         }
@@ -1300,7 +1241,7 @@ mod tests {
     #[test]
     fn attribute_with_gt_inside_quotes() {
         let text = r#"<context attr="a > b">payload</context>"#;
-        let (cleaned, blocks, _stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].1, text);
         assert!(!cleaned.contains("payload"));
@@ -1312,15 +1253,12 @@ mod tests {
         // confuse the stack: the HTML close is emitted verbatim, the
         // custom span still closes when its own close arrives.
         let text = "<custom>x</div> y</custom>";
-        let (cleaned, blocks, stats) = protect_tags(text, false);
+        let (cleaned, blocks) = protect_tags(text, false);
         // The whole `<custom>...</custom>` span wins, including the
         // verbatim `</div>` inside.
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].1, "<custom>x</div> y</custom>");
         assert!(!cleaned.contains("<custom>"));
-        // `</div>` is HTML, not orphan.
-        assert_eq!(stats.html_tags_skipped, 1);
-        assert_eq!(stats.orphan_closes, 0);
     }
 
     // ─── Hotfix-A9 invariants ────────────────────────────────────────
@@ -1416,7 +1354,7 @@ mod tests {
         /// the same amount.
         #[test]
         fn restore_never_introduces_asymmetry(content in "[a-z<>/]{0,200}") {
-            let (cleaned, blocks, _stats) = protect_tags(&content, false);
+            let (cleaned, blocks) = protect_tags(&content, false);
             // Baseline: strip every placeholder from `cleaned`. This
             // is the "lost everything" worst case; the discard-wrap
             // path must produce exactly this output.
@@ -1463,7 +1401,7 @@ mod tests {
             content in "[a-z<>/]{0,200}",
             compressed in "[ -~]{0,200}",
         ) {
-            let (_cleaned, blocks, _stats) = protect_tags(&content, false);
+            let (_cleaned, blocks) = protect_tags(&content, false);
             // Drop all placeholders by feeding `restore_tags` arbitrary
             // text the compressor "produced". If none of the
             // placeholders happen to appear in `compressed` (the
@@ -1487,7 +1425,7 @@ mod tests {
         fn restore_no_orphan_byte_injection(
             content in "[a-z<>/]{0,200}",
         ) {
-            let (cleaned, blocks, _stats) = protect_tags(&content, false);
+            let (cleaned, blocks) = protect_tags(&content, false);
             let restored = restore_tags(&cleaned, &blocks);
             // Sum of the byte-lengths of the originals that were
             // actually substituted (placeholder still present in

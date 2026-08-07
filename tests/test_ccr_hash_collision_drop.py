@@ -35,7 +35,9 @@ def _collide(store: CompressionStore) -> str:
 def test_collision_drops_binding_retrieve_is_loud_miss() -> None:
     store = CompressionStore(max_entries=10)
     returned = _collide(store)
-    assert returned == H  # signature unchanged: the key is still returned
+    # Signature unchanged (Bug-6 contrast): the non-durable path still RETURNS the
+    # key rather than raising — only require_durable callers get the veto.
+    assert returned == H
     # The ambiguous binding is dropped → retrieve is a loud miss (None), which
     # the retrieval callers surface as an explicit error — NOT foreign content.
     assert store.retrieve(H) is None
@@ -94,14 +96,6 @@ def test_collision_with_require_durable_vetoes_bug6() -> None:
             require_durable=True,
         )
     # Still dropped (no foreign content served) — a loud miss, as before.
-    assert store.retrieve(H) is None
-
-
-def test_non_durable_collision_keeps_returning_hash_bug6() -> None:
-    # The non-durable path is unchanged: it returns the key (which now loud-misses)
-    # rather than raising — only require_durable callers get the veto.
-    store = CompressionStore(max_entries=10)
-    assert _collide(store) == H
     assert store.retrieve(H) is None
 
 

@@ -250,16 +250,10 @@ pub struct CrushabilityAnalysis {
     pub crushable: bool,
     pub confidence: f64,
     pub reason: SkipReason,
-    pub signals_present: Vec<String>,
-    pub signals_absent: Vec<String>,
-
-    // Detailed metrics (mirroring Python field-by-field)
-    pub has_id_field: bool,
-    pub id_uniqueness: f64,
-    pub avg_string_uniqueness: f64,
-    pub has_score_field: bool,
-    pub error_item_count: usize,
-    pub anomaly_count: usize,
+    /// True iff at least one crushability signal fired (score field,
+    /// structural outliers, error keywords, numeric anomalies, or a
+    /// change point).
+    pub has_any_signal: bool,
 
     // Memoized detection indices (PERF-3). `analyze_crushability`
     // already runs both detections over the full array to derive its
@@ -280,14 +274,7 @@ impl CrushabilityAnalysis {
             crushable: false,
             confidence,
             reason,
-            signals_present: Vec::new(),
-            signals_absent: Vec::new(),
-            has_id_field: false,
-            id_uniqueness: 0.0,
-            avg_string_uniqueness: 0.0,
-            has_score_field: false,
-            error_item_count: 0,
-            anomaly_count: 0,
+            has_any_signal: false,
             structural_outlier_indices: Vec::new(),
             error_keyword_indices: Vec::new(),
         }
@@ -339,18 +326,11 @@ pub struct ArrayAnalysis {
 /// Plan for how to compress an array.
 ///
 /// Mirrors `CompressionPlan` at `smart_crusher.py:900-910`. `keep_indices`
-/// is the list of original-array indices that survive compression;
-/// `summary_ranges` carries `(start, end, summary_dict)` for runs we
-/// summarized rather than dropped (currently unused in the Python impl
-/// but plumbed through for parity with the dataclass).
+/// is the list of original-array indices that survive compression.
 #[derive(Debug, Clone)]
 pub struct CompressionPlan {
     pub strategy: CompressionStrategy,
     pub keep_indices: Vec<usize>,
-    /// `(start, end, summary)` triples for summarized runs. Python uses
-    /// `list[tuple[int, int, dict]]`; we use `Value` for the summary so
-    /// any JSON shape is representable.
-    pub summary_ranges: Vec<(usize, usize, Value)>,
     pub cluster_field: Option<String>,
     pub sort_field: Option<String>,
     pub keep_count: usize,
@@ -362,7 +342,6 @@ impl Default for CompressionPlan {
         CompressionPlan {
             strategy: CompressionStrategy::None,
             keep_indices: Vec::new(),
-            summary_ranges: Vec::new(),
             cluster_field: None,
             sort_field: None,
             keep_count: 10,

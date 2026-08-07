@@ -23,7 +23,6 @@ These pins lock that outcome in:
 
 from __future__ import annotations
 
-import hashlib
 import json
 
 import pytest
@@ -31,71 +30,11 @@ import pytest
 from furl_ctx.cache.compression_store import get_compression_store, reset_compression_store
 from furl_ctx.ccr.retrieve_filters import FilterError, RetrieveFilters, apply_filters
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
+from tests._fixtures import hash_from_marker as _hash_from_marker
+from tests._fixtures import high_entropy_logs as _high_entropy_logs
+from tests._fixtures import sentinel_from_output as _sentinel_from_output
 
 pytest.importorskip("tiktoken")
-
-
-def _high_entropy_logs(n: int, seed: int) -> list[dict]:
-    """Deterministic near-unique log rows — the tier that forces a lossy
-    row-drop (defeats the lossless compactor), reproducibly and without a
-    committed fixture. Same generator as ``test_ccr_proportional_retrieval``."""
-    rows: list[dict] = []
-    services = ["api", "worker", "scheduler", "auth", "billing", "ingest"]
-    levels = ["INFO", "WARN", "ERROR", "DEBUG"]
-    for i in range(n):
-        h = hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()
-        rows.append(
-            {
-                "id": h[:32],
-                "commit": h[32:72],
-                "service": services[int(h[:2], 16) % len(services)],
-                "level": levels[int(h[2:4], 16) % len(levels)],
-                "latency_ms": int(h[4:8], 16) % 5000,
-                "message": f"request {h[8:20]} handled in span {h[20:28]}",
-            }
-        )
-    return rows
-
-
-def _find_sentinel(node: object) -> dict | None:
-    if isinstance(node, dict):
-        if "_ccr_dropped" in node:
-            return node
-        for v in node.values():
-            found = _find_sentinel(v)
-            if found is not None:
-                return found
-    elif isinstance(node, list):
-        for x in node:
-            found = _find_sentinel(x)
-            if found is not None:
-                return found
-    return None
-
-
-def _sentinel_from_output(compressed: str) -> dict | None:
-    """Locate the ``{"_ccr_dropped": ...}`` sentinel in a compressed output —
-    a JSON array/object tree, or a JSON-string-wrapped survivor table whose
-    final line is the sentinel object."""
-    tree = json.loads(compressed)
-    found = _find_sentinel(tree)
-    if found is not None:
-        return found
-    if isinstance(tree, str):
-        last_line = tree.strip().rsplit("\n", 1)[-1]
-        try:
-            obj = json.loads(last_line)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        if isinstance(obj, dict) and "_ccr_dropped" in obj:
-            return obj
-    return None
-
-
-def _hash_from_marker(marker: str) -> str:
-    start = marker.index("<<ccr:") + len("<<ccr:")
-    rest = marker[start:]
-    return rest[: rest.index(" ")]
 
 
 def _compress(items: list[dict]) -> tuple[str, dict]:

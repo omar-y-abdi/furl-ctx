@@ -36,6 +36,7 @@ import json
 
 import pytest
 
+from furl_ctx.ccr import marker_grammar
 from furl_ctx.transforms.smart_crusher import SmartCrusher
 
 
@@ -205,10 +206,37 @@ def _blob(seed: int, repeats: int = 8) -> str:
 
 
 def _scrape_opaque_hashes(rendered: str) -> set[str]:
-    """The comma-shape (opaque) scrape — Python's pre-§4.2 discovery path."""
+    """The comma-shape (opaque) scrape — Python's pre-§4.2 discovery path.
+
+    Same no-regex walk + hex alphabet as
+    ``SmartCrusher._collect_ccr_hashes_from_string``, but a hash is collected
+    ONLY when the character immediately after the hex run is a comma — that
+    delimiter is what distinguishes the opaque shape (``<<ccr:HASH,KIND,SIZE>>``)
+    from the space-delimited row-drop and ``#rows`` shapes. Lives here rather
+    than on ``SmartCrusher`` because no production path has called it since
+    §4.2: every fresh-output site consumes typed refs, and the result-cache
+    bridge scrapes ALL shapes at once via ``_collect_ccr_hashes``.
+    """
     sink: set[str] = set()
-    SmartCrusher._collect_opaque_ccr_hashes_from_string(rendered, sink)
-    return sink
+    idx = 0
+    prefix = marker_grammar.CCR_PREFIX
+    n = len(rendered)
+    while True:
+        start = rendered.find(prefix, idx)
+        if start == -1:
+            return sink
+        cursor = start + len(prefix)
+        end = cursor
+        while end < n and rendered[end] in marker_grammar.HEX_ALPHABET:
+            end += 1
+        if end == cursor:
+            # No hex after `<<ccr:` — not a real marker.
+            idx = cursor
+            continue
+        # OPAQUE shape iff the delimiter after the hash is a comma.
+        if end < n and rendered[end] == ",":
+            sink.add(rendered[cursor:end].lower())
+        idx = end
 
 
 def _scrape_row_drop_only(rendered: str) -> set[str]:

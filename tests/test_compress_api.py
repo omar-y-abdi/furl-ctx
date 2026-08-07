@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from furl_ctx.compress import CompressConfig, CompressResult, compress
+from furl_ctx.compress import CompressConfig, compress
 from furl_ctx.hooks import CompressionHooks
 
 # =============================================================================
@@ -24,14 +24,6 @@ class TestCompressFunction:
         result = compress(messages, model="gpt-4o")
         assert result.messages[0]["content"] == "hello"
         assert result.tokens_saved == 0
-
-    def test_returns_compress_result(self):
-        result = compress([{"role": "user", "content": "hi"}])
-        assert isinstance(result, CompressResult)
-        assert hasattr(result, "messages")
-        assert hasattr(result, "tokens_saved")
-        assert hasattr(result, "compression_ratio")
-        assert hasattr(result, "transforms_applied")
 
     def test_large_tool_output_compressed(self):
         """Large JSON tool output IS compressed — not merely not-inflated.

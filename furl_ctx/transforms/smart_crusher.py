@@ -1,12 +1,8 @@
 """Smart JSON array crusher — Rust-backed via PyO3.
 
-The Python implementation has been retired.
-All array compression now goes through `furl_ctx._core.SmartCrusher`
-(built from `crates/furl-py`). Byte-equality of the two
-implementations was verified against 17 recorded parity fixtures
-before the Python source was removed (the fixture corpus itself was
-retired with the parity runner in the standalone excise); the Rust
-crate has its own coverage in `crates/furl-core/`.
+All array compression goes through `furl_ctx._core.SmartCrusher`
+(built from `crates/furl-py`); the Rust crate has its own coverage
+in `crates/furl-core/`.
 
 This module retains the public surface — `SmartCrusherConfig`,
 `CrushResult`, `SmartCrusher`, `smart_crush_tool_output` — so existing
@@ -30,8 +26,7 @@ fallback. Build it locally with `scripts/build_rust_extension.sh`
   which the router reads back to decide whether to inject the
   heavier `furl_retrieve` TOOL into the request; they no longer gate
   the pointer or the store write. The Python store mirror consumes the
-  TYPED refs the engine surfaces (`dropped_refs` — §4.2 R5; the legacy
-  text scrape rides alongside for one release as a union safety net),
+  TYPED refs the engine surfaces (`dropped_refs` — §4.2 R5),
   so `compression_store.retrieve(hash)` resolves it. Opaque-string CCR
   substitutions likewise always emit their pointer and their typed ref.
 - **Custom relevance scorer / scorer override** — fails loud.
@@ -87,11 +82,9 @@ _CONTEXT_MAX_TOTAL_CHARS = 8000  # hard bound on collected query-context chars
 # Every fresh-output mirror site consumes TYPED refs (``dropped_refs`` /
 # ``smart_crush_content_typed`` / ``compact_document_json_typed``) as the
 # sole recovery path — the engine surfaces exactly the hashes it dropped,
-# so nothing is re-parsed out of rendered text. (§4.2 R6 removed the
-# one-release union safety net that briefly cross-checked a legacy text
-# scrape; the soak counter stayed 0, confirming the typed path is complete.
-# The text scrape survives ONLY as the result-cache re-mirror bridge below,
-# where cached rendered prompt text carries no typed refs.)
+# so nothing is re-parsed out of rendered text. The text scrape survives
+# ONLY as the result-cache re-mirror bridge below, where cached rendered
+# prompt text carries no typed refs.
 
 
 class CcrMirrorError(RuntimeError):
@@ -212,14 +205,9 @@ class SmartCrusherConfig:
     array. No wrappers, no generated text, no metadata keys.
 
     Field names + defaults match the Rust `SmartCrusherConfig` byte-for-
-    byte; the shim copies these straight into the PyO3 constructor.
-
-    Four historical knobs (``enabled``, ``uniqueness_threshold``,
-    ``similarity_threshold``, ``include_summaries``) were read by ZERO
-    code paths on either side of the FFI and were deleted in lockstep
-    with the Rust struct + PyO3 kwargs (SIMP-7 wire-contract): passing
-    them now raises ``TypeError`` here (dataclass) and at the bridge
-    (PyO3) instead of silently doing nothing.
+    byte; the shim copies these straight into the PyO3 constructor. An
+    unknown kwarg raises ``TypeError`` here (dataclass) and at the
+    bridge (PyO3) instead of silently doing nothing.
     """
 
     min_items_to_analyze: int = 5
@@ -265,8 +253,7 @@ class SmartCrusherConfig:
 class SmartCrusher(Transform):
     """Rust-backed `SmartCrusher` (via PyO3 / `furl_ctx._core`).
 
-    Same `__init__` and method shapes as the retired Python class —
-    drop-in replacement. The `crush()` and `_smart_crush_content()`
+    The `crush()` and `_smart_crush_content()`
     methods delegate every byte to Rust; `apply()` keeps the
     Transform-protocol orchestration in Python (message walking,
     digest-marker insertion, token counting) since that's mostly glue
@@ -311,8 +298,7 @@ class SmartCrusher(Transform):
         # and `inject_retrieval_marker=False` collapse to the Rust
         # crusher's `advertise_retrieval_tool=False` field.
         #
-        # That field does NOT skip the marker or the CCR store write
-        # (Defect 1 corrected the prior comment, which claimed it did).
+        # That field does NOT skip the marker or the CCR store write.
         # The lossy row-drop path ALWAYS surfaces the `<<ccr:HASH>>`
         # recovery pointer and ALWAYS writes the store when a distinct
         # item is dropped, regardless of this flag — a drop without a
@@ -364,10 +350,7 @@ class SmartCrusher(Transform):
         #
         # The pyo3 constructor accepts two MORE kwargs that are NOT
         # dataclass fields and so must be passed explicitly:
-        #   * `relevance_threshold` (0.3) — the RECONCILED scoring
-        #     threshold (API-14): the retired top-level
-        #     `RelevanceScorerConfig` documented 0.25 but was never
-        #     forwarded; 0.3 here is — and always was — the value the
+        #   * `relevance_threshold` (0.3) — the scoring threshold the
         #     engine actually runs with (it matches the Rust default).
         #   * `advertise_retrieval_tool` — derived from the CCR config, not
         #     a crusher-config field. Falling through to the pyo3 default
@@ -422,7 +405,7 @@ class SmartCrusher(Transform):
     def crush(self, content: str, query: str = "", bias: float = 1.0) -> CrushResult:
         """Crush a single JSON content string.
 
-        Mirrors the retired Python method. Returns a `CrushResult`
+        Returns a `CrushResult`
         dataclass so call sites that destructure with `asdict()` keep
         working.
         """
@@ -576,18 +559,18 @@ class SmartCrusher(Transform):
     ) -> tuple[str, bool, str]:
         """Apply smart crushing; return `(crushed, was_modified, info)`.
 
-        Mirrors the retired Python method's tuple shape (its tuple-shape
+        Its tuple-shape
         consumers — `apply()`, `smart_crush_tool_output`, external
-        embedders — keep the 3-tuple through this wrapper). `tool_name`
+        embedders — keep the 3-tuple through this wrapper. `tool_name`
         is threaded through to the CCR store mirror's entry metadata;
         ``None`` (e.g. the legacy pipeline doesn't have one in scope) is
         accepted.
 
         Internally rides the TYPED sibling (§4.2 R5): the live
-        `SmartCrusher.apply()` path — historically the last 100%-scrape
-        site — now receives every recovery ref typed (row-drops with
-        bare index keys AND opaque substitutions) and mirrors them
-        directly; nothing is re-parsed out of the rendered text.
+        `SmartCrusher.apply()` path receives every recovery ref typed
+        (row-drops with bare index keys AND opaque substitutions) and
+        mirrors them directly; nothing is re-parsed out of the rendered
+        text.
         """
         crushed, was_modified, info, refs = self._rust.smart_crush_content_typed(
             content, query_context, bias
@@ -613,8 +596,7 @@ class SmartCrusher(Transform):
     # (`_mirror_typed_refs`) exclusively — the scrape below is NOT on that
     # path at all. It survives ONLY as the bridge for the RESULT-CACHE
     # plane (`router_ccr_mirror.CcrMirror` re-mirrors hashes parsed out of
-    # CACHED prompt text, where no typed refs exist). (§4.2 R6 removed the
-    # one-release union net that briefly also fed this walker.)
+    # CACHED prompt text, where no typed refs exist).
     #
     # The bridge is straight Rust→Python mirror: extract every
     # `<<ccr:HASH>>` hash from the rendered output, fetch the canonical
@@ -735,8 +717,7 @@ class SmartCrusher(Transform):
         # Prefix + hex alphabet come from the owned grammar spec
         # (marker_grammar). This walker intentionally enforces NO width — it
         # keeps any hex run, unlike the strict-width regex consumer — and keeps
-        # the ``#rows`` suffix below. Behavior is unchanged; only the literals
-        # are now sourced from the single owner.
+        # the ``#rows`` suffix below.
         idx = 0
         prefix = marker_grammar.CCR_PREFIX
         n = len(s)
@@ -762,44 +743,6 @@ class SmartCrusher(Transform):
                 hash_str = f"{hash_str}#rows"
                 end += len("#rows")
             sink.add(hash_str)
-            idx = end
-
-    # ── OPAQUE-only scrape (comma shape) ──────────────────────────────────
-    #
-    # Retained for the typed-parity suite: the comma-delimited walk
-    # distinguishes the opaque marker shape (`<<ccr:HASH,KIND,SIZE>>`)
-    # from the space-delimited row-drop and `#rows` shapes. No production
-    # mirror path calls it since §4.2 — all fresh-output sites consume
-    # typed refs; the result-cache bridge scrapes ALL shapes at once via
-    # `_collect_ccr_hashes`.
-
-    @staticmethod
-    def _collect_opaque_ccr_hashes_from_string(s: str, sink: set[str]) -> None:
-        """Extract OPAQUE-blob hashes (`<<ccr:HASH,KIND,SIZE>>`) from `s` by
-        substring scan — the comma delimiter is what distinguishes shape C
-        from the space-delimited row-drop (A) and the `#rows` index (B).
-
-        Same no-regex walk + hex alphabet as
-        `_collect_ccr_hashes_from_string`, but a hash is collected ONLY when
-        the character immediately after the hex run is a comma."""
-        idx = 0
-        prefix = marker_grammar.CCR_PREFIX
-        n = len(s)
-        while True:
-            start = s.find(prefix, idx)
-            if start == -1:
-                return
-            cursor = start + len(prefix)
-            end = cursor
-            while end < n and s[end] in marker_grammar.HEX_ALPHABET:
-                end += 1
-            if end == cursor:
-                # No hex after `<<ccr:` — not a real marker.
-                idx = cursor
-                continue
-            # OPAQUE shape iff the delimiter after the hash is a comma.
-            if end < n and s[end] == ",":
-                sink.add(s[cursor:end].lower())
             idx = end
 
     def _mirror_single_hash_to_python_store(
@@ -936,9 +879,9 @@ class SmartCrusher(Transform):
             # with ValueError. It "shouldn't happen in practice", but the lossy
             # Rust row-drop is ALREADY committed and the <<ccr:HASH>> marker
             # ships — so swallowing it is the SAME signalled-but-unrecoverable
-            # silent loss the sibling branch guards against (the earlier
-            # log-and-return here was an asymmetry that defeated the invariant it
-            # sat next to). Fail the drop: raise CcrMirrorError so compress()'s
+            # silent loss the sibling branch guards against. Never
+            # log-and-return here: that asymmetry defeats the invariant it sits
+            # next to. Fail the drop: raise CcrMirrorError so compress()'s
             # fail-open boundary reverts to the ORIGINAL rows (audit #10). A
             # marker never stands without a backing store entry.
             raise CcrMirrorError(
@@ -981,10 +924,7 @@ class SmartCrusher(Transform):
         cap hit, so the caps keep the most recent (most relevant) signal:
 
         * ``_CONTEXT_MAX_USER_MESSAGES`` user messages (historical cap);
-        * ``_CONTEXT_MAX_ASSISTANT_MESSAGES`` assistant tool-call scans —
-          previously unbounded until the user-turn cap broke the loop, so
-          a 200-turn single-prompt agent session (tool results are
-          ``role:"tool"``) swept EVERY assistant turn's arguments;
+        * ``_CONTEXT_MAX_ASSISTANT_MESSAGES`` assistant tool-call scans;
         * ``_CONTEXT_MAX_TOTAL_CHARS`` total collected chars — the hard
           bound that keeps hundreds of KB of history out of the Rust BM25
           query regardless of turn shape. The part that crosses the cap
@@ -1126,7 +1066,7 @@ class SmartCrusher(Transform):
             # block has a string content field of its own — or, in the
             # canonical Anthropic/MCP shape, a nested parts list
             # ``[{"type": "text", "text": …}]`` whose text parts crush
-            # individually (COR-47 mirror; previously skipped entirely).
+            # individually (COR-47 mirror).
             content = msg.get("content")
             if isinstance(content, list):
                 # Copy-on-write (COR-55): lazily copy the containing list /

@@ -10,6 +10,8 @@ A determination lock — no production change in the commit.
 
 from __future__ import annotations
 
+import pytest
+
 import furl_ctx.cache.compression_store as cs
 from furl_ctx.cache.compression_store import (
     DEFAULT_CCR_TTL_SECONDS,
@@ -22,23 +24,13 @@ _ENV = "FURL_CCR_TTL_SECONDS"
 # ── #22-env: non-positive / invalid env TTL is already guarded ────────────
 
 
-def test_env_ttl_zero_falls_back_to_default(monkeypatch) -> None:
-    monkeypatch.setenv(_ENV, "0")
-    assert _get_env_default_ttl_seconds() == DEFAULT_CCR_TTL_SECONDS
-
-
-def test_env_ttl_negative_falls_back_to_default(monkeypatch) -> None:
-    monkeypatch.setenv(_ENV, "-5")
-    assert _get_env_default_ttl_seconds() == DEFAULT_CCR_TTL_SECONDS
-
-
-def test_env_ttl_non_integer_falls_back_to_default(monkeypatch) -> None:
-    monkeypatch.setenv(_ENV, "not-a-number")
-    assert _get_env_default_ttl_seconds() == DEFAULT_CCR_TTL_SECONDS
-
-
-def test_env_ttl_empty_falls_back_to_default(monkeypatch) -> None:
-    monkeypatch.setenv(_ENV, "   ")
+@pytest.mark.parametrize(
+    "raw",
+    ["0", "-5", "not-a-number", "   "],
+    ids=["zero", "negative", "non-integer", "blank"],
+)
+def test_invalid_env_ttl_falls_back_to_default(monkeypatch, raw: str) -> None:
+    monkeypatch.setenv(_ENV, raw)
     assert _get_env_default_ttl_seconds() == DEFAULT_CCR_TTL_SECONDS
 
 

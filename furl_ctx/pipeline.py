@@ -1,10 +1,8 @@
 """Furl compression lifecycle stages and the extension contract.
 
 Only the three stages the standalone ``compress()`` path actually emits survive
-here — ``INPUT_RECEIVED`` → ``INPUT_ROUTED`` → ``INPUT_COMPRESSED``. The former
-send/response/proxy stages and the entry-point extension-discovery path were
-removed with the proxy in the standalone excise; ``compress.py`` is the sole
-emitter and passes ``hooks`` directly, so nothing discovers or consumes them.
+here — ``INPUT_RECEIVED`` → ``INPUT_ROUTED`` → ``INPUT_COMPRESSED``.
+``compress.py`` is the sole emitter and passes ``hooks`` directly.
 """
 
 from __future__ import annotations

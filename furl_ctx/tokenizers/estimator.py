@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import suppress
 
 from .base import BaseTokenizer
 
-# PERF-14: ratio detection and special-pattern overhead scanning operate on
+# Ratio detection and special-pattern overhead scanning operate on
 # a bounded PREFIX SAMPLE of the text. Auto-mode previously json.loads-parsed
 # multi-MB strings and regex-scanned the full text on EVERY count_text call
 # just to pick 3.2 vs 4.0 chars/token — on large tool outputs the "cheap
@@ -123,10 +124,8 @@ class EstimatingTokenCounter(BaseTokenizer):
     def _detect_ratio(self, text: str) -> float:
         """Detect optimal chars-per-token ratio based on content.
 
-        Detection runs on a ``_DETECTION_SAMPLE_CHARS`` prefix sample
-        (PERF-14): a multi-MB tool output was previously fully
-        ``json.loads``-parsed and regex-scanned per call just to pick the
-        ratio. Texts at or under the sample size keep the exact historical
+        Detection runs on a ``_DETECTION_SAMPLE_CHARS`` prefix sample.
+        Texts at or under the sample size keep the exact historical
         behavior (the sample IS the text); larger JSON candidates classify
         via a structural-density heuristic on the prefix, since a truncated
         prefix never parses.
@@ -142,11 +141,9 @@ class EstimatingTokenCounter(BaseTokenizer):
         # Check for JSON
         if self.JSON_PATTERN.match(sample):
             if len(text) <= _DETECTION_SAMPLE_CHARS:
-                try:
+                with suppress(json.JSONDecodeError, ValueError):
                     json.loads(text)
                     return self.CHARS_PER_TOKEN_JSON
-                except (json.JSONDecodeError, ValueError):
-                    pass
             elif self._sample_is_json_like(sample):
                 return self.CHARS_PER_TOKEN_JSON
 
@@ -159,7 +156,7 @@ class EstimatingTokenCounter(BaseTokenizer):
 
     @staticmethod
     def _sample_is_json_like(sample: str) -> bool:
-        """Structural-density JSON check for a prefix sample (PERF-14).
+        """Structural-density JSON check for a prefix sample.
 
         Used only when the full text exceeds the sample window, so
         ``json.loads`` on the (truncated) prefix cannot decide. Counts the
@@ -176,9 +173,7 @@ class EstimatingTokenCounter(BaseTokenizer):
 
         URLs and UUIDs often tokenize into more tokens than
         character count would suggest. The scan is bounded to the same
-        ``_DETECTION_SAMPLE_CHARS`` prefix sample as ratio detection
-        (PERF-14) — two full-text regex passes per count_text call were
-        the other half of the multi-MB auto-mode cost. The overhead is a
+        ``_DETECTION_SAMPLE_CHARS`` prefix sample as ratio detection. The overhead is a
         small correction term on top of the length-based estimate; for
         texts at or under the sample size the behavior is exactly the
         historical one.
@@ -190,17 +185,15 @@ class EstimatingTokenCounter(BaseTokenizer):
             Additional token overhead.
         """
         sample = text[:_DETECTION_SAMPLE_CHARS]
-        overhead = 0
 
-        # URLs typically tokenize to more tokens
-        urls = self.URL_PATTERN.findall(sample)
-        for url in urls:
-            # Each URL component adds overhead
-            overhead += url.count("/") + url.count("?") + url.count("&")
+        # URLs typically tokenize to more tokens — each component adds overhead
+        overhead: int = sum(
+            url.count("/") + url.count("?") + url.count("&")
+            for url in self.URL_PATTERN.findall(sample)
+        )
 
-        # UUIDs are typically 8-10 tokens despite being 36 chars
-        uuids = self.UUID_PATTERN.findall(sample)
-        overhead += len(uuids) * 2  # Each UUID adds ~2 extra tokens
+        # UUIDs are typically 8-10 tokens despite being 36 chars (~2 extra each)
+        overhead += len(self.UUID_PATTERN.findall(sample)) * 2
 
         return overhead
 

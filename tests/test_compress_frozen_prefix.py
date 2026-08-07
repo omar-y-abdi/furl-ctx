@@ -8,8 +8,10 @@ Contract tested (Contract #2 — prompt-cache ordering):
 ``_compute_frozen_message_count`` in compress.py is the SOLE owner of
 this logic — there is no Rust twin (an earlier docstring here cited a
 ``cache_control.rs`` that never existed in crates/; TEST-7). The
-``TestParity`` class below is a table-driven characterization of that
-Python owner, not a cross-language parity lock.
+``TestComputeFrozenMessageCount`` class below is a table-driven
+characterization of that Python owner, not a cross-language parity lock —
+a ``TestParity`` class that once duplicated it case-for-case was deleted
+with the fiction.
 """
 
 from __future__ import annotations
@@ -164,6 +166,32 @@ class TestComputeFrozenMessageCount:
         ]
         assert _compute_frozen_message_count(messages) == 2
 
+    def test_ttl_1h_and_5m_both_bump(self) -> None:
+        """Both 1h and 5m TTL markers count; highest index wins."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "first 1h",
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    },
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "second 5m",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+            },
+        ]
+        assert _compute_frozen_message_count(messages) == 2
+
     # ----- Edge cases -------------------------------------------------------
 
     def test_non_dict_block_skipped_gracefully(self) -> None:
@@ -191,162 +219,6 @@ class TestComputeFrozenMessageCount:
         ]
         # Key present (even if null) → marker found → floor = 1
         assert _compute_frozen_message_count(messages) == 1
-
-
-# ---------------------------------------------------------------------------
-# Table-driven characterization of the Python owner
-# ---------------------------------------------------------------------------
-
-
-class TestParity:
-    """Table-driven characterization of ``_compute_frozen_message_count``.
-
-    Historical name: this class once claimed to mirror fixtures from a
-    Rust ``cache_control.rs`` — no such file ever existed (TEST-7); the
-    helper is Python-only. The expected integers below are the pinned
-    behavior of the sole owner. Two vacuous tests were deleted with the
-    fiction: "system/tools markers don't bump" is untestable through this
-    helper (its input is the messages list; system/tools live outside it),
-    and both were byte-identical to ``test_parity_no_markers_zero``.
-    """
-
-    def _run(self, messages: list[dict]) -> int:
-        return _compute_frozen_message_count(messages)
-
-    def test_parity_marker_at_3_yields_4(self) -> None:
-        messages = [
-            {"role": "user", "content": "first"},
-            {"role": "assistant", "content": "second"},
-            {"role": "user", "content": "third"},
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "fourth", "cache_control": {"type": "ephemeral"}},
-                ],
-            },
-            {"role": "user", "content": "fifth"},
-        ]
-        assert self._run(messages) == 4
-
-    def test_parity_ttl_1h_and_5m_both_bump(self) -> None:
-        """Both 1h and 5m TTL markers count; highest index wins."""
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "first 1h",
-                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                    },
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "second 5m",
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                ],
-            },
-        ]
-        assert self._run(messages) == 2
-
-    def test_parity_no_markers_zero(self) -> None:
-        messages = [
-            {"role": "user", "content": "no marker here"},
-            {"role": "assistant", "content": [{"type": "text", "text": "no marker either"}]},
-        ]
-        assert self._run(messages) == 0
-
-    def test_parity_multiple_non_adjacent_markers(self) -> None:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "m0", "cache_control": {"type": "ephemeral"}},
-                ],
-            },
-            {"role": "assistant", "content": "m1 string"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "m2", "cache_control": {"type": "ephemeral"}},
-                ],
-            },
-            {"role": "assistant", "content": [{"type": "text", "text": "m3"}]},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "m4",
-                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                    },
-                ],
-            },
-            {"role": "assistant", "content": "m5 string"},
-        ]
-        assert self._run(messages) == 5
-
-    def test_parity_multi_block_one_message(self) -> None:
-        messages = [
-            {"role": "user", "content": "first"},
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "block A",
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                    {
-                        "type": "text",
-                        "text": "block B",
-                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                    },
-                    {"type": "text", "text": "block C", "cache_control": {"type": "ephemeral"}},
-                ],
-            },
-        ]
-        assert self._run(messages) == 2
-
-    def test_parity_string_then_block_with_marker(self) -> None:
-        messages = [
-            {"role": "user", "content": "plain string"},
-            {"role": "assistant", "content": "another plain string"},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "now with marker",
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                ],
-            },
-        ]
-        assert self._run(messages) == 3
-
-    def test_parity_missing_messages_field_yields_zero(self) -> None:
-        # Python helper takes messages list directly; empty list = same
-        assert self._run([]) == 0
-
-    def test_parity_non_object_blocks_skipped(self) -> None:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    "not an object",
-                    42,
-                    None,
-                    {"type": "text", "text": "real block", "cache_control": {"type": "ephemeral"}},
-                ],
-            },
-        ]
-        assert self._run(messages) == 1
 
 
 # ---------------------------------------------------------------------------

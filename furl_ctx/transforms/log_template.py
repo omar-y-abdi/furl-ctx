@@ -41,6 +41,7 @@ I/O.  Template ids are first-appearance order.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from furl_ctx.transforms import log_template_format as fmt
@@ -73,7 +74,7 @@ class LogTemplateEncoding:
 
     ``wire`` is the complete, self-describing serialisation understood by
     :func:`furl_ctx.transforms.log_template_decoder.decode`.  The stats are
-    informational (for the router / diagnostics in wave 3b) and are NOT required
+    informational (for the router / diagnostics) and are NOT required
     to decode.
     """
 
@@ -227,10 +228,7 @@ def _verbatim_record(content: str, terminator: str) -> str:
 
 def _template_support(matches: tuple[MatchedLine, ...]) -> dict[int, int]:
     """Count how many source lines resolved to each template id (deterministic)."""
-    support: dict[int, int] = {}
-    for m in matches:
-        support[m.template_id] = support.get(m.template_id, 0) + 1
-    return support
+    return Counter(m.template_id for m in matches)
 
 
 def encode(text: str) -> LogTemplateEncoding | None:

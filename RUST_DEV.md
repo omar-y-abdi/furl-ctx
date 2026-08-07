@@ -86,7 +86,7 @@ so they don't regress further or get forgotten.
 | Subsystem | State | Tracked by |
 |---|---|---|
 | Compression-feedback learning loop | **Deleted with the telemetry/feedback plane (2026-06 excision).** The recorder the 2026-04-28 audit had re-attached (and its per-tool `tool_name` hook) went with the rest of the learning plane; the shim records nothing after a compression. Not a silent gap — the subsystem no longer exists. | — (subsystem and its test file deleted together) |
-| CCR marker emission knob | **Superseded by the recovery invariant (Defect 1).** The `advertise_retrieval_tool: bool` field (renamed from `enable_ccr_marker`; the old Python FFI kwarg is accepted as a deprecation alias for one release, emitting `DeprecationWarning`) still exists on Rust `SmartCrusherConfig` (flipped from `ccr_config.enabled and ccr_config.inject_retrieval_marker`), but it does NOT gate the `<<ccr:HASH>>` recovery pointer or the CCR store write — both are UNCONDITIONAL on every drop (a drop without its pointer is silent loss; `persist_dropped` emits both regardless of the flag). The flag is the retrieval-tool advertisement preference, preserved for embedders that read it back; the router also requires it for the optional CCR-offload fallback. The log/search/diff `Retrieve …: hash=…` marker lines are likewise unconditional recovery pointers (pinned by `tests/test_lossless_only_mode.py::test_log_route_recovery_marker_immune_to_ccr_flags`). Marker-free output is what `lossless_only` strict mode is for — it never drops, so nothing needs a pointer. | `crusher.rs::tests::advertise_retrieval_tool_false_still_surfaces_recovery_pointer`; `tests/test_ccr_recovery_invariant.py` |
+| CCR marker emission knob | **Superseded by the recovery invariant (Defect 1).** The `advertise_retrieval_tool: bool` field (renamed from `enable_ccr_marker`; the old Python FFI kwarg is accepted as a deprecation alias for one release, emitting `DeprecationWarning`) still exists on Rust `SmartCrusherConfig` (flipped from `ccr_config.enabled and ccr_config.inject_retrieval_marker`), but it does NOT gate the `<<ccr:HASH>>` recovery pointer or the CCR store write — both are UNCONDITIONAL on every drop (a drop without its pointer is silent loss; `persist_dropped` emits both regardless of the flag). The flag is the retrieval-tool advertisement preference, preserved for embedders that read it back; the router also requires it for the optional CCR-offload fallback. The log/search/diff `Retrieve …: hash=…` marker lines are likewise unconditional recovery pointers (pinned by `tests/test_lossless_only_mode.py::test_log_route_recovery_marker_immune_to_ccr_flags`). Marker-free output is what `lossless_only` strict mode is for — it never drops, so nothing needs a pointer. | `route.rs::tests::advertise_retrieval_tool_false_still_surfaces_recovery_pointer`; `tests/test_ccr_recovery_invariant.py` |
 | Custom relevance scorer | **Closed (fail-loud) 2026-04-29.** `relevance_config` and `scorer` constructor args remain in the signature for source compat, but the shim raises `NotImplementedError` when either is non-None — silently dropping a user-supplied scorer is a textbook silent-fallback bug. | fail-loud guard in `furl_ctx/transforms/smart_crusher.py` (its dedicated test was deleted with the feedback-plane test file) |
 
 ### DiffCompressor
@@ -140,7 +140,7 @@ captured in issue #315.
 **Status: closed.** The orchestrator + trait pair was built and later
 DELETED in the dead-code sweep — no separate offload-pipeline trait
 survives in the current tree; offloading is inlined in
-`crusher.rs::persist_dropped` (see CODEBASE-MAP.md).
+`persist.rs::persist_dropped` (see CODEBASE-MAP.md).
 
 ### Watch list (potential regressions, not yet audited)
 
@@ -159,7 +159,7 @@ When any item above changes, update both this section and the test file. The shi
 
 ## CCR storage — process-local, request-window-scoped
 
-The Rust CCR store (`crates/furl-core/src/ccr/backends/`) ships a single
+The Rust CCR store (`crates/furl-core/src/ccr/`) ships a single
 backend: `InMemoryCcrStore`, a process-local sharded `DashMap` constructed once
 at startup and shared across worker threads behind an `Arc`. Entries are
 bounded — **generation-counter FIFO** eviction (oldest-created-first; NOT LRU —

@@ -47,7 +47,7 @@ def concat_text_parts(content: Any) -> str:
     blocks (Anthropic-style ``{"type": "text", "text": ...}``). Transforms
     that inspect prompt text (CacheAligner hashing/detection, ContentRouter
     analysis-intent detection) must see BOTH shapes, or block-format prompts
-    silently vanish from their view (COR-53).
+    silently vanish from their view.
 
     - ``str`` content is returned unchanged, so callers hashing plain-string
       prompts stay byte-identical to their pre-helper behavior.
@@ -61,23 +61,22 @@ def concat_text_parts(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts)
+        return "\n".join(
+            text
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(text := block.get("text"), str)
+        )
     return ""
 
 
 def create_tool_digest_marker(original_hash: str) -> str:
     """Create marker for crushed tool output.
 
-    Uses the ``<furl:...>`` namespace (A11): the residual ``<headroom:...>``
-    branding from the upstream lineage was renamed to Furl's own name. This is a
-    display annotation on the compressed view, not a stored-then-retrieved marker,
-    so the rename touches no persisted bytes; it aligns with the Rust
+    Uses the ``<furl:...>`` namespace. This is a
+    display annotation on the compressed view, not a stored-then-retrieved marker;
+    it aligns with the Rust
     tag-protector docs, which already reference ``<furl:tool_digest>``."""
     return f'<furl:tool_digest sha256="{original_hash}">'
 

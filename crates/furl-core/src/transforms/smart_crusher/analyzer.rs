@@ -439,9 +439,6 @@ impl SmartAnalyzer {
     ) -> CrushabilityAnalysis {
         use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
 
-        let mut signals_present: Vec<String> = Vec::new();
-        let mut signals_absent: Vec<String> = Vec::new();
-
         // 1. ID field detection — keep best (highest confidence) match.
         //
         // PERF: `detect_id_field_statistically` hard-gates `unique_ratio
@@ -499,36 +496,23 @@ impl SmartAnalyzer {
 
         // 2. Score field detection — short-circuit on first match.
         let mut has_score_field = false;
-        for (name, stats) in field_stats {
-            let (is_score, confidence) = detect_score_field_statistically(stats, items);
+        for stats in field_stats.values() {
+            let (is_score, _confidence) = detect_score_field_statistically(stats, items);
             if is_score {
                 has_score_field = true;
-                signals_present.push(format!("score_field:{}(conf={:.2})", name, confidence));
                 break;
             }
-        }
-        if !has_score_field {
-            signals_absent.push("score_field".to_string());
         }
 
         // 3. Structural outliers.
         let outlier_indices = detect_structural_outliers(items);
         let structural_outlier_count = outlier_indices.len();
-        if structural_outlier_count > 0 {
-            signals_present.push(format!("structural_outliers:{}", structural_outlier_count));
-        } else {
-            signals_absent.push("structural_outliers".to_string());
-        }
 
         // 3b. Error-keyword fallback when no structural signal. Reuses
         // the caller's serializations when provided (PERF-3).
         let error_keyword_indices = detect_error_items_for_preservation(items, item_strings);
         let keyword_error_count = error_keyword_indices.len();
-        if keyword_error_count > 0 && structural_outlier_count == 0 {
-            signals_present.push(format!("error_keywords:{}", keyword_error_count));
-        }
-
-        let error_count = structural_outlier_count.max(keyword_error_count);
+        let has_error_keyword_signal = keyword_error_count > 0 && structural_outlier_count == 0;
 
         // 4. Numeric anomalies (>variance_threshold σ from mean).
         let mut anomaly_indices: BTreeSet<usize> = BTreeSet::new();
@@ -562,11 +546,6 @@ impl SmartAnalyzer {
             }
         }
         let anomaly_count = anomaly_indices.len();
-        if anomaly_count > 0 {
-            signals_present.push(format!("anomalies:{}", anomaly_count));
-        } else {
-            signals_absent.push("anomalies".to_string());
-        }
 
         // 5. Average string uniqueness, EXCLUDING the detected ID field.
         let id_name_ref = id_field_name.as_deref();
@@ -600,31 +579,24 @@ impl SmartAnalyzer {
             .values()
             .filter(|s| s.field_type == FieldType::Numeric)
             .any(|s| !s.change_points.is_empty());
-        if has_change_points {
-            signals_present.push("change_points".to_string());
-        }
 
-        let has_any_signal = !signals_present.is_empty();
+        let has_any_signal = has_score_field
+            || structural_outlier_count > 0
+            || has_error_keyword_signal
+            || anomaly_count > 0
+            || has_change_points;
 
         // Decision tree — order matters; mirrors Python case-by-case.
         let make = |crushable: bool,
                     confidence: f64,
                     reason: SkipReason,
-                    signals_present: Vec<String>,
-                    signals_absent: Vec<String>|
+                    has_any_signal: bool|
          -> CrushabilityAnalysis {
             CrushabilityAnalysis {
                 crushable,
                 confidence,
                 reason,
-                signals_present,
-                signals_absent,
-                has_id_field,
-                id_uniqueness,
-                avg_string_uniqueness,
-                has_score_field,
-                error_item_count: error_count,
-                anomaly_count,
+                has_any_signal,
                 // Memoized for the over-budget prioritizer (PERF-3) —
                 // both detections already ran above to derive the
                 // counts; carrying the indices avoids a re-scan.
@@ -635,15 +607,9 @@ impl SmartAnalyzer {
 
         // Case 0: repetitive content with unique IDs.
         if non_id_content_uniqueness < 0.1 && has_id_field {
-            let mut sp = signals_present.clone();
-            sp.push("repetitive_content".to_string());
-            return make(
-                true,
-                0.85,
-                SkipReason::RepetitiveContentWithIds,
-                sp,
-                signals_absent,
-            );
+            // `repetitive_content` is itself a signal, so this arm is
+            // always `has_any_signal = true`.
+            return make(true, 0.85, SkipReason::RepetitiveContentWithIds, true);
         }
 
         // Case 1: low uniqueness.
@@ -652,8 +618,7 @@ impl SmartAnalyzer {
                 true,
                 0.9,
                 SkipReason::LowUniquenessSafeToSample,
-                signals_present,
-                signals_absent,
+                has_any_signal,
             );
         }
 
@@ -663,8 +628,7 @@ impl SmartAnalyzer {
                 false,
                 0.85,
                 SkipReason::UniqueEntitiesNoSignal,
-                signals_present,
-                signals_absent,
+                has_any_signal,
             );
         }
 
@@ -674,8 +638,7 @@ impl SmartAnalyzer {
                 true,
                 0.7,
                 SkipReason::UniqueEntitiesWithSignal,
-                signals_present,
-                signals_absent,
+                has_any_signal,
             );
         }
 
@@ -685,8 +648,7 @@ impl SmartAnalyzer {
                 false,
                 0.6,
                 SkipReason::MediumUniquenessNoSignal,
-                signals_present,
-                signals_absent,
+                has_any_signal,
             );
         }
 
@@ -695,8 +657,7 @@ impl SmartAnalyzer {
             true,
             0.5,
             SkipReason::MediumUniquenessWithSignal,
-            signals_present,
-            signals_absent,
+            has_any_signal,
         )
     }
 

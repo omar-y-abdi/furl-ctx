@@ -6,8 +6,7 @@ The producer owns marker CONSTRUCTION; this module owns marker RECOGNITION.
 Both halves must agree byte-for-byte, and that agreement is pinned by
 ``tests/test_ccr_marker_grammar_characterization.py`` (producer-driven).
 
-Before this module existed, the grammar was hand-rolled in six places across
-three files with three different width contracts. Now the widths, the hex
+The widths, the hex
 alphabets, the ``<<ccr:`` prefix, the separator set, and the per-shape regex
 fragments live here, and the production consumer + auxiliary scanners reference
 them instead of re-hardcoding the contract.
@@ -57,6 +56,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any, Final
 
 # --------------------------------------------------------------------------- #
@@ -94,10 +94,8 @@ def is_valid_ccr_hash(value: object) -> bool:
     exactly ``HASH_WIDTHS`` (12 or 24) lowercase-hex characters.
 
     The single width+charset spoofing guard at the ccr-hash ingress —
-    the MCP ``furl_retrieve`` handler (the proxy-side
-    ``tool_injection.parse_tool_call`` twin was excised with its module,
-    SIMP-4). Rejects ``None``, non-``str``, wrong width, and any non-hex
-    character.
+    the MCP ``furl_retrieve`` handler. Rejects ``None``, non-``str``, wrong
+    width, and any non-hex character.
     """
     return (
         isinstance(value, str)
@@ -114,8 +112,7 @@ def is_valid_ccr_hash(value: object) -> bool:
 # The MCP server registers it (hosts alias it as
 # ``mcp__<server>__furl_retrieve``), and the router's retrieval-loop guard
 # (router_message_policy.ALWAYS_EXCLUDE_TOOLS) excludes its outputs from
-# re-compression. Re-homed here from the excised ``tool_injection`` module
-# (SIMP-4): the tool NAME is wire contract exactly like the marker shapes.
+# re-compression. The tool NAME is wire contract exactly like the marker shapes.
 CCR_TOOL_NAME: str = "furl_retrieve"
 
 # The double-angle marker prefix shared by shapes A-F + D.
@@ -136,9 +133,8 @@ _HASH_WIDTH_ALT: str = rf"({HEX_CLASS}{{24}}|{HEX_CLASS}{{12}})"
 # Compiled consumer patterns — built FROM the named parts above.
 #
 # These reproduce the original ``tool_injection._marker_patterns`` literals
-# byte-for-byte (minus the retired dead pattern; the injector module itself
-# was excised — SIMP-4 — so this module is now the sole owner of the
-# consumer patterns). Equivalence is proven in
+# byte-for-byte (minus the retired dead pattern); this module is the sole
+# owner of the consumer patterns. Equivalence is proven in
 # tests/test_ccr_marker_grammar_characterization.py against frozen copies of
 # the original literals.
 # --------------------------------------------------------------------------- #
@@ -381,11 +377,10 @@ def finditer_within_budget(pattern: re.Pattern[str], text: str) -> list[Any]:
     """
     twin = _RE2_TWINS.get(pattern)
     if twin is not None:
-        try:
+        # RE2 refuses inputs re accepts (a lone surrogate has no UTF-8
+        # encoding); fall back to the total re engine.
+        with suppress(Exception):
             return list(twin.finditer(text))
-        except Exception:  # noqa: BLE001 - RE2 refuses inputs re accepts (a lone
-            # surrogate has no UTF-8 encoding); fall back to the total re engine.
-            pass
     return list(pattern.finditer(text))
 
 

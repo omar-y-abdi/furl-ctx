@@ -9,12 +9,6 @@ content by hash. Two components live here:
 2. ``mcp_server`` — the standalone MCP server that exposes the
    ``furl_retrieve`` tool (plus ``furl_compress``/``furl_stats``) via
    the MCP protocol. This is the production retrieval channel.
-
-The historical proxy-side injection plane (``tool_injection`` —
-``CCRToolInjector``, request/system-message injection, tool-call
-parsing) had zero production callers post proxy-removal and was excised
-(SIMP-4). ``CCR_TOOL_NAME`` and the marker patterns it owned live on in
-``marker_grammar``.
 """
 
 from typing import TYPE_CHECKING, Any

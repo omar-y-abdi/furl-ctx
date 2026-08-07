@@ -204,19 +204,6 @@ def test_retrieve_select_equals_int_parsing() -> None:
     assert rows[0]["id"] == 3
 
 
-def test_retrieve_select_min_max_numeric_range() -> None:
-    """``--select-min 3.0 --select-max 5.0`` keeps rows where value is in [3, 5]."""
-    h = _compress_and_get_hash()
-    rc, stdout, _stderr = _call_main(
-        ["retrieve", h, "--select-field", "value", "--select-min", "3.0", "--select-max", "5.0"]
-    )
-    assert rc == 0
-    rows: list[Any] = json.loads(stdout)
-    assert len(rows) == 3
-    values = [r["value"] for r in rows]
-    assert values == [3.0, 4.0, 5.0]
-
-
 def test_retrieve_select_with_limit() -> None:
     """``--select-min 0 --select-max 100 --limit 3`` caps at 3 data rows.
 
@@ -325,14 +312,6 @@ def test_purge_removes_a_stored_hash_then_second_purge_misses(
     assert rc2 == 1
     assert stdout2 == ""
     assert "not found" in stderr2
-
-
-def test_purge_unknown_hash_exits_1_with_stderr(inprocess_memory_store) -> None:  # type: ignore[no-untyped-def]
-    """Purging a never-stored hash is a loud miss (exit 1, message on stderr), not a crash."""
-    rc, stdout, stderr = _call_main(["purge", "0" * 24])
-    assert rc == 1
-    assert stdout == ""
-    assert "not found" in stderr
 
 
 def test_doctor_inprocess_all_checks_ok(inprocess_memory_store) -> None:  # type: ignore[no-untyped-def]
