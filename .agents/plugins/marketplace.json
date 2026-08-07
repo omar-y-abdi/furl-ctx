@@ -1,0 +1,20 @@
+{
+  "name": "furl",
+  "interface": {
+    "displayName": "Furl"
+  },
+  "plugins": [
+    {
+      "name": "furl",
+      "source": {
+        "source": "local",
+        "path": "./plugins/furl"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

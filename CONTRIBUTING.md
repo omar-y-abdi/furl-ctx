@@ -100,8 +100,9 @@ until they agree:
   `_ENGINE_VERSION` in `plugins/furl/hooks/session_start_banner.py` (the engine half of
   the SessionStart status line — moved out of `hooks.json` in the T7 version-gating fix),
   to the new version on that same PR before merging.
-- **Plugin version** (`plugins/furl/.claude-plugin/plugin.json` `version`): bump it together
-  with both `version` fields in `.claude-plugin/marketplace.json`, the `version:` in
+- **Plugin version** (`plugins/furl/.claude-plugin/plugin.json` and
+  `plugins/furl/.codex-plugin/plugin.json` `version`): bump both together with both
+  `version` fields in `.claude-plugin/marketplace.json`, the `version:` in
   `plugins/furl/skills/furl/SKILL.md` frontmatter, and `_PLUGIN_VERSION` in
   `plugins/furl/hooks/session_start_banner.py` (the plugin half of the same
   `furl <version> · engine furl-ctx <version>` string).
