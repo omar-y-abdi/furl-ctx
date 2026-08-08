@@ -42,11 +42,19 @@ def test_search_compressor_compress_paths_and_ccr() -> None:
 
 
 def test_search_compressor_fails_open_when_omissions_lack_ccr() -> None:
-    """Every omitted non-empty line needs a full-original CCR backing."""
+    """With CCR enabled, parser or selection omissions need full-original backing."""
     mixed = "src/main.py:12:needle\nBinary file assets/blob.bin matches\n"
     mixed_result = SearchCompressor().compress(mixed)
     assert mixed_result.cache_key is None
     assert mixed_result.compressed == mixed
+
+    # Rust str::trim does not treat U+001C as whitespace; the native
+    # lines_unparsed sidecar must therefore catch it even though Python
+    # str.strip() would erase it.
+    control_separator = "src/a.py:1:hit\n\x1c\n"
+    separator_result = SearchCompressor().compress(control_separator)
+    assert separator_result.cache_key is None
+    assert separator_result.compressed == control_separator
 
     capped = "\n".join(f"src/main.py:{i}:match {i}" for i in range(1, 7)) + "\n"
     capped_result = SearchCompressor(
@@ -54,6 +62,17 @@ def test_search_compressor_fails_open_when_omissions_lack_ccr() -> None:
     ).compress(capped)
     assert capped_result.cache_key is None
     assert capped_result.compressed == capped
+
+
+def test_search_compressor_no_ccr_opt_out_preserves_lossy_caps() -> None:
+    """Explicitly disabling CCR keeps the pre-existing configured cap behavior."""
+    content = "\n".join(f"src/main.py:{i}:match {i}" for i in range(1, 7)) + "\n"
+    result = SearchCompressor(
+        SearchCompressorConfig(enable_ccr=False, max_matches_per_file=1)
+    ).compress(content)
+    assert result.cache_key is None
+    assert result.compressed != content
+    assert result.compressed_match_count == 1
 
 
 def test_search_compressor_persist_to_python_ccr(monkeypatch: pytest.MonkeyPatch) -> None:
