@@ -1,65 +1,156 @@
 name: Publish to PyPI (manual fallback)
 
-# DEPRECATED: This workflow is superseded by release.yml's matrix-based
-# build-and-publish flow. It exists as a manual fallback in case release.yml
-# is broken and a hotfix needs to be pushed without going through the
-# normal tag-driven pipeline. Single-platform; produces only the linux
-# x86_64 wheel + sdist. For full cross-platform release, use release.yml.
+# Manual recovery path for a release that already has a vX.Y.Z tag. It builds
+# from that exact tag, verifies the version, keeps the files as an artifact, and
+# can be re-run safely because PyPI uploads skip files that already exist.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the leading v"
+        required: true
+        type: string
+      dry_run:
+        description: "Build and verify only"
+        required: false
+        type: boolean
+        default: false
 
-# Least-privilege default floor; the publish job below overrides this with the
-# id-token + contents write it needs (a job-level block fully replaces this).
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_DEFAULT_TIMEOUT: "120"
+  PIP_RETRIES: "5"
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+
 jobs:
   publish:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     environment: pypi
     permissions:
-      id-token: write  # For trusted publishing
-      contents: write  # For uploading release assets
+      id-token: write
+      contents: write
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: v${{ inputs.version }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          toolchain: 1.95.0  # keep in sync with rust-toolchain.toml (TEST-30)
+          toolchain: 1.95.0
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ". -> target"
 
-      - name: Install build tools
+      - name: Verify requested version
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
-          python -m pip install --upgrade pip 'maturin>=1.9,<2.0' 'cyclonedx-bom>=7,<8'
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          expected = os.environ["EXPECTED_VERSION"]
+          if version != expected:
+              raise SystemExit(f"tag/source version is {version}, expected {expected}")
+          print(f"version OK: {version}")
+          PY
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip 'maturin>=1.9,<2.0' 'cyclonedx-bom>=7,<8' 'twine>=5,<7'
 
       - name: Build wheel + sdist
         run: |
+          rm -rf dist
           maturin sdist --out dist
           maturin build --release --out dist
+          python -m twine check dist/*
 
-      - name: Generate SBOM (CycloneDX)
+      - name: Generate SBOM
         run: |
-          pip install -e "."
-          cyclonedx-py environment \
-            --output-format json \
-            --output-file dist/furl-sbom.cdx.json
+          WHEEL="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
+          python -m pip install "$WHEEL"
+          cyclonedx-py environment --output-format json --output-file dist/furl-sbom.cdx.json
 
-      - name: Upload SBOM to release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+      - name: Preserve release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          files: dist/furl-sbom.cdx.json
+          name: manual-release-${{ inputs.version }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        if: inputs.dry_run != true
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          skip-existing: true
+
+      - name: Create or update GitHub Release
+        if: inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ inputs.version }}
+        run: |
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "5" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
+
+          ensure_release() {
+            local n=1
+            while true; do
+              if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                return 0
+              fi
+              if gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Release $TAG" --generate-notes; then
+                return 0
+              fi
+              if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                return 0
+              fi
+              [[ "$n" == "5" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
+
+          ensure_release
+          retry gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Summary
+        if: always()
+        run: |
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            echo "Built and verified v${{ inputs.version }} without publishing." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Built v${{ inputs.version }} and attempted idempotent publication." >> "$GITHUB_STEP_SUMMARY"
+          fi
