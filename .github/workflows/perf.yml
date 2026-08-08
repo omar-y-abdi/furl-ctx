@@ -2,8 +2,10 @@ name: perf
 
 # Performance + tool-regression gate. Runs the Rust checks that ci.yml's
 # required set does not (fmt/clippy/test), then a determinism gate:
-# verify.run's tool-regression counters plus a benchmark comparison against the
-# committed baseline floor.
+# verify.run's tool-regression counters plus two performance signals: PRs first
+# compare against the exact base commit measured on the same runner (eliminating
+# historical-host drift), then retain the committed floor as a long-term drift
+# alarm. Main pushes continue to use the committed floor directly.
 #
 # NEVER a required check, so paths-filtering is SAFE here: a PR that touches
 # none of these paths simply does not run this workflow, and nothing waits on
@@ -87,7 +89,7 @@ jobs:
 
   perf-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -128,6 +130,30 @@ jobs:
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
           cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
           python -c "from furl_ctx._core import DiffCompressor; print('furl_ctx._core OK')"
+
+      - name: Measure PR base commit on the same runner
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base_dir="${RUNNER_TEMP}/perf-base"
+          base_venv="${RUNNER_TEMP}/perf-base-venv"
+          git worktree add --detach "$base_dir" "$BASE_SHA"
+
+          (
+            cd "$base_dir"
+            python -m pip install --upgrade pip 'maturin>=1.9,<2.0'
+            CARGO_TARGET_DIR="${RUNNER_TEMP}/perf-base-target" \
+              maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
+            python -m venv "$base_venv"
+            "$base_venv/bin/python" -m pip install --upgrade pip
+            base_wheel="$(ls dist/*.whl)"
+            "$base_venv/bin/pip" install "${base_wheel}[dev]" google-re2
+            base_site="$("$base_venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+            cp "${base_site}/furl_ctx/"_core*.so furl_ctx/
+            "$base_venv/bin/python" -c "from furl_ctx._core import DiffCompressor; print('base furl_ctx._core OK')"
+            "$base_venv/bin/python" -m benchmarks.run_bench --out "${RUNNER_TEMP}/bench-base"
+          )
 
       - name: Tool-regression sweep (verify.run)
         run: |
@@ -197,7 +223,15 @@ jobs:
       - name: Run benchmarks
         run: python -m benchmarks.run_bench --out "${RUNNER_TEMP}/bench-now"
 
-      - name: Compare against baseline
+      - name: Compare PR against same-runner base commit
+        if: github.event_name == 'pull_request'
+        run: |
+          python -m benchmarks.compare_baseline \
+            --baseline "${RUNNER_TEMP}/bench-base/baseline_results.json" \
+            --candidate "${RUNNER_TEMP}/bench-now/baseline_results.json" \
+            --markdown-summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare against committed baseline floor
         # Nonzero exit on any regression or invalid input fails the job.
         env:
           BASELINE_UPDATED: ${{ steps.baseline.outputs.updated }}
