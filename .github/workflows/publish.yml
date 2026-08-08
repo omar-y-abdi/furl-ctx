@@ -1,8 +1,11 @@
 name: Publish to PyPI (manual fallback)
 
-# Manual recovery path for a release that already has a vX.Y.Z tag. It builds
-# from that exact tag, verifies the version, keeps the files as an artifact, and
-# can be re-run safely because PyPI uploads skip files that already exist.
+# Publication recovery only. This workflow NEVER rebuilds release bytes. It
+# resolves the immutable vX.Y.Z tag, finds a Release workflow run for that exact
+# SHA whose collect-dist and complete smoke-import matrix succeeded, downloads
+# that run's canonical `dist` artifact, then replays those exact bytes. Build
+# failures must be fixed/rerun in Release; publication failures can be recovered
+# here without giving package build code an OIDC or contents-write credential.
 on:
   workflow_dispatch:
     inputs:
@@ -10,64 +13,54 @@ on:
         description: "Release version without the leading v"
         required: true
         type: string
+      release_run_id:
+        description: "Optional Release workflow run ID (auto-discovered when empty)"
+        required: false
+        type: string
       dry_run:
-        description: "Build and verify only"
+        description: "Resolve and verify artifacts only"
         required: false
         type: boolean
         default: false
 
-permissions:
-  contents: read
+permissions: {}
 
 defaults:
   run:
     shell: bash -Eeuo pipefail {0}
 
 env:
+  PYPI_PACKAGE: furl-ctx
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_DEFAULT_TIMEOUT: "120"
   PIP_RETRIES: "5"
-  CARGO_NET_RETRY: "10"
-  CARGO_HTTP_TIMEOUT: "120"
 
 jobs:
-  publish:
+  recover-artifacts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    environment: pypi
+    timeout-minutes: 20
     permissions:
-      id-token: write
-      contents: write
-
+      actions: read
+      contents: read
+    outputs:
+      source_run_id: ${{ steps.resolve.outputs.run_id }}
+      tag_sha: ${{ steps.tag.outputs.sha }}
     steps:
-      - name: Checkout release tag
+      - name: Checkout immutable release tag
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: v${{ inputs.version }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: 1.95.0
-
-      - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: ". -> target"
-
-      - name: Verify requested version
+      - name: Verify tag source and requested version
+        id: tag
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
-          python - <<'PY'
+          tag_sha="$(git rev-parse HEAD^{commit})"
+          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
           import os
           import pathlib
           import tomllib
@@ -79,42 +72,304 @@ jobs:
           print(f"version OK: {version}")
           PY
 
-      - name: Install build tools
-        run: python -m pip install --upgrade pip 'maturin>=1.9,<2.0' 'cyclonedx-bom>=7,<8' 'twine>=5,<7'
-
-      - name: Build wheel + sdist
+      - name: Resolve a previously smoke-verified Release artifact
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_SHA: ${{ steps.tag.outputs.sha }}
+          REQUESTED_RUN_ID: ${{ inputs.release_run_id }}
         run: |
-          rm -rf dist
-          maturin sdist --out dist
-          maturin build --release --out dist
-          python -m twine check dist/*
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "4" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
 
-      - name: Generate SBOM
+          validate_run() {
+            local run_id="$1"
+            local run_json jobs_json smoke_total smoke_bad collect_ok run_sha run_name run_event
+
+            run_json="$(retry gh api -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")" || return 1
+            run_sha="$(jq -r '.head_sha' <<<"$run_json")"
+            run_name="$(jq -r '.name' <<<"$run_json")"
+            run_event="$(jq -r '.event' <<<"$run_json")"
+            [[ "$run_name" == "Release" ]] || {
+              echo "Run $run_id belongs to workflow '$run_name', not Release." >&2
+              return 1
+            }
+            [[ "$run_event" != "pull_request" ]] || {
+              echo "Run $run_id is a PR dry-run, never a publication source." >&2
+              return 1
+            }
+            [[ "$run_sha" == "$TAG_SHA" ]] || {
+              echo "Run $run_id has head_sha=$run_sha, expected tag SHA $TAG_SHA." >&2
+              return 1
+            }
+
+            jobs_json="$(retry gh api --paginate --slurp -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")" || return 1
+            collect_ok="$(jq '[.[] | .jobs[] | select(.name == "collect-dist" and .conclusion == "success")] | length' <<<"$jobs_json")"
+            smoke_total="$(jq '[.[] | .jobs[] | select(.name | startswith("smoke-import-wheels"))] | length' <<<"$jobs_json")"
+            smoke_bad="$(jq '[.[] | .jobs[] | select((.name | startswith("smoke-import-wheels")) and .conclusion != "success")] | length' <<<"$jobs_json")"
+
+            if (( collect_ok != 1 || smoke_total != 7 || smoke_bad != 0 )); then
+              echo "Run $run_id is not publication-safe: collect_ok=$collect_ok smoke_total=$smoke_total smoke_bad=$smoke_bad." >&2
+              return 1
+            fi
+
+            rm -rf recovered-dist
+            mkdir -p recovered-dist
+            if ! retry gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name dist --dir recovered-dist; then
+              echo "Run $run_id has no downloadable canonical dist artifact (possibly expired)." >&2
+              return 1
+            fi
+            find recovered-dist -maxdepth 1 -type f -print -quit | grep -q . || return 1
+            return 0
+          }
+
+          selected=""
+          if [[ -n "$REQUESTED_RUN_ID" ]]; then
+            validate_run "$REQUESTED_RUN_ID" || {
+              echo "::error::Requested Release run $REQUESTED_RUN_ID is not a smoke-verified artifact source for $TAG_SHA."
+              exit 1
+            }
+            selected="$REQUESTED_RUN_ID"
+          else
+            mapfile -t candidates < <(
+              retry gh run list --repo "$GITHUB_REPOSITORY" --workflow "Release" \
+                --commit "$TAG_SHA" --limit 30 --json databaseId,createdAt \
+                --jq 'sort_by(.createdAt) | reverse | .[].databaseId'
+            )
+            for run_id in "${candidates[@]}"; do
+              if validate_run "$run_id"; then
+                selected="$run_id"
+                break
+              fi
+            done
+            if [[ -z "$selected" ]]; then
+              echo "::error::No Release run for $TAG_SHA has both a successful smoke matrix and a retained dist artifact."
+              exit 1
+            fi
+          fi
+
+          echo "run_id=$selected" >> "$GITHUB_OUTPUT"
+          echo "Replaying canonical dist artifact from Release run $selected."
+
+      - name: Verify recovered distribution set
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
-          WHEEL="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
-          test -n "$WHEEL"
-          python -m pip install "$WHEEL"
-          cyclonedx-py environment --output-format json --output-file dist/furl-sbom.cdx.json
+          python3 - <<'PY'
+          import os
+          import pathlib
 
-      - name: Preserve release files
+          expected = os.environ["EXPECTED_VERSION"]
+          artifacts = sorted(pathlib.Path("recovered-dist").iterdir())
+          wheels = [p for p in artifacts if p.name.endswith(".whl")]
+          sdists = [p for p in artifacts if p.name.endswith(".tar.gz")]
+          if not wheels or len(sdists) != 1:
+              raise SystemExit(f"expected wheels plus exactly one sdist, found wheels={len(wheels)} sdists={len(sdists)}")
+
+          bad = []
+          for path in wheels + sdists:
+              if path.name.endswith(".whl"):
+                  version = path.name.split("-")[1]
+              else:
+                  version = path.name[:-7].rsplit("-", 1)[-1]
+              if version != expected:
+                  bad.append(f"{path.name} -> {version}")
+          if bad:
+              raise SystemExit("artifact version mismatch: " + "; ".join(bad))
+          print(f"Recovered {len(wheels)} wheel(s) + one sdist for {expected}.")
+          PY
+
+      - name: Twine-check exact recovered bytes
+        run: |
+          python3 -m pip install --upgrade pip 'twine>=5,<7'
+          python3 -m twine check recovered-dist/*
+
+      - name: Preserve replay artifact for privileged jobs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: manual-release-${{ inputs.version }}
-          path: dist/*
+          name: manual-release-dist-${{ inputs.version }}
+          path: recovered-dist/*
           retention-days: 14
           if-no-files-found: error
 
-      - name: Publish to PyPI
-        if: inputs.dry_run != true
+  publish-pypi:
+    needs: recover-artifacts
+    if: inputs.dry_run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download exact recovered distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: manual-release-dist-${{ inputs.version }}
+          path: dist
+
+      - name: Gate idempotence with PyPI SHA-256 digests
+        id: pypi-state
+        env:
+          PACKAGE: ${{ env.PYPI_PACKAGE }}
+          VERSION: ${{ inputs.version }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(pathlib.Path("dist").iterdir())
+              if path.name.endswith((".whl", ".tar.gz"))
+          }
+          if not local:
+              raise SystemExit("dist/ contains no distributions")
+
+          url = (
+              "https://pypi.org/pypi/"
+              + urllib.parse.quote(os.environ["PACKAGE"], safe="")
+              + "/"
+              + urllib.parse.quote(os.environ["VERSION"], safe="")
+              + "/json"
+          )
+          import time
+
+          payload = None
+          remote = None
+          for attempt in range(1, 4):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      payload = json.load(response)
+                  break
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      remote = {}
+                      break
+                  if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                      raise
+              except urllib.error.URLError:
+                  if attempt == 3:
+                      raise
+              time.sleep(attempt * 3)
+
+          if remote is None:
+              remote = {item["filename"]: item["digests"]["sha256"] for item in payload.get("urls", [])}
+
+          unexpected = sorted(set(remote) - set(local))
+          if unexpected:
+              raise SystemExit("PyPI has unexpected files for this version: " + ", ".join(unexpected))
+          mismatched = sorted(name for name in set(local) & set(remote) if local[name] != remote[name])
+          if mismatched:
+              raise SystemExit(
+                  "PyPI filename collision with different bytes: "
+                  + ", ".join(f"{name} local={local[name]} pypi={remote[name]}" for name in mismatched)
+              )
+
+          missing = sorted(set(local) - set(remote))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"needs_publish={'true' if missing else 'false'}\n")
+          print("Missing from PyPI: " + (", ".join(missing) if missing else "nothing; all digests match"))
+
+      - name: Publish only missing verified files
+        if: steps.pypi-state.outputs.needs_publish == 'true'
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           skip-existing: true
 
-      - name: Create or update GitHub Release
-        if: inputs.dry_run != true
+      - name: Verify PyPI canonical state after publication
+        env:
+          PACKAGE: ${{ env.PYPI_PACKAGE }}
+          VERSION: ${{ inputs.version }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(pathlib.Path("dist").iterdir())
+              if path.name.endswith((".whl", ".tar.gz"))
+          }
+          package = urllib.parse.quote(os.environ["PACKAGE"], safe="")
+          version = urllib.parse.quote(os.environ["VERSION"], safe="")
+          url = f"https://pypi.org/pypi/{package}/{version}/json"
+
+          last_error = None
+          for attempt in range(1, 7):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      payload = json.load(response)
+                  remote = {
+                      item["filename"]: item["digests"]["sha256"]
+                      for item in payload.get("urls", [])
+                  }
+                  if remote == local:
+                      print("PyPI canonical state verified: filename set and every SHA-256 digest match.")
+                      break
+                  last_error = (
+                      f"canonical set mismatch: missing={sorted(set(local)-set(remote))} "
+                      f"unexpected={sorted(set(remote)-set(local))} "
+                      f"digest_mismatch={sorted(name for name in set(local)&set(remote) if local[name] != remote[name])}"
+                  )
+              except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+                  last_error = repr(exc)
+              if attempt == 6:
+                  raise SystemExit("PyPI did not converge to the canonical distribution set: " + str(last_error))
+              time.sleep(attempt * 5)
+
+  github-release:
+    needs: [recover-artifacts, publish-pypi]
+    if: inputs.dry_run != true && needs.publish-pypi.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag without persisting write credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: v${{ inputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Re-assert immutable tag identity
+        env:
+          EXPECTED_SHA: ${{ needs.recover-artifacts.outputs.tag_sha }}
+        run: test "$(git rev-parse HEAD^{commit})" = "$EXPECTED_SHA"
+
+      - name: Download exact recovered distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: manual-release-dist-${{ inputs.version }}
+          path: dist
+
+      - name: Create checksum manifest
+        run: (cd dist && sha256sum *.whl *.tar.gz | LC_ALL=C sort) > SHA256SUMS
+
+      - name: Create or update GitHub Release from existing tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ inputs.version }}
+          EXPECTED_SHA: ${{ needs.recover-artifacts.outputs.tag_sha }}
         run: |
           retry() {
             local n=1
@@ -125,32 +380,33 @@ jobs:
             done
           }
 
-          ensure_release() {
-            local n=1
-            while true; do
-              if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-                return 0
-              fi
-              if gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Release $TAG" --generate-notes; then
-                return 0
-              fi
-              if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-                return 0
-              fi
-              [[ "$n" == "5" ]] && return 1
-              sleep $((n * 5))
-              n=$((n + 1))
-            done
-          }
+          retry git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          current_tag_sha="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
+          if [[ "$current_tag_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::${TAG} moved to ${current_tag_sha}; expected immutable source ${EXPECTED_SHA}."
+            exit 1
+          fi
 
-          ensure_release
-          retry gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            retry gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Release $TAG" --generate-notes
+          fi
+          retry gh release upload "$TAG" dist/*.whl dist/*.tar.gz SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
-      - name: Summary
-        if: always()
+  summary:
+    needs: [recover-artifacts, publish-pypi, github-release]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Recovery summary
         run: |
+          echo "Recovered artifact source run: ${{ needs.recover-artifacts.outputs.source_run_id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Immutable tag SHA: ${{ needs.recover-artifacts.outputs.tag_sha }}" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${{ inputs.dry_run }}" == "true" ]]; then
-            echo "Built and verified v${{ inputs.version }} without publishing." >> "$GITHUB_STEP_SUMMARY"
+            echo "Dry run: verified exact previously-smoked release bytes; nothing was published." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Built v${{ inputs.version }} and attempted idempotent publication." >> "$GITHUB_STEP_SUMMARY"
+            echo "PyPI job: ${{ needs.publish-pypi.result }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "GitHub Release job: ${{ needs.github-release.result }}" >> "$GITHUB_STEP_SUMMARY"
           fi

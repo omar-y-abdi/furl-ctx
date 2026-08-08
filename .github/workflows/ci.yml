@@ -7,12 +7,11 @@ name: CI
 #   test         — 4 parallel shards (pytest-split), each a fresh runner VM
 #   build / commitlint — preserved
 #
-# Python-version policy (TEST-23, deliberate cost decision — not a gap):
-# the test suite runs on 3.12 ONLY. The 3.10–3.14 classifiers in
-# pyproject.toml describe WHEEL compatibility, which is covered elsewhere:
-# abi3 wheels are built once for cp310+ (release.yml) and smoke-imported
-# on a 3.11/3.12/3.13 customer-environment matrix there. Adding a full
-# test matrix would multiply CI cost without exercising new native code.
+# Python-version policy: 3.12 remains the primary interpreter, but every
+# existing required shard is replayed on the declared compatibility endpoints
+# (3.10 and 3.14) using the exact same prebuilt abi3 wheel. This preserves the
+# six required check names while proving Python-level behavior at both edges;
+# wheel ABI compatibility alone cannot prove stdlib/runtime compatibility.
 
 on:
   # PRs are the merge gate. Main pushes and a daily scheduled pass re-check
@@ -76,6 +75,7 @@ jobs:
               - 'crates/**'
               - '**/*.rs'
               - 'pyproject.toml'
+              - 'uv.lock'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.release-please-manifest.json'
@@ -275,6 +275,7 @@ jobs:
           name: furl-wheel
           path: dist/*.whl
           retention-days: 1
+          if-no-files-found: error
 
   test:
     # Required checks test (1..4) — always run so each shard CONCLUDES on
@@ -282,7 +283,7 @@ jobs:
     # code=='false', so a docs/config-only PR concludes SUCCESS in seconds.
     needs: [changes, build-wheel]
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     # FURL_RELEASE_PR_CONTEXT arms the release-PR escape hatch in
     # tests/test_release_manifest_tag_guard.py. A release-please release PR bumps
     # .release-please-manifest.json ahead of its git tag, which does not exist
@@ -365,6 +366,46 @@ jobs:
       - name: Run test shard ${{ matrix.shard }}/4
         if: needs.changes.outputs.code == 'true'
         run: |
+          pytest tests \
+            --splits 4 --group ${{ matrix.shard }} \
+            --tb=short -q
+
+      - name: Set up Python 3.10 compatibility floor
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
+      - name: Replay shard ${{ matrix.shard }}/4 on Python 3.10
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL="$(ls dist/*.whl)"
+          pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2
+          rm -f furl_ctx/_core*.so
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+          python -c "from furl_ctx._core import DiffCompressor; print('Python 3.10 abi3 import OK')"
+          pytest tests \
+            --splits 4 --group ${{ matrix.shard }} \
+            --tb=short -q
+
+      - name: Set up Python 3.14 compatibility ceiling
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Replay shard ${{ matrix.shard }}/4 on Python 3.14
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL="$(ls dist/*.whl)"
+          pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2
+          rm -f furl_ctx/_core*.so
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+          python -c "from furl_ctx._core import DiffCompressor; print('Python 3.14 abi3 import OK')"
           pytest tests \
             --splits 4 --group ${{ matrix.shard }} \
             --tb=short -q

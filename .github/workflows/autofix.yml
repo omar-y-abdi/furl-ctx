@@ -51,19 +51,7 @@ jobs:
             echo "token=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Loop guard
-        id: guard
-        run: |
-          subject="$(git log -1 --pretty=format:%s)"
-          if [[ "$subject" == ci:\ autofix* ]]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Already an autofix commit; stopping the repair loop."
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Set up Python
-        if: steps.guard.outputs.run == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -71,7 +59,6 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Set up Rust toolchain
-        if: steps.guard.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.95.0
@@ -79,7 +66,6 @@ jobs:
 
       - name: Apply safe automatic fixes
         id: fix
-        if: steps.guard.outputs.run == 'true'
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
         run: |
@@ -118,9 +104,19 @@ jobs:
             echo "Any remaining problem is left for CI to report; this repair job still preserves any fixes it could make."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify the candidate repair
+        id: verify
+        continue-on-error: true
+        run: |
+          # Autofix may only push changes that make every mechanical check it
+          # owns pass. Unfixable lint/type/test failures remain CI's job and are
+          # never papered over by a partial formatting commit.
+          ruff check .
+          ruff format --check .
+          cargo fmt --all -- --check
+
       - name: Detect changes
         id: dirty
-        if: steps.guard.outputs.run == 'true'
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
             echo "dirty=true" >> "$GITHUB_OUTPUT"
@@ -129,7 +125,7 @@ jobs:
           fi
 
       - name: Build repair patch
-        if: steps.guard.outputs.run == 'true' && steps.dirty.outputs.dirty == 'true'
+        if: steps.dirty.outputs.dirty == 'true'
         run: |
           git diff --binary > autofix.patch
           test -s autofix.patch
@@ -138,12 +134,13 @@ jobs:
         id: push
         continue-on-error: true
         if: >-
-          steps.guard.outputs.run == 'true' &&
           steps.dirty.outputs.dirty == 'true' &&
+          steps.verify.outcome == 'success' &&
           steps.scope.outputs.same_repo == 'true' &&
           steps.scope.outputs.token == 'true'
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           AUTOFIX_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
         run: |
           git config user.name "furl-autofix"
@@ -151,6 +148,15 @@ jobs:
           git add -u
           git commit -m "ci: autofix formatting and lint"
           git remote set-url origin "https://x-access-token:${AUTOFIX_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # A normal push already rejects most races, but compare the remote ref
+          # explicitly so a force-reset/rewrite cannot make an old repair commit
+          # look like a legitimate fast-forward.
+          remote_head="$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk '{print $1}')"
+          if [[ "$remote_head" != "$EXPECTED_HEAD" ]]; then
+            echo "PR head moved from $EXPECTED_HEAD to ${remote_head:-<missing>}; refusing to push a stale repair." >&2
+            exit 1
+          fi
 
           retry() {
             local n=1
@@ -168,9 +174,9 @@ jobs:
       - name: Upload repair patch
         if: >-
           always() &&
-          steps.guard.outputs.run == 'true' &&
           steps.dirty.outputs.dirty == 'true' &&
           (
+            steps.verify.outcome != 'success' ||
             steps.scope.outputs.same_repo != 'true' ||
             steps.scope.outputs.token != 'true' ||
             steps.push.outcome == 'failure'
@@ -185,12 +191,12 @@ jobs:
       - name: Final summary
         if: always()
         run: |
-          if [[ "${{ steps.guard.outputs.run }}" != "true" ]]; then
-            echo "Autofix loop guard stopped this run." >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.verify.outcome }}" != "success" ]]; then
+            echo "Autofix produced no push: the candidate did not pass every mechanical verification check. Any patch was preserved for inspection." >> "$GITHUB_STEP_SUMMARY"
           elif [[ "${{ steps.dirty.outputs.dirty }}" != "true" ]]; then
-            echo "No mechanical fixes were needed." >> "$GITHUB_STEP_SUMMARY"
+            echo "No mechanical fixes were needed; the autofix-owned checks already pass." >> "$GITHUB_STEP_SUMMARY"
           elif [[ "${{ steps.push.outcome }}" == "success" ]]; then
-            echo "Fixes were pushed back to the PR branch." >> "$GITHUB_STEP_SUMMARY"
+            echo "A verified repair was pushed back to the unchanged PR head." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Fixes were saved as an autofix patch artifact." >> "$GITHUB_STEP_SUMMARY"
+            echo "Verified fixes were saved as an autofix patch artifact because a safe push was unavailable." >> "$GITHUB_STEP_SUMMARY"
           fi

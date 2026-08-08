@@ -93,10 +93,18 @@ jobs:
       height: ${{ steps.ver.outputs.height }}
       bump: ${{ steps.ver.outputs.bump }}
       previous_tag: ${{ steps.ver.outputs.previous_tag }}
+      release_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+
+      - name: Freeze immutable release source SHA
+        id: source
+        run: |
+          sha="$(git rev-parse HEAD^{commit})"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release source frozen at $sha"
 
       # Use the version already present in the tree for push/PR runs. A release
       # event uses its tag, and a manual run must provide the version explicitly.
@@ -173,7 +181,13 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
           fetch-depth: 0
+
+      - name: Assert checkout matches frozen release SHA
+        env:
+          EXPECTED_SHA: ${{ needs.detect-version.outputs.release_sha }}
+        run: test "$(git rev-parse HEAD^{commit})" = "$EXPECTED_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -278,6 +292,7 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
 
   # Aggregator step: merge all wheel artifacts into the canonical
   # `dist/` directory for downstream publishing jobs.
@@ -295,14 +310,24 @@ jobs:
           path: wheels-tmp/
           merge-multiple: true
 
-      - name: Stage final dist directory
+      - name: Stage final dist directory fail-closed
         run: |
           mkdir -p dist release-assets
-          cp -v wheels-tmp/*.whl wheels-tmp/*.tar.gz dist/ 2>/dev/null || true
-          ls -la dist/
-          # Mirror the wheels into release-assets so create-release uploads them.
-          cp -v dist/*.whl dist/*.tar.gz release-assets/ 2>/dev/null || true
-          ls -la release-assets/
+          shopt -s nullglob
+          wheels=(wheels-tmp/*.whl)
+          sdists=(wheels-tmp/*.tar.gz)
+          if (( ${#wheels[@]} == 0 )); then
+            echo "::error::No wheels were collected from the successful build matrix."
+            exit 1
+          fi
+          if (( ${#sdists[@]} != 1 )); then
+            echo "::error::Expected exactly one sdist, found ${#sdists[@]}."
+            exit 1
+          fi
+          cp -v "${wheels[@]}" "${sdists[@]}" dist/
+          # Mirror the exact canonical distribution set into release-assets.
+          cp -v dist/*.whl dist/*.tar.gz release-assets/
+          ls -la dist/ release-assets/
 
       # TEST-28: wheel-version <-> tag consistency gate. Every artifact in
       # dist/ must carry EXACTLY the version detect-version resolved — a
@@ -337,17 +362,24 @@ jobs:
           print(f"OK: {len(artifacts)} dist artifacts all carry {expected}")
           PY
 
+      - name: Generate immutable release checksum manifest
+        run: |
+          (cd dist && sha256sum *.whl *.tar.gz | LC_ALL=C sort) > release-assets/SHA256SUMS
+          cat release-assets/SHA256SUMS
+
       - name: Upload merged dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist
           path: dist/
+          if-no-files-found: error
 
       - name: Upload merged release-assets artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets-merged
           path: release-assets/
+          if-no-files-found: error
 
   # ─── Wheel smoke-import gate ───────────────────────────────────────────────
   # Issue #355's bug class: `manylinux_2_28` wheels that build cleanly,
@@ -364,7 +396,8 @@ jobs:
   # `pypa/gh-action-pypi-publish` has already pushed it to the world.
   smoke-import-wheels:
     needs: [build-wheels]
-    if: github.event.inputs.dry_run != 'true'
+    # Dry-run intentionally executes the same smoke matrix as a real release;
+    # only irreversible publication is skipped.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
@@ -385,7 +418,7 @@ jobs:
         # dispatch, matching the wheels actually built. The macOS Intel
         # (x86_64-apple-darwin) row was restored after the ML-backend
         # excision removed ort-sys — the historical Intel blocker.
-        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.11","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"}]') || fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.11","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"ubuntu-24.04-arm","image":"quay.io/pypa/manylinux_2_28_aarch64","python":"3.11","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04-arm","image":"ubuntu:22.04","python":"3.12","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"macos-14","image":"","python":"3.13","wheel_target":"aarch64-apple-darwin","wheel_artifact":"wheels-macos-14-aarch64-apple-darwin","glibc_label":""},{"runner":"macos-15-intel","image":"","python":"3.13","wheel_target":"x86_64-apple-darwin","wheel_artifact":"wheels-macos-15-intel-x86_64-apple-darwin","glibc_label":""}]') }}
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.10","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.14","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"}]') || fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.10","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.14","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"ubuntu-24.04-arm","image":"quay.io/pypa/manylinux_2_28_aarch64","python":"3.10","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04-arm","image":"ubuntu:22.04","python":"3.12","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"macos-14","image":"","python":"3.14","wheel_target":"aarch64-apple-darwin","wheel_artifact":"wheels-macos-14-aarch64-apple-darwin","glibc_label":""},{"runner":"macos-15-intel","image":"","python":"3.14","wheel_target":"x86_64-apple-darwin","wheel_artifact":"wheels-macos-15-intel-x86_64-apple-darwin","glibc_label":""}]') }}
 
     steps:
       - name: Download wheels artifact for this target
@@ -393,6 +426,12 @@ jobs:
         with:
           name: ${{ matrix.wheel_artifact }}
           path: dist/
+
+      - name: Set up requested Python on macOS
+        if: matrix.image == ''
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
 
       - name: Stage smoke-import script
         # The smoke script lives in a host file rather than an inline
@@ -668,17 +707,90 @@ jobs:
           fi
           echo "Installing: $whl"
 
-          # Use the system python at the requested minor version. The
-          # macos-14 runner image preinstalls multiple Python versions.
-          "python$PYTHON_VERSION" -m venv /tmp/venv
+          # setup-python above makes the requested interpreter authoritative;
+          # do not rely on whatever minor versions the moving runner image ships.
+          python -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet --upgrade pip
           /tmp/venv/bin/pip install --quiet "$whl"
           # Same staged smoke script as the Linux container path uses,
           # invoked directly on the macOS host (no docker mount needed).
           /tmp/venv/bin/python "${RUNNER_TEMP}/smoke_import.py"
 
+  verify-release-identity:
+    needs: [detect-version, collect-dist, smoke-import-wheels]
+    if: github.event_name != 'pull_request' && github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Reject a version tag that points at different source
+        env:
+          RELEASE_SHA: ${{ needs.detect-version.outputs.release_sha }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "3" ]] && return 1
+              sleep $((n * 4))
+              n=$((n + 1))
+            done
+          }
+
+          # Distinguish a genuinely absent tag (ls-remote exit 2) from a
+          # transport/API failure. Network ambiguity must never be interpreted
+          # as permission to publish a new version tag.
+          probe_remote_tag() {
+            local n rc output
+            for n in 1 2 3; do
+              if output="$(git ls-remote --exit-code --refs origin "refs/tags/${TAG}" 2>&1)"; then
+                rc=0
+              else
+                rc=$?
+              fi
+              if [[ "$rc" -eq 0 ]]; then return 0; fi
+              if [[ "$rc" -eq 2 ]]; then return 2; fi
+              echo "::warning::Could not query ${TAG} from origin (attempt ${n}/3): ${output}" >&2
+              [[ "$n" -lt 3 ]] && sleep $((n * 4))
+            done
+            return 1
+          }
+
+          if probe_remote_tag; then
+            probe_rc=0
+          else
+            probe_rc=$?
+          fi
+
+          if [[ "$probe_rc" -eq 0 ]]; then
+            retry git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            tag_sha="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
+            if [[ "$tag_sha" != "$RELEASE_SHA" ]]; then
+              echo "::error::${TAG} points to ${tag_sha}, but this release built ${RELEASE_SHA}."
+              exit 1
+            fi
+            echo "Existing ${TAG} is bound to the exact release source SHA."
+          elif [[ "$probe_rc" -eq 2 ]]; then
+            if [[ "${{ github.event_name }}" == "release" ]]; then
+              echo "::error::Release-event tag ${TAG} is genuinely absent on origin."
+              exit 1
+            fi
+            echo "${TAG} does not exist yet; create-release may create it only at ${RELEASE_SHA}."
+          else
+            echo "::error::Could not establish whether ${TAG} exists; refusing publication."
+            exit 1
+          fi
+
   publish-pypi:
-    needs: [collect-dist, smoke-import-wheels]
+    needs: [detect-version, collect-dist, smoke-import-wheels, verify-release-identity]
     # X2: skip on pull_request — dry-run only verifies build+smoke,
     # never publishes. The other two predicates remain (workflow_dispatch
     # dry_run, vars-level skip).
@@ -695,21 +807,144 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Gate idempotence with PyPI SHA-256 digests
+        id: pypi-state
+        env:
+          PACKAGE: ${{ env.PYPI_PACKAGE }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          dist = pathlib.Path("dist")
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(dist.iterdir())
+              if path.name.endswith((".whl", ".tar.gz"))
+          }
+          if not local:
+              raise SystemExit("dist/ contains no publishable distributions")
+
+          package = urllib.parse.quote(os.environ["PACKAGE"], safe="")
+          version = urllib.parse.quote(os.environ["VERSION"], safe="")
+          url = f"https://pypi.org/pypi/{package}/{version}/json"
+          import time
+
+          payload = None
+          remote = None
+          for attempt in range(1, 4):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      payload = json.load(response)
+                  break
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      remote = {}
+                      break
+                  if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                      raise
+              except urllib.error.URLError:
+                  if attempt == 3:
+                      raise
+              time.sleep(attempt * 3)
+
+          if remote is None:
+              remote = {
+                  item["filename"]: item["digests"]["sha256"]
+                  for item in payload.get("urls", [])
+              }
+
+          unexpected = sorted(set(remote) - set(local))
+          if unexpected:
+              raise SystemExit(
+                  "PyPI already contains files for this version that are not in the canonical release set: "
+                  + ", ".join(unexpected)
+              )
+
+          mismatched = sorted(
+              name for name in set(local) & set(remote) if local[name] != remote[name]
+          )
+          if mismatched:
+              details = ", ".join(
+                  f"{name} local={local[name]} pypi={remote[name]}" for name in mismatched
+              )
+              raise SystemExit("PyPI filename collision with different bytes: " + details)
+
+          missing = sorted(set(local) - set(remote))
+          output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as fh:
+              fh.write(f"needs_publish={'true' if missing else 'false'}\n")
+          if missing:
+              print("PyPI is missing verified distributions: " + ", ".join(missing))
+          else:
+              print("PyPI already contains the complete canonical distribution set with matching SHA-256 digests.")
+
       - name: Publish ${{ env.PYPI_PACKAGE }} to PyPI
         id: pypi-publish
+        if: steps.pypi-state.outputs.needs_publish == 'true'
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
-          # Idempotent re-runs: when a wheel filename for the computed
-          # version is already on PyPI (e.g. a previous push to main
-          # already published this version, or this run's computed
-          # semver hasn't bumped past the last release), treat the
-          # existing file as a no-op instead of a hard failure. PyPA's
-          # recommended pattern for release workflows that may run
-          # multiple times against the same version.
+          # Partial publication recovery is allowed only after the digest gate
+          # proved every pre-existing filename is byte-for-byte identical.
+          # skip-existing can therefore upload only the missing canonical files
+          # without converting a conflicting artifact into a false success.
           skip-existing: true
 
+      - name: Verify PyPI canonical state after publication
+        env:
+          PACKAGE: ${{ env.PYPI_PACKAGE }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(pathlib.Path("dist").iterdir())
+              if path.name.endswith((".whl", ".tar.gz"))
+          }
+          package = urllib.parse.quote(os.environ["PACKAGE"], safe="")
+          version = urllib.parse.quote(os.environ["VERSION"], safe="")
+          url = f"https://pypi.org/pypi/{package}/{version}/json"
+
+          last_error = None
+          for attempt in range(1, 7):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      payload = json.load(response)
+                  remote = {
+                      item["filename"]: item["digests"]["sha256"]
+                      for item in payload.get("urls", [])
+                  }
+                  if remote == local:
+                      print("PyPI canonical state verified: filename set and every SHA-256 digest match.")
+                      break
+                  last_error = (
+                      f"canonical set mismatch: missing={sorted(set(local)-set(remote))} "
+                      f"unexpected={sorted(set(remote)-set(local))} "
+                      f"digest_mismatch={sorted(name for name in set(local)&set(remote) if local[name] != remote[name])}"
+                  )
+              except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+                  last_error = repr(exc)
+              if attempt == 6:
+                  raise SystemExit("PyPI did not converge to the canonical distribution set: " + str(last_error))
+              time.sleep(attempt * 5)
+
   create-release:
-    needs: [detect-version, build-wheels, collect-dist, smoke-import-wheels, publish-pypi]
+    needs: [detect-version, build-wheels, collect-dist, smoke-import-wheels, verify-release-identity, publish-pypi]
     if: >-
       ${{
         always() &&
@@ -719,6 +954,7 @@ jobs:
         needs.build-wheels.result == 'success' &&
         needs.collect-dist.result == 'success' &&
         needs.smoke-import-wheels.result == 'success' &&
+        needs.verify-release-identity.result == 'success' &&
         (vars.PYPI_SKIP == 'true' || needs.publish-pypi.result == 'success')
       }}
     runs-on: ubuntu-24.04
@@ -728,6 +964,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
           fetch-depth: 0
 
       - name: Download merged release assets (wheels + sdist)
@@ -743,7 +980,7 @@ jobs:
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ needs.detect-version.outputs.release_sha }}
         run: |
           retry() {
             local n=1
@@ -757,18 +994,62 @@ jobs:
           TAG="v${{ needs.detect-version.outputs.version }}"
           TITLE="Release v${{ needs.detect-version.outputs.version }}"
 
+          # Returns 0 when TAG exists at TARGET_SHA, 2 when it genuinely
+          # does not exist, and 1 for mismatch/transport ambiguity.
+          verify_tag_identity() {
+            local n rc output tag_sha
+            for n in 1 2 3; do
+              if output="$(git ls-remote --exit-code --refs origin "refs/tags/${TAG}" 2>&1)"; then
+                rc=0
+              else
+                rc=$?
+              fi
+              if [[ "$rc" -eq 0 ]]; then
+                if ! retry git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"; then
+                  return 1
+                fi
+                tag_sha="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")" || return 1
+                if [[ "$tag_sha" != "$TARGET_SHA" ]]; then
+                  echo "::error::${TAG} points to ${tag_sha}; refusing release assets built from ${TARGET_SHA}."
+                  return 1
+                fi
+                return 0
+              fi
+              if [[ "$rc" -eq 2 ]]; then return 2; fi
+              echo "::warning::Could not query ${TAG} from origin (attempt ${n}/3): ${output}" >&2
+              [[ "$n" -lt 3 ]] && sleep $((n * 4))
+            done
+            return 1
+          }
+
           ensure_release() {
-            local n=1
+            local n=1 tag_state
             while true; do
+              if verify_tag_identity; then
+                tag_state=0
+              else
+                tag_state=$?
+              fi
+              if [[ "$tag_state" -eq 1 ]]; then return 1; fi
+
               if gh release view "$TAG" > /dev/null 2>&1; then
+                if [[ "$tag_state" -ne 0 ]]; then
+                  echo "::error::GitHub Release ${TAG} exists but its tag is absent; refusing ambiguous release state."
+                  return 1
+                fi
                 return 0
               fi
+
               if gh release create "$TAG" --target "$TARGET_SHA" --title "$TITLE" --generate-notes; then
-                return 0
+                verify_tag_identity
+                return $?
               fi
-              # If another run created it between view/create, that is success.
+
+              # A concurrent run may have created it between view/create. That is
+              # success only after re-proving the tag now resolves to TARGET_SHA.
               if gh release view "$TAG" > /dev/null 2>&1; then
-                return 0
+                verify_tag_identity
+                return $?
               fi
               [[ "$n" == "5" ]] && return 1
               sleep $((n * 5))
@@ -794,4 +1075,4 @@ jobs:
           }
 
           TAG="v${{ needs.detect-version.outputs.version }}"
-          retry gh release upload "$TAG" release-assets/*.whl release-assets/*.tar.gz --clobber
+          retry gh release upload "$TAG" release-assets/*.whl release-assets/*.tar.gz release-assets/SHA256SUMS --clobber
