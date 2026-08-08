@@ -1,0 +1,65 @@
+name: Retry Failed Workflows
+
+# Bounded whole-run recovery for transient runner, network, cache, registry, and
+# GitHub API failures. It never checks out or executes code from the triggering
+# run; it only asks GitHub to rerun failed jobs with the original run's identity
+# and permissions. Real defects still stay red after the final attempt.
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Dev Containers
+      - perf
+      - rust
+      - Release
+      - Release Please
+      - PR Health
+      - Stale Triage
+      - autofix
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: retry-failed-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: >-
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'timed_out' ||
+       github.event.workflow_run.conclusion == 'startup_failure') &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Re-run failed jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          set -Eeuo pipefail
+
+          # Back off longer after each failed attempt so short outages can clear.
+          sleep $((RUN_ATTEMPT * 20))
+
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "3" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
+
+          echo "Retrying failed jobs in ${WORKFLOW_NAME} run ${RUN_ID} after attempt ${RUN_ATTEMPT}."
+          if ! retry gh run rerun "$RUN_ID" --repo "$GITHUB_REPOSITORY" --failed; then
+            # Startup failures can have no failed job records yet; fall back to
+            # a full rerun of the same immutable workflow attempt.
+            retry gh run rerun "$RUN_ID" --repo "$GITHUB_REPOSITORY"
+          fi
