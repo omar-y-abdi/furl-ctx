@@ -18,6 +18,7 @@ on:
       - PR Health
       - Stale Triage
       - autofix
+      - autofix apply
     types: [completed]
 
 permissions:

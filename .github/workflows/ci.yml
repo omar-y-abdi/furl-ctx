@@ -284,18 +284,13 @@ jobs:
     needs: [changes, build-wheel]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    # FURL_RELEASE_PR_CONTEXT arms the release-PR escape hatch in
-    # tests/test_release_manifest_tag_guard.py. A release-please release PR bumps
-    # .release-please-manifest.json ahead of its git tag, which does not exist
-    # until the PR merges, so the tag-drift guard would otherwise fail every
-    # release PR. This sets the variable to "1" via a case-insensitive startsWith
-    # on the head ref prefix release-please--, and to empty for push, schedule,
-    # and workflow_dispatch runs where github.head_ref is empty, so the guard
-    # stays fully armed everywhere except release PRs. release-please always
-    # generates lowercase branch names, so legitimate arming is unaffected. See
-    # that test's module docstring.
+    # FURL_RELEASE_PR_CONTEXT arms the release-manifest/tag exception only for
+    # an authenticated Release Please PR. Branch naming alone is not authority:
+    # the PR must be same-repository, authored by the exact GITHUB_TOKEN bot,
+    # and use Release Please's canonical branch prefix. Ordinary PRs cannot
+    # obtain the exception merely by naming their branch `release-please--...`.
     env:
-      FURL_RELEASE_PR_CONTEXT: ${{ startsWith(github.head_ref, 'release-please--') && '1' || '' }}
+      FURL_RELEASE_PR_CONTEXT: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'github-actions[bot]' && startsWith(github.head_ref, 'release-please--') && '1' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -490,3 +485,75 @@ jobs:
           maturin build --release --out dist
       - name: Check package
         run: twine check dist/*
+
+      - name: Prove release wheel contains the repository Python payload
+        run: |
+          python - <<'PY'
+          import pathlib
+          import zipfile
+
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one release wheel, found {len(wheels)}")
+
+          source_root = pathlib.Path("furl_ctx")
+          source = {
+              path.as_posix(): path.read_bytes()
+              for path in source_root.rglob("*")
+              if path.is_file() and path.suffix in {".py", ".pyi"}
+          }
+          if not source:
+              raise SystemExit("repository Python payload is unexpectedly empty")
+
+          with zipfile.ZipFile(wheels[0]) as zf:
+              packaged = {
+                  name: zf.read(name)
+                  for name in zf.namelist()
+                  if name.startswith("furl_ctx/") and pathlib.PurePosixPath(name).suffix in {".py", ".pyi"}
+              }
+
+          missing = sorted(set(source) - set(packaged))
+          unexpected = sorted(set(packaged) - set(source))
+          changed = sorted(name for name in set(source) & set(packaged) if source[name] != packaged[name])
+          if missing or unexpected or changed:
+              raise SystemExit(
+                  "release wheel Python payload diverges from the source tree: "
+                  f"missing={missing} unexpected={unexpected} changed={changed}"
+              )
+          print(f"release wheel payload matches {len(source)} repository Python source/stub files byte-for-byte")
+          PY
+
+      - name: Exercise the installed release wheel outside the checkout
+        run: |
+          wheel="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          wheel="$(realpath "$wheel")"
+          venv="${RUNNER_TEMP}/shipped-wheel-venv"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --upgrade pip
+          "$venv/bin/python" -m pip install "$wheel"
+          outside="${RUNNER_TEMP}/shipped-wheel-smoke"
+          mkdir -p "$outside"
+          cd "$outside"
+          EXPECTED_WHEEL="$wheel" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" "$venv/bin/python" - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import furl_ctx
+          from furl_ctx import compress, purge, resolve_markers, retrieve  # noqa: F401
+          from furl_ctx._core import hello
+
+          module_path = pathlib.Path(furl_ctx.__file__).resolve()
+          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          if workspace in module_path.parents:
+              raise SystemExit(f"import leaked to repository checkout: {module_path}")
+
+          scripts = [
+              ep for ep in importlib.metadata.entry_points(group="console_scripts")
+              if ep.name == "furl"
+          ]
+          if len(scripts) != 1 or scripts[0].value != "furl_ctx.cli:main":
+              raise SystemExit(f"unexpected furl console-script metadata: {scripts}")
+          print(f"installed release wheel import OK: {module_path}; hello={hello()}")
+          PY
+          "$venv/bin/furl" --help >/dev/null
