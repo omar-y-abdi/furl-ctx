@@ -5,6 +5,44 @@ All notable changes to Furl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0](https://github.com/omar-y-abdi/furl-ctx/compare/v1.3.2...v1.4.0) (2026-08-07)
+
+
+### Features
+
+* **mcp:** ingest a file from disk in furl_compress via file_path ([#173](https://github.com/omar-y-abdi/furl-ctx/issues/173)) ([8b9ee00](https://github.com/omar-y-abdi/furl-ctx/commit/8b9ee000381196652071c8745abea80e483fc624))
+* **plugin:** add Codex installation support ([#200](https://github.com/omar-y-abdi/furl-ctx/issues/200)) ([6a54034](https://github.com/omar-y-abdi/furl-ctx/commit/6a54034389af116701c7c5e76b3759dc4f6476d1))
+* **retrieve:** warn on absent select_field and add raw byte-exact row mode (F7, F10) ([#174](https://github.com/omar-y-abdi/furl-ctx/issues/174)) ([e5a0ab1](https://github.com/omar-y-abdi/furl-ctx/commit/e5a0ab151cc5ae6b9ec5af40644f9ea052b53b02))
+* **verify:** add an opaque family so the whole-blob CCR offload path is measured at all ([#189](https://github.com/omar-y-abdi/furl-ctx/issues/189)) ([4a9b66b](https://github.com/omar-y-abdi/furl-ctx/commit/4a9b66bf0200d30ee3fa9d08141a51fe9448dd68))
+
+
+### Bug Fixes
+
+* **cache:** declare backend max_rows and durability, reject negative counter amounts ([#194](https://github.com/omar-y-abdi/furl-ctx/issues/194)) ([dbf41e2](https://github.com/omar-y-abdi/furl-ctx/commit/dbf41e2f7a3ee2785743e9d3096bba2c04f20cd9))
+* consume one cap slot per columnar output by not mirroring per-row chunks ([#168](https://github.com/omar-y-abdi/furl-ctx/issues/168)) ([9e06c7b](https://github.com/omar-y-abdi/furl-ctx/commit/9e06c7b97f1066f47b1c11afde261bb9cc6e6117))
+* decline nested-uniform flatten when dotted names are ambiguous (COR-14) ([#157](https://github.com/omar-y-abdi/furl-ctx/issues/157)) ([642c8c7](https://github.com/omar-y-abdi/furl-ctx/commit/642c8c74b73869a139381ab00a00731af93cae0c))
+* **plugin:** isolate Codex package from Claude hooks ([#201](https://github.com/omar-y-abdi/furl-ctx/issues/201)) ([fe5c1b8](https://github.com/omar-y-abdi/furl-ctx/commit/fe5c1b8e2e3c7ea023fada1a37322001a181fb3d))
+* recover columnar row total inline and stop nested-object escaping (F4, F5) ([#163](https://github.com/omar-y-abdi/furl-ctx/issues/163)) ([5d79576](https://github.com/omar-y-abdi/furl-ctx/commit/5d7957603104bfdf8917b8fccf6287a0e44ec844))
+* **redaction:** fail closed when credential scanning cannot complete ([#192](https://github.com/omar-y-abdi/furl-ctx/issues/192)) ([9c4f9ef](https://github.com/omar-y-abdi/furl-ctx/commit/9c4f9efa1b7f6c7719689308c2ee0f847bf5e8b7))
+* **redaction:** never arm a watchdog whose handler cannot be uninstalled ([#197](https://github.com/omar-y-abdi/furl-ctx/issues/197)) ([a191584](https://github.com/omar-y-abdi/furl-ctx/commit/a19158424e9ee690a82e290edfc955ff626cb3f9))
+* remove the never-consumable _ccr_rows offload, in code, tests, docs and benchmark ([#172](https://github.com/omar-y-abdi/furl-ctx/issues/172)) ([13db7ab](https://github.com/omar-y-abdi/furl-ctx/commit/13db7abead38f6d2050d633e0f90b60af8f56dcf))
+* route single-line JSON arrays PURE and bound hook wall time for F2 ([#161](https://github.com/omar-y-abdi/furl-ctx/issues/161)) ([215128c](https://github.com/omar-y-abdi/furl-ctx/commit/215128c9abc0ecc8abca0a6366fcab07f2f2deba))
+* separate fused boundaries in HTML main-content extraction ([#158](https://github.com/omar-y-abdi/furl-ctx/issues/158)) ([eca3d75](https://github.com/omar-y-abdi/furl-ctx/commit/eca3d75e95271947b6de2698217d36241b799efe))
+* skip no-op compression stores and scope furl_stats counters [F9 F11] ([#167](https://github.com/omar-y-abdi/furl-ctx/issues/167)) ([d9e3be9](https://github.com/omar-y-abdi/furl-ctx/commit/d9e3be9170e58220217ee5cba3f1d812bd829107))
+* stop diff compressor silently dropping chmod-only mode changes ([#169](https://github.com/omar-y-abdi/furl-ctx/issues/169)) ([c21d663](https://github.com/omar-y-abdi/furl-ctx/commit/c21d663b480a8a683bf2d3ac8dd38ef54ad9c560))
+* stop entropy fallback misclassifying short words as identity noise ([#150](https://github.com/omar-y-abdi/furl-ctx/issues/150)) ([7a6cda4](https://github.com/omar-y-abdi/furl-ctx/commit/7a6cda4d03e0fc284da407e913cae2612e700121))
+* stop MIXED-path reassembly from fabricating a fence language tag ([#159](https://github.com/omar-y-abdi/furl-ctx/issues/159)) ([491ab02](https://github.com/omar-y-abdi/furl-ctx/commit/491ab02f41fcf47e3c58a92ef1603469aa3ba676))
+* stop resolve_markers deleting bytes before a generic bracket marker ([#160](https://github.com/omar-y-abdi/furl-ctx/issues/160)) ([3afc265](https://github.com/omar-y-abdi/furl-ctx/commit/3afc26505e532cfea479bfe295ad9373c776647b))
+* surface furl pipe rule-gating in banner and furl_stats, add opt-in ([#162](https://github.com/omar-y-abdi/furl-ctx/issues/162)) ([819c9ad](https://github.com/omar-y-abdi/furl-ctx/commit/819c9adf046f5cabdf8b462ba6fe7863b7a09a05))
+* trim constant-column dead weight from F4 __stats, re-floor gate ([#164](https://github.com/omar-y-abdi/furl-ctx/issues/164)) ([4afd8c7](https://github.com/omar-y-abdi/furl-ctx/commit/4afd8c7d22134d13be2f8fcc779b7c09d00eade3))
+* **verify:** charge the retrieval surface a model pays on, not the library's ([#195](https://github.com/omar-y-abdi/furl-ctx/issues/195)) ([2ad5722](https://github.com/omar-y-abdi/furl-ctx/commit/2ad57225c099f08bc4373881685c866ad9edc608))
+* **verify:** charge whole-blob offload retrieval at r&gt;0 for zero-drop families ([#179](https://github.com/omar-y-abdi/furl-ctx/issues/179)) ([d02778b](https://github.com/omar-y-abdi/furl-ctx/commit/d02778b6e43bcc291ad5b15dd35523e4011be0d7))
+
+
+### Code Refactoring
+
+* repo-wide lazy-dev cleanup (−1,951 LoC code, −35k orphaned fixtures, zero behavior change) ([#177](https://github.com/omar-y-abdi/furl-ctx/issues/177)) ([a80ee72](https://github.com/omar-y-abdi/furl-ctx/commit/a80ee724ae7ce29b5046b8885b5ee65f2ac70c4e))
+
 ## [1.3.2](https://github.com/omar-y-abdi/furl-ctx/compare/v1.3.0...v1.3.2) (2026-07-21)
 
 

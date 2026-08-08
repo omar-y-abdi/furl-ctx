@@ -51,8 +51,8 @@ _MIN_VERSION = (2, 1, 163)
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 # Keep in sync with furl_ctx/host_version.py's release-please-managed pins.
-_PLUGIN_VERSION = "1.3.2"
-_ENGINE_VERSION = "1.3.2"
+_PLUGIN_VERSION = "1.4.0"
+_ENGINE_VERSION = "1.4.0"
 
 
 def _parse_version(text: str) -> tuple[int, int, int] | None:
