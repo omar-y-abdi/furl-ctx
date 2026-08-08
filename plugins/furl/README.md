@@ -227,7 +227,7 @@ through `uv`, which fetches Furl on first use — no prior install:
 ```json
 { "mcpServers": { "furl": {
   "command": "sh",
-  "args": ["-c", "PATH=\"$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\" exec uv run --no-project --with 'furl-ctx[mcp]==1.3.2' python -m furl_ctx.ccr.mcp_server"],
+  "args": ["-c", "PATH=\"$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\" exec uv run --no-project --with 'furl-ctx[mcp]==1.4.0' python -m furl_ctx.ccr.mcp_server"],
   "env": { "FURL_CCR_BACKEND": "sqlite", "FURL_CCR_TTL_SECONDS": "86400" }
 }}}
 ```
@@ -255,7 +255,7 @@ file instead of dropped, so its `<<ccr:HASH>>` marker stays retrievable past the
 1000-entry cap — the spill is bounded in turn by its own row cap and TTL. Raising
 `FURL_CCR_TTL_SECONDS` widens the time ceiling, not the live cap — check
 `furl_stats` for live entry counts against the cap. The
-`furl-ctx[mcp]==1.3.2` pin is deterministic — every launch resolves the same wheel instead
+`furl-ctx[mcp]==1.4.0` pin is deterministic — every launch resolves the same wheel instead
 of whatever `uv`'s cache last held; upgrades ship through plugin updates, which bump the pin.
 
 **Plugin version vs. engine version.** The host manifests (`plugin.json`) and pinned engine

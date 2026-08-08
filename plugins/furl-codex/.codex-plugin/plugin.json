@@ -1,6 +1,6 @@
 {
   "name": "furl",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Reversible context compression for Codex through six on-demand MCP tools and a retrieval-aware skill. Originals remain byte-exactly retrievable through <<ccr:HASH>> markers.",
   "author": {
     "name": "Omar Y. Abdi",
