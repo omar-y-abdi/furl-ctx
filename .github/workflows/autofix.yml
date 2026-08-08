@@ -108,12 +108,12 @@ jobs:
 
       - name: Apply formatters and lint fixes
         if: steps.guard.outputs.run == 'true'
-        # ruff pinned to the version pyproject.toml declares (>=0.15.19) and that
+        # ruff pinned to the version pyproject.toml declares (>=0.16.2) and that
         # ci.yml's required lint check pins, so autofix produces byte-identical
         # output to what lint verifies.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ruff==0.15.19
+          python -m pip install ruff==0.16.2
           # Order matters: --fix-only edits (e.g. removing an unused import) can
           # leave blank-line layouts the formatter must then collapse, so format
           # runs LAST as the final normalizer. The reverse order shipped a bot
