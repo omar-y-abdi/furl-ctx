@@ -1,51 +1,41 @@
 name: Release
 
-# ─── Package Registry Configuration ────────────────────────────────────────────
-# Edit these constants to change package names, environments, and registries.
-# All values are referenced via ${{ env.VAR }} throughout the workflow.
+# Build environment. Publication state transitions are shared through local
+# composite actions, while the PyPI OIDC job deliberately remains in this
+# workflow because PyPI Trusted Publishing does not authorize reusable workflows.
 env:
-  # PyPI
-  PYPI_PACKAGE: furl-ctx
-  PYPI_ENVIRONMENT: pypi
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_DEFAULT_TIMEOUT: "120"
+  PIP_RETRIES: "5"
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
 
-  # ─── Safety Gates ──────────────────────────────────────────────────────────────
-  # The publish kill-switch is the repository Actions VARIABLE `PYPI_SKIP`
-  # (read as `vars.PYPI_SKIP` by the publish-pypi and create-release gates
-  # below) — NOT a workflow env constant. TEST-31: an env entry here was a
-  # decoy the gates never read; an operator editing it still published.
-  # Set it in GitHub: repo Settings → Secrets and variables → Actions →
-  # Variables → New repository variable `PYPI_SKIP` = 'true'.
-  # Locally via act: pass -e event.yml or set in .actrc.local (see
-  # .actrc.local.example).
-  # Semantics: 'true' short-circuits the `publish-pypi` job's own `if:` below
-  # to skipped (no PyPI upload attempted) while still letting `create-release`
-  # proceed. Any other value (`false`, unset, or anything else) requires
-  # `publish-pypi` to actually run and succeed before `create-release` will
-  # proceed. This comment intentionally does not state which value is set
-  # right now: that is live repository state which drifts independently of
-  # this file, so check it directly with `gh variable get PYPI_SKIP` or the
-  # GitHub UI path above rather than trusting a comment to have kept up.
-
+# Global release circuit breaker: repository Actions variable
+# `RELEASE_HALT=true`. It intentionally stops ALL public release side effects
+# (tag creation, PyPI, and GitHub Release) at the shared publication gates. Builds,
+# smoke tests, and artifact sealing may still finish, leaving verified bytes for
+# diagnosis/recovery after the halt is cleared.
 on:
-  # Triggered when release-please's release PR is merged: the bot
-  # tags the merge commit `vX.Y.Z` and creates a GitHub Release on
-  # that tag, which fires the `release: published` event. Ordinary
-  # pushes to main no longer trigger publishes — that was the old
-  # behavior that burned PyPI's per-project storage quota by
-  # uploading a fresh wheel matrix (~200 MB) per merged fix/feat PR.
-  # See .github/workflows/release-please.yml for the PR-aggregator.
-  release:
-    types: [published]
-  # X2: PR-time release dry-run. Trigger on PRs that touch release-
-  # critical paths so the wheel matrix + smoke-import gate run BEFORE
-  # merge — not after the tag is pushed and main is broken. Path
-  # filter is deliberately narrow: source-only PRs that don't change
-  # the wheel layout (the single `furl-ctx` wheel built from
-  # `crates/furl-py`) don't need the dry-run.
+  # Primary release trigger: release-please's release PR updates the manifest
+  # when it lands on main. This push is created by the PR merge itself, so it
+  # reliably starts this workflow even though GitHub suppresses most follow-up
+  # events created later by the workflow's own GITHUB_TOKEN.
+  push:
+    branches: [main]
+    paths:
+      - ".release-please-manifest.json"
+  # PR-time release dry-run. Platform/build-sensitive changes automatically
+  # escalate from the inexpensive Linux x86_64 qualification path to the full
+  # Linux arm64 + macOS matrix before merge (see release-risk below).
   pull_request:
     paths:
       - ".github/workflows/release.yml"
-      - "crates/furl-py/**"
+      - ".github/actions/pypi-canonical/**"
+      - ".github/actions/release-state/**"
+      - "crates/**"
+      - "**/*.rs"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
       - "pyproject.toml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -53,20 +43,21 @@ on:
     inputs:
       version:
         description: "Manual version override"
-        required: false
+        required: true
       dry_run:
         description: "Skip publish"
         type: boolean
         default: false
 
 concurrency:
-  # Main release runs are namespaced by ref_name and never cancel
-  # (cancel-in-progress: false) — losing a tag-push release mid-flight
-  # would mean PyPI/Docker get partial state. PR dry-runs are
-  # namespaced by PR number and DO cancel: rapid PR pushes shouldn't
-  # spawn N parallel wheel builds, only the latest matters.
-  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  # Never cancel a real release. PR dry-runs may cancel older copies. Manual
+  # releases are keyed by requested version so retries serialize safely.
+  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('v-{0}', inputs.version) || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
 
 # Default-deny floor: any future-added job that omits its own permissions
 # block inherits nothing, not the repo-default token scope. Existing jobs
@@ -74,6 +65,34 @@ concurrency:
 permissions: {}
 
 jobs:
+  release-risk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      full_matrix: ${{ github.event_name != 'pull_request' || steps.filter.outputs.platform_sensitive == 'true' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Classify changes that can alter native/platform release behavior
+        if: github.event_name == 'pull_request'
+        id: filter
+        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
+        with:
+          filters: |
+            platform_sensitive:
+              - '.github/workflows/release.yml'
+              - '.github/actions/pypi-canonical/**'
+              - '.github/actions/release-state/**'
+              - 'crates/**'
+              - '**/*.rs'
+              - '.cargo/**'
+              - 'rust-toolchain.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'pyproject.toml'
+
   detect-version:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -85,52 +104,47 @@ jobs:
       height: ${{ steps.ver.outputs.height }}
       bump: ${{ steps.ver.outputs.bump }}
       previous_tag: ${{ steps.ver.outputs.previous_tag }}
+      release_sha: ${{ steps.source.outputs.sha }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
-      # When fired by release-please's release event, the tag the
-      # bot just published IS the canonical version for this run —
-      # release_version.py's git-log derivation would re-bump it.
-      # workflow_dispatch REQUIRES `inputs.version` (TEST-28): without
-      # it the script computes one bump AHEAD of every built artifact
-      # (wheels carry pyproject's version), so the run would tag vX+1
-      # over wheels versioned X — and `skip-existing: true` on the PyPI
-      # step would silently no-op the mismatch. PR dry-runs leave
-      # MANUAL_VER empty and the script computes normally.
+      - name: Freeze immutable release source SHA
+        id: source
+        run: |
+          sha="$(git rev-parse HEAD^{commit})"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release source frozen at $sha"
+
+      # Use the version already present in the tree for push/PR runs. A manual
+      # run must provide the version explicitly. Release events are not accepted:
+      # this workflow is now the sole creator of release tags/releases.
       - name: Resolve MANUAL_VER from trigger
         id: manualver
-        shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          MANUAL_INPUT: ${{ github.event.inputs.version }}
+          MANUAL_INPUT: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            # github.event.release.tag_name is "vX.Y.Z" — strip the
-            # leading "v" so release_version.py's SemVer parser
-            # accepts it.
-            echo "value=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ -z "$MANUAL_INPUT" ]; then
-              echo "::error::workflow_dispatch requires inputs.version" \
-                "(TEST-28): a computed version runs one bump ahead of the" \
-                "built artifacts and mis-tags the release. Pass the version" \
-                "that matches pyproject.toml."
+          project_version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            value="$MANUAL_INPUT"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            manifest_version="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path(".release-please-manifest.json").read_text())["."])')"
+            if [[ "$manifest_version" != "$project_version" ]]; then
+              echo "::error::release manifest ($manifest_version) and pyproject.toml ($project_version) disagree"
               exit 1
             fi
-            echo "value=$MANUAL_INPUT" >> "$GITHUB_OUTPUT"
+            value="$project_version"
           else
-            # PR dry-run (X2): gate against what this tree actually
-            # BUILDS — pyproject's version. The git-log derivation
-            # computes the NEXT release version, which by definition
-            # exceeds every artifact built from the PR tree, so the
-            # collect-dist gate would fail on every feat PR touching
-            # wheel paths. The dry-run's job is wheel-matrix build +
-            # smoke-import + internal version consistency, not
-            # predicting the future tag.
-            echo "value=$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')" >> "$GITHUB_OUTPUT"
+            value="$project_version"
           fi
+
+          if [[ -z "$value" || "$value" != "$project_version" ]]; then
+            echo "::error::requested release version '$value' does not match pyproject.toml '$project_version'"
+            exit 1
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
 
       - name: Compute semantic version from canonical + release history
         id: ver
@@ -145,7 +159,7 @@ jobs:
   # Python source under `furl_ctx/` plus the compiled `furl_ctx/_core.so`
   # — one atomic install via `pip install furl-ctx`.
   build-wheels:
-    needs: [detect-version]
+    needs: [release-risk, detect-version]
     # Minimal privilege: this job only checks out source, builds wheels,
     # and uploads them as artifacts. It doesn't push, write packages, or
     # mutate releases — `contents: read` is sufficient. Mitigates CodeQL
@@ -155,12 +169,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Quota guard (private repo, macOS bills 10x): PR dry-runs build
-        # ONLY the Linux x86_64 wheel (+ sdist, keyed on that target) —
-        # enough to gate buildability, version consistency, and
-        # smoke-import before merge. The FULL matrix (Linux arm64 native
-        # runner + macOS arm64) runs on real releases and manual
-        # dispatch, where completeness matters.
+        # Risk-adaptive quota guard: ordinary PRs build Linux x86_64 only.
+        # Any native/platform/build/dependency-sensitive PR is escalated by
+        # release-risk to this exact full matrix before merge. Real releases
+        # and manual dispatches always use the full matrix.
         #
         # Full-matrix notes preserved: manylinux_2_28 is pinned explicitly
         # (auto resolved to manylinux2014/CentOS 7/OpenSSL 1.0.2k — too
@@ -170,13 +182,19 @@ jobs:
         # shipped no prebuilt ONNX Runtime for it, but the ML-backend
         # excision removed ort-sys from the dependency graph entirely, so
         # the Intel blocker is gone (Q15).
-        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"}]') || fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","manylinux":"2_28"},{"os":"macos-14","target":"aarch64-apple-darwin","manylinux":""},{"os":"macos-15-intel","target":"x86_64-apple-darwin","manylinux":""}]') }}
+        include: ${{ github.event_name == 'pull_request' && needs.release-risk.outputs.full_matrix != 'true' && fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"}]') || fromJSON('[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","manylinux":"2_28"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","manylinux":"2_28"},{"os":"macos-14","target":"aarch64-apple-darwin","manylinux":""},{"os":"macos-15-intel","target":"x86_64-apple-darwin","manylinux":""}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
           fetch-depth: 0
+
+      - name: Assert checkout matches frozen release SHA
+        env:
+          EXPECTED_SHA: ${{ needs.detect-version.outputs.release_sha }}
+        run: test "$(git rev-parse HEAD^{commit})" = "$EXPECTED_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -281,6 +299,7 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
 
   # Aggregator step: merge all wheel artifacts into the canonical
   # `dist/` directory for downstream publishing jobs.
@@ -298,14 +317,24 @@ jobs:
           path: wheels-tmp/
           merge-multiple: true
 
-      - name: Stage final dist directory
+      - name: Stage final dist directory fail-closed
         run: |
           mkdir -p dist release-assets
-          cp -v wheels-tmp/*.whl wheels-tmp/*.tar.gz dist/ 2>/dev/null || true
-          ls -la dist/
-          # Mirror the wheels into release-assets so create-release uploads them.
-          cp -v dist/*.whl dist/*.tar.gz release-assets/ 2>/dev/null || true
-          ls -la release-assets/
+          shopt -s nullglob
+          wheels=(wheels-tmp/*.whl)
+          sdists=(wheels-tmp/*.tar.gz)
+          if (( ${#wheels[@]} == 0 )); then
+            echo "::error::No wheels were collected from the successful build matrix."
+            exit 1
+          fi
+          if (( ${#sdists[@]} != 1 )); then
+            echo "::error::Expected exactly one sdist, found ${#sdists[@]}."
+            exit 1
+          fi
+          cp -v "${wheels[@]}" "${sdists[@]}" dist/
+          # Mirror the exact canonical distribution set into release-assets.
+          cp -v dist/*.whl dist/*.tar.gz release-assets/
+          ls -la dist/ release-assets/
 
       # TEST-28: wheel-version <-> tag consistency gate. Every artifact in
       # dist/ must carry EXACTLY the version detect-version resolved — a
@@ -340,17 +369,24 @@ jobs:
           print(f"OK: {len(artifacts)} dist artifacts all carry {expected}")
           PY
 
+      - name: Generate immutable release checksum manifest
+        run: |
+          (cd dist && sha256sum *.whl *.tar.gz | LC_ALL=C sort) > release-assets/SHA256SUMS
+          cat release-assets/SHA256SUMS
+
       - name: Upload merged dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist
           path: dist/
+          if-no-files-found: error
 
       - name: Upload merged release-assets artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets-merged
           path: release-assets/
+          if-no-files-found: error
 
   # ─── Wheel smoke-import gate ───────────────────────────────────────────────
   # Issue #355's bug class: `manylinux_2_28` wheels that build cleanly,
@@ -362,12 +398,13 @@ jobs:
   # This job spins up a matrix of representative customer environments
   # — the manylinux floor we promise + common older/newer glibc + macOS
   # native — and runs the actual `import furl_ctx._core` check at
-  # startup. Failure here BLOCKS publish-pypi and create-release. Better
-  # to find a broken wheel here than 8 minutes after
-  # `pypa/gh-action-pypi-publish` has already pushed it to the world.
+  # startup. Failure here BLOCKS the artifact seal and therefore the canonical
+  # publisher. Better to find a broken wheel here than after bytes have reached
+  # PyPI or a public GitHub Release.
   smoke-import-wheels:
-    needs: [build-wheels]
-    if: github.event.inputs.dry_run != 'true'
+    needs: [release-risk, build-wheels]
+    # Dry-run intentionally executes the same smoke matrix as a real release;
+    # only irreversible publication is skipped.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
@@ -381,14 +418,13 @@ jobs:
         # (`ubuntu:20.04 + py3.10` dropped PR #396 — deadsnakes stopped
         # provisioning on EOL focal; env failure, not wheel failure.)
         #
-        # Quota guard (see build-wheels): PR dry-runs smoke ONLY the
-        # x86_64 Linux wheel that PR builds — manylinux floor + the
-        # most-reported customer env. Full sweep (Linux arm64 floor+22.04,
-        # macOS arm64 native + macOS Intel) runs on real releases /
-        # dispatch, matching the wheels actually built. The macOS Intel
+        # Risk-adaptive quota guard (see build-wheels): ordinary PRs smoke
+        # only x86_64 Linux, while platform-sensitive PRs run this full
+        # Linux arm64 + macOS matrix before merge. Real releases/manual
+        # dispatches always run the full sweep. The macOS Intel
         # (x86_64-apple-darwin) row was restored after the ML-backend
         # excision removed ort-sys — the historical Intel blocker.
-        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.11","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"}]') || fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.11","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"ubuntu-24.04-arm","image":"quay.io/pypa/manylinux_2_28_aarch64","python":"3.11","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04-arm","image":"ubuntu:22.04","python":"3.12","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"macos-14","image":"","python":"3.13","wheel_target":"aarch64-apple-darwin","wheel_artifact":"wheels-macos-14-aarch64-apple-darwin","glibc_label":""},{"runner":"macos-15-intel","image":"","python":"3.13","wheel_target":"x86_64-apple-darwin","wheel_artifact":"wheels-macos-15-intel-x86_64-apple-darwin","glibc_label":""}]') }}
+        include: ${{ github.event_name == 'pull_request' && needs.release-risk.outputs.full_matrix != 'true' && fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.10","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.14","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"}]') || fromJSON('[{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.10","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"quay.io/pypa/manylinux_2_28_x86_64","python":"3.14","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04","image":"ubuntu:22.04","python":"3.12","wheel_target":"x86_64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-x86_64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"ubuntu-24.04-arm","image":"quay.io/pypa/manylinux_2_28_aarch64","python":"3.10","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.28-floor"},{"runner":"ubuntu-24.04-arm","image":"ubuntu:22.04","python":"3.12","wheel_target":"aarch64-unknown-linux-gnu","wheel_artifact":"wheels-ubuntu-24.04-arm-aarch64-unknown-linux-gnu","glibc_label":"2.35"},{"runner":"macos-14","image":"","python":"3.14","wheel_target":"aarch64-apple-darwin","wheel_artifact":"wheels-macos-14-aarch64-apple-darwin","glibc_label":""},{"runner":"macos-15-intel","image":"","python":"3.14","wheel_target":"x86_64-apple-darwin","wheel_artifact":"wheels-macos-15-intel-x86_64-apple-darwin","glibc_label":""}]') }}
 
     steps:
       - name: Download wheels artifact for this target
@@ -396,6 +432,12 @@ jobs:
         with:
           name: ${{ matrix.wheel_artifact }}
           path: dist/
+
+      - name: Set up requested Python on macOS
+        if: matrix.image == ''
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
 
       - name: Stage smoke-import script
         # The smoke script lives in a host file rather than an inline
@@ -671,48 +713,20 @@ jobs:
           fi
           echo "Installing: $whl"
 
-          # Use the system python at the requested minor version. The
-          # macos-14 runner image preinstalls multiple Python versions.
-          "python$PYTHON_VERSION" -m venv /tmp/venv
+          # setup-python above makes the requested interpreter authoritative;
+          # do not rely on whatever minor versions the moving runner image ships.
+          python -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet --upgrade pip
           /tmp/venv/bin/pip install --quiet "$whl"
           # Same staged smoke script as the Linux container path uses,
           # invoked directly on the macOS host (no docker mount needed).
           /tmp/venv/bin/python "${RUNNER_TEMP}/smoke_import.py"
 
-  publish-pypi:
-    needs: [collect-dist, smoke-import-wheels]
-    # X2: skip on pull_request — dry-run only verifies build+smoke,
-    # never publishes. The other two predicates remain (workflow_dispatch
-    # dry_run, vars-level skip).
-    if: github.event_name != 'pull_request' && github.event.inputs.dry_run != 'true' && vars.PYPI_SKIP != 'true'
-    environment: pypi  # NOTE: environment name must be a literal; update here if the GitHub environment name changes
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      id-token: write  # Required for OIDC trusted publishing
-    steps:
-      - name: Download merged dist artifact (sdist + cross-platform wheels)
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: dist
-          path: dist/
-
-      - name: Publish ${{ env.PYPI_PACKAGE }} to PyPI
-        id: pypi-publish
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
-        with:
-          # Idempotent re-runs: when a wheel filename for the computed
-          # version is already on PyPI (e.g. a previous push to main
-          # already published this version, or this run's computed
-          # semver hasn't bumped past the last release), treat the
-          # existing file as a no-op instead of a hard failure. PyPA's
-          # recommended pattern for release workflows that may run
-          # multiple times against the same version.
-          skip-existing: true
-
-  create-release:
-    needs: [detect-version, build-wheels, collect-dist, smoke-import-wheels, publish-pypi]
+  # A successful seal is the publication authorization boundary. The seal is
+  # deliberately separate from registry credentials: it proves the exact dist
+  # bytes came from this Release run after the complete smoke matrix succeeded.
+  seal-release-artifacts:
+    needs: [detect-version, build-wheels, collect-dist, smoke-import-wheels]
     if: >-
       ${{
         always() &&
@@ -721,50 +735,158 @@ jobs:
         needs.detect-version.result == 'success' &&
         needs.build-wheels.result == 'success' &&
         needs.collect-dist.result == 'success' &&
-        needs.smoke-import-wheels.result == 'success' &&
-        (vars.PYPI_SKIP == 'true' || needs.publish-pypi.result == 'success')
+        needs.smoke-import-wheels.result == 'success'
       }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
-      contents: write
+      actions: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Download canonical dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          fetch-depth: 0
+          name: dist
+          path: dist
 
-      - name: Download merged release assets (wheels + sdist)
+      - name: Download canonical release checksum artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-assets-merged
           path: release-assets
 
-      - name: Show release assets
-        run: |
-          ls -la release-assets
-
-      - name: Create or update GitHub Release
+      - name: Re-prove checksum manifest and create release seal
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
+          RELEASE_SHA: ${{ needs.detect-version.outputs.release_sha }}
         run: |
-          TAG="v${{ needs.detect-version.outputs.version }}"
-          TITLE="Release v${{ needs.detect-version.outputs.version }}"
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            # Release already exists — typically created by
-            # release-please on release-PR merge with an auto-
-            # generated changelog body. Don't overwrite its notes;
-            # only sync the title in case detect-version's canonical
-            # form differs from what the bot set.
-            gh release edit "$TAG" --title "$TITLE"
-          else
-            # workflow_dispatch path: no release-please body exists yet,
-            # so let GitHub auto-generate the notes from commit history.
-            gh release create "$TAG" --title "$TITLE" --generate-notes
-          fi
+          (cd dist && sha256sum -c ../release-assets/SHA256SUMS)
+          mkdir -p release-seal
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
 
-      - name: Publish ${{ env.PYPI_PACKAGE }} Python distributions to GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="v${{ needs.detect-version.outputs.version }}"
-          gh release upload "$TAG" release-assets/*.whl release-assets/*.tar.gz --clobber
+          dist = pathlib.Path("dist")
+          files = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(dist.iterdir())
+              if path.name.endswith((".whl", ".tar.gz"))
+          }
+          if not files:
+              raise SystemExit("cannot seal an empty distribution set")
+          seal = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "version": os.environ["VERSION"],
+              "release_sha": os.environ["RELEASE_SHA"],
+              "files": files,
+          }
+          pathlib.Path("release-seal/release-seal.json").write_text(
+              json.dumps(seal, sort_keys=True, indent=2) + "\n"
+          )
+          print(json.dumps(seal, sort_keys=True, indent=2))
+          PY
+
+      - name: Upload release seal
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-seal-${{ needs.detect-version.outputs.version }}
+          path: release-seal/release-seal.json
+          if-no-files-found: error
+
+  establish-release-tag:
+    needs: [detect-version, seal-release-artifacts]
+    if: >-
+      ${{
+        always() &&
+        github.event_name != 'pull_request' &&
+        github.event.inputs.dry_run != 'true' &&
+        needs.detect-version.result == 'success' &&
+        needs.seal-release-artifacts.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted release automation at frozen source SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Establish immutable release tag
+        uses: ./.github/actions/release-state
+        with:
+          mode: establish
+          version: ${{ needs.detect-version.outputs.version }}
+          release-sha: ${{ needs.detect-version.outputs.release_sha }}
+          require-existing-tag: false
+          halt: ${{ vars.RELEASE_HALT == 'true' }}
+
+  publish-pypi:
+    needs: [detect-version, seal-release-artifacts, establish-release-tag]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: pypi
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      # Keep the OIDC-bearing job in release.yml: PyPI Trusted Publishing binds
+      # authorization to the workflow filename and currently rejects reusable
+      # workflows. Shared registry semantics live in the composite action.
+      - name: Checkout trusted publication action
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
+          persist-credentials: false
+
+      - name: Download exact sealed distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish canonical PyPI state
+        uses: ./.github/actions/pypi-canonical
+        with:
+          package: furl-ctx
+          version: ${{ needs.detect-version.outputs.version }}
+          packages-dir: dist
+          halt: ${{ vars.RELEASE_HALT == 'true' }}
+
+  create-release:
+    needs: [detect-version, establish-release-tag, publish-pypi]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout trusted release automation at frozen source SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download exact sealed distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Finalize byte-verified GitHub Release
+        uses: ./.github/actions/release-state
+        with:
+          mode: finalize
+          version: ${{ needs.detect-version.outputs.version }}
+          release-sha: ${{ needs.detect-version.outputs.release_sha }}
+          dist-dir: dist
+          halt: ${{ vars.RELEASE_HALT == 'true' }}

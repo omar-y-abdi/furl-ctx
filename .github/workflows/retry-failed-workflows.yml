@@ -1,0 +1,123 @@
+name: Retry Failed Workflows
+
+# Conservative recovery for GitHub-hosted runner/action-delivery failures only.
+# A normal test/lint/audit/build failure is NEVER rerun automatically: rerunning
+# deterministic failures can turn a flaky defect green and destroy the value of
+# a required check. Startup failures are safe to rerun because no job executed;
+# ordinary failures are retried only when every failed job carries a narrowly
+# allowlisted GitHub Actions infrastructure signature.
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Dev Containers
+      - perf
+      - rust
+      - Release
+      - Release Please
+      - PR Health
+      - Stale Triage
+      - autofix
+      - autofix apply
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: retry-failed-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: >-
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'startup_failure') &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Classify failure and rerun only infrastructure faults
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          set -Eeuo pipefail
+
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "3" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
+
+          sleep $((RUN_ATTEMPT * 20))
+
+          if [[ "$RUN_CONCLUSION" == "startup_failure" ]]; then
+            echo "Startup failure: no workflow job executed. Re-running the immutable run."
+            retry gh run rerun "$RUN_ID" --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+
+          jobs_json="$(retry gh api --paginate --slurp \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100")"
+
+          mapfile -t failed_jobs < <(
+            jq -r '.[] | .jobs[] | select(.conclusion == "failure") | [.id, .name, .conclusion, ([.steps[]? | select(.conclusion == "failure")] | length)] | @tsv' \
+              <<<"$jobs_json"
+          )
+
+          if (( ${#failed_jobs[@]} == 0 )); then
+            echo "No failed job records are available; refusing an unclassified rerun."
+            exit 0
+          fi
+
+          # Deliberately narrow. Package registry/network failures are handled by
+          # retries inside the workflows themselves. These patterns identify the
+          # Actions runner/action-delivery layer, not application/test output.
+          infra_re='(The hosted runner encountered an error|The runner has received a shutdown signal|Lost communication with the server|The self-hosted runner lost communication with the server|Failed to download action|Unable to resolve action|GitHub Actions service is currently unavailable|The job was abandoned because the runner was lost)'
+
+          classified=0
+          unclassified=0
+          for row in "${failed_jobs[@]}"; do
+            IFS=$'\t' read -r job_id job_name job_conclusion failed_steps <<<"$row"
+            log_file="${RUNNER_TEMP}/job-${job_id}.log"
+
+            # A real failed step means application/action logic executed and
+            # reported failure. Never retry it automatically, even if its output
+            # happens to contain an infrastructure-looking phrase.
+            if (( failed_steps > 0 )); then
+              echo "${job_name}: ${failed_steps} step(s) concluded failure; automatic rerun forbidden."
+              unclassified=$((unclassified + 1))
+              continue
+            fi
+
+            if ! retry gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --job "$job_id" --log >"$log_file" 2>&1; then
+              echo "::notice::${job_name}: logs unavailable; refusing to guess that this was infrastructure."
+              unclassified=$((unclassified + 1))
+              continue
+            fi
+
+            if grep -Eiq "$infra_re" "$log_file"; then
+              echo "${job_name} (${job_conclusion}): classified as GitHub Actions infrastructure failure."
+              classified=$((classified + 1))
+            else
+              echo "${job_name} (${job_conclusion}): deterministic/unknown failure; not eligible for automatic rerun."
+              unclassified=$((unclassified + 1))
+            fi
+          done
+
+          if (( classified > 0 && unclassified == 0 )); then
+            echo "Every failed job is infrastructure-classified; rerunning failed jobs in ${WORKFLOW_NAME} run ${RUN_ID}."
+            retry gh run rerun "$RUN_ID" --repo "$GITHUB_REPOSITORY" --failed
+          else
+            echo "Automatic rerun suppressed: classified=${classified}, unclassified=${unclassified}."
+            echo "A real or ambiguous CI failure remains red for investigation."
+          fi

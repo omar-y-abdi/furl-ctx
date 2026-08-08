@@ -1,0 +1,168 @@
+name: Canonical PyPI publication
+description: Fail-closed PyPI idempotence, OIDC publication, and canonical-state verification.
+
+inputs:
+  package:
+    description: PyPI project name
+    required: true
+  version:
+    description: Canonical release version
+    required: true
+  packages-dir:
+    description: Directory containing the exact publishable distributions
+    required: true
+  halt:
+    description: Global release circuit breaker
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Enforce release circuit breaker
+      if: inputs.halt == 'true'
+      shell: bash
+      run: |
+        echo "::error::RELEASE_HALT=true: refusing PyPI publication."
+        exit 1
+
+    - name: Gate idempotence with PyPI SHA-256 digests
+      id: pypi-state
+      shell: python
+      env:
+        PACKAGE: ${{ inputs.package }}
+        VERSION: ${{ inputs.version }}
+        PACKAGES_DIR: ${{ inputs.packages-dir }}
+      run: |
+        import hashlib
+        import json
+        import os
+        import pathlib
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        dist = pathlib.Path(os.environ["PACKAGES_DIR"])
+        files = sorted(dist.iterdir()) if dist.is_dir() else []
+        unexpected = [p.name for p in files if not p.name.endswith((".whl", ".tar.gz"))]
+        local = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in files
+            if path.name.endswith((".whl", ".tar.gz"))
+        }
+        wheels = [name for name in local if name.endswith(".whl")]
+        sdists = [name for name in local if name.endswith(".tar.gz")]
+        if unexpected or not wheels or len(sdists) != 1:
+            raise SystemExit(
+                f"non-canonical dist set: wheels={len(wheels)} sdists={len(sdists)} unexpected={unexpected}"
+            )
+
+        package = urllib.parse.quote(os.environ["PACKAGE"], safe="")
+        version = urllib.parse.quote(os.environ["VERSION"], safe="")
+        url = f"https://pypi.org/pypi/{package}/{version}/json"
+        payload = None
+        remote = None
+        for attempt in range(1, 4):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as response:
+                    payload = json.load(response)
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    remote = {}
+                    break
+                if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                    raise
+            except urllib.error.URLError:
+                if attempt == 3:
+                    raise
+            time.sleep(attempt * 3)
+
+        if remote is None:
+            remote = {
+                item["filename"]: item["digests"]["sha256"]
+                for item in payload.get("urls", [])
+            }
+        unexpected_remote = sorted(set(remote) - set(local))
+        mismatched = sorted(
+            name for name in set(local) & set(remote) if local[name] != remote[name]
+        )
+        if unexpected_remote:
+            raise SystemExit(
+                "PyPI contains non-canonical files for this version: "
+                + ", ".join(unexpected_remote)
+            )
+        if mismatched:
+            raise SystemExit(
+                "PyPI filename collision with different bytes: "
+                + ", ".join(
+                    f"{name} local={local[name]} pypi={remote[name]}"
+                    for name in mismatched
+                )
+            )
+
+        missing = sorted(set(local) - set(remote))
+        with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
+            fh.write(f"needs_publish={'true' if missing else 'false'}\n")
+        if missing:
+            print("PyPI is missing verified distributions: " + ", ".join(missing))
+        else:
+            print("PyPI already matches the complete canonical distribution set.")
+
+    - name: Publish exact canonical distributions to PyPI
+      if: steps.pypi-state.outputs.needs_publish == 'true'
+      uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+      with:
+        packages-dir: ${{ inputs.packages-dir }}
+        # A collision is skipped only after the gate above proved that every
+        # existing filename is byte-for-byte identical to the canonical file.
+        skip-existing: true
+
+    - name: Verify PyPI canonical state after publication
+      shell: python
+      env:
+        PACKAGE: ${{ inputs.package }}
+        VERSION: ${{ inputs.version }}
+        PACKAGES_DIR: ${{ inputs.packages-dir }}
+      run: |
+        import hashlib
+        import json
+        import os
+        import pathlib
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        dist = pathlib.Path(os.environ["PACKAGES_DIR"])
+        local = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(dist.iterdir())
+            if path.name.endswith((".whl", ".tar.gz"))
+        }
+        package = urllib.parse.quote(os.environ["PACKAGE"], safe="")
+        version = urllib.parse.quote(os.environ["VERSION"], safe="")
+        url = f"https://pypi.org/pypi/{package}/{version}/json"
+        last_error = None
+        for attempt in range(1, 7):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as response:
+                    payload = json.load(response)
+                remote = {
+                    item["filename"]: item["digests"]["sha256"]
+                    for item in payload.get("urls", [])
+                }
+                if remote == local:
+                    print("PyPI canonical state verified: exact filename set and SHA-256 digests match.")
+                    break
+                last_error = (
+                    f"missing={sorted(set(local)-set(remote))} "
+                    f"unexpected={sorted(set(remote)-set(local))} "
+                    f"digest_mismatch={sorted(name for name in set(local)&set(remote) if local[name] != remote[name])}"
+                )
+            except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+                last_error = repr(exc)
+            if attempt == 6:
+                raise SystemExit("PyPI did not converge to canonical state: " + str(last_error))
+            time.sleep(attempt * 5)

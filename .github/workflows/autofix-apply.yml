@@ -1,0 +1,495 @@
+name: autofix apply
+
+# Trusted bridge for same-repository PRs. The source `autofix` workflow is
+# intentionally unprivileged and may execute PR-controlled code; this workflow
+# therefore treats every source artifact as hostile input.
+#
+# Security invariant: no job in this workflow checks out a PR head, restores a
+# dependency cache, executes repository scripts, imports repository modules, or
+# runs Cargo/Ruff against PR-controlled files. The verifier only parses candidate
+# Python source as data with the CPython tokenizer/AST and proves that the
+# candidate preserves the original AST and security-significant comments. Only
+# that narrow formatting-only subset can cross into the write job. Rust and
+# lint-fix changes remain available in the unprivileged patch artifact but are
+# never auto-pushed from a privileged trigger.
+on:
+  workflow_run:
+    workflows: [autofix]
+    types: [completed]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+concurrency:
+  group: autofix-apply-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+jobs:
+  verify-candidate:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.pull_requests[0].number != null
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      dirty: ${{ steps.verify.outputs.dirty == 'true' && 'true' || 'false' }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      head_ref: ${{ steps.pr.outputs.head_ref }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      payload_name: trusted-autofix-${{ github.run_id }}
+    steps:
+      - name: Resolve unchanged same-repository PR head
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          data="$(gh api -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          state="$(jq -r '.state' <<<"$data")"
+          base_ref="$(jq -r '.base.ref' <<<"$data")"
+          head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$data")"
+          head_ref="$(jq -r '.head.ref' <<<"$data")"
+          head_sha="$(jq -r '.head.sha' <<<"$data")"
+
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          if [[ "$state" != "open" || "$base_ref" != "main" || "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "PR #${PR_NUMBER} is forked, closed, or retargeted; refusing autonomous application." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download source candidate as untrusted data
+        if: steps.pr.outputs.eligible == 'true'
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          artifact_name="autofix-candidate-pr-${PR_NUMBER}"
+          artifacts="$(gh api -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100")"
+          mapfile -t ids < <(jq -r --arg name "$artifact_name" '.artifacts[] | select(.name == $name and .expired == false) | .id' <<<"$artifacts")
+          if (( ${#ids[@]} == 0 )); then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No verified same-repository autofix candidate artifact exists for this run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if (( ${#ids[@]} != 1 )); then
+            echo "Expected exactly one ${artifact_name} artifact, found ${#ids[@]}." >&2
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/autofix-source"
+          gh api -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ids[0]}/zip" > "$RUNNER_TEMP/autofix-candidate.zip"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify candidate semantics and build sanitized payload
+        if: steps.pr.outputs.eligible == 'true' && steps.source.outputs.present == 'true'
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          SOURCE_ZIP: ${{ runner.temp }}/autofix-candidate.zip
+          OUT_ROOT: ${{ runner.temp }}/trusted-autofix-payload
+        run: |
+          python3 - <<'PY'
+          import ast
+          import base64
+          import hashlib
+          import io
+          import json
+          import os
+          import pathlib
+          import re
+          import shutil
+          import subprocess
+          import tokenize
+          import zipfile
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pr_number = int(os.environ["PR_NUMBER"])
+          head_ref = os.environ["HEAD_REF"]
+          head_sha = os.environ["HEAD_SHA"]
+          source_zip = pathlib.Path(os.environ["SOURCE_ZIP"])
+          out_root = pathlib.Path(os.environ["OUT_ROOT"])
+
+          MAX_FILES = 500
+          MAX_FILE_BYTES = 5 * 1024 * 1024
+          MAX_TOTAL_BYTES = 20 * 1024 * 1024
+          SAFE_SUFFIXES = {".py", ".pyi"}
+          DIRECTIVE_RE = re.compile(
+              r"(?:#\!|coding[:=]|noqa\b|type:\s*ignore\b|fmt:\s*(?:on|off)\b|"
+              r"pragma:\s*no\s*cover\b|nosec\b|pyright:|mypy:|ruff:)",
+              re.IGNORECASE,
+          )
+
+          def gh_json(path: str):
+              raw = subprocess.check_output(
+                  ["gh", "api", "-H", "Accept: application/vnd.github+json", path],
+                  text=True,
+              )
+              return json.loads(raw)
+
+          # Never call ZipFile.extract/extractall on an artifact produced by an
+          # untrusted workflow. Validate every member first, then read bytes only.
+          with zipfile.ZipFile(source_zip) as zf:
+              infos = zf.infolist()
+              if not infos or len(infos) > MAX_FILES:
+                  raise SystemExit(f"candidate archive entry count is unsafe: {len(infos)}")
+              total = 0
+              members: dict[str, bytes] = {}
+              for info in infos:
+                  pure = pathlib.PurePosixPath(info.filename)
+                  if info.is_dir():
+                      continue
+                  if pure.is_absolute() or ".." in pure.parts:
+                      raise SystemExit(f"unsafe artifact member path: {info.filename}")
+                  # Reject Unix symlinks/special files encoded in external attrs.
+                  mode = (info.external_attr >> 16) & 0o170000
+                  if mode not in {0, 0o100000}:
+                      raise SystemExit(f"unsafe artifact member type: {info.filename}")
+                  if info.file_size > MAX_FILE_BYTES:
+                      raise SystemExit(f"artifact member is too large: {info.filename}")
+                  total += info.file_size
+                  if total > MAX_TOTAL_BYTES:
+                      raise SystemExit("candidate archive exceeds trusted size budget")
+                  name = pure.as_posix()
+                  # upload-artifact may retain or strip the top-level directory.
+                  if name.startswith("autofix-candidate/"):
+                      name = name.removeprefix("autofix-candidate/")
+                  if name != "manifest.json" and not name.startswith("files/"):
+                      raise SystemExit(f"unexpected candidate artifact member: {name}")
+                  if name in members:
+                      raise SystemExit(f"duplicate artifact member: {name}")
+                  members[name] = zf.read(info)
+
+          if "manifest.json" not in members:
+              raise SystemExit("candidate artifact is missing manifest.json")
+          manifest = json.loads(members["manifest.json"])
+          if manifest.get("repository") != repo or manifest.get("pr_number") != pr_number:
+              raise SystemExit("candidate repository/PR identity mismatch")
+          if manifest.get("head_sha") != head_sha:
+              # A synchronize event should make a new source run. Never replay a
+              # candidate generated for an older PR head onto a newer commit.
+              print("candidate is stale; refusing autonomous application")
+              pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("dirty=false\n")
+              raise SystemExit(0)
+
+          declared = manifest.get("files")
+          if not isinstance(declared, list) or len(declared) > MAX_FILES:
+              raise SystemExit("candidate manifest files list is invalid")
+          declared_paths: set[str] = set()
+          for entry in declared:
+              if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                  raise SystemExit("candidate manifest contains an invalid file entry")
+              path = pathlib.PurePosixPath(entry["path"])
+              raw = path.as_posix()
+              if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] == ".github":
+                  raise SystemExit(f"unsafe candidate path: {raw}")
+              if raw in declared_paths:
+                  raise SystemExit(f"duplicate candidate path: {raw}")
+              declared_paths.add(raw)
+              member = f"files/{raw}"
+              data = members.get(member)
+              if data is None:
+                  raise SystemExit(f"candidate bytes missing for {raw}")
+              if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
+                  raise SystemExit(f"candidate digest mismatch for {raw}")
+
+          extra_file_members = {
+              name.removeprefix("files/") for name in members if name.startswith("files/")
+          } - declared_paths
+          if extra_file_members:
+              raise SystemExit(f"undeclared candidate files present: {sorted(extra_file_members)}")
+
+          commit = gh_json(f"repos/{repo}/git/commits/{head_sha}")
+          tree = gh_json(f"repos/{repo}/git/trees/{commit['tree']['sha']}?recursive=1")
+          if tree.get("truncated"):
+              raise SystemExit("Git tree response was truncated; refusing partial verification")
+          live = {
+              item["path"]: item
+              for item in tree.get("tree", [])
+              if item.get("type") == "blob"
+          }
+
+          def parse_python(data: bytes, filename: str):
+              try:
+                  return compile(
+                      data,
+                      filename,
+                      "exec",
+                      ast.PyCF_ONLY_AST | ast.PyCF_TYPE_COMMENTS,
+                      dont_inherit=True,
+                  )
+              except (SyntaxError, ValueError, TypeError) as exc:
+                  raise SystemExit(f"cannot parse {filename} for semantic verification: {exc}") from exc
+
+          def comments(data: bytes, filename: str):
+              try:
+                  tokens = list(tokenize.tokenize(io.BytesIO(data).readline))
+              except (SyntaxError, tokenize.TokenError) as exc:
+                  raise SystemExit(f"cannot tokenize {filename}: {exc}") from exc
+              ordinary: list[str] = []
+              directives: list[tuple[str, int]] = []
+              for token in tokens:
+                  if token.type != tokenize.COMMENT:
+                      continue
+                  ordinary.append(token.string)
+                  if DIRECTIVE_RE.search(token.string):
+                      directives.append((token.string, token.start[0]))
+              return ordinary, directives
+
+          safe_entries = []
+          out_files = out_root / "files"
+          shutil.rmtree(out_root, ignore_errors=True)
+          out_files.mkdir(parents=True)
+
+          for entry in declared:
+              raw = entry["path"]
+              suffix = pathlib.PurePosixPath(raw).suffix
+              if suffix not in SAFE_SUFFIXES:
+                  # Rust formatting remains in the reviewable patch. Auto-pushing
+                  # it would require trusting a Rust parser/formatter in this
+                  # privileged trigger, which defeats the privilege boundary.
+                  continue
+              live_entry = live.get(raw)
+              if not live_entry or live_entry.get("mode") not in {"100644", "100755"}:
+                  raise SystemExit(f"candidate path is not a regular tracked file at live head: {raw}")
+              blob = gh_json(f"repos/{repo}/git/blobs/{live_entry['sha']}")
+              if blob.get("encoding") != "base64":
+                  raise SystemExit(f"unexpected Git blob encoding for {raw}")
+              original = base64.b64decode(blob["content"], validate=False)
+              candidate = members[f"files/{raw}"]
+              if len(candidate) > MAX_FILE_BYTES:
+                  raise SystemExit(f"candidate file is too large: {raw}")
+              if original == candidate:
+                  continue
+
+              before = parse_python(original, raw)
+              after = parse_python(candidate, raw)
+              if ast.dump(before, include_attributes=False) != ast.dump(after, include_attributes=False):
+                  # Ruff's lint fixes can be safe, but a privileged bridge should
+                  # not need to trust that classification. Only AST-preserving
+                  # formatting crosses this boundary automatically.
+                  print(f"leaving semantic/lint change in patch artifact only: {raw}")
+                  continue
+              before_comments, before_directives = comments(original, raw)
+              after_comments, after_directives = comments(candidate, raw)
+              if before_comments != after_comments or before_directives != after_directives:
+                  print(f"leaving comment-affecting change in patch artifact only: {raw}")
+                  continue
+
+              dest = out_files / raw
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              dest.write_bytes(candidate)
+              safe_entries.append({
+                  "path": raw,
+                  "mode": live_entry["mode"],
+                  "original_blob": live_entry["sha"],
+                  "sha256": hashlib.sha256(candidate).hexdigest(),
+              })
+
+          output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          if not safe_entries:
+              with output.open("a") as fh:
+                  fh.write("dirty=false\n")
+              print("No formatting-only Python candidate survived the privileged semantic gate.")
+              raise SystemExit(0)
+
+          trusted = {
+              "repository": repo,
+              "pr_number": pr_number,
+              "head_ref": head_ref,
+              "head_sha": head_sha,
+              "files": safe_entries,
+          }
+          (out_root / "manifest.json").write_text(json.dumps(trusted, sort_keys=True, indent=2) + "\n")
+          with output.open("a") as fh:
+              fh.write("dirty=true\n")
+          print(f"Verified {len(safe_entries)} semantics-preserving Python formatting file(s).")
+          PY
+
+      - name: Upload sanitized current-workflow payload
+        if: steps.verify.outputs.dirty == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: trusted-autofix-${{ github.run_id }}
+          path: ${{ runner.temp }}/trusted-autofix-payload/
+          retention-days: 1
+          if-no-files-found: error
+
+  apply:
+    needs: verify-candidate
+    if: needs.verify-candidate.outputs.dirty == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Download sanitized payload from verifier job
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.verify-candidate.outputs.payload_name }}
+          path: payload
+
+      - name: Revalidate payload and live PR head without write token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.verify-candidate.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ needs.verify-candidate.outputs.head_sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          root = pathlib.Path("payload")
+          manifest = json.loads((root / "manifest.json").read_text())
+          if manifest["repository"] != os.environ["GITHUB_REPOSITORY"]:
+              raise SystemExit("trusted payload repository mismatch")
+          if str(manifest["pr_number"]) != os.environ["PR_NUMBER"] or manifest["head_sha"] != os.environ["EXPECTED_HEAD"]:
+              raise SystemExit("trusted payload PR/head identity mismatch")
+          if not manifest.get("files"):
+              raise SystemExit("trusted payload contains no files")
+          seen = set()
+          for entry in manifest["files"]:
+              pure = pathlib.PurePosixPath(entry["path"])
+              if pure.is_absolute() or ".." in pure.parts or pure.suffix not in {".py", ".pyi"} or pure.parts[0] == ".github":
+                  raise SystemExit(f"unsafe trusted payload path: {entry['path']}")
+              if entry["path"] in seen:
+                  raise SystemExit(f"duplicate trusted payload path: {entry['path']}")
+              seen.add(entry["path"])
+              if entry["mode"] not in {"100644", "100755"}:
+                  raise SystemExit(f"unsafe trusted payload mode: {entry['path']}")
+              data = (root / "files" / entry["path"]).read_bytes()
+              if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+                  raise SystemExit(f"trusted payload digest mismatch: {entry['path']}")
+          print(f"Sanitized payload integrity OK for {len(seen)} file(s).")
+          PY
+
+          data="$(gh api -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          [[ "$(jq -r '.state' <<<"$data")" == "open" ]]
+          [[ "$(jq -r '.base.ref' <<<"$data")" == "main" ]]
+          [[ "$(jq -r '.head.repo.full_name // ""' <<<"$data")" == "$GITHUB_REPOSITORY" ]]
+          [[ "$(jq -r '.head.sha' <<<"$data")" == "$EXPECTED_HEAD" ]]
+
+      - name: Fast-forward verified formatting via Git Data API
+        env:
+          AUTOFIX_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
+          EXPECTED_HEAD: ${{ needs.verify-candidate.outputs.head_sha }}
+        run: |
+          if [[ -z "$AUTOFIX_TOKEN" ]]; then
+            echo "::warning::AUTOFIX_TOKEN is not configured; the unprivileged patch remains available, but no autonomous write is attempted."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import pathlib
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          root = pathlib.Path("payload")
+          manifest = json.loads((root / "manifest.json").read_text())
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["AUTOFIX_TOKEN"]
+          expected = os.environ["EXPECTED_HEAD"]
+          api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+
+          def request(method, path, payload=None):
+              body = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  api + path,
+                  data=body,
+                  method=method,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      data = response.read()
+                      return json.loads(data) if data else {}
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", "replace")
+                  raise SystemExit(f"GitHub API {method} {path} failed: HTTP {exc.code}: {detail}") from exc
+
+          ref_path = "/repos/{}/git/ref/heads/{}".format(
+              repo, urllib.parse.quote(manifest["head_ref"], safe="/")
+          )
+          ref = request("GET", ref_path)
+          if ref["object"]["sha"] != expected:
+              raise SystemExit(f"PR branch moved before write: {ref['object']['sha']} != {expected}")
+
+          parent = request("GET", f"/repos/{repo}/git/commits/{expected}")
+          current_tree = request("GET", f"/repos/{repo}/git/trees/{parent['tree']['sha']}?recursive=1")
+          if current_tree.get("truncated"):
+              raise SystemExit("parent tree response was truncated")
+          current_blobs = {
+              item["path"]: item
+              for item in current_tree.get("tree", [])
+              if item.get("type") == "blob"
+          }
+          tree_entries = []
+          for entry in manifest["files"]:
+              # Re-prove the original blob identity at the exact parent tree.
+              # This prevents a sanitized payload from being replayed against a
+              # different file version even if the branch ref check were wrong.
+              current = current_blobs.get(entry["path"])
+              if not current or current.get("sha") != entry["original_blob"] or current.get("mode") != entry["mode"]:
+                  raise SystemExit(f"live parent blob identity changed for {entry['path']}")
+
+              data = (root / "files" / entry["path"]).read_bytes()
+              blob = request("POST", f"/repos/{repo}/git/blobs", {
+                  "content": base64.b64encode(data).decode(),
+                  "encoding": "base64",
+              })
+              tree_entries.append({
+                  "path": entry["path"],
+                  "mode": entry["mode"],
+                  "type": "blob",
+                  "sha": blob["sha"],
+              })
+
+          tree = request("POST", f"/repos/{repo}/git/trees", {
+              "base_tree": parent["tree"]["sha"],
+              "tree": tree_entries,
+          })
+          commit = request("POST", f"/repos/{repo}/git/commits", {
+              "message": "ci: autofix formatting",
+              "tree": tree["sha"],
+              "parents": [expected],
+              "author": {"name": "furl-autofix", "email": "furl-autofix@users.noreply.github.com"},
+              "committer": {"name": "furl-autofix", "email": "furl-autofix@users.noreply.github.com"},
+          })
+
+          # `force: false` is the final race barrier. A synchronize event created
+          # by AUTOFIX_TOKEN starts fresh CI; contributor history is never reset.
+          request("PATCH", "/repos/{}/git/refs/heads/{}".format(
+              repo, urllib.parse.quote(manifest["head_ref"], safe="/")
+          ), {"sha": commit["sha"], "force": False})
+          print(f"Applied verified formatting commit {commit['sha']} on top of {expected}.")
+          PY

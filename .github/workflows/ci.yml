@@ -7,25 +7,28 @@ name: CI
 #   test         — 4 parallel shards (pytest-split), each a fresh runner VM
 #   build / commitlint — preserved
 #
-# Python-version policy (TEST-23, deliberate cost decision — not a gap):
-# the test suite runs on 3.12 ONLY. The 3.10–3.14 classifiers in
-# pyproject.toml describe WHEEL compatibility, which is covered elsewhere:
-# abi3 wheels are built once for cp310+ (release.yml) and smoke-imported
-# on a 3.11/3.12/3.13 customer-environment matrix there. Adding a full
-# test matrix would multiply CI cost without exercising new native code.
+# Python-version policy: 3.12 remains the primary interpreter, but every
+# existing required shard is replayed on the declared compatibility endpoints
+# (3.10 and 3.14) using the exact same prebuilt abi3 wheel. This preserves the
+# six required check names while proving Python-level behavior at both edges;
+# wheel ABI compatibility alone cannot prove stdlib/runtime compatibility.
 
 on:
-  # Quota guard: no `push: main` trigger. Every change reaches main via a
-  # squash-merged PR (ruleset 18484290 requires the PR checks), so the
-  # post-merge tree is byte-identical to what the PR already tested —
-  # re-running CI on main doubled the bill for zero signal. The weekly
-  # cron is the drift guard (toolchain/image/dependency rot on an
-  # untouched tree).
+  # PRs are the merge gate. Main pushes and a daily scheduled pass re-check
+  # the repository after merges and catch runner/toolchain drift even when no
+  # pull request is open. Manual runs always execute the full suite.
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   schedule:
-    - cron: "0 6 * * 1"
+    - cron: "0 6 * * *"
   workflow_dispatch:
+    inputs:
+      force_full:
+        description: "Run every expensive check"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -37,21 +40,33 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Cancel superseded runs on PRs/branches, but never cancel a main build.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Cancel superseded PR runs, but preserve every main/scheduled validation.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
 
 env:
   PY_VERSION: "3.12"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_DEFAULT_TIMEOUT: "120"
+  PIP_RETRIES: "5"
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      # Non-PR runs are always full runs. PRs may skip expensive work when the
+      # diff cannot affect code, while the required jobs still conclude.
+      code: ${{ github.event_name != 'pull_request' || inputs.force_full == true || steps.filter.outputs.code == 'true' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
+        if: github.event_name == 'pull_request'
         id: filter
         with:
           filters: |
@@ -60,6 +75,7 @@ jobs:
               - 'crates/**'
               - '**/*.rs'
               - 'pyproject.toml'
+              - 'uv.lock'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.release-please-manifest.json'
@@ -107,7 +123,7 @@ jobs:
     # 18484290); the heavy steps below short-circuit when code=='false',
     # so a docs/config-only PR still concludes SUCCESS in seconds.
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -201,21 +217,35 @@ jobs:
       - if: needs.changes.outputs.code == 'true'
         run: python -m pip install --upgrade pip ruff==0.16.2 mypy==1.14.1
       - name: ruff check
+        id: ruff_check
+        continue-on-error: true
         if: needs.changes.outputs.code == 'true'
         run: ruff check .
       - name: ruff format --check
+        id: ruff_format
+        continue-on-error: true
         if: needs.changes.outputs.code == 'true'
         run: ruff format --check .
       - name: mypy
+        id: mypy
+        continue-on-error: true
         if: needs.changes.outputs.code == 'true'
         run: mypy furl_ctx --ignore-missing-imports
+      - name: Enforce lint results
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          failed=0
+          [[ "${{ steps.ruff_check.outcome }}" == "success" ]] || failed=1
+          [[ "${{ steps.ruff_format.outcome }}" == "success" ]] || failed=1
+          [[ "${{ steps.mypy.outcome }}" == "success" ]] || failed=1
+          exit "$failed"
 
   build-wheel:
     # Required check — always runs so it CONCLUDES on every PR (ruleset
     # 18484290); the heavy steps below short-circuit when code=='false',
     # so a docs/config-only PR still concludes SUCCESS in seconds.
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -245,26 +275,22 @@ jobs:
           name: furl-wheel
           path: dist/*.whl
           retention-days: 1
+          if-no-files-found: error
 
   test:
     # Required checks test (1..4) — always run so each shard CONCLUDES on
     # every PR (ruleset 18484290); the heavy steps below short-circuit when
     # code=='false', so a docs/config-only PR concludes SUCCESS in seconds.
     needs: [changes, build-wheel]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # FURL_RELEASE_PR_CONTEXT arms the release-PR escape hatch in
-    # tests/test_release_manifest_tag_guard.py. A release-please release PR bumps
-    # .release-please-manifest.json ahead of its git tag, which does not exist
-    # until the PR merges, so the tag-drift guard would otherwise fail every
-    # release PR. This sets the variable to "1" via a case-insensitive startsWith
-    # on the head ref prefix release-please--, and to empty for push, schedule,
-    # and workflow_dispatch runs where github.head_ref is empty, so the guard
-    # stays fully armed everywhere except release PRs. release-please always
-    # generates lowercase branch names, so legitimate arming is unaffected. See
-    # that test's module docstring.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # FURL_RELEASE_PR_CONTEXT arms the release-manifest/tag exception only for
+    # an authenticated Release Please PR. Branch naming alone is not authority:
+    # the PR must be same-repository, authored by the exact GITHUB_TOKEN bot,
+    # and use Release Please's canonical branch prefix. Ordinary PRs cannot
+    # obtain the exception merely by naming their branch `release-please--...`.
     env:
-      FURL_RELEASE_PR_CONTEXT: ${{ startsWith(github.head_ref, 'release-please--') && '1' || '' }}
+      FURL_RELEASE_PR_CONTEXT: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'github-actions[bot]' && startsWith(github.head_ref, 'release-please--') && '1' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -276,7 +302,7 @@ jobs:
       # manifest against git tags. Without this the default shallow checkout
       # fetches zero tags and the guard can only skip, never actually verify
       # anything, on every PR.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-tags: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -339,22 +365,111 @@ jobs:
             --splits 4 --group ${{ matrix.shard }} \
             --tb=short -q
 
+      - name: Set up Python 3.10 compatibility floor
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
+      - name: Replay shard ${{ matrix.shard }}/4 on Python 3.10
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL="$(ls dist/*.whl)"
+          pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2
+          rm -f furl_ctx/_core*.so
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+          python -c "from furl_ctx._core import DiffCompressor; print('Python 3.10 abi3 import OK')"
+          # These six modules are repository/tooling policy guards, not runtime
+          # compatibility tests. They import the Python 3.11+ stdlib `tomllib`
+          # directly and are already authoritative in the primary 3.12 shards
+          # (and replayed at the 3.14 ceiling). Running them under 3.10 creates a
+          # collection failure before any package compatibility test can run.
+          # Keep the exclusion explicit instead of injecting a `tomllib` shim:
+          # a shim could mask a real Python-3.10 package bug that CI should catch.
+          py310_repo_policy_ignores=(
+            --ignore=tests/test_optional_suites_not_silently_disarmed.py
+            --ignore=tests/test_plugin_hooks_manifest.py
+            --ignore=tests/test_plugin_version_pins.py
+            --ignore=tests/test_regex_budget.py
+            --ignore=tests/test_security_suite_requires_re2.py
+            --ignore=tests/test_toolchain_pin_sync.py
+          )
+          pytest tests "${py310_repo_policy_ignores[@]}" \
+            --splits 4 --group ${{ matrix.shard }} \
+            --tb=short -q
+
+      - name: Set up Python 3.14 compatibility ceiling
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Replay shard ${{ matrix.shard }}/4 on Python 3.14
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL="$(ls dist/*.whl)"
+          pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2
+          rm -f furl_ctx/_core*.so
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+          python -c "from furl_ctx._core import DiffCompressor; print('Python 3.14 abi3 import OK')"
+          pytest tests \
+            --splits 4 --group ${{ matrix.shard }} \
+            --tb=short -q
+
   commitlint:
+    # Advisory only. This repository squash-merges PRs and CONTRIBUTING.md
+    # defines the PR title as the conventional-commit field. Rewriting a PR's
+    # existing commit messages here would require destructive force-pushing
+    # contributor history, so PR Health fixes the title instead. We still audit
+    # individual commits for feedback, but they can never make CI red.
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout history for advisory commit audit
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
-      - uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6
+
+      - name: Audit commit messages (advisory)
+        id: commitlint
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
+        uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6
         with:
           configFile: .commitlintrc.json
+
+      - name: Keep commit-message style non-blocking
+        if: always()
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          COMMITLINT_OUTCOME: ${{ steps.commitlint.outcome }}
+        run: |
+          if [[ "$CHECKOUT_OUTCOME" != "success" ]]; then
+            echo "::warning::Could not read commit history; skipping the advisory commit-message audit."
+            echo "Commit-message audit skipped because history checkout was unavailable." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$COMMITLINT_OUTCOME" == "failure" ]]; then
+            echo "::warning::Some intermediate commit messages are not conventional. PR Health normalizes the PR title used for squash merging; Git history is not force-rewritten."
+            {
+              echo "## Commit-message audit"
+              echo ""
+              echo "Some intermediate commits do not match the conventional format."
+              echo "This is advisory: PR Health fixes the PR title, and CI stays green rather than rewriting contributor history."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Commit-message audit passed." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -385,3 +500,75 @@ jobs:
           maturin build --release --out dist
       - name: Check package
         run: twine check dist/*
+
+      - name: Prove release wheel contains the repository Python payload
+        run: |
+          python - <<'PY'
+          import pathlib
+          import zipfile
+
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one release wheel, found {len(wheels)}")
+
+          source_root = pathlib.Path("furl_ctx")
+          source = {
+              path.as_posix(): path.read_bytes()
+              for path in source_root.rglob("*")
+              if path.is_file() and path.suffix in {".py", ".pyi"}
+          }
+          if not source:
+              raise SystemExit("repository Python payload is unexpectedly empty")
+
+          with zipfile.ZipFile(wheels[0]) as zf:
+              packaged = {
+                  name: zf.read(name)
+                  for name in zf.namelist()
+                  if name.startswith("furl_ctx/") and pathlib.PurePosixPath(name).suffix in {".py", ".pyi"}
+              }
+
+          missing = sorted(set(source) - set(packaged))
+          unexpected = sorted(set(packaged) - set(source))
+          changed = sorted(name for name in set(source) & set(packaged) if source[name] != packaged[name])
+          if missing or unexpected or changed:
+              raise SystemExit(
+                  "release wheel Python payload diverges from the source tree: "
+                  f"missing={missing} unexpected={unexpected} changed={changed}"
+              )
+          print(f"release wheel payload matches {len(source)} repository Python source/stub files byte-for-byte")
+          PY
+
+      - name: Exercise the installed release wheel outside the checkout
+        run: |
+          wheel="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          wheel="$(realpath "$wheel")"
+          venv="${RUNNER_TEMP}/shipped-wheel-venv"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --upgrade pip
+          "$venv/bin/python" -m pip install "$wheel"
+          outside="${RUNNER_TEMP}/shipped-wheel-smoke"
+          mkdir -p "$outside"
+          cd "$outside"
+          EXPECTED_WHEEL="$wheel" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" "$venv/bin/python" - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import furl_ctx
+          from furl_ctx import compress, purge, resolve_markers, retrieve  # noqa: F401
+          from furl_ctx._core import hello
+
+          module_path = pathlib.Path(furl_ctx.__file__).resolve()
+          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          if workspace in module_path.parents:
+              raise SystemExit(f"import leaked to repository checkout: {module_path}")
+
+          scripts = [
+              ep for ep in importlib.metadata.entry_points(group="console_scripts")
+              if ep.name == "furl"
+          ]
+          if len(scripts) != 1 or scripts[0].value != "furl_ctx.cli:main":
+              raise SystemExit(f"unexpected furl console-script metadata: {scripts}")
+          print(f"installed release wheel import OK: {module_path}; hello={hello()}")
+          PY
+          "$venv/bin/furl" --help >/dev/null
