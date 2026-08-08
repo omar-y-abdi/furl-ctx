@@ -1,7 +1,7 @@
 ---
 name: furl
 description: How the Furl context-compression plugin works in Claude Code and Codex — the furl_compress / furl_retrieve / furl_stats / furl_purge / furl_search / furl_list MCP tools, the <<ccr:HASH>> retrieval flow, and Claude Code's optional automatic hooks. Use when the user asks what Furl is doing, how to compress or retrieve content, why Claude Code output looks compressed, or how to tune or disable Furl.
-version: 1.3.2
+version: 1.4.0
 ---
 
 # Furl — context compression for Claude Code and Codex
@@ -284,7 +284,7 @@ is in [`LIBRARY.md`](../../../../LIBRARY.md) → "Configuration".
 ## Prerequisite
 
 The MCP server and Claude Code hooks launch through [`uv`](https://docs.astral.sh/uv/)
-(`uv run --with "furl-ctx[mcp]==1.3.2" …`), which fetches Furl from PyPI on first use — no
+(`uv run --with "furl-ctx[mcp]==1.4.0" …`), which fetches Furl from PyPI on first use — no
 `pip install`, no Rust toolchain. The version is pinned so every launch resolves the same
 wheel deterministically instead of whatever `uv`'s cache last held; upgrades arrive through
 plugin updates, which bump the pin. The
