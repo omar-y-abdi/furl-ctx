@@ -25,6 +25,9 @@ is a thin shim that:
   parses legitimate names like `pre-commit-config.yaml-42-line` wrong.
   The Rust parser anchors on the *line-number marker* — earliest
   `<sep>\\d+<sep>` in the line — so paths can contain dashes.
+* **Unbacked omissions fail open.** If parsing, deduplication, or selection
+  omits any non-empty input line and Rust emitted no full-original CCR key,
+  the Python shim returns the original search output verbatim.
 * **CCR storage failures are loud.** Storage failures surface to logs
   rather than being swallowed.
 
@@ -128,9 +131,9 @@ class SearchCompressionResult:
 class SearchCompressor:
     """Compresses grep/ripgrep search results via the Rust port.
 
-    `compress()` delegates to Rust end-to-end; the only Python-side
-    additions are the CCR persistence bridge (`_persist_to_python_ccr`)
-    and the passthrough result builder.
+    `compress()` delegates to Rust end-to-end; the Python side enforces the
+    reversible-output boundary, persists CCR keys into the production store,
+    and builds passthrough results when either safety check vetoes compression.
     """
 
     def __init__(self, config: SearchCompressorConfig | None = None) -> None:
@@ -177,6 +180,11 @@ class SearchCompressor:
     ) -> SearchCompressionResult:
         rust_result = self._rust.compress(content, context, bias)
         cache_key: str | None = rust_result.cache_key
+        if self._has_unbacked_omissions(content, rust_result):
+            # Search selection may omit parsed matches, and the parser may
+            # decline non-search diagnostic lines. Either is safe only when a
+            # CCR key backs the full original; otherwise fail open verbatim.
+            return self._passthrough_result(content, rust_result)
         if cache_key is not None and not self._persist_to_python_ccr(
             content, rust_result.compressed, cache_key
         ):
@@ -198,6 +206,21 @@ class SearchCompressor:
         )
 
     # ─── Internal CCR persistence ───────────────────────────────────────
+
+    @staticmethod
+    def _has_unbacked_omissions(content: str, r: Any) -> bool:
+        """True when rendered search output omits a non-empty line without CCR.
+
+        Rust scans every non-empty ``\n``-delimited line exactly once. Each
+        parsed line can contribute at most one selected match, so a rendered
+        match count below the non-empty input-line count proves that at least
+        one input line was omitted, whether by parsing, dedup, or selection
+        caps. That is only reversible when a full-original CCR key exists.
+        """
+        if r.cache_key is not None or r.compressed == content:
+            return False
+        nonempty_line_count = sum(1 for raw in content.split("\n") if raw.strip())
+        return r.compressed_match_count < nonempty_line_count
 
     def _persist_to_python_ccr(self, original: str, compressed: str, cache_key: str) -> bool:
         """Promote the Rust-emitted cache_key into the production Python
@@ -225,7 +248,7 @@ class SearchCompressor:
     @staticmethod
     def _passthrough_result(content: str, r: Any) -> SearchCompressionResult:
         """No-compression result: serve the original search output verbatim
-        with no CCR marker, used when the store write vetoes."""
+        with no CCR marker after an omission or store-write safety veto."""
         return SearchCompressionResult(
             compressed=content,
             original=content,
