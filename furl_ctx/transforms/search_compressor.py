@@ -25,6 +25,11 @@ is a thin shim that:
   parses legitimate names like `pre-commit-config.yaml-42-line` wrong.
   The Rust parser anchors on the *line-number marker* — earliest
   `<sep>\\d+<sep>` in the line — so paths can contain dashes.
+* **Unbacked omissions fail open when CCR is enabled.** If parsing,
+  deduplication, or selection omits input while CCR is enabled and Rust emits
+  no full-original key, the Python shim returns the original search output
+  verbatim. Explicit ``enable_ccr=False`` preserves the configured lossy cap
+  behavior: opting out also opts out of the recovery promise.
 * **CCR storage failures are loud.** Storage failures surface to logs
   rather than being swallowed.
 
@@ -128,9 +133,10 @@ class SearchCompressionResult:
 class SearchCompressor:
     """Compresses grep/ripgrep search results via the Rust port.
 
-    `compress()` delegates to Rust end-to-end; the only Python-side
-    additions are the CCR persistence bridge (`_persist_to_python_ccr`)
-    and the passthrough result builder.
+    `compress()` delegates to Rust end-to-end; when CCR is enabled the Python
+    side enforces the reversible-output boundary, persists CCR keys into the
+    production store, and builds passthrough results when a safety check vetoes
+    compression.
     """
 
     def __init__(self, config: SearchCompressorConfig | None = None) -> None:
@@ -177,6 +183,22 @@ class SearchCompressor:
     ) -> SearchCompressionResult:
         rust_result = self._rust.compress(content, context, bias)
         cache_key: str | None = rust_result.cache_key
+        omitted_content = (
+            rust_result.lines_unparsed > 0
+            or rust_result.compressed_match_count < rust_result.original_match_count
+        )
+        if (
+            self.config.enable_ccr
+            and cache_key is None
+            and rust_result.compressed != content
+            and omitted_content
+        ):
+            # Use the Rust sidecar rather than reimplementing its parser
+            # semantics in Python: `lines_unparsed` catches declined lines,
+            # while the parsed-vs-selected counts catch dedup/cap omissions.
+            # With CCR enabled, either requires a full-original key or a
+            # verbatim fail-open result.
+            return self._passthrough_result(content, rust_result)
         if cache_key is not None and not self._persist_to_python_ccr(
             content, rust_result.compressed, cache_key
         ):
@@ -225,7 +247,7 @@ class SearchCompressor:
     @staticmethod
     def _passthrough_result(content: str, r: Any) -> SearchCompressionResult:
         """No-compression result: serve the original search output verbatim
-        with no CCR marker, used when the store write vetoes."""
+        with no CCR marker after an omission or store-write safety veto."""
         return SearchCompressionResult(
             compressed=content,
             original=content,
