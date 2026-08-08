@@ -7,6 +7,11 @@ env:
   # PyPI
   PYPI_PACKAGE: furl-ctx
   PYPI_ENVIRONMENT: pypi
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_DEFAULT_TIMEOUT: "120"
+  PIP_RETRIES: "5"
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
 
   # ─── Safety Gates ──────────────────────────────────────────────────────────────
   # The publish kill-switch is the repository Actions VARIABLE `PYPI_SKIP`
@@ -27,13 +32,15 @@ env:
   # GitHub UI path above rather than trusting a comment to have kept up.
 
 on:
-  # Triggered when release-please's release PR is merged: the bot
-  # tags the merge commit `vX.Y.Z` and creates a GitHub Release on
-  # that tag, which fires the `release: published` event. Ordinary
-  # pushes to main no longer trigger publishes — that was the old
-  # behavior that burned PyPI's per-project storage quota by
-  # uploading a fresh wheel matrix (~200 MB) per merged fix/feat PR.
-  # See .github/workflows/release-please.yml for the PR-aggregator.
+  # Primary release trigger: release-please's release PR updates the manifest
+  # when it lands on main. This push is created by the PR merge itself, so it
+  # reliably starts this workflow even though GitHub suppresses most follow-up
+  # events created later by the workflow's own GITHUB_TOKEN.
+  push:
+    branches: [main]
+    paths:
+      - ".release-please-manifest.json"
+  # Backup/manual-release trigger for releases created outside release-please.
   release:
     types: [published]
   # X2: PR-time release dry-run. Trigger on PRs that touch release-
@@ -53,20 +60,21 @@ on:
     inputs:
       version:
         description: "Manual version override"
-        required: false
+        required: true
       dry_run:
         description: "Skip publish"
         type: boolean
         default: false
 
 concurrency:
-  # Main release runs are namespaced by ref_name and never cancel
-  # (cancel-in-progress: false) — losing a tag-push release mid-flight
-  # would mean PyPI/Docker get partial state. PR dry-runs are
-  # namespaced by PR number and DO cancel: rapid PR pushes shouldn't
-  # spawn N parallel wheel builds, only the latest matters.
-  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  # Never cancel a real release. PR dry-runs may cancel older copies. Manual
+  # releases are keyed by requested version so retries serialize safely.
+  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('v-{0}', inputs.version) || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
 
 # Default-deny floor: any future-added job that omits its own permissions
 # block inherits nothing, not the repo-default token scope. Existing jobs
@@ -86,51 +94,40 @@ jobs:
       bump: ${{ steps.ver.outputs.bump }}
       previous_tag: ${{ steps.ver.outputs.previous_tag }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
-      # When fired by release-please's release event, the tag the
-      # bot just published IS the canonical version for this run —
-      # release_version.py's git-log derivation would re-bump it.
-      # workflow_dispatch REQUIRES `inputs.version` (TEST-28): without
-      # it the script computes one bump AHEAD of every built artifact
-      # (wheels carry pyproject's version), so the run would tag vX+1
-      # over wheels versioned X — and `skip-existing: true` on the PyPI
-      # step would silently no-op the mismatch. PR dry-runs leave
-      # MANUAL_VER empty and the script computes normally.
+      # Use the version already present in the tree for push/PR runs. A release
+      # event uses its tag, and a manual run must provide the version explicitly.
       - name: Resolve MANUAL_VER from trigger
         id: manualver
-        shell: bash
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          MANUAL_INPUT: ${{ github.event.inputs.version }}
+          MANUAL_INPUT: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            # github.event.release.tag_name is "vX.Y.Z" — strip the
-            # leading "v" so release_version.py's SemVer parser
-            # accepts it.
-            echo "value=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ -z "$MANUAL_INPUT" ]; then
-              echo "::error::workflow_dispatch requires inputs.version" \
-                "(TEST-28): a computed version runs one bump ahead of the" \
-                "built artifacts and mis-tags the release. Pass the version" \
-                "that matches pyproject.toml."
+          project_version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            value="${RELEASE_TAG#v}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            value="$MANUAL_INPUT"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            manifest_version="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path(".release-please-manifest.json").read_text())["."])')"
+            if [[ "$manifest_version" != "$project_version" ]]; then
+              echo "::error::release manifest ($manifest_version) and pyproject.toml ($project_version) disagree"
               exit 1
             fi
-            echo "value=$MANUAL_INPUT" >> "$GITHUB_OUTPUT"
+            value="$project_version"
           else
-            # PR dry-run (X2): gate against what this tree actually
-            # BUILDS — pyproject's version. The git-log derivation
-            # computes the NEXT release version, which by definition
-            # exceeds every artifact built from the PR tree, so the
-            # collect-dist gate would fail on every feat PR touching
-            # wheel paths. The dry-run's job is wheel-matrix build +
-            # smoke-import + internal version consistency, not
-            # predicting the future tag.
-            echo "value=$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')" >> "$GITHUB_OUTPUT"
+            value="$project_version"
           fi
+
+          if [[ -z "$value" || "$value" != "$project_version" ]]; then
+            echo "::error::requested release version '$value' does not match pyproject.toml '$project_version'"
+            exit 1
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
 
       - name: Compute semantic version from canonical + release history
         id: ver
@@ -174,7 +171,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
@@ -700,7 +697,7 @@ jobs:
 
       - name: Publish ${{ env.PYPI_PACKAGE }} to PyPI
         id: pypi-publish
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           # Idempotent re-runs: when a wheel filename for the computed
           # version is already on PyPI (e.g. a previous push to main
@@ -729,7 +726,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
@@ -745,26 +742,56 @@ jobs:
 
       - name: Create or update GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
         run: |
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "5" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
+
           TAG="v${{ needs.detect-version.outputs.version }}"
           TITLE="Release v${{ needs.detect-version.outputs.version }}"
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            # Release already exists — typically created by
-            # release-please on release-PR merge with an auto-
-            # generated changelog body. Don't overwrite its notes;
-            # only sync the title in case detect-version's canonical
-            # form differs from what the bot set.
-            gh release edit "$TAG" --title "$TITLE"
-          else
-            # workflow_dispatch path: no release-please body exists yet,
-            # so let GitHub auto-generate the notes from commit history.
-            gh release create "$TAG" --title "$TITLE" --generate-notes
-          fi
+
+          ensure_release() {
+            local n=1
+            while true; do
+              if gh release view "$TAG" > /dev/null 2>&1; then
+                return 0
+              fi
+              if gh release create "$TAG" --target "$TARGET_SHA" --title "$TITLE" --generate-notes; then
+                return 0
+              fi
+              # If another run created it between view/create, that is success.
+              if gh release view "$TAG" > /dev/null 2>&1; then
+                return 0
+              fi
+              [[ "$n" == "5" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
+
+          ensure_release
+          # Keep release-please's notes; only normalize the title.
+          retry gh release edit "$TAG" --title "$TITLE"
 
       - name: Publish ${{ env.PYPI_PACKAGE }} Python distributions to GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "5" ]] && return 1
+              sleep $((n * 5))
+              n=$((n + 1))
+            done
+          }
+
           TAG="v${{ needs.detect-version.outputs.version }}"
-          gh release upload "$TAG" release-assets/*.whl release-assets/*.tar.gz --clobber
+          retry gh release upload "$TAG" release-assets/*.whl release-assets/*.tar.gz --clobber
