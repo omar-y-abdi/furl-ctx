@@ -9,6 +9,8 @@ on:
   workflow_dispatch:
 
 permissions:
+  # Branch updates use AUTOFIX_TOKEN; keep the built-in token read-only for code.
+  # This workflow never checks out or executes pull-request code.
   contents: read
   issues: write
   pull-requests: write
@@ -20,31 +22,47 @@ permissions:
 
 concurrency:
   group: pr-health-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Updating a branch emits synchronize; let the current pass finish instead of
+  # cancelling itself when that follow-up event arrives.
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
 
 jobs:
   label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Prefer the PAT already used by autofix so an automatic branch update
+      # starts normal CI. The built-in token remains the metadata/label token.
+      UPDATE_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
       - name: Ensure maintenance labels exist
         run: |
-          set -euo pipefail
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "3" ]] && return 1
+              sleep $((n * 3))
+              n=$((n + 1))
+            done
+          }
 
-          gh label create "status: needs rebase" \
+          retry gh label create "status: needs rebase" \
             --repo "$REPO" \
             --color "fbca04" \
             --description "Pull request branch is behind the base branch" \
             --force
-          gh label create "status: has conflicts" \
+          retry gh label create "status: has conflicts" \
             --repo "$REPO" \
             --color "d73a4a" \
             --description "Pull request has merge conflicts with the base branch" \
             --force
-          gh label create "status: ci failing" \
+          retry gh label create "status: ci failing" \
             --repo "$REPO" \
             --color "d73a4a" \
             --description "Required or reported CI checks are failing" \
@@ -52,22 +70,35 @@ jobs:
 
       - name: Label open pull requests
         run: |
-          set -euo pipefail
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "3" ]] && return 1
+              sleep $((n * 3))
+              n=$((n + 1))
+            done
+          }
 
-          if jq -e '.pull_request.number' "$GITHUB_EVENT_PATH" >/dev/null; then
+          if jq -e '.pull_request.number' "$GITHUB_EVENT_PATH" >/dev/null 2>&1; then
             pr_numbers="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
           else
-            pr_numbers="$(gh pr list --repo "$REPO" --state open --limit 100 --json number --jq '.[].number')"
+            pr_numbers="$(retry gh pr list --repo "$REPO" --state open --limit 1000 --json number --jq '.[].number')"
           fi
 
+          failures=0
           for pr in $pr_numbers; do
-            data="$(gh pr view "$pr" --repo "$REPO" \
-              --json mergeStateStatus,statusCheckRollup)"
+            if ! data="$(retry gh pr view "$pr" --repo "$REPO" --json mergeStateStatus,statusCheckRollup,isCrossRepository,maintainerCanModify)"; then
+              echo "Could not read PR #$pr after retries." >&2
+              failures=$((failures + 1))
+              continue
+            fi
 
             merge_state="$(jq -r '.mergeStateStatus // "UNKNOWN"' <<<"$data")"
+            is_cross_repo="$(jq -r '.isCrossRepository // false' <<<"$data")"
+            maintainer_can_modify="$(jq -r '.maintainerCanModify // false' <<<"$data")"
             check_state="$(jq -r '
               [
-                .statusCheckRollup[]
+                (.statusCheckRollup // [])[]
                 | select((.conclusion // .state // "") as $s
                   | ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED", "ERROR"] | index($s))
               ]
@@ -75,20 +106,44 @@ jobs:
             ' <<<"$data")"
 
             if [[ "$merge_state" == "BEHIND" ]]; then
-              gh pr edit "$pr" --repo "$REPO" --add-label "status: needs rebase"
+              updated=false
+              # Same-repo PRs are always eligible. Fork PRs are attempted only
+              # when the author allowed maintainer edits. Use AUTOFIX_TOKEN so
+              # the resulting synchronize event starts CI normally.
+              if [[ -n "$UPDATE_TOKEN" && ( "$is_cross_repo" == "false" || "$maintainer_can_modify" == "true" ) ]]; then
+                if GH_TOKEN="$UPDATE_TOKEN" retry gh pr update-branch "$pr" --repo "$REPO"; then
+                  updated=true
+                  echo "Updated PR #$pr with the latest base branch."
+                else
+                  echo "::warning::Could not update PR #$pr automatically; leaving the rebase label in place."
+                fi
+              elif [[ -z "$UPDATE_TOKEN" ]]; then
+                echo "::warning::AUTOFIX_TOKEN is not configured; PR #$pr can be labeled but not safely auto-updated."
+              fi
+
+              if [[ "$updated" == "true" ]]; then
+                retry gh pr edit "$pr" --repo "$REPO" --remove-label "status: needs rebase" >/dev/null 2>&1 || true
+              else
+                retry gh pr edit "$pr" --repo "$REPO" --add-label "status: needs rebase" || failures=$((failures + 1))
+              fi
             else
-              gh pr edit "$pr" --repo "$REPO" --remove-label "status: needs rebase" || true
+              retry gh pr edit "$pr" --repo "$REPO" --remove-label "status: needs rebase" >/dev/null 2>&1 || true
             fi
 
             if [[ "$merge_state" == "DIRTY" ]]; then
-              gh pr edit "$pr" --repo "$REPO" --add-label "status: has conflicts"
+              retry gh pr edit "$pr" --repo "$REPO" --add-label "status: has conflicts" || failures=$((failures + 1))
             else
-              gh pr edit "$pr" --repo "$REPO" --remove-label "status: has conflicts" || true
+              retry gh pr edit "$pr" --repo "$REPO" --remove-label "status: has conflicts" >/dev/null 2>&1 || true
             fi
 
             if [[ "$check_state" == "failing" ]]; then
-              gh pr edit "$pr" --repo "$REPO" --add-label "status: ci failing"
+              retry gh pr edit "$pr" --repo "$REPO" --add-label "status: ci failing" || failures=$((failures + 1))
             else
-              gh pr edit "$pr" --repo "$REPO" --remove-label "status: ci failing" || true
+              retry gh pr edit "$pr" --repo "$REPO" --remove-label "status: ci failing" >/dev/null 2>&1 || true
             fi
           done
+
+          if (( failures > 0 )); then
+            echo "$failures PR-health update(s) still failed after retries." >&2
+            exit 1
+          fi
