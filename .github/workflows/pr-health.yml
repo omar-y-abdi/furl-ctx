@@ -41,6 +41,103 @@ jobs:
       UPDATE_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
+      - name: Normalize conventional PR titles
+        # pull_request_target gives this metadata-only workflow permission to
+        # repair titles on both same-repo and fork PRs. It never checks out or
+        # executes pull-request code. This fixes the squash-merge message that
+        # actually reaches main without force-rewriting contributor commits.
+        run: |
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "3" ]] && return 1
+              sleep $((n * 3))
+              n=$((n + 1))
+            done
+          }
+
+          if jq -e '.pull_request.number' "$GITHUB_EVENT_PATH" >/dev/null 2>&1; then
+            pr_numbers="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+          else
+            pr_numbers="$(retry gh pr list --repo "$REPO" --state open --limit 1000 --json number --jq '.[].number' || true)"
+          fi
+
+          for pr in $pr_numbers; do
+            title="$(retry gh pr view "$pr" --repo "$REPO" --json title --jq '.title' || true)"
+            if [[ -z "$title" ]]; then
+              echo "::warning::Could not read PR #$pr title after retries; leaving it unchanged."
+              continue
+            fi
+
+            fixed="$(PR_TITLE="$title" python3 - <<'PY'
+          import os
+          import re
+          
+          allowed = {
+              "build", "chore", "ci", "deps", "docs", "feat", "fix",
+              "parity", "perf", "refactor", "revert", "style", "test",
+          }
+          raw = " ".join(os.environ.get("PR_TITLE", "").split()).strip()
+          
+          # Parse an existing conventional-looking prefix first. Keep valid types/scopes,
+          # while normalizing whitespace and a trailing full stop that commitlint rejects.
+          m = re.match(r"^([A-Za-z]+)(?:\(([^)]+)\))?(!)?:\s*(.*)$", raw)
+          if m and m.group(1).lower() in allowed and m.group(4).strip():
+              typ = m.group(1).lower()
+              scope = m.group(2)
+              bang = m.group(3) or ""
+              subject = m.group(4).strip().rstrip(".").strip()
+              if scope:
+                  scope = re.sub(r"[^a-z0-9_.-]+", "-", scope.lower()).strip("-")
+                  prefix = f"{typ}({scope}){bang}: " if scope else f"{typ}{bang}: "
+              else:
+                  prefix = f"{typ}{bang}: "
+          else:
+              # Remove an invalid conventional-looking prefix before inferring a safe one.
+              bad_prefix = re.match(r"^[A-Za-z][A-Za-z0-9_-]*(?:\([^)]+\))?!?:\s*(.*)$", raw)
+              subject = (bad_prefix.group(1) if bad_prefix else raw).strip().rstrip(".").strip()
+              first = re.sub(r"[^a-z]", "", subject.split(maxsplit=1)[0].lower()) if subject else ""
+              aliases = {
+                  "add": "feat", "added": "feat", "adding": "feat", "implement": "feat",
+                  "fix": "fix", "fixed": "fix", "fixing": "fix", "repair": "fix",
+                  "refactor": "refactor", "refactored": "refactor",
+                  "test": "test", "tests": "test",
+                  "doc": "docs", "docs": "docs", "document": "docs",
+                  "perf": "perf", "performance": "perf", "optimize": "perf", "optimise": "perf",
+                  "ci": "ci", "workflow": "ci", "workflows": "ci",
+                  "build": "build", "deps": "deps", "dependency": "deps", "dependencies": "deps",
+                  "style": "style", "format": "style", "revert": "revert",
+              }
+              typ = aliases.get(first, "chore")
+              prefix = f"{typ}: "
+          
+          if not subject:
+              subject = "update pull request"
+          
+          # @commitlint/config-conventional defaults to a 100-character header. Truncate
+          # at a word boundary where possible so the repaired title passes that rule too.
+          limit = max(1, 100 - len(prefix))
+          if len(subject) > limit:
+              cut = subject[:limit].rstrip()
+              if " " in cut:
+                  cut = cut.rsplit(" ", 1)[0].rstrip()
+              subject = cut or subject[:limit]
+          
+          print(prefix + subject)
+          PY
+            )"
+
+            if [[ "$fixed" != "$title" ]]; then
+              if retry gh pr edit "$pr" --repo "$REPO" --title "$fixed" >/dev/null; then
+                echo "Normalized PR #$pr title: $fixed"
+              else
+                # Title repair is maintenance metadata, never a reason to make
+                # the health workflow red. The next event/scheduled run retries.
+                echo "::warning::Could not normalize PR #$pr title after retries."
+              fi
+            fi
+          done
+
       - name: Ensure maintenance labels exist
         run: |
           retry() {
