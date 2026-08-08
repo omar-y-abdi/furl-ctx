@@ -436,9 +436,11 @@ def test_row_drop_recovers_from_python_store_only(production_store: str) -> None
     )
 
 
-def test_opaque_blob_default_config_recovers() -> None:
+def test_opaque_blob_default_config_recovers(production_store: str) -> None:
     # Default ContentRouter (markers on) — the production default. Same
     # invariant: every opaque blob recoverable from the output's marker.
+    # Exercise both production store backends so the default-path claim cannot
+    # be satisfied only by the in-memory identity path.
     items = _opaque_rows()
     blobs = {it["data"] for it in items}
     router = ContentRouter()
@@ -457,7 +459,7 @@ def test_opaque_blob_default_config_recovers() -> None:
     # the one shipping to users; it must pin the production store too.
     assert blobs <= py_recovered, (
         f"{len(blobs - py_recovered)} opaque blobs unrecoverable from the PRODUCTION "
-        f"Python compression_store under the DEFAULT config"
+        f"Python compression_store under the DEFAULT config (backend={production_store})"
     )
 
 
