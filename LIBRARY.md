@@ -117,8 +117,7 @@ dropped = retrieve(hash, select_field="name", select_equals="DroppedFrame")
 window = retrieve(hash, select_field="ts", select_min=404733, select_max=404999)
 
 # Project only some columns of the selected rows, and cap the result:
-cols = retrieve(hash, select_field="name", select_equals="Paint",
-                fields=["name", "ts"], limit=200)
+cols = retrieve(hash, select_field="name", select_equals="Paint", fields=["name", "ts"], limit=200)
 
 # BYTE-EXACT rows (hashing / diffing / signatures) — each matched row verbatim
 # from the source instead of the pretty-printed re-serialization:
@@ -126,7 +125,7 @@ exact = retrieve(hash, select_field="name", select_equals="DroppedFrame", raw=Tr
 
 # TEXT filters over the original as lines (regex + context, or a line window):
 lines = retrieve(hash, pattern=r"ERROR", context_lines=2)
-head  = retrieve(hash, line_range=[1, 50])
+head = retrieve(hash, line_range=[1, 50])
 
 # FIELDS projection over a top-level JSON array of objects:
 ids = retrieve(hash, fields=["id", "status"])
@@ -255,8 +254,10 @@ your input is never mutated.
 import re
 from furl_ctx import compress, CompressConfig
 
+
 def scrub(text: str) -> str:
     return re.sub(r"sk-[A-Za-z0-9_-]{12,}", "[REDACTED]", text)
+
 
 result = compress(messages, config=CompressConfig(redactor=scrub))
 ```
