@@ -295,6 +295,101 @@ def test_real_markers_are_pinned():
         assert _looks_like_ccr_output(text), text
 
 
+class TestRetrieveHintChannelSpoofingGuard:
+    """Behavioral width/alternation spoofing-guard pins for the
+    ``Retrieve (?:more|original): hash=`` channel of ``_looks_like_ccr_output``.
+
+    The double-angle channel's width guard is pinned directly at the owning
+    ``marker_grammar`` layer (``test_marker_grammar_smartcrusher_hash.py``);
+    this pins the OTHER channel — the ``_RETRIEVE_HINT_PATTERN`` in
+    ``router_message_policy`` — through the gate that actually consumes it,
+    so both recognition paths carry the SAME strict-grammar spoofing guard.
+
+    The contract: ``_RETRIEVE_HINT_PATTERN``'s docstring says "Engine-emitted
+    retrieval hints always carry a real 12/24-hex hash; content that merely
+    talks about the grammar (docs, this repo's own source read back as tool
+    output) uses placeholders and never matches." The width alternation
+    ``{12}(?:[0-9a-fA-F]{12})?`` plus the ``(?![0-9a-fA-F])`` lookahead IS
+    that "real 12/24-hex" check, and the ``(?:more|original)`` alternation IS
+    that "engine-emitted" check — a wrong-width hash, or a non-enumerated
+    spelling, is not a real engine emission and must NOT pin the content as
+    already-compressed (pinning prose would skip compression it deserves;
+    under-matching a real marker would re-compress it and bust the prefix
+    cache — the ping-pong the retrieval-loop guard exists to prevent).
+
+    The existing ``test_real_markers_are_pinned`` /
+    ``test_mentioning_marker_text_is_not_pinned`` cover only lowercase
+    12/24-hex positives and placeholder negatives — a width broadening
+    (``{12,24}``) or an alternation broadening (adding ``full diff``) stays
+    GREEN under both (proven by mutation: ``{12,24}`` left the two existing
+    tests passing while a 16-hex hash then matched). These pins fail on every
+    such broadening because a wrong-width or wrong-spelling hash then pins.
+
+    Each input is constructed WITHOUT a ``<<ccr:`` token so the double-angle
+    channel cannot match — isolating the Retrieve-hint channel's own guard.
+    """
+
+    @pytest.mark.parametrize(
+        "width",
+        [11, 13, 16, 23, 25, 32],
+        ids=["w11", "w13", "w16", "w23", "w25", "w32"],
+    )
+    def test_retrieve_hint_rejects_wrong_width_hash(self, width: int) -> None:
+        # A wrong-width hex run is not a real engine emission — producers
+        # emit exactly 12 (sha256[:6]) or 24 (md5[:24]) hex. The
+        # {12}(?:...{12})? alternation + (?![0-9a-fA-F]) lookahead must
+        # reject it. Catches a {12,24}-style broadening the existing tests
+        # cannot (w16 is the canary: rejected now, matched under {12,24}).
+        bad = "a" * width
+        text = f"[N items compressed to M. Retrieve more: hash={bad}]"
+        assert not _looks_like_ccr_output(text), f"width {width} must not pin as already-compressed"
+
+    @pytest.mark.parametrize("width", [12, 24], ids=["w12", "w24"])
+    def test_retrieve_hint_accepts_strict_widths(self, width: int) -> None:
+        # The other half of the width guard: 12 and 24 lowercase-hex are
+        # accepted (12 is the legacy crusher width, 24 the current width for
+        # every diff/log/search producer). Paired with the rejection pin so a
+        # tightening that drops a legitimate width is also visible.
+        good = "a" * width
+        text = f"[N items compressed to M. Retrieve more: hash={good}]"
+        assert _looks_like_ccr_output(text), f"width {width} is a real engine emission and must pin"
+
+    @pytest.mark.parametrize(
+        ("phrase", "why"),
+        [
+            # Shape G's `Retrieve full diff: hash=` phrase is deliberately NOT
+            # in the alternation (the diff idempotency gap is an open product
+            # candidate in IMPROVEMENT-LEDGER.md) — pinning its rejection here
+            # keeps an accidental `(?:more|original|full diff)` broadening
+            # visible without taking a product position on whether it SHOULD
+            # match.
+            ("Retrieve full diff: hash=", "shape G — deliberately not matched"),
+            ("Retrieve all: hash=", "non-enumerated spelling"),
+            ("Retrieve: hash=", "no keyword before the colon"),
+            # The pattern is case-sensitive on `Retrieve` (no IGNORECASE flag):
+            # prose writing `retrieve more:` must not pin. An accidental
+            # re.IGNORECASE broadening would over-match prose.
+            ("retrieve more: hash=", "lowercase 'r' — case-sensitive 'Retrieve'"),
+        ],
+        ids=["full_diff", "all", "no_keyword", "lowercase_retrieve"],
+    )
+    def test_retrieve_hint_rejects_non_enumerated_spelling(self, phrase: str, why: str) -> None:
+        # Only `more`/`original` are real engine emissions. A broadening to
+        # `(?:more|original|full diff|all)` or to `re.IGNORECASE` would
+        # over-match prose — this pin fails on both.
+        text = phrase + "a" * 24
+        assert not _looks_like_ccr_output(text), f"spelling {phrase!r} must not pin ({why})"
+
+    @pytest.mark.parametrize(
+        "phrase",
+        ["Retrieve more: hash=", "Retrieve original: hash="],
+        ids=["more", "original"],
+    )
+    def test_retrieve_hint_accepts_enumerated_spellings(self, phrase: str) -> None:
+        text = phrase + "a" * 24
+        assert _looks_like_ccr_output(text), f"spelling {phrase!r} must pin"
+
+
 # ---------------------------------------------------------------------------
 # Error protection: raw dumps verbatim, structured JSON compressible.
 # ---------------------------------------------------------------------------
