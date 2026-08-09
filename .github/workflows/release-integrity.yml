@@ -1,0 +1,274 @@
+name: Release Integrity Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/pypi-canonical/**'
+      - '.github/actions/release-state/**'
+      - '.github/workflows/release-integrity.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/publish.yml'
+      - '.github/workflows/publish-request.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/actions/pypi-canonical/**'
+      - '.github/actions/release-state/**'
+      - '.github/workflows/release-integrity.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/publish.yml'
+      - '.github/workflows/publish-request.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-integrity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  state-machines:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout candidate automation without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Prepare hermetic PyPI state fixtures
+        id: pypi
+        run: |
+          mkdir -p test-dist "${RUNNER_TEMP}/pypi/pypi/furl-ctx/1.2.3" "${RUNNER_TEMP}/pypi/pypi/furl-ctx/1.2.4"
+          printf 'wheel-bytes\n' > test-dist/furl_ctx-1.2.3-py3-none-any.whl
+          printf 'sdist-bytes\n' > test-dist/furl_ctx-1.2.3.tar.gz
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          dist = pathlib.Path('test-dist')
+          files = {
+              p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in sorted(dist.iterdir())
+          }
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pypi' / 'pypi' / 'furl-ctx'
+          exact = {'urls': [{'filename': name, 'digests': {'sha256': digest}} for name, digest in files.items()]}
+          mismatch = json.loads(json.dumps(exact))
+          mismatch['urls'][0]['digests']['sha256'] = '0' * 64
+          (root / '1.2.3' / 'json').write_text(json.dumps(exact), encoding='utf-8')
+          (root / '1.2.4' / 'json').write_text(json.dumps(mismatch), encoding='utf-8')
+          PY
+          python -m http.server 8765 --bind 127.0.0.1 --directory "${RUNNER_TEMP}/pypi" >"${RUNNER_TEMP}/pypi-server.log" 2>&1 &
+          echo "pid=$!" >> "$GITHUB_OUTPUT"
+          for _ in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:8765/pypi/furl-ctx/1.2.3/json >/dev/null; then
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat "${RUNNER_TEMP}/pypi-server.log" >&2
+          exit 1
+
+      - name: Canonical PyPI state accepts exact digests without publication
+        uses: ./.github/actions/pypi-canonical
+        with:
+          package: furl-ctx
+          version: 1.2.3
+          packages-dir: test-dist
+          pypi-json-base-url: http://127.0.0.1:8765/pypi
+
+      - name: Canonical PyPI state rejects same filename with different bytes
+        id: pypi-mismatch
+        continue-on-error: true
+        uses: ./.github/actions/pypi-canonical
+        with:
+          package: furl-ctx
+          version: 1.2.4
+          packages-dir: test-dist
+          pypi-json-base-url: http://127.0.0.1:8765/pypi
+
+      - name: Assert PyPI digest collision failed closed
+        env:
+          OUTCOME: ${{ steps.pypi-mismatch.outcome }}
+        run: test "$OUTCOME" = failure
+
+      - name: Circuit breaker refuses PyPI side effects before state lookup
+        id: pypi-halt
+        continue-on-error: true
+        uses: ./.github/actions/pypi-canonical
+        with:
+          package: furl-ctx
+          version: 1.2.3
+          packages-dir: test-dist
+          halt: 'true'
+          pypi-json-base-url: http://127.0.0.1:9/unused
+
+      - name: Assert PyPI circuit breaker failed closed
+        env:
+          OUTCOME: ${{ steps.pypi-halt.outcome }}
+        run: test "$OUTCOME" = failure
+
+      - name: Prepare isolated immutable-tag origin
+        id: repo
+        run: |
+          sha="$(git rev-parse HEAD^{commit})"
+          bare="${RUNNER_TEMP}/release-state-origin.git"
+          git init --bare "$bare"
+          git remote set-url origin "$bare"
+          git push origin "${sha}:refs/heads/main"
+          git push origin "${sha}:refs/tags/v9.9.9"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Existing tag at exact SHA is idempotent success
+        uses: ./.github/actions/release-state
+        with:
+          mode: establish
+          version: 9.9.9
+          release-sha: ${{ steps.repo.outputs.sha }}
+          require-existing-tag: 'true'
+
+      - name: Existing tag at different SHA is rejected
+        id: tag-mismatch
+        continue-on-error: true
+        uses: ./.github/actions/release-state
+        with:
+          mode: establish
+          version: 9.9.9
+          release-sha: 0000000000000000000000000000000000000000
+          require-existing-tag: 'true'
+
+      - name: Assert tag mismatch failed closed
+        env:
+          OUTCOME: ${{ steps.tag-mismatch.outcome }}
+        run: test "$OUTCOME" = failure
+
+      - name: Release circuit breaker refuses tag/release side effects
+        id: release-halt
+        continue-on-error: true
+        uses: ./.github/actions/release-state
+        with:
+          mode: establish
+          version: 9.9.9
+          release-sha: ${{ steps.repo.outputs.sha }}
+          require-existing-tag: 'true'
+          halt: 'true'
+
+      - name: Assert release circuit breaker failed closed
+        env:
+          OUTCOME: ${{ steps.release-halt.outcome }}
+        run: test "$OUTCOME" = failure
+
+      - name: Install hermetic GitHub Release API mock
+        run: |
+          mkdir -p "${RUNNER_TEMP}/mock-bin" "${RUNNER_TEMP}/remote-release-assets"
+          cp test-dist/* "${RUNNER_TEMP}/remote-release-assets/"
+          printf 'tampered-wheel-bytes\n' > "${RUNNER_TEMP}/remote-release-assets/furl_ctx-1.2.3-py3-none-any.whl"
+          cat > "${RUNNER_TEMP}/mock-bin/gh" <<'MOCK'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          printf '%q ' "$@" >> "$MOCK_GH_LOG"
+          printf '\n' >> "$MOCK_GH_LOG"
+
+          if [[ "${1:-}" == release && "${2:-}" == view ]]; then
+            if [[ "${MOCK_GH_MODE:-}" == unknown ]]; then
+              echo 'HTTP 502: simulated GitHub API transport ambiguity' >&2
+              exit 1
+            fi
+            if [[ " $* " == *' --json assets '* ]]; then
+              echo 2
+            else
+              printf '{"isDraft":false,"isImmutable":false,"tagName":"v9.9.9"}\n'
+            fi
+            exit 0
+          fi
+
+          if [[ "${1:-}" == release && "${2:-}" == download && "${MOCK_GH_MODE:-}" == asset_mismatch ]]; then
+            destination=''
+            while (( $# > 0 )); do
+              if [[ "$1" == --dir ]]; then
+                destination="$2"
+                break
+              fi
+              shift
+            done
+            [[ -n "$destination" ]] || exit 96
+            cp "$REMOTE_ASSET_DIR"/* "$destination/"
+            exit 0
+          fi
+
+          echo "unexpected mocked gh invocation: $*" >&2
+          exit 97
+          MOCK
+          chmod +x "${RUNNER_TEMP}/mock-bin/gh"
+          echo "${RUNNER_TEMP}/mock-bin" >> "$GITHUB_PATH"
+          echo "MOCK_GH_LOG=${RUNNER_TEMP}/mock-gh.log" >> "$GITHUB_ENV"
+          : > "${RUNNER_TEMP}/mock-gh.log"
+
+      - name: Existing public release with conflicting bytes is rejected
+        id: release-asset-mismatch
+        continue-on-error: true
+        uses: ./.github/actions/release-state
+        env:
+          MOCK_GH_MODE: asset_mismatch
+          REMOTE_ASSET_DIR: ${{ runner.temp }}/remote-release-assets
+        with:
+          mode: finalize
+          version: 9.9.9
+          release-sha: ${{ steps.repo.outputs.sha }}
+          dist-dir: test-dist
+
+      - name: Assert conflicting release assets failed before mutation
+        env:
+          OUTCOME: ${{ steps.release-asset-mismatch.outcome }}
+        run: |
+          test "$OUTCOME" = failure
+          if grep -Eq 'release (upload|edit|create)' "$MOCK_GH_LOG"; then
+            echo "::error::release-state mutated a release after detecting conflicting bytes"
+            cat "$MOCK_GH_LOG" >&2
+            exit 1
+          fi
+          : > "$MOCK_GH_LOG"
+
+      - name: Unknown GitHub Release state must never become create authorization
+        id: unknown-release
+        continue-on-error: true
+        uses: ./.github/actions/release-state
+        env:
+          MOCK_GH_MODE: unknown
+        with:
+          mode: finalize
+          version: 9.9.9
+          release-sha: ${{ steps.repo.outputs.sha }}
+          dist-dir: test-dist
+
+      - name: Assert unknown release state failed before mutation
+        env:
+          OUTCOME: ${{ steps.unknown-release.outcome }}
+        run: |
+          test "$OUTCOME" = failure
+          if grep -Eq 'release (upload|edit|create)' "$MOCK_GH_LOG"; then
+            echo "::error::release-state attempted mutation from unknown remote state"
+            cat "$MOCK_GH_LOG" >&2
+            exit 1
+          fi
+          grep -Fq 'release view' "$MOCK_GH_LOG"
+
+      - name: Stop hermetic PyPI server
+        if: always()
+        env:
+          SERVER_PID: ${{ steps.pypi.outputs.pid }}
+        run: |
+          if [[ -n "$SERVER_PID" ]]; then
+            kill "$SERVER_PID" 2>/dev/null || true
+          fi

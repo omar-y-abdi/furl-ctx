@@ -15,6 +15,10 @@ inputs:
     description: Global release circuit breaker
     required: false
     default: "false"
+  pypi-json-base-url:
+    description: PyPI JSON API base URL; override only in hermetic action tests
+    required: false
+    default: "https://pypi.org/pypi"
 
 runs:
   using: composite
@@ -33,6 +37,7 @@ runs:
         PACKAGE: ${{ inputs.package }}
         VERSION: ${{ inputs.version }}
         PACKAGES_DIR: ${{ inputs.packages-dir }}
+        PYPI_JSON_BASE_URL: ${{ inputs.pypi-json-base-url }}
       run: |
         import hashlib
         import json
@@ -60,7 +65,8 @@ runs:
 
         package = urllib.parse.quote(os.environ["PACKAGE"], safe="")
         version = urllib.parse.quote(os.environ["VERSION"], safe="")
-        url = f"https://pypi.org/pypi/{package}/{version}/json"
+        base_url = os.environ["PYPI_JSON_BASE_URL"].rstrip("/")
+        url = f"{base_url}/{package}/{version}/json"
         payload = None
         remote = None
         for attempt in range(1, 4):
@@ -125,6 +131,7 @@ runs:
         PACKAGE: ${{ inputs.package }}
         VERSION: ${{ inputs.version }}
         PACKAGES_DIR: ${{ inputs.packages-dir }}
+        PYPI_JSON_BASE_URL: ${{ inputs.pypi-json-base-url }}
       run: |
         import hashlib
         import json
@@ -143,7 +150,8 @@ runs:
         }
         package = urllib.parse.quote(os.environ["PACKAGE"], safe="")
         version = urllib.parse.quote(os.environ["VERSION"], safe="")
-        url = f"https://pypi.org/pypi/{package}/{version}/json"
+        base_url = os.environ["PYPI_JSON_BASE_URL"].rstrip("/")
+        url = f"{base_url}/{package}/{version}/json"
         last_error = None
         for attempt in range(1, 7):
             try:

@@ -6,24 +6,14 @@ name: Publish to PyPI (manual fallback)
 # verifies GitHub's SHA-256 digest for both the dist and seal artifacts, and then
 # replays the exact recovered bytes through the same local canonical publication
 # actions used by Release. Build failures stay in Release; this path can only
-# replay a previously smoke-verified artifact set. The PyPI job itself remains
-# in this workflow because Trusted Publishing binds authorization to its filename.
+# replay a previously smoke-verified artifact set. Manual input is collected by
+# the unprivileged Publish Recovery Request workflow; this privileged continuation
+# runs only from workflow_run on protected main. The PyPI job itself remains here
+# because Trusted Publishing binds authorization to this workflow filename.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version without the leading v"
-        required: true
-        type: string
-      release_run_id:
-        description: "Optional Release workflow run ID (auto-discovered when empty)"
-        required: false
-        type: string
-      dry_run:
-        description: "Resolve and verify artifacts only"
-        required: false
-        type: boolean
-        default: false
+  workflow_run:
+    workflows: ["Publish Recovery Request"]
+    types: [completed]
 
 permissions: {}
 
@@ -31,8 +21,102 @@ defaults:
   run:
     shell: bash -Eeuo pipefail {0}
 
+concurrency:
+  group: publish-recovery-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
 jobs:
+  resolve-request:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.request.outputs.version }}
+      release_run_id: ${{ steps.request.outputs.release_run_id }}
+      dry_run: ${{ steps.request.outputs.dry_run }}
+      controller_sha: ${{ steps.controller.outputs.sha }}
+    steps:
+      - name: Freeze trusted recovery controller SHA
+        id: controller
+        env:
+          CONTROLLER_SHA: ${{ github.sha }}
+        run: |
+          [[ "$CONTROLLER_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Unexpected controller SHA: $CONTROLLER_SHA"
+            exit 1
+          }
+          echo "sha=$CONTROLLER_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Download and validate unprivileged recovery request
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          retry() {
+            local n=1
+            until "$@"; do
+              [[ "$n" == "4" ]] && return 1
+              sleep $((n * 4))
+              n=$((n + 1))
+            done
+          }
+
+          artifacts="$(retry gh api -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUEST_RUN_ID}/artifacts?per_page=100")"
+          mapfile -t ids < <(jq -r '.artifacts[] | select(.name == "publish-recovery-request" and .expired == false) | .id' <<<"$artifacts")
+          if (( ${#ids[@]} != 1 )); then
+            echo "::error::Expected exactly one live publish-recovery-request artifact; found ${#ids[@]}."
+            exit 1
+          fi
+          archive="${RUNNER_TEMP}/publish-recovery-request.zip"
+          retry gh api -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ids[0]}/zip" > "$archive"
+          mkdir -p "${RUNNER_TEMP}/publish-recovery-request"
+          ARCHIVE="$archive" DEST="${RUNNER_TEMP}/publish-recovery-request" python - <<'PYREQ'
+          import os
+          import pathlib
+          import zipfile
+
+          archive = pathlib.Path(os.environ["ARCHIVE"])
+          dest = pathlib.Path(os.environ["DEST"])
+          with zipfile.ZipFile(archive) as zf:
+              for info in zf.infolist():
+                  p = pathlib.PurePosixPath(info.filename)
+                  if p.is_absolute() or ".." in p.parts:
+                      raise SystemExit(f"unsafe request artifact member: {info.filename}")
+              zf.extractall(dest)
+          PYREQ
+
+          REQUEST="${RUNNER_TEMP}/publish-recovery-request/request.json" python - <<'PYREQ' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import pathlib
+          import re
+
+          payload = json.loads(pathlib.Path(os.environ["REQUEST"]).read_text(encoding="utf-8"))
+          version = payload.get("version")
+          run_id = payload.get("release_run_id", "")
+          dry_run = payload.get("dry_run")
+          if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?", version):
+              raise SystemExit(f"invalid recovery version: {version!r}")
+          if not isinstance(run_id, str) or (run_id and not run_id.isdigit()):
+              raise SystemExit("release_run_id must be a numeric string or empty")
+          if not isinstance(dry_run, bool):
+              raise SystemExit("dry_run must be boolean")
+          print(f"version={version}")
+          print(f"release_run_id={run_id}")
+          print(f"dry_run={'true' if dry_run else 'false'}")
+          PYREQ
+
   recover-artifacts:
+    needs: resolve-request
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -41,19 +125,34 @@ jobs:
     outputs:
       source_run_id: ${{ steps.resolve.outputs.run_id }}
       tag_sha: ${{ steps.tag.outputs.sha }}
-      artifact_name: manual-release-dist-${{ inputs.version }}
+      artifact_name: ${{ steps.request.outputs.artifact_name }}
+      version: ${{ steps.request.outputs.version }}
+      dry_run: ${{ steps.request.outputs.dry_run }}
+      controller_sha: ${{ steps.request.outputs.controller_sha }}
     steps:
+      - name: Bind validated recovery request
+        id: request
+        env:
+          VERSION: ${{ needs.resolve-request.outputs.version }}
+          DRY_RUN: ${{ needs.resolve-request.outputs.dry_run }}
+          CONTROLLER_SHA: ${{ needs.resolve-request.outputs.controller_sha }}
+        run: |
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "controller_sha=$CONTROLLER_SHA" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=manual-release-dist-${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout immutable release tag
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: v${{ inputs.version }}
+          ref: v${{ needs.resolve-request.outputs.version }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify tag source and requested version
         id: tag
         env:
-          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_VERSION: ${{ needs.resolve-request.outputs.version }}
         run: |
           tag_sha="$(git rev-parse HEAD^{commit})"
           echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
@@ -85,8 +184,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_SHA: ${{ steps.tag.outputs.sha }}
           RELEASE_WORKFLOW_ID: ${{ steps.workflow.outputs.id }}
-          REQUESTED_RUN_ID: ${{ inputs.release_run_id }}
-          EXPECTED_VERSION: ${{ inputs.version }}
+          REQUESTED_RUN_ID: ${{ needs.resolve-request.outputs.release_run_id }}
+          EXPECTED_VERSION: ${{ needs.resolve-request.outputs.version }}
         run: |
           retry() {
             local n=1
@@ -144,8 +243,8 @@ jobs:
             conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
             [[ "$workflow_id" == "$RELEASE_WORKFLOW_ID" ]] || {
               echo "Run $run_id belongs to workflow_id=$workflow_id, expected $RELEASE_WORKFLOW_ID." >&2; return 1; }
-            [[ "$run_event" == "push" || "$run_event" == "workflow_dispatch" ]] || {
-              echo "Run $run_id has event=$run_event; only release push/manual runs are recovery sources." >&2; return 1; }
+            [[ "$run_event" == "push" ]] || {
+              echo "Run $run_id has event=$run_event; only protected-main Release push runs are recovery sources." >&2; return 1; }
             [[ "$run_sha" == "$TAG_SHA" ]] || {
               echo "Run $run_id has head_sha=$run_sha, expected $TAG_SHA." >&2; return 1; }
             # The overall run may be failure solely because publication failed;
@@ -234,7 +333,7 @@ jobs:
 
       - name: Verify recovered distribution shape and metadata
         env:
-          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_VERSION: ${{ needs.resolve-request.outputs.version }}
         run: |
           python - <<'PY'
           import os
@@ -261,22 +360,23 @@ jobs:
       - name: Preserve exact recovered bytes for canonical publisher
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: manual-release-dist-${{ inputs.version }}
+          name: ${{ steps.request.outputs.artifact_name }}
           path: recovered-dist/*
           retention-days: 14
           if-no-files-found: error
 
   establish-release-tag:
     needs: recover-artifacts
-    if: inputs.dry_run != true
+    if: needs.recover-artifacts.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - name: Checkout trusted recovery automation
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.recover-artifacts.outputs.controller_sha }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -284,7 +384,7 @@ jobs:
         uses: ./.github/actions/release-state
         with:
           mode: establish
-          version: ${{ inputs.version }}
+          version: ${{ needs.recover-artifacts.outputs.version }}
           release-sha: ${{ needs.recover-artifacts.outputs.tag_sha }}
           require-existing-tag: true
           halt: ${{ vars.RELEASE_HALT == 'true' }}
@@ -304,8 +404,9 @@ jobs:
       # remains valid. The shared composite action removes policy drift without
       # changing the workflow identity PyPI authenticates.
       - name: Checkout trusted recovery publication action
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.recover-artifacts.outputs.controller_sha }}
           persist-credentials: false
 
       - name: Download exact recovered distributions
@@ -318,7 +419,7 @@ jobs:
         uses: ./.github/actions/pypi-canonical
         with:
           package: furl-ctx
-          version: ${{ inputs.version }}
+          version: ${{ needs.recover-artifacts.outputs.version }}
           packages-dir: dist
           halt: ${{ vars.RELEASE_HALT == 'true' }}
 
@@ -331,8 +432,9 @@ jobs:
       contents: write
     steps:
       - name: Checkout trusted recovery release action
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.recover-artifacts.outputs.controller_sha }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -346,7 +448,7 @@ jobs:
         uses: ./.github/actions/release-state
         with:
           mode: finalize
-          version: ${{ inputs.version }}
+          version: ${{ needs.recover-artifacts.outputs.version }}
           release-sha: ${{ needs.recover-artifacts.outputs.tag_sha }}
           dist-dir: dist
           halt: ${{ vars.RELEASE_HALT == 'true' }}
@@ -361,7 +463,7 @@ jobs:
         run: |
           echo "Recovered artifact source run: ${{ needs.recover-artifacts.outputs.source_run_id }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Immutable tag SHA: ${{ needs.recover-artifacts.outputs.tag_sha }}" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          if [[ "${{ needs.recover-artifacts.outputs.dry_run }}" == "true" ]]; then
             echo "Dry run: verified exact sealed release bytes; nothing was published." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Tag identity: ${{ needs.establish-release-tag.result }}" >> "$GITHUB_STEP_SUMMARY"

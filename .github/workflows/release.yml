@@ -39,20 +39,9 @@ on:
       - "pyproject.toml"
       - "Cargo.toml"
       - "Cargo.lock"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Manual version override"
-        required: true
-      dry_run:
-        description: "Skip publish"
-        type: boolean
-        default: false
-
 concurrency:
-  # Never cancel a real release. PR dry-runs may cancel older copies. Manual
-  # releases are keyed by requested version so retries serialize safely.
-  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('v-{0}', inputs.version) || github.ref_name }}
+  # Never cancel a real release. PR qualification runs may cancel older copies.
+  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -74,7 +63,7 @@ jobs:
     outputs:
       full_matrix: ${{ github.event_name != 'pull_request' || steps.filter.outputs.platform_sensitive == 'true' }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Classify changes that can alter native/platform release behavior
         if: github.event_name == 'pull_request'
         id: filter
@@ -106,7 +95,7 @@ jobs:
       previous_tag: ${{ steps.ver.outputs.previous_tag }}
       release_sha: ${{ steps.source.outputs.sha }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -117,32 +106,21 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Release source frozen at $sha"
 
-      # Use the version already present in the tree for push/PR runs. A manual
-      # run must provide the version explicitly. Release events are not accepted:
-      # this workflow is now the sole creator of release tags/releases.
-      - name: Resolve MANUAL_VER from trigger
+      # The release workflow is intentionally not manually dispatchable: its
+      # OIDC-bearing publication path can only originate from protected main.
+      # PRs exercise qualification only; the merged release-please manifest push
+      # is the sole publication trigger.
+      - name: Resolve release version from trusted source tree
         id: manualver
-        env:
-          MANUAL_INPUT: ${{ inputs.version }}
         run: |
           project_version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            value="$MANUAL_INPUT"
-          elif [[ "${{ github.event_name }}" == "push" ]]; then
+          value="$project_version"
+          if [[ "${{ github.event_name }}" == "push" ]]; then
             manifest_version="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path(".release-please-manifest.json").read_text())["."])')"
             if [[ "$manifest_version" != "$project_version" ]]; then
               echo "::error::release manifest ($manifest_version) and pyproject.toml ($project_version) disagree"
               exit 1
             fi
-            value="$project_version"
-          else
-            value="$project_version"
-          fi
-
-          if [[ -z "$value" || "$value" != "$project_version" ]]; then
-            echo "::error::requested release version '$value' does not match pyproject.toml '$project_version'"
-            exit 1
           fi
           echo "value=$value" >> "$GITHUB_OUTPUT"
 
@@ -152,6 +130,40 @@ jobs:
           python scripts/release_version.py
         env:
           MANUAL_VER: ${{ steps.manualver.outputs.value }}
+
+  release-security:
+    needs: detect-version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact frozen release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.detect-version.outputs.release_sha }}
+          persist-credentials: false
+
+      - name: Install release Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.95.0  # keep in sync with rust-toolchain.toml (TEST-30)
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install release security policy tools
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      # Re-evaluate the same dependency policies enforced by rust.yml against
+      # the exact frozen source immediately before any artifact can be sealed.
+      # This closes the advisory-publication window between PR/cron CI and release.
+      - name: Fresh RustSec advisory gate
+        run: cargo audit
+
+      - name: Re-evaluate configured cargo-deny license policy
+        run: cargo deny check licenses
 
   # Cross-platform wheel matrix. Each entry produces wheels for cp310/11/12/13
   # in one maturin invocation (PyO3 ABI3 forward-compat handles 3.14+ until
@@ -172,7 +184,7 @@ jobs:
         # Risk-adaptive quota guard: ordinary PRs build Linux x86_64 only.
         # Any native/platform/build/dependency-sensitive PR is escalated by
         # release-risk to this exact full matrix before merge. Real releases
-        # and manual dispatches always use the full matrix.
+        # always use the full matrix.
         #
         # Full-matrix notes preserved: manylinux_2_28 is pinned explicitly
         # (auto resolved to manylinux2014/CentOS 7/OpenSSL 1.0.2k — too
@@ -186,7 +198,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.detect-version.outputs.release_sha }}
           fetch-depth: 0
@@ -726,13 +738,13 @@ jobs:
   # deliberately separate from registry credentials: it proves the exact dist
   # bytes came from this Release run after the complete smoke matrix succeeded.
   seal-release-artifacts:
-    needs: [detect-version, build-wheels, collect-dist, smoke-import-wheels]
+    needs: [detect-version, release-security, build-wheels, collect-dist, smoke-import-wheels]
     if: >-
       ${{
         always() &&
-        github.event_name != 'pull_request' &&
-        github.event.inputs.dry_run != 'true' &&
+        github.event_name == 'push' &&
         needs.detect-version.result == 'success' &&
+        needs.release-security.result == 'success' &&
         needs.build-wheels.result == 'success' &&
         needs.collect-dist.result == 'success' &&
         needs.smoke-import-wheels.result == 'success'
@@ -802,8 +814,7 @@ jobs:
     if: >-
       ${{
         always() &&
-        github.event_name != 'pull_request' &&
-        github.event.inputs.dry_run != 'true' &&
+        github.event_name == 'push' &&
         needs.detect-version.result == 'success' &&
         needs.seal-release-artifacts.result == 'success'
       }}
@@ -813,7 +824,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout trusted release automation at frozen source SHA
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.detect-version.outputs.release_sha }}
           fetch-depth: 0
@@ -842,7 +853,7 @@ jobs:
       # authorization to the workflow filename and currently rejects reusable
       # workflows. Shared registry semantics live in the composite action.
       - name: Checkout trusted publication action
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.detect-version.outputs.release_sha }}
           persist-credentials: false
@@ -870,7 +881,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout trusted release automation at frozen source SHA
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.detect-version.outputs.release_sha }}
           fetch-depth: 0
