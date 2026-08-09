@@ -40,19 +40,7 @@ jobs:
       version: ${{ steps.request.outputs.version }}
       release_run_id: ${{ steps.request.outputs.release_run_id }}
       dry_run: ${{ steps.request.outputs.dry_run }}
-      controller_sha: ${{ steps.controller.outputs.sha }}
     steps:
-      - name: Freeze trusted recovery controller SHA
-        id: controller
-        env:
-          CONTROLLER_SHA: ${{ github.sha }}
-        run: |
-          [[ "$CONTROLLER_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "::error::Unexpected controller SHA: $CONTROLLER_SHA"
-            exit 1
-          }
-          echo "sha=$CONTROLLER_SHA" >> "$GITHUB_OUTPUT"
-
       - name: Download and validate unprivileged recovery request
         id: request
         env:
@@ -128,18 +116,15 @@ jobs:
       artifact_name: ${{ steps.request.outputs.artifact_name }}
       version: ${{ steps.request.outputs.version }}
       dry_run: ${{ steps.request.outputs.dry_run }}
-      controller_sha: ${{ steps.request.outputs.controller_sha }}
     steps:
       - name: Bind validated recovery request
         id: request
         env:
           VERSION: ${{ needs.resolve-request.outputs.version }}
           DRY_RUN: ${{ needs.resolve-request.outputs.dry_run }}
-          CONTROLLER_SHA: ${{ needs.resolve-request.outputs.controller_sha }}
         run: |
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
-          echo "controller_sha=$CONTROLLER_SHA" >> "$GITHUB_OUTPUT"
           echo "artifact_name=manual-release-dist-${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout immutable release tag
@@ -373,10 +358,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout trusted recovery automation
+      # Do not supply a ref here. For workflow_run, GitHub executes this workflow
+      # from the default branch and fixes GITHUB_SHA for the run. A data-derived
+      # checkout ref would turn this privileged job into an untrusted-code sink.
+      - name: Checkout protected recovery controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.recover-artifacts.outputs.controller_sha }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -403,10 +390,9 @@ jobs:
       # existing PyPI Trusted Publisher registration for the fallback workflow
       # remains valid. The shared composite action removes policy drift without
       # changing the workflow identity PyPI authenticates.
-      - name: Checkout trusted recovery publication action
+      - name: Checkout protected recovery controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.recover-artifacts.outputs.controller_sha }}
           persist-credentials: false
 
       - name: Download exact recovered distributions
@@ -431,10 +417,9 @@ jobs:
       actions: read
       contents: write
     steps:
-      - name: Checkout trusted recovery release action
+      - name: Checkout protected recovery controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.recover-artifacts.outputs.controller_sha }}
           persist-credentials: false
           fetch-depth: 0
 
