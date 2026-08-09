@@ -1,0 +1,83 @@
+name: Publish Recovery Request
+
+# Unprivileged request surface for manual release recovery. This workflow never
+# receives OIDC or write permissions and never publishes. The privileged
+# `Publish to PyPI (manual fallback)` workflow is triggered via workflow_run from
+# the protected default branch and accepts requests only when this run itself was
+# dispatched on main.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the leading v"
+        required: true
+        type: string
+      release_run_id:
+        description: "Optional Release workflow run ID (auto-discovered when empty)"
+        required: false
+        type: string
+      dry_run:
+        description: "Resolve and verify artifacts only"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-recovery-request-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  request:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require protected main as the request source
+        env:
+          VERSION: ${{ inputs.version }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Recovery requests must be dispatched from protected main, not ${GITHUB_REF}."
+            exit 1
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::Invalid release version: $VERSION"
+            exit 1
+          }
+          if [[ -n "$RELEASE_RUN_ID" && ! "$RELEASE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::release_run_id must be numeric when provided."
+            exit 1
+          fi
+
+          mkdir -p request
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          payload = {
+              "version": os.environ["VERSION"],
+              "release_run_id": os.environ.get("RELEASE_RUN_ID", ""),
+              "dry_run": os.environ.get("DRY_RUN", "false").lower() == "true",
+          }
+          pathlib.Path("request/request.json").write_text(
+              json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(payload, sort_keys=True))
+          PY
+
+      - name: Upload immutable recovery request
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: publish-recovery-request
+          path: request/request.json
+          retention-days: 7
+          if-no-files-found: error

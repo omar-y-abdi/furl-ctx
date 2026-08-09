@@ -64,7 +64,7 @@ jobs:
       # diff cannot affect code, while the required jobs still conclude.
       code: ${{ github.event_name != 'pull_request' || inputs.force_full == true || steps.filter.outputs.code == 'true' }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
         if: github.event_name == 'pull_request'
         id: filter
@@ -78,6 +78,7 @@ jobs:
               - 'uv.lock'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'rust-toolchain.toml'
               - '.release-please-manifest.json'
               - '.release-please-config.json'
               - 'tests/**'
@@ -113,6 +114,7 @@ jobs:
               # still CONCLUDE in seconds via the short-circuit.
               # Deadlock history — do NOT re-add job-level gating: #15, #32, #56.
               - '.github/workflows/**'
+              - '.github/actions/**'
               - 'plugins/**'
               - '.agents/**'
               - '.claude-plugin/**'
@@ -126,10 +128,36 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PY_VERSION }}
+      - name: Enforce one audited SHA per external action
+        shell: python
+        run: |
+          import collections
+          import pathlib
+          import re
+
+          uses_re = re.compile(r"\buses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\b")
+          pins = collections.defaultdict(lambda: collections.defaultdict(list))
+          paths = set(pathlib.Path(".github").rglob("*.yml")) | set(pathlib.Path(".github").rglob("*.yaml"))
+          for path in sorted(paths):
+              for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                  match = uses_re.search(line)
+                  if match:
+                      action, sha = match.groups()
+                      pins[action][sha].append(f"{path}:{lineno}")
+
+          drift = {action: shas for action, shas in pins.items() if len(shas) > 1}
+          if drift:
+              details = []
+              for action, shas in sorted(drift.items()):
+                  details.append(action)
+                  for sha, locations in sorted(shas.items()):
+                      details.append(f"  {sha}: {', '.join(locations)}")
+              raise SystemExit("external action SHA drift detected:\n" + "\n".join(details))
+          print(f"External action pins are repository-consistent across {len(pins)} action(s).")
       # Runs unconditionally (not gated behind needs.changes.outputs.code): llms.txt
       # is agent-orientation content, not `.md`, so a PR that edits only llms.txt
       # never trips the `code` path filter above — gating this step the same way
@@ -248,7 +276,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PY_VERSION }}
@@ -302,7 +330,7 @@ jobs:
       # manifest against git tags. Without this the default shallow checkout
       # fetches zero tags and the guard can only skip, never actually verify
       # anything, on every PR.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-tags: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -433,7 +461,7 @@ jobs:
       - name: Checkout history for advisory commit audit
         id: checkout
         continue-on-error: true
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -472,7 +500,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"

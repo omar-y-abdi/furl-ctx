@@ -210,11 +210,35 @@ runs:
         PY
         }
 
+        # Remote observation is tri-state: present, confirmed absent, or unknown.
+        # Never reinterpret transport/API/auth ambiguity as absence, because doing
+        # so authorizes a create mutation from an unproven state.
+        query_release_state() {
+          local n output rc err_file err
+          err_file="${RUNNER_TEMP}/release-view-error"
+          for n in 1 2 3; do
+            : > "$err_file"
+            if output="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,tagName 2>"$err_file")"; then
+              printf '%s\n' "$output"
+              return 0
+            else
+              rc=$?
+            fi
+            err="$(cat "$err_file")"
+            if grep -Eiq '(release not found|HTTP 404|Not Found)' <<<"$err"; then
+              return 2
+            fi
+            echo "::warning::Could not determine release state for ${TAG} (attempt ${n}/3, rc=${rc}): ${err}" >&2
+            [[ "$n" -lt 3 ]] && sleep $((n * 5))
+          done
+          return 1
+        }
+
         release_exists=false
         release_is_draft=false
         release_is_immutable=false
         release_json=""
-        if release_json="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,tagName 2>/dev/null)"; then
+        if release_json="$(query_release_state)"; then
           release_exists=true
           [[ "$(jq -r '.tagName' <<<"$release_json")" == "$TAG" ]] || {
             echo "::error::Release lookup returned an unexpected tag."
@@ -222,6 +246,12 @@ runs:
           }
           release_is_draft="$(jq -r '.isDraft' <<<"$release_json")"
           release_is_immutable="$(jq -r '.isImmutable' <<<"$release_json")"
+        else
+          release_state=$?
+          if [[ "$release_state" -ne 2 ]]; then
+            echo "::error::Release state for ${TAG} is unknown after retries; refusing any mutation."
+            exit 1
+          fi
         fi
 
         if [[ "$release_exists" == "false" ]]; then
@@ -294,7 +324,7 @@ runs:
           cat "$final_missing" >&2
           exit 1
         fi
-        state="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName)"
+        state="$(retry gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName)"
         [[ "$(jq -r '.tagName' <<<"$state")" == "$TAG" && "$(jq -r '.isDraft' <<<"$state")" == "false" ]] || {
           echo "::error::${TAG} did not converge to a published release."
           exit 1
