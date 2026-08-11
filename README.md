@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fomar-y-abdi%2Ffurl-ctx.svg)](https://mcptoplist.com/server/glama%2Fomar-y-abdi%2Ffurl-ctx)
+
 <div align="center"><pre>
 ███████╗██╗   ██╗██████╗ ██╗
 ██╔════╝██║   ██║██╔══██╗██║
