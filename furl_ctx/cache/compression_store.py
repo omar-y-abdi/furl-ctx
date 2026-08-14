@@ -311,6 +311,12 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
     default_ttl = status.get("default_ttl_seconds", DEFAULT_CCR_TTL_SECONDS)
     ttl_seconds = status.get("ttl_seconds", default_ttl)
 
+    if status.get("status") == "available":
+        return (
+            "Entry is available in the CCR store, but this retrieval attempt returned "
+            "no content. Retry the retrieval."
+        )
+
     if status.get("status") == "expired":
         age_seconds = status.get("age_seconds")
         if isinstance(age_seconds, (int, float)):
@@ -2015,9 +2021,18 @@ class CompressionStore:
         """Apply a fully preflighted cascade without further marker discovery."""
         if hash_key in visited:
             return CascadeOutcome(top_deleted=False)
-        visited.add(hash_key)
 
         top_deleted = self.delete(hash_key)
+        # ``delete`` intentionally fails open for spill I/O, so its boolean only
+        # means that at least one tier removed a copy. A cascade may ignore this
+        # parent during child co-reference checks ONLY after the hash is proven
+        # unreachable from every tier. ``exists_any_tier`` is fail-closed on an
+        # unreadable spill, which turns mutation-time uncertainty into a stopped
+        # cascade instead of a dangling parent marker.
+        if self.exists_any_tier(hash_key):
+            return CascadeOutcome(top_deleted=False)
+        visited.add(hash_key)
+
         deleted: list[str] = []
         skipped: list[str] = []
         for nested_hash in graph.get(hash_key, ()):

@@ -1699,8 +1699,11 @@ class FurlMCPServer:
             # gone from the store. Use the side-effect-free ``exists`` check
             # (not ``retrieve``, which logs a retrieval event + bumps access
             # stats) so a no-match query does not inflate retrieval metrics —
-            # nothing was actually retrieved.
-            if store.exists(hash_key):
+            # nothing was actually retrieved. The check must span BOTH tiers:
+            # ``search`` is spill-aware, while ``exists`` is intentionally
+            # primary-only, so using ``exists`` here can turn a spill-only
+            # no-match into a false missing-entry error.
+            if store.exists_any_tier(hash_key):
                 return {
                     "hash": hash_key,
                     "source": "local",
