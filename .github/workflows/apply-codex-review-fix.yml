@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.event.head_commit.message == 'chore: apply codex review fix'
+    if: "${{ github.event.head_commit.message == 'chore: retry codex review fix' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
