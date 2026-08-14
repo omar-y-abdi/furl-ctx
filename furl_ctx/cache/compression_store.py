@@ -2026,9 +2026,7 @@ class CompressionStore:
             if self._is_co_referenced(nested_hash, ignoring=visited):
                 skipped.append(nested_hash)
                 continue
-            child = self._delete_cascade_from_graph(
-                nested_hash, graph=graph, visited=visited
-            )
+            child = self._delete_cascade_from_graph(nested_hash, graph=graph, visited=visited)
             if child.top_deleted:
                 deleted.append(nested_hash)
             deleted.extend(child.nested_deleted)
