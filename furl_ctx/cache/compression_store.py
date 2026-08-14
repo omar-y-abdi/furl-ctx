@@ -91,6 +91,16 @@ class DurableWriteError(RuntimeError):
         self.hash_key = hash_key
 
 
+class CollisionSafetyError(DurableWriteError):
+    """Veto an explicit-hash write when its spill collision domain is uncertain.
+
+    This subclasses :class:`DurableWriteError` so marker-producing callers that
+    already veto on durable-store failures also veto here. The attempted new
+    binding is never persisted: an unreadable or uncleanable same-key spill row
+    must not become foreign content for the new producer.
+    """
+
+
 # Cheap pre-check that skips the marker regex scan for the common raw original
 # that embeds no marker at all. Case-INSENSITIVE (RG5): the marker grammar's
 # ``GENERIC_BRACKET_PATTERN`` is itself ``re.IGNORECASE``, so an uppercase
@@ -805,7 +815,32 @@ class CompressionStore:
             # never reaches this branch: _evict_if_needed() above already reaped
             # it, so a dead binding cannot wedge its key.
             existing = self._backend.get(hash_key)
-            spilled = self._recover_from_spill(hash_key) if self._spill is not None else None
+            spilled: CompressionEntry | None = None
+            if self._spill is not None:
+                if explicit_hash is None:
+                    # Preserve the optional spill's general fail-open contract for
+                    # content-derived hashes. Explicit keys can intentionally alias
+                    # unrelated content, so their collision domain must be inspected
+                    # fail-closed instead.
+                    spilled = self._recover_from_spill(hash_key)
+                else:
+                    try:
+                        spilled = self._spill.get(hash_key)
+                    except Exception as exc:
+                        logger.error(
+                            "CCR spill collision-domain read failed for explicit hash %s; "
+                            "refusing the new binding: %s",
+                            hash_key,
+                            exc,
+                        )
+                        raise CollisionSafetyError(
+                            f"Cannot safely bind explicit hash {hash_key}: the spill tier "
+                            "could not be inspected for an older same-key binding.",
+                            hash_key=hash_key,
+                        ) from exc
+                    if spilled is not None and spilled.is_expired(self._now()):
+                        spilled = None
+
             conflicting = next(
                 (
                     candidate
@@ -825,21 +860,34 @@ class CompressionStore:
                     len(conflicting.original_content),
                     len(original),
                 )
-                # A same-key spill row is part of the collision domain too. If a
-                # newer primary binding later expires, retrieve() falls back to
-                # spill; leaving an older DIFFERENT spill value there would
-                # silently resurrect foreign content. Drop both tiers before
-                # refusing the new binding so the key becomes a loud miss.
-                if self._backend.delete(hash_key):
-                    self._stale_heap_entries += 1
+                # Collision cleanup is different from ordinary spill maintenance:
+                # uncertainty here would let the same hash resolve to foreign bytes.
+                # Verify the spill row is gone BEFORE dropping primary or accepting
+                # any future binding. A failure vetoes this store() call.
                 if self._spill is not None:
                     try:
                         self._spill.delete(hash_key)
-                    except Exception as exc:  # noqa: BLE001 — collision path stays fail-open
-                        logger.warning(
-                            "CCR spill delete during collision cleanup failed (non-fatal): %s",
+                        residual = self._spill.get(hash_key)
+                    except Exception as exc:
+                        logger.error(
+                            "CCR spill collision cleanup failed for hash %s; refusing the "
+                            "new binding: %s",
+                            hash_key,
                             exc,
                         )
+                        raise CollisionSafetyError(
+                            f"Cannot safely resolve collision for hash {hash_key}: spill "
+                            "cleanup could not be verified.",
+                            hash_key=hash_key,
+                        ) from exc
+                    if residual is not None and not residual.is_expired(self._now()):
+                        raise CollisionSafetyError(
+                            f"Cannot safely resolve collision for hash {hash_key}: a live "
+                            "same-key spill binding survived cleanup.",
+                            hash_key=hash_key,
+                        )
+                if self._backend.delete(hash_key):
+                    self._stale_heap_entries += 1
                 collision_dropped = True
             elif existing is not None:
                 # Same content being stored again - this is fine, just update
@@ -1173,17 +1221,18 @@ class CompressionStore:
         with self._lock:
             snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
             spill = self._spill
-
-        if spill is not None:
-            try:
-                seen = set(snapshot_keys)
-                snapshot_keys.extend(
-                    hash_key
-                    for _created_at, hash_key in spill.created_at_index()
-                    if hash_key not in seen
-                )
-            except Exception as exc:  # noqa: BLE001 — search is fail-open
-                logger.warning("CCR spill index read during search_all failed (non-fatal): %s", exc)
+            if spill is not None:
+                try:
+                    seen = set(snapshot_keys)
+                    snapshot_keys.extend(
+                        hash_key
+                        for _created_at, hash_key in spill.created_at_index()
+                        if hash_key not in seen
+                    )
+                except Exception as exc:  # noqa: BLE001 — search is fail-open
+                    logger.warning(
+                        "CCR spill index read during search_all failed (non-fatal): %s", exc
+                    )
 
         live_entries: list[tuple[str, CompressionEntry]] = []
         for hash_key in snapshot_keys:
@@ -1903,58 +1952,83 @@ class CompressionStore:
         outcome = self.delete_cascade_detailed(hash_key)
         return (outcome.top_deleted, len(outcome.nested_deleted))
 
-    def delete_cascade_detailed(
-        self, hash_key: str, *, _visited: set[str] | None = None
-    ) -> CascadeOutcome:
-        """Delete *hash_key* and nested blobs no other live entry references.
+    def _preflight_cascade_graph(
+        self,
+        hash_key: str,
+        *,
+        already_visited: set[str],
+    ) -> dict[str, tuple[str, ...]] | None:
+        """Discover the complete reachable marker graph before any deletion.
 
-        Marker discovery reads both primary and spill representations before
-        deleting the named hash. The same content hash can exist in both tiers
-        with different compressed marker graphs, so both must contribute nested
-        references. Shared-child deletion fails closed through
-        :meth:`_is_co_referenced`.
+        Every backend lookup is serialized by ``self._lock``. If any spill
+        representation cannot be inspected, the whole preflight fails so no
+        ancestor has already been erased when a deeper node becomes unreadable.
         """
-        visited = _visited if _visited is not None else set()
+        graph: dict[str, tuple[str, ...]] = {}
+        seen = set(already_visited)
+        pending = [hash_key]
+
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+
+            with self._lock:
+                entries: list[CompressionEntry] = []
+                primary = self._backend.get(current)
+                if primary is not None:
+                    entries.append(primary)
+                if self._spill is not None:
+                    try:
+                        spilled = self._spill.get(current)
+                    except Exception as exc:
+                        logger.warning(
+                            "CCR spill read during delete_cascade preflight failed for %s; "
+                            "aborting the entire cascade before mutation: %s",
+                            current,
+                            exc,
+                        )
+                        return None
+                    if spilled is not None:
+                        entries.append(spilled)
+
+            nested_seen: dict[str, None] = {}
+            for entry in entries:
+                for nested_hash in self._entry_marker_hashes(entry, exclude=current):
+                    nested_seen.setdefault(nested_hash, None)
+            nested = tuple(nested_seen)
+            graph[current] = nested
+            pending.extend(
+                nested_hash for nested_hash in reversed(nested) if nested_hash not in seen
+            )
+
+        return graph
+
+    def _delete_cascade_from_graph(
+        self,
+        hash_key: str,
+        *,
+        graph: dict[str, tuple[str, ...]],
+        visited: set[str],
+    ) -> CascadeOutcome:
+        """Apply a fully preflighted cascade without further marker discovery."""
         if hash_key in visited:
             return CascadeOutcome(top_deleted=False)
         visited.add(hash_key)
 
-        with self._lock:
-            entries: list[CompressionEntry] = []
-            primary = self._backend.get(hash_key)
-            if primary is not None:
-                entries.append(primary)
-            if self._spill is not None:
-                try:
-                    spilled = self._spill.get(hash_key)
-                except Exception as exc:  # noqa: BLE001 — destructive discovery fails closed
-                    logger.warning(
-                        "CCR spill read during delete_cascade failed; aborting cascade for %s "
-                        "so unreadable nested markers cannot be orphaned: %s",
-                        hash_key,
-                        exc,
-                    )
-                    return CascadeOutcome(top_deleted=False)
-                else:
-                    if spilled is not None:
-                        entries.append(spilled)
-
-        nested_seen: dict[str, None] = {}
-        for entry in entries:
-            for nested_hash in self._entry_marker_hashes(entry, exclude=hash_key):
-                nested_seen.setdefault(nested_hash, None)
-        nested = list(nested_seen)
-
         top_deleted = self.delete(hash_key)
         deleted: list[str] = []
         skipped: list[str] = []
-        for nested_hash in nested:
+        for nested_hash in graph.get(hash_key, ()):
             if nested_hash in visited:
                 continue
             if self._is_co_referenced(nested_hash, ignoring=visited):
                 skipped.append(nested_hash)
                 continue
-            child = self.delete_cascade_detailed(nested_hash, _visited=visited)
+            child = self._delete_cascade_from_graph(
+                nested_hash, graph=graph, visited=visited
+            )
             if child.top_deleted:
                 deleted.append(nested_hash)
             deleted.extend(child.nested_deleted)
@@ -1966,6 +2040,25 @@ class CompressionStore:
             nested_deleted=tuple(deleted),
             nested_shared_skipped=tuple(h for h in skipped if h not in deleted_set),
         )
+
+    def delete_cascade_detailed(
+        self, hash_key: str, *, _visited: set[str] | None = None
+    ) -> CascadeOutcome:
+        """Delete *hash_key* and nested blobs no other live entry references.
+
+        Marker discovery reads both primary and spill representations. Discovery
+        is a separate preflight phase: no hash is deleted until every reachable
+        node's spill representation has been inspected successfully.
+        """
+        visited = _visited if _visited is not None else set()
+        if hash_key in visited:
+            return CascadeOutcome(top_deleted=False)
+
+        graph = self._preflight_cascade_graph(hash_key, already_visited=visited)
+        if graph is None:
+            return CascadeOutcome(top_deleted=False)
+
+        return self._delete_cascade_from_graph(hash_key, graph=graph, visited=visited)
 
     def clear(self) -> int:
         """Clear all entries; return the count STILL reachable after the wipe.
