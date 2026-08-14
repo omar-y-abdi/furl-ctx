@@ -190,7 +190,6 @@ def test_delete_cascade_preflights_nested_nodes_before_parent_mutation() -> None
     assert spill.delete_calls == [], "preflight failure must happen before any mutation"
 
 
-
 def test_delete_cascade_stops_when_parent_survives_spill_delete_failure() -> None:
     """A surviving spill parent must keep its referenced child reachable."""
     spill = _DictSpill()
