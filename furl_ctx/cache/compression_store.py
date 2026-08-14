@@ -134,13 +134,17 @@ class CascadeOutcome:
 
     ``nested_deleted`` is the DISTINCT nested hashes the cascade removed;
     ``nested_shared_skipped`` is those it deliberately left because another live
-    entry still references them (RG3). ``deleted_hashes`` is the full set a
-    read-back should find gone (RG6) — the top hash only when it truly went.
+    entry still references them (RG3). ``failed_hashes`` names hashes the cascade
+    attempted to remove but proved still reachable from at least one tier. Those
+    failures propagate to the purge read-back so partial mutation cannot be
+    reported as a clean erase. ``deleted_hashes`` is the full set a read-back
+    should find gone (RG6) — the top hash only when it truly went.
     """
 
     top_deleted: bool
     nested_deleted: tuple[str, ...] = ()
     nested_shared_skipped: tuple[str, ...] = ()
+    failed_hashes: tuple[str, ...] = ()
 
     def deleted_hashes(self, hash_key: str) -> tuple[str, ...]:
         """Every hash this cascade decided to delete, for read-back verification."""
@@ -2030,11 +2034,12 @@ class CompressionStore:
         # unreadable spill, which turns mutation-time uncertainty into a stopped
         # cascade instead of a dangling parent marker.
         if self.exists_any_tier(hash_key):
-            return CascadeOutcome(top_deleted=False)
+            return CascadeOutcome(top_deleted=False, failed_hashes=(hash_key,))
         visited.add(hash_key)
 
         deleted: list[str] = []
         skipped: list[str] = []
+        failed: list[str] = []
         for nested_hash in graph.get(hash_key, ()):
             if nested_hash in visited:
                 continue
@@ -2046,12 +2051,14 @@ class CompressionStore:
                 deleted.append(nested_hash)
             deleted.extend(child.nested_deleted)
             skipped.extend(child.nested_shared_skipped)
+            failed.extend(child.failed_hashes)
 
         deleted_set = set(deleted)
         return CascadeOutcome(
             top_deleted=top_deleted,
             nested_deleted=tuple(deleted),
             nested_shared_skipped=tuple(h for h in skipped if h not in deleted_set),
+            failed_hashes=tuple(dict.fromkeys(failed)),
         )
 
     def delete_cascade_detailed(

@@ -1696,8 +1696,8 @@ class FurlMCPServer:
             # evicted — a LIVE entry with no query match must report "no match",
             # not a false "no longer retrievable" eviction error. Only fall
             # through to the cause-honest miss path when the entry is genuinely
-            # gone from the store. Use the side-effect-free ``exists`` check
-            # (not ``retrieve``, which logs a retrieval event + bumps access
+            # gone from the store. Use the side-effect-free ``exists_any_tier``
+            # check (not ``retrieve``, which logs a retrieval event + bumps access
             # stats) so a no-match query does not inflate retrieval metrics —
             # nothing was actually retrieved. The check must span BOTH tiers:
             # ``search`` is spill-aware, while ``exists`` is intentionally
@@ -2968,9 +2968,14 @@ class FurlMCPServer:
         outcome = store.delete_cascade_detailed(hash_key)
         # The named hash is always verified (even when it was already absent, so a
         # delete that silently no-ops on a live entry is still caught); the nested
-        # hashes verified are the ones the cascade actually removed. dict.fromkeys
+        # hashes verified are the ones the cascade actually removed PLUS any
+        # hash whose mutation-time delete was proven incomplete. The latter must
+        # be read back too, otherwise a surviving nested child can disappear from
+        # the outcome and a partial purge can be reported as success. dict.fromkeys
         # dedupes while keeping order -- the top hash appears in both sources.
-        expected_gone = dict.fromkeys((hash_key, *outcome.deleted_hashes(hash_key)))
+        expected_gone = dict.fromkeys(
+            (hash_key, *outcome.deleted_hashes(hash_key), *outcome.failed_hashes)
+        )
         survivors = tuple(h for h in expected_gone if store.exists_any_tier(h))
         return (
             outcome.top_deleted,

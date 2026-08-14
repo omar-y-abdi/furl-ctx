@@ -220,6 +220,7 @@ def test_delete_cascade_stops_when_parent_survives_spill_delete_failure() -> Non
     assert store.exists_any_tier(PARENT_HASH) is True
     assert store.exists_any_tier(CHILD_HASH) is True
     assert outcome.nested_deleted == ()
+    assert outcome.failed_hashes == (PARENT_HASH,)
 
 
 def test_available_miss_status_never_claims_the_hash_is_missing() -> None:
