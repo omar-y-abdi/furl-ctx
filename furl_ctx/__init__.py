@@ -58,9 +58,7 @@ from .compress import CompressConfig, CompressResult, OpaqueOffload, compress
 from .compress_to import compress_to
 from .retrieve import purge, resolve_markers, retrieve
 
-# Keep a real callable bound for the one-function compression API so
-# `from furl_ctx import compress` is never shadowed by the submodule object.
-# ``compress_to`` is bound the same way (its submodule would otherwise shadow it).
+# Keep a real callable bound for the one-function compression API so `from furl_ctx import compress` is never shadowed by the submodule object.
 
 __all__ = [
     # Exceptions — the reserved base class only. compress() fails open
@@ -109,10 +107,7 @@ __all__ = [
     "PipelineExtensionManager",
 ]
 
-# Keep package-level imports lightweight so `import furl_ctx` does not eagerly
-# load provider SDKs, ML stacks, or optional runtime integrations.
-# ``__version__`` is lazy too (PERF-13): resolving it reads installed
-# distribution metadata — never at import time, never via git subprocesses.
+# Keep package-level imports lightweight so `import furl_ctx` does not eagerly load provider SDKs, ML stacks, or optional runtime integrations.
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "__version__": ("furl_ctx._version", "__version__"),
     # Exceptions

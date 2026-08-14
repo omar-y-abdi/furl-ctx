@@ -1,74 +1,5 @@
-//! Search-results compressor — Rust port of
-//! `furl_ctx.transforms.search_compressor`.
-//!
-//! Compresses grep / ripgrep / ag output (one of the most common tool
-//! outputs in coding tasks). Typical compression: 5-10×.
-//!
-//! # Input format
-//!
-//! Standard `grep -n` style:
-//! ```text
-//! src/utils.py:42:def process_data(items):
-//! src/utils.py:43:    """Process items with validation."""
-//! src/models.py:15:class DataProcessor:
-//! ```
-//!
-//! Ripgrep with `-C` context (mixes `:` and `-` separators):
-//! ```text
-//! src/main.py-40-some context before
-//! src/main.py:42:def process_data(items):
-//! src/main.py-43-some context after
-//! ```
-//!
-//! # Compression pipeline
-//!
-//! 1. Parse into `{file: [(line, content), ...]}` structure.
-//! 2. Score each match on relevance (context-word overlap +
-//!    [`crate::signals::LineImportanceDetector`] priority signals +
-//!    config-supplied keywords).
-//! 3. Sort files by total match score; cap to `max_files`.
-//! 4. Run [`crate::transforms::adaptive_sizer::compute_optimal_k`] over
-//!    the global match list with `bias` to land an adaptive total.
-//! 5. Per-file selection: always-keep first/last (configurable), fill
-//!    remaining slots by score, sort survivors back to line order.
-//! 6. Format `file:line:content` lines (each line re-emits its SOURCE
-//!    separator — `:` match / `-` rg context — and its verbatim
-//!    line-number token, so every emitted line is a byte-exact copy of
-//!    its input line) + `[... and N more matches in file]` summaries.
-//!    With `group_by_file` (default off) the file path is emitted once
-//!    as a `file:` header and match lines nest under it as
-//!    `  line:content` — better token economics when many matches
-//!    concentrate in few files (the common rg shape).
-//! 7. Optional CCR storage when `min_matches_for_ccr` cleared and
-//!    compression ratio < 0.8 — appends standard CCR marker.
-//!
-//! # Bug fixes vs Python (2026-04-29)
-//!
-//! Python's `_GREP_PATTERN`/`_RG_CONTEXT_PATTERN` regexes mis-handled
-//! two real-world inputs. The hand-rolled parser here fixes both:
-//!
-//! - **Windows paths.** `^([^:]+):(\d+):(.*)$` captured only the drive
-//!   letter for `C:\Users\foo\bar.py:42:line`, then the `\d+` group
-//!   failed (next char is `\`). Result: every Windows-formatted line
-//!   silently dropped from `file_matches`. Rust parser detects
-//!   `[A-Za-z]:[\\/]` drive-prefix and starts the line-number scan
-//!   *after* the drive colon.
-//! - **Filenames containing `-`.** `_RG_CONTEXT_PATTERN`'s
-//!   `[^:-]+` excluded dashes from the path, so legitimate names like
-//!   `pre-commit-config.yaml-42-line` parsed wrong. Rust parser
-//!   anchors on the *line-number marker* (`<sep>\d+<sep>`) found
-//!   earliest in the line; everything before is the path, everything
-//!   after is the content.
-//!
-//! Two further hardening changes:
-//!
-//! - **CCR storage failures are loud.** Python silently swallowed all
-//!   exceptions from the store. Rust returns `Result` and surfaces
-//!   storage errors via `tracing::warn!` so operations can investigate.
-//! - **Per-file dedup is `O(n log n)`.** Python checks `match not in
-//!   file_selected` linearly inside a loop (worst-case O(n²) for big
-//!   files). Rust uses a `BTreeSet<(line_number, content_hash)>` so the
-//!   membership check is logarithmic.
+//! Compress grep/ripgrep results by parsing file/line records, relevance scoring, adaptive selection, and optional grouping.
+//! Preserve source separators and line tokens exactly; handle Windows paths and dashed filenames without regex ambiguity.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -85,25 +16,10 @@ use crate::transforms::adaptive_sizer::compute_optimal_k;
 pub struct SearchMatch {
     pub file: String,
     pub line_number: u64,
-    /// The line-number token EXACTLY as it appeared in the input line
-    /// (e.g. `"42"`, but also `"00"`, `"09"`, `"0042"`). Rendering emits
-    /// this verbatim so a zero-padded numeric field — a `HH:MM:SS`
-    /// minute, a padded id — that the grep parser latched onto as a
-    /// "line number" round-trips byte-for-byte instead of being stripped
-    /// by a `u64` re-render (`13:00:00` → `13:0:00`). `line_number` stays
-    /// the parsed numeric value used for ordering and dedup. For matches
-    /// built programmatically via [`SearchMatch::new`] it is
-    /// `line_number.to_string()`, so genuine grep output (no leading
-    /// zeros) renders byte-identically to before.
+    /// The line-number token EXACTLY as it appeared in the input line (e.g.
     pub line_display: String,
-    /// The separator the parser matched for this line: `':'` for
-    /// grep/ripgrep MATCH lines (`path:N:content`), `'-'` for ripgrep
-    /// CONTEXT lines (`path-N-content`). Rendering re-emits it so a
-    /// context line round-trips byte-for-byte instead of being rewritten
-    /// with `':'` (`src/app.py-40-ctx` must not become
-    /// `src/app.py:40:ctx`). Programmatic construction via
-    /// [`SearchMatch::new`] uses `':'` — the grep match shape — so
-    /// pre-existing callers render byte-identically.
+    /// The separator the parser matched for this line: `':'` for grep/ripgrep MATCH lines (`path:N:content`), `'-'` for ripgrep CONTEXT lines (`path-N-content`).
+    /// Rendering re-emits it so a context line round-trips byte-for-byte instead of being rewritten with `':'` (`src/app.py-40-ctx` must not become `src/app.py:40:ctx`).
     pub sep_display: char,
     pub content: String,
     /// Relevance score in [0.0, 1.0]; populated by [`SearchCompressor::score_matches`].
@@ -122,11 +38,8 @@ impl SearchMatch {
         }
     }
 
-    /// Construct from a parsed grep/ripgrep line, keeping `line_display`
-    /// as the VERBATIM line-number token and `sep` as the separator the
-    /// parser matched, so the rendered `file{sep}line{sep}content` is a
-    /// byte-exact copy of the input. `line_number` is the same token
-    /// parsed to its numeric value (ordering + dedup).
+    /// Construct from a parsed grep/ripgrep line, keeping `line_display` as the VERBATIM line-number token and `sep` as the separator the parser matched, so the
+    /// rendered `file{sep}line{sep}content` is a byte-exact copy of the input. `line_number` is the same token parsed to its numeric value (ordering + dedup).
     fn from_parsed(
         file: &str,
         line_number: u64,
@@ -185,27 +98,9 @@ pub struct SearchCompressorConfig {
     pub boost_errors: bool,
     pub enable_ccr: bool,
     pub min_matches_for_ccr: usize,
-    /// Compression ratio threshold for CCR storage. Python defaults to
-    /// 0.8 — only persist when compression saved at least 20%. Promoted
-    /// to a config field here (Python had it inline) so a future
-    /// pipeline can tune per-content-type.
+    /// Compression ratio threshold for CCR storage. Python defaults to 0.8 — only persist when compression saved at least 20%.
     pub min_compression_ratio_for_ccr: f64,
-    /// Render matches grouped under one header line per file (upstream's
-    /// `group_by_file` mode, restored per ENGINE-COMPARISON P2-15):
-    ///
-    /// ```text
-    /// src/main.py:
-    ///   42:def main():
-    ///   43:    pass
-    ///   [... and 3 more matches in src/main.py]
-    /// ```
-    ///
-    /// The file path is emitted once instead of per match — better token
-    /// economics for the common rg shape (many matches across few files).
-    /// Selection, caps, stats attribution (COR-41 3-way scheme) and CCR
-    /// persistence are all unchanged; only the rendering differs.
-    /// Default: `false` — flat `file:line:content` output, byte-identical
-    /// to the pre-existing behavior.
+    /// Render matches grouped under one header line per file (upstream's `group_by_file` mode, restored per ENGINE-COMPARISON P2-15)
     pub group_by_file: bool,
 }
 
@@ -227,10 +122,7 @@ impl Default for SearchCompressorConfig {
     }
 }
 
-/// Compression result. `compressed` carries the formatted output (with
-/// optional CCR marker appended); `summaries` maps file paths to the
-/// `[... and N more matches in foo.py]` line that landed in that file's
-/// section.
+/// Compression result.
 #[derive(Debug, Clone)]
 pub struct SearchCompressionResult {
     pub compressed: String,
@@ -243,9 +135,8 @@ pub struct SearchCompressionResult {
     pub summaries: BTreeMap<String, String>,
 }
 
-/// Sidecar diagnostics not returned by the parity-equal API. Captures
-/// per-stage drop counts so OTel can see what the compressor actually
-/// did beyond the bytes Python emits.
+/// Sidecar diagnostics not returned by the parity-equal API. Captures per-stage drop
+/// counts so OTel can see what the compressor actually did beyond the bytes Python emits.
 #[derive(Debug, Clone, Default)]
 pub struct SearchCompressorStats {
     pub lines_scanned: usize,
@@ -253,9 +144,7 @@ pub struct SearchCompressorStats {
     pub files_dropped: usize,
     pub matches_dropped_by_per_file_cap: usize,
     pub matches_dropped_by_global_cap: usize,
-    /// Duplicate match instances collapsed by the intra-file dedup
-    /// (same line number + content). Mutually exclusive with the two
-    /// cap counters (COR-41).
+    /// Duplicate match instances collapsed by the intra-file dedup (same line number + content). Mutually exclusive with the two cap counters (COR-41).
     pub matches_dropped_by_dedup: usize,
     pub ccr_emitted: bool,
     pub ccr_skip_reason: Option<&'static str>,
@@ -263,9 +152,8 @@ pub struct SearchCompressorStats {
 
 // ─── Compressor ─────────────────────────────────────────────────────────
 
-/// Top-level compressor. Holds an importance detector (from the signals
-/// trait family) so the priority-pattern scoring is pluggable. Defaults
-/// to a [`crate::signals::KeywordDetector`].
+/// Top-level compressor. Holds an importance detector (from the signals trait family) so the
+/// priority-pattern scoring is pluggable. Defaults to a [`crate::signals::KeywordDetector`].
 pub struct SearchCompressor {
     config: SearchCompressorConfig,
     importance: Box<dyn LineImportanceDetector>,
@@ -302,13 +190,7 @@ impl SearchCompressor {
         self.compress_with_store(content, context, bias, None)
     }
 
-    /// Compress with the CCR `cache_key` computed but NOTHING persisted
-    /// (PERF-8). Byte-identical output (compressed bytes, marker,
-    /// `cache_key`, stats) to `compress_with_store(.., Some(store))` —
-    /// only the store write is skipped. For callers that own persistence
-    /// themselves: the PyO3 bridge's Python shim re-persists the
-    /// original into the production `CompressionStore` under this exact
-    /// key and vetoes the compression if that write fails.
+    /// Compress with the CCR `cache_key` computed but NOTHING persisted (PERF-8).
     pub fn compress_key_only(
         &self,
         content: &str,
@@ -318,10 +200,8 @@ impl SearchCompressor {
         self.compress_inner(content, context, bias, MarkerBacking::KeyOnly)
     }
 
-    /// Compress with optional CCR persistence. `store` is consulted only
-    /// if `config.enable_ccr` is true and the compression cleared the
-    /// thresholds; storage failures emit `tracing::warn!` rather than
-    /// being silently swallowed.
+    /// Compress with optional CCR persistence. `store` is consulted only if `config.enable_ccr` is true and the
+    /// compression cleared the thresholds; storage failures emit `tracing::warn!` rather than being silently swallowed.
     pub fn compress_with_store(
         &self,
         content: &str,
@@ -381,11 +261,8 @@ impl SearchCompressor {
             } else if ratio >= self.config.min_compression_ratio_for_ccr {
                 stats.ccr_skip_reason = Some("compression ratio too high");
             } else {
-                // Shared key→[put]→marker tail (`ccr::persist`, ARCH-5);
-                // the leading `\n` is composed there so the marker
-                // grammar in `ccr::markers` stays newline-free. Key and
-                // marker bytes are identical across backings (PERF-8) —
-                // only whether the original is persisted differs.
+                // Shared key→[put]→marker tail (`ccr::persist`, ARCH-5); the leading `\n` is composed there so the marker grammar in `ccr::markers`
+                // stays newline-free. Key and marker bytes are identical across backings (PERF-8) — only whether the original is persisted differs.
                 let keyed = match backing {
                     MarkerBacking::Store(store) => Some(persist_and_mark(
                         store,
@@ -484,17 +361,13 @@ impl SearchCompressor {
                 if self.config.boost_errors {
                     let signal = self.importance.score(&m.content, ImportanceContext::Search);
                     if let Some(category) = signal.category {
-                        // Python's loop boosts by 0.5 - i*0.1 over priority
-                        // patterns; map our trait categories to the same
-                        // ordering: Error first (0.5), Warning (0.4),
-                        // Importance (0.3).
+                        // Python's loop boosts by 0.5 - i*0.1 over priority patterns; map our trait categories
+                        // to the same ordering: Error first (0.5), Warning (0.4), Importance (0.3).
                         let bump = match category {
                             crate::signals::ImportanceCategory::Error => 0.5,
                             crate::signals::ImportanceCategory::Warning => 0.4,
                             crate::signals::ImportanceCategory::Importance => 0.3,
-                            // Categories below aren't part of
-                            // PRIORITY_PATTERNS_SEARCH; preserve Python's
-                            // behavior of not boosting for them.
+                            // Categories below aren't part of PRIORITY_PATTERNS_SEARCH; preserve Python's behavior of not boosting for them.
                             crate::signals::ImportanceCategory::Security
                             | crate::signals::ImportanceCategory::Markdown => 0.0,
                         };
@@ -519,9 +392,7 @@ impl SearchCompressor {
         bias: f64,
         stats: &mut SearchCompressorStats,
     ) -> BTreeMap<String, FileMatches> {
-        // Python `_select_matches` sorts files by total match score
-        // descending. `BTreeMap` iterates in key order, so we collect
-        // and sort explicitly.
+        // Python `_select_matches` sorts files by total match score descending. `BTreeMap` iterates in key order, so we collect and sort explicitly.
         let mut by_score: Vec<(&String, &FileMatches)> = files.iter().collect();
         by_score.sort_by(|a, b| {
             b.1.total_score()
@@ -534,14 +405,7 @@ impl SearchCompressor {
             by_score.truncate(self.config.max_files);
         }
 
-        // Feed the adaptive sizer the match CONTENT slices directly
-        // (PERF-6). The old shape materialized every match as a fresh
-        // `format!("{file}:{line}:{content}")` String purely to size the
-        // set — per-line-unique `file:line:` prefixes glued to the first
-        // content word inflated bigram uniqueness with zero information,
-        // and the allocs dominated select_matches on big result sets.
-        // The saturation signal lives in the content; the k this yields
-        // is gated by the benchmark ratio floor (non-regression).
+        // Feed the adaptive sizer the match CONTENT slices directly (PERF-6).
         let all_refs: Vec<&str> = by_score
             .iter()
             .flat_map(|(_file, fm)| fm.matches.iter().map(|m| m.content.as_str()))
@@ -558,10 +422,8 @@ impl SearchCompressor {
                 continue;
             }
 
-            // Sort by score desc, ties broken by line number asc for
-            // determinism (Python's `sorted` is stable; order in is
-            // line-asc by construction so highest-score-first picks the
-            // earliest line on ties).
+            // Sort by score desc, ties broken by line number asc for determinism (Python's `sorted` is stable;
+            // order in is line-asc by construction so highest-score-first picks the earliest line on ties).
             let mut sorted = fm.matches.clone();
             sorted.sort_by(|a, b| {
                 b.score
@@ -616,12 +478,8 @@ impl SearchCompressor {
             // Restore line order for output.
             file_selected.sort_by_key(|m| m.line_number);
 
-            // Attribute every truncated match to its actual cause
-            // (COR-41): duplicate instances collapsed by the intra-file
-            // dedup; unique matches beyond the per-file cap (dropped
-            // regardless of budget); and unique matches that fit the
-            // per-file cap but not the remaining global budget. The three
-            // buckets sum to `fm.matches.len() - file_selected.len()`.
+            // Attribute every truncated match to its actual cause (COR-41): duplicate instances collapsed by the intra-file dedup; unique matches
+            // beyond the per-file cap (dropped regardless of budget); and unique matches that fit the per-file cap but not the remaining global budget.
             let unique_total = fm
                 .matches
                 .iter()
@@ -648,20 +506,7 @@ impl SearchCompressor {
         selected
     }
 
-    /// Render the selected matches. Two modes:
-    ///
-    /// - Flat (default): grep-shaped `file{sep}line{sep}content` per
-    ///   match, where `sep` is the line's SOURCE separator (`:` match /
-    ///   `-` rg context) — every emitted line is a byte-exact copy of its
-    ///   input line.
-    /// - Grouped (`config.group_by_file`): one `file:` header per file
-    ///   (structural — always `:`), match lines nested under it as
-    ///   `  line{sep}content` (P2-15). Grouping hoists the file out of
-    ///   each line, so FULL-line byte-exactness cannot apply; the nested
-    ///   line minus its 2-space indent is still a byte-exact substring of
-    ///   its input line and keeps the match/context distinction. The
-    ///   per-file omission summary nests too. Same selection, same caps,
-    ///   same summaries map keys — only the rendering differs.
+    /// Render the selected matches. grep-shaped `file{sep}line{sep}content` per match
     pub fn format_output(
         &self,
         selected: &BTreeMap<String, FileMatches>,
@@ -676,11 +521,8 @@ impl SearchCompressor {
                 lines.push(format!("{}:", file));
             }
             for m in &fm.matches {
-                // Emit the VERBATIM line-number token (`line_display`) and
-                // the SOURCE separator (`sep_display`): a preview line the
-                // agent reads must be a byte-exact copy of its input line —
-                // no zero-pad strip (`13:00:00`, never `13:0:00`) and no
-                // separator rewrite (rg context `path-N-ctx` keeps its `-`).
+                // Emit the VERBATIM line-number token (`line_display`) and the SOURCE separator
+                // (`sep_display`): a preview line the agent reads must be a byte-exact copy of its input line.
                 if grouped {
                     lines.push(format!(
                         "  {}{}{}",
@@ -713,33 +555,8 @@ impl SearchCompressor {
 
 // ─── Parser ─────────────────────────────────────────────────────────────
 
-/// Parse one grep/ripgrep-style line into `(file, line_number, content)`.
-///
-/// Strategy:
-/// 1. If the line starts with a Windows drive prefix (`C:\` or `C:/`),
-///    record the drive letter + colon as the path's required prefix and
-///    start the line-number scan after the drive colon.
-/// 2. Colon pass: find the leftmost `:<digits>:` marker. grep and
-///    ripgrep match lines are always `path:N:content`, so this form
-///    wins even when the filename contains a `-<digits>-` run
-///    (fixed_in_cor26: `utils-2-final.py:42:content` used to parse as
-///    file `utils`, line 2, content `final.py:42:content`).
-/// 3. Dash pass (ripgrep context lines, `path-N-content`): find the
-///    leftmost `-<digits>-` marker; runs only when no colon marker
-///    exists. Match and context lines may still be intermingled in one
-///    stream — each individual line is one of the two pure forms.
-///    Mixed separators (`:N-` / `-N:`) no longer parse; neither tool
-///    emits them.
-///
-/// Returns `None` for lines that don't match either shape. Caller
-/// treats those as un-parseable and drops them.
-///
-/// The tuple is `(file, line_number, line_number_token, separator,
-/// content)`: `line_number` is the parsed numeric value (ordering/dedup),
-/// `line_number_token` is that same run of digits VERBATIM (leading zeros
-/// intact), and `separator` is the marker byte that matched (`b':'` match
-/// line / `b'-'` context line) — both kept so the line renders back
-/// byte-for-byte.
+/// Parse grep/ripgrep lines by locating `:<digits>:` first, then `-<digits>-`; scan after Windows drive
+/// prefixes. Preserve the original digit token and separator so selected lines render byte-for-byte.
 fn parse_match_line(line: &str) -> Option<(&str, u64, &str, u8, &str)> {
     let bytes = line.as_bytes();
     // Windows drive prefix: starts with [A-Za-z]:[\\/]
@@ -755,9 +572,7 @@ fn parse_match_line(line: &str) -> Option<(&str, u64, &str, u8, &str)> {
         0
     };
 
-    // Reject zero-length paths up front: a line that *starts* with a
-    // `<sep><digits><sep>` marker (any separator pair) has no file part.
-    // Matches the old leftmost-scan behavior, which aborted on these.
+    // Reject zero-length paths up front: a line that *starts* with a `<sep><digits><sep>` marker (any separator pair) has no file part.
     if scan_start == 0 && matches!(bytes.first(), Some(b':') | Some(b'-')) {
         let mut j = 1;
         while j < bytes.len() && bytes[j].is_ascii_digit() {
@@ -776,18 +591,8 @@ fn parse_match_line(line: &str) -> Option<(&str, u64, &str, u8, &str)> {
         })
 }
 
-/// Find the leftmost `<sep><digits><sep>` marker where BOTH separators
-/// are `sep`, splitting the line into `(path, line_number,
-/// line_number_token, content)`. The caller attaches the `sep` it passed
-/// in (the parse tuple's separator slot) — this helper never mixes
-/// separator kinds within one marker.
-///
-/// The byte immediately before the first separator must not itself be a
-/// separator. That collapses adjacent-separator runs (`::`, `:-`, `--`)
-/// so a line like `src/file.py:-1:invalid` doesn't parse the `-` as the
-/// marker's first separator and `1` as the line number; the negative
-/// sign belongs to the content, not the marker, so the line is rejected
-/// as un-parseable.
+/// Find the leftmost `<sep><digits><sep>` marker where BOTH separators are `sep`, splitting the line into `(path, line_number, line_number_token,
+/// content)`. The caller attaches the `sep` it passed in (the parse tuple's separator slot) — this helper never mixes separator kinds within one marker.
 fn find_marker(line: &str, scan_start: usize, sep: u8) -> Option<(&str, u64, &str, &str)> {
     let bytes = line.as_bytes();
     let mut i = scan_start;
@@ -804,16 +609,14 @@ fn find_marker(line: &str, scan_start: usize, sep: u8) -> Option<(&str, u64, &st
                 j += 1;
             }
             if j > digits_start && j < bytes.len() && bytes[j] == sep {
-                // Zero-length path (line starts with the separator);
-                // the caller's up-front guard rejects these before the
-                // passes run, kept here so the helper stands alone.
+                // Zero-length path (line starts with the separator); the caller's up-front guard
+                // rejects these before the passes run, kept here so the helper stands alone.
                 if i == 0 {
                     return None;
                 }
                 let file = &line[..i];
-                // Digits are ASCII, so this byte range is a valid `&str`
-                // slice: keep it VERBATIM (leading zeros intact) for
-                // rendering, and parse the SAME token for the numeric value.
+                // Digits are ASCII, so this byte range is a valid `&str` slice: keep it VERBATIM
+                // (leading zeros intact) for rendering, and parse the SAME token for the numeric value.
                 let line_display = &line[digits_start..j];
                 let line_no = line_display.parse::<u64>().ok()?;
                 let content = &line[j + 1..];
@@ -834,9 +637,8 @@ fn hash_u64(s: &str) -> u64 {
     h.finish()
 }
 
-// `md5_hex_24` (the CCR cache key) lives in `crate::ccr::persist` —
-// one shared implementation for the diff/log/search/text family
-// (ARCH-5); the tail above rides it via `persist_and_mark`.
+// `md5_hex_24` (the CCR cache key) lives in `crate::ccr::persist` — one shared implementation
+// for the diff/log/search/text family (ARCH-5); the tail above rides it via `persist_and_mark`.
 
 #[cfg(test)]
 mod tests {
@@ -884,9 +686,8 @@ mod tests {
 
     #[test]
     fn fixed_in_3e2_handles_dashes_in_filename_with_ripgrep_context() {
-        // Pre-3e2 `_RG_CONTEXT_PATTERN`'s `[^:-]+` excluded dashes from
-        // the path, so this line was either misparsed (path truncated
-        // at the first dash) or fell through.
+        // Pre-3e2 `_RG_CONTEXT_PATTERN`'s `[^:-]+` excluded dashes from the path, so this
+        // line was either misparsed (path truncated at the first dash) or fell through.
         assert_eq!(
             parse_line("pre-commit-config.yaml-42-fail_fast: true"),
             Some((
@@ -899,11 +700,8 @@ mod tests {
 
     #[test]
     fn fixed_in_cor26_digit_run_between_dashes_in_filename() {
-        // `foo-2-bar.py:42:x` used to parse as file `foo`, line 2,
-        // content `bar.py:42:x`: the leftmost any-separator scan matched
-        // the `-2-` run inside the filename before the real `:42:`
-        // marker. grep/rg match lines are always `path:N:content`, so
-        // the colon-only form is tried first.
+        // `foo-2-bar.py:42:x` used to parse as file `foo`, line 2, content `bar.py:42:x`: the leftmost any-separator scan matched the `-2-` run
+        // inside the filename before the real `:42:` marker. grep/rg match lines are always `path:N:content`, so the colon-only form is tried first.
         assert_eq!(
             parse_line("foo-2-bar.py:42:x"),
             Some(("foo-2-bar.py".into(), 42, "x".into()))
@@ -917,11 +715,8 @@ mod tests {
 
     #[test]
     fn fixed_in_cor26_mixed_separators_no_longer_parse() {
-        // grep emits `path:N:content`; rg context lines are
-        // `path-N-content`. Neither tool mixes separators within one
-        // line, so the old any-pair acceptance (`file.py:42-text`) only
-        // ever fired on coincidental shapes. Both passes now require a
-        // matching pair.
+        // grep emits `path:N:content`; rg context lines are `path-N-content`. Neither tool mixes separators within one line, so the
+        // old any-pair acceptance (`file.py:42-text`) only ever fired on coincidental shapes. Both passes now require a matching pair.
         assert!(parse_line("file.py:42-text").is_none());
         assert!(parse_line("file.py-42:text").is_none());
     }
@@ -950,9 +745,8 @@ mod tests {
 
     #[test]
     fn rejects_negative_line_numbers() {
-        // The `-` is part of the content, not a separator. Pre-3e2 the
-        // adjacent-separator collapse rule didn't exist; a stray fix
-        // could have re-introduced this regression.
+        // The `-` is part of the content, not a separator. Pre-3e2 the adjacent-separator
+        // collapse rule didn't exist; a stray fix could have re-introduced this regression.
         assert!(parse_line("src/file.py:-1:invalid").is_none());
         // Equivalent form with the dash adjacent to the dash separator.
         assert!(parse_line("src/file.py--1-invalid").is_none());
@@ -1001,10 +795,8 @@ src/main.py-44-context line";
 
     #[test]
     fn select_respects_per_file_cap_and_global_cap() {
-        // Note: compute_optimal_k enforces a hard `min_k=5` floor (matches
-        // Python `_select_matches`), so `max_total_matches` is a soft cap
-        // that bites only above that floor. Configure 6 here to exercise
-        // the cap path.
+        // Note: compute_optimal_k enforces a hard `min_k=5` floor (matches Python
+        // `_select_matches`), so `max_total_matches` is a soft cap that bites only above that floor.
         let compressor = SearchCompressor::new(SearchCompressorConfig {
             max_matches_per_file: 2,
             max_total_matches: 6,
@@ -1042,10 +834,8 @@ src/main.py-44-context line";
 
     #[test]
     fn truncation_stats_attribute_global_cap_inside_processed_file() {
-        // COR-41: matches truncated inside a PROCESSED file because the
-        // global budget ran out used to be booked under
-        // `matches_dropped_by_per_file_cap`. Here the per-file cap (10)
-        // never binds — the global cap (5) does.
+        // COR-41: matches truncated inside a PROCESSED file because the global budget ran out used to be booked
+        // under `matches_dropped_by_per_file_cap`. Here the per-file cap never binds — the global cap does.
         let compressor = SearchCompressor::new(SearchCompressorConfig {
             max_matches_per_file: 10,
             max_total_matches: 5,
@@ -1117,10 +907,8 @@ src/main.py-44-context line";
 
     #[test]
     fn key_only_mode_is_byte_identical_to_store_mode() {
-        // PERF-8 pin: `compress_key_only` must produce byte-equal output
-        // (compressed bytes incl. marker, cache_key, counts) to
-        // `compress_with_store(.., Some(store))` — the ONLY difference
-        // is that nothing is persisted.
+        // PERF-8 pin: `compress_key_only` must produce byte-equal output (compressed bytes incl. marker, cache_key,
+        // counts) to `compress_with_store(.., Some(store))` — the ONLY difference is that nothing is persisted.
         use crate::ccr::InMemoryCcrStore;
         let content: String = (1..=200)
             .map(|i| format!("src/file.py:{i}:line {i}"))
@@ -1187,9 +975,8 @@ src/main.py-44-context line";
 
     #[test]
     fn group_by_file_defaults_off_and_flat_output_is_byte_identical() {
-        // The flag must default OFF, and the flat rendering must stay the
-        // exact grep shape: when nothing is dropped the output reproduces
-        // the input byte-for-byte.
+        // The flag must default OFF, and the flat rendering must stay the exact grep
+        // shape: when nothing is dropped the output reproduces the input byte-for-byte.
         assert!(!SearchCompressorConfig::default().group_by_file);
         let compressor = SearchCompressor::new(SearchCompressorConfig {
             enable_ccr: false,
@@ -1316,24 +1103,11 @@ src/main.py-44-context line";
         assert_eq!(stats.ccr_skip_reason, Some("ccr disabled in config"));
     }
 
-    // ─── Preview digit fidelity (byte-exact line numbers) ───────────────
-    //
-    // A payments-style log with `HH:MM:SS` timestamps (`2026-07-11T13:00:00
-    // ...`) is misread by the grep parser as `file:line:content` — the
-    // `:00:` minute field becomes the "line number". Before the fix the
-    // renderer emitted the PARSED `u64`, stripping the pad (`13:00:00` →
-    // `13:0:00`): a retained preview line the agent reads that no longer
-    // matches its own input. Retrieval was always byte-exact; only the
-    // inline preview corrupted. The invariant these pin: every rendered
-    // preview line is a byte-exact substring of the input.
+    // Preview digit fidelity (byte-exact line numbers) ─────────────── A payments-style log with `HH:MM:SS` timestamps (`2026-07-11T13:00:00
+    // ...`) is misread by the grep parser as `file:line:content` Retrieval was always byte-exact; only the inline preview corrupted.
 
-    /// Every rendered line that is retained content must appear verbatim
-    /// in the input. Only the two STRUCTURAL lines this formatter emits
-    /// are exempt, matched PRECISELY: the `[... and N more matches in
-    /// FILE]` omission summary and the `[N matches compressed to M.
-    /// Retrieve more: hash=…]` CCR marker. A data line that merely starts
-    /// with `[` (a bracketed timestamp `[2026-…] …`) is still asserted —
-    /// the old any-`[`-prefix skip silently exempted exactly those lines.
+    /// Every rendered line that is retained content must appear verbatim in the input. Only the two STRUCTURAL lines this formatter emits are exempt,
+    /// matched PRECISELY: the `[... and N more matches in FILE]` omission summary and the `[N matches compressed to M. Retrieve more: hash=…]` CCR marker.
     fn assert_preview_lines_byte_exact(content: &str, compressed: &str) {
         for line in compressed.lines() {
             let t = line.trim_start();
@@ -1411,19 +1185,13 @@ src/main.py-44-context line";
 
     #[test]
     fn preview_byte_exact_over_zero_padded_corpus() {
-        // Property-style sweep over zero-padded numeric shapes the grep
-        // parser latches onto as a "line number", each carrying further
-        // zero-padded numerics (hex `0x0042`, versions `1.02.003`, padded
-        // ids) in the CONTENT tail. Every retained preview line must be a
-        // byte-exact substring of its input.
+        // Property-style sweep over zero-padded numeric shapes the grep parser latches onto as a "line number", each carrying further zero-padded numerics
+        // (hex `0x0042`, versions `1.02.003`, padded ids) in the CONTENT tail. Every retained preview line must be a byte-exact substring of its input.
         let compressor = SearchCompressor::new(SearchCompressorConfig {
             enable_ccr: false,
             ..Default::default()
         });
-        // Shapes cover BOTH separator passes: the grep `:NN:` marker (the
-        // form the reported bug hit) and the rg-context `-NN-` marker. The
-        // parsed token carries leading zeros and the content tail carries
-        // further zero-padded numerics that must ride through verbatim.
+        // Shapes cover BOTH separator passes: the grep `:NN:` marker (the form the reported bug hit) and the rg-context `-NN-` marker.
         let shapes: [fn(usize) -> String; 6] = [
             // Leading-zero ":NN:" line-number token; hex + padded id in tail.
             |i| format!("host:00{:02}:svc build 0x{:04x} id=0042 ok", i % 100, i),
@@ -1447,10 +1215,8 @@ src/main.py-44-context line";
                     i
                 )
             },
-            // Bracketed timestamp: the line STARTS with `[` — pins that the
-            // byte-exact helper ASSERTS these instead of skipping them as
-            // structural markers (the old any-`[` skip passed them silently
-            // even when corrupted).
+            // Bracketed timestamp: the line STARTS with `[` — pins that the byte-exact helper ASSERTS these instead
+            // of skipping them as structural markers (the old any-`[` skip passed them silently even when corrupted).
             |i| {
                 format!(
                     "[2026-07-11T13:{:02}:00] batch payment id={:04} ok",
@@ -1476,12 +1242,7 @@ src/main.py-44-context line";
 
     #[test]
     fn preview_context_lines_keep_dash_separator_byte_exact() {
-        // ripgrep -C output interleaves match (`path:N:content`) and
-        // context (`path-N-content`) lines. The renderer used to hardcode
-        // `:` for both, so a context line came back with the wrong
-        // separator (`src/app.py-40-ctx` → `src/app.py:40:ctx`) — the same
-        // invariant violation as the digit strip, via the separator. Each
-        // match now carries its source separator (`sep_display`).
+        // ripgrep -C output interleaves match (`path:N:content`) and context (`path-N-content`) lines.
         let compressor = SearchCompressor::new(SearchCompressorConfig {
             enable_ccr: false,
             ..Default::default()
@@ -1512,12 +1273,7 @@ src/main.py-44-context line";
 
     #[test]
     fn group_by_file_nested_lines_keep_source_separator() {
-        // Grouped mode hoists the file into a `path:` header — an explicit
-        // restructuring, so FULL-line byte-exactness cannot apply there.
-        // The invariant grouped mode DOES keep: each nested line minus its
-        // 2-space indent is `line{sep}content` with the SOURCE separator —
-        // a byte-exact substring of its input line — preserving rg's
-        // match(`:`)/context(`-`) distinction.
+        // Grouped mode hoists the file into a `path:` header — an explicit restructuring, so FULL-line byte-exactness cannot apply there.
         let compressor = SearchCompressor::new(SearchCompressorConfig {
             group_by_file: true,
             enable_ccr: false,

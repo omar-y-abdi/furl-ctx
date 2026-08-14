@@ -38,9 +38,8 @@ class TestScoreLine:
         assert priority == 0.0
 
     def test_unknown_context_raises_valueerror(self) -> None:
-        # The Rust binding returns None for unknown contexts (pyo3/clippy
-        # workaround); the shim owns translating that into the explicit
-        # error every caller expects. This is the module's ONE error path.
+        # The Rust binding returns None for unknown contexts (pyo3/clippy workaround); the shim owns
+        # translating that into the explicit error every caller expects. This is the module's ONE error path.
         with pytest.raises(ValueError, match="unknown importance context: banana"):
             score_line("ERROR: whatever", context="banana")
 
@@ -84,16 +83,13 @@ class TestUnstructuredErrorOutputBoundary:
         assert _is_unstructured_error_output(tb)
 
     def test_valueerror_substring_is_load_bearing(self) -> None:
-        # A word-boundary match would MISS this (``\\berror\\b`` does not match
-        # "ValueError"); substring matching is exactly why the gate sees it.
-        # Paired with a second distinct indicator to clear the strict threshold.
+        # A word-boundary match would MISS this (``\\berror\\b`` does not match "ValueError"); substring matching is exactly why the gate sees it.
         assert _is_unstructured_error_output("ValueError raised\nprocess failed midway")
 
     # --- MUST NOT protect: benign content that merely mentions errors --------
     def test_brief_example_fixed_error_handling_not_protected(self) -> None:
-        # The brief's exact worry: a changelog line naming a fix + error
-        # handling. Only ONE distinct indicator (``error``) → the >= 2 threshold
-        # already screens it out. The reassuring result.
+        # The brief's exact worry: a changelog line naming a fix + error handling. Only ONE distinct
+        # indicator (``error``) → the >= 2 threshold already screens it out. The reassuring result.
         assert not _is_unstructured_error_output("Fixed: better error handling in the parser")
 
     def test_benign_single_error_mention_not_protected(self) -> None:
@@ -112,19 +108,8 @@ class TestUnstructuredErrorOutputBoundary:
 
     # --- KNOWN, bounded over-protection (characterization — see PR report) ---
     def test_known_fp_changelog_prose_with_two_indicators(self) -> None:
-        # Documented limitation reproducing the symptom the evaluator saw once:
-        # release-note PROSE pairing two DISTINCT error substrings (``error`` in
-        # "error handling" + ``fail`` in "failed") clears the >= 2 gate and is
-        # protected. Deliberately NOT tightened: the only signal separating this
-        # from a real dump is structural, and every keyword-level narrowing that
-        # drops this case also blinds the gate to genuine tracebacks (see
-        # ``test_valueerror_substring_is_load_bearing``). The cost is bounded —
-        # protection ships the bytes verbatim (no data loss) and now surfaces as
-        # an EXPLAINED ``router:protected:error_output`` transform, not a silent
-        # 0%. This pin is ONE-directional: it fails only when the FP is fixed
-        # (a structural distinguisher lands), forcing that fix to be a
-        # deliberate flip to a negative assertion — it does NOT guard against
-        # new false positives elsewhere.
+        # Documented limitation reproducing the symptom the evaluator saw once release-note PROSE pairing two DISTINCT error
+        # substrings (``error`` in "error handling" + ``fail`` in "failed") clears the >= 2 gate and is protected. The cost is bounded
         changelog_prose = (
             "## v1.2.0\n"
             "- Improved error handling for upstream timeouts\n"
@@ -141,9 +126,8 @@ class TestReExportedTables:
         assert "error" in ERROR_KEYWORDS
 
     def test_timeout_family_present_in_both_keywords_and_pattern(self) -> None:
-        # The documented Rust-side bug fix: ERROR_KEYWORDS listed
-        # timeout/abort/denied/rejected but the old regex omitted them.
-        # Pin that keywords and the recompiled pattern agree on the family.
+        # The documented Rust-side bug fix: ERROR_KEYWORDS listed timeout/abort/denied/rejected but
+        # the old regex omitted them. Pin that keywords and the recompiled pattern agree on the family.
         for word in ("timeout", "abort", "denied", "rejected"):
             assert word in ERROR_KEYWORDS, f"{word} missing from ERROR_KEYWORDS"
             assert ERROR_PATTERN.search(f"FATAL: {word} connecting upstream"), (

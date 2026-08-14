@@ -48,9 +48,8 @@ _BLOCK_TAGS = frozenset(
         "blockquote",
     }
 )
-# Table-cell tags: their boundaries become single spaces, so adjacent cells
-# never fuse — "<td>5</td><td>3</td>" must extract as "5 3", not the number
-# "53" the model would otherwise read.
+# Table-cell tags: their boundaries become single spaces, so adjacent cells never fuse —
+# "<td>5</td><td>3</td>" must extract as "5 3", not the number "53" the model would otherwise read.
 _CELL_TAGS = frozenset({"td", "th"})
 
 
@@ -85,9 +84,8 @@ class _MainContentExtractor(HTMLParser):
         if data.strip():
             self._parts.append(data)
         elif data:
-            # A whitespace-only run between elements is the only separator
-            # HTML gives "<span>a</span> <span>b</span>"; dropping it fused
-            # the neighbors. Collapse it to one space (browser semantics).
+            # A whitespace-only run between elements is the only separator HTML gives "<span>a</span>
+            # <span>b</span>"; dropping it fused the neighbors. Collapse it to one space (browser semantics).
             self._parts.append(" ")
 
     def text(self) -> str:

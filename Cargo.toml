@@ -4,11 +4,8 @@ members = [
     "crates/furl-core",
     "crates/furl-py",
 ]
-# furl-py is a Python extension module — it must be built via maturin, not
-# plain cargo (the "extension-module" feature tells pyo3 not to link libpython,
-# which is required for `import` to work). `cargo build --workspace` without
-# explicit members skips it; `cargo test --workspace` still runs its tests
-# because pyo3 can dynamically link here for the cdylib used by tests.
+# furl-py is a Python extension module — it must be built via maturin, not plain cargo (the
+# "extension-module" feature tells pyo3 not to link libpython, which is required for `import` to work).
 default-members = [
     "crates/furl-core",
 ]
@@ -21,79 +18,25 @@ authors = ["Furl Maintainers"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-# `preserve_order` makes `serde_json::Value::Object` use IndexMap so JSON
-# parse order is preserved through Value→string→Value round-trips. The
-# smart_crusher port relies on this to match Python's `str(dict)` output,
-# which preserves insertion order; otherwise BTreeMap's sorted-key default
-# would diverge from Python on every multi-key object.
-#
-# `arbitrary_precision` keeps the literal numeric token from the source
-# JSON intact: `Value::Number` becomes a wrapper around the original
-# digit string, so `1.0` does NOT collapse to `1`, and `12345678901234567`
-# does NOT lose precision through f64. Required by Realignment invariant
-# I1 (byte-faithful passthrough on unmutated bytes; see
-# archive/REALIGNMENT/02-architecture.md §2.2) and PR-A4 (see
-# archive/REALIGNMENT/03-phase-A-lockdown.md — the REALIGNMENT docs
-# survive only under archive/).
-#
-# `raw_value` exposes `serde_json::value::RawValue`, the unparsed JSON
-# fragment type. Phase B PR-B2 uses this to forward unmodified
-# `messages[*]` entries as exact byte copies — the parser captures the
-# original byte slice, so byte-for-byte round-trips work even with
-# whitespace, key order, or escape preferences the producer chose.
-# Enabled here in Phase A so PR-B2 can land as a pure consumer change.
+# `preserve_order` keeps JSON insertion order, `arbitrary_precision` preserves numeric lexemes, and `raw_value`
+# exposes original fragments for byte-exact forwarding. These features prevent Python/Rust round-trip drift.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
 thiserror = "2"
 tracing = "0.1"
 pyo3 = { version = "0.29", features = ["abi3-py310"] }
-# NOTE: the proxy-era workspace deps (clap, tokio, axum, tower, reqwest,
-# anyhow, bytes, aws-sigv4/-config/-credential-types/-smithy-runtime-api,
-# gcp_auth) were removed with the proxy/parity crates in the amputation
-# (D7) — no remaining workspace member references them.
+# NOTE: the proxy-era workspace deps (clap, tokio, axum, tower, reqwest, anyhow, bytes, aws-sigv4/-config/-credential-types/-smithy-runtime-api,
+# gcp_auth) were removed with the proxy/parity crates in the amputation (D7) — no remaining workspace member references them.
 
 
-# ── Release profile — wheel size optimization ───────────────────────
-#
-# PyPI imposes a 10 GB cumulative storage limit per project. We hit it
-# at version 0.21.36 (191 versions × ~213 MB/release = 10.00 GB
-# exactly). Recent wheels were ~16-18 MB each, of which ~6.4 MB was
-# pure debug metadata (`.strtab` + `.symtab` ELF sections; uncovered
-# by post-mortem inspection of an actual production wheel).
-#
-# This profile shrinks each Linux wheel from ~18 MB → ~10-11 MB by:
-# * Stripping symbol/string tables (~6.4 MB direct savings)
-# * Link-time optimization across crate boundaries (~5-10% .text
-#   savings via dead-code elim across the workspace)
-# * Single codegen unit (better inlining + dead-code elim, at the
-#   cost of slightly slower release builds)
-#
-# We deliberately do NOT set ``panic = "abort"``. Furl ships as a
-# PyO3 extension loaded into a host Python process — panic-abort would
-# tear down the whole interpreter on a single Rust panic. Keeping
-# ``panic = "unwind"`` lets the hot bridge methods wrap their compute in
-# ``std::panic::catch_unwind`` and convert a panic into a ``PyRuntimeError``
-# (a normal Python ``Exception`` that ``compress()``'s fail-open catches);
-# under ``panic = "abort"`` that ``catch_unwind`` would be a no-op. NB a bare
-# (un-caught) PyO3 panic surfaces as ``pyo3_runtime.PanicException``, which is
-# a ``BaseException`` — it would escape ``except Exception`` — which is exactly
-# why the bridge converts it and why the Python fail-open also catches
-# ``BaseException`` (see crates/furl-py/src/lib.rs, furl_ctx/compress.py).
-# Accept the smaller wheel-size savings; keep unwind behaviour.
-#
-# Estimated impact: 213 MB/release → ~130 MB/release. Buys ~30+ more
-# release slots within the 10 GB ceiling at the current release
-# cadence. Per-PyPI-version savings AND faster downloads for end
-# users. Tradeoff: release builds take ~30-50% longer due to
-# `codegen-units = 1` + LTO; acceptable for the size win.
+# Release builds strip symbols, use thin LTO, and one codegen unit to reduce wheel size. Keep panic
+# unwinding so PyO3 can convert Rust panics to Python errors instead of aborting the host process.
 [profile.release]
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
 
-# Fast-to-compile profile for CI test wheels. The shipped wheel uses
-# `release` (lto + codegen-units=1) for runtime/size; CI only needs a working
-# extension, so trade runtime perf for ~parallel, lto-free compilation. Used
-# via `maturin build --profile ci`. Does NOT affect `--release` builds.
+# Fast-to-compile profile for CI test wheels. The shipped wheel uses `release` (lto + codegen-units=1) for
+# runtime/size; CI only needs a working extension, so trade runtime perf for ~parallel, lto-free compilation.
 [profile.ci]
 inherits = "release"
 lto = false

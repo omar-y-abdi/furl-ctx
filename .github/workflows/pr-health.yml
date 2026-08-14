@@ -42,11 +42,8 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Normalize conventional PR titles without inventing semantics
-        # Valid conventional prefixes are normalized mechanically. For a title
-        # without one, infer a type only from a complete, deterministic file set
-        # (docs-only, CI-only, lockfile-only, or tests-only). Arbitrary source
-        # changes are never guessed as feat/fix/chore because that can change
-        # release-please semantics and silently suppress a real release.
+        # Valid conventional prefixes are normalized mechanically. For a title without one, infer a type only from a complete, deterministic file set (docs-only, CI-only, lockfile-only,
+        # or tests-only). Arbitrary source changes are never guessed as feat/fix/chore because that can change release-please semantics and silently suppress a real release.
         run: |
           retry() {
             local n=1
@@ -245,9 +242,8 @@ jobs:
 
             if [[ "$merge_state" == "BEHIND" ]]; then
               updated=false
-              # Same-repo PRs are always eligible. Fork PRs are attempted only
-              # when the author allowed maintainer edits. Use AUTOFIX_TOKEN so
-              # the resulting synchronize event starts CI normally.
+              # Same-repo PRs are always eligible. Fork PRs are attempted only when the author allowed
+              # maintainer edits. Use AUTOFIX_TOKEN so the resulting synchronize event starts CI normally.
               if [[ -n "$UPDATE_TOKEN" && ( "$is_cross_repo" == "false" || "$maintainer_can_modify" == "true" ) ]]; then
                 if GH_TOKEN="$UPDATE_TOKEN" retry gh pr update-branch "$pr" --repo "$REPO"; then
                   updated=true

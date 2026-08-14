@@ -21,13 +21,8 @@ class CacheAlignerConfig:
     enabled: bool = False  # Disabled by default — prefix stability gains are marginal in practice
 
 
-# Default tools to exclude from compression (local file/code tools)
-# Tool outputs that are reference data and must NOT be compressed.
-# Read/Glob/Grep contain exact file contents/search results the agent needs for edits.
-# Write/Edit record what changes were made — compressing them causes duplicate/conflicting edits.
-# Bash is NOT excluded — its outputs (build logs, test output) are ideal compression targets.
-# Entries are matched via is_tool_excluded(): case-insensitive, fnmatch-style
-# globs supported (e.g. "mcp__*").
+# Default tools to exclude from compression (local file/code tools) Tool outputs that are reference data and
+# must NOT be compressed. Read/Glob/Grep contain exact file contents/search results the agent needs for edits.
 DEFAULT_EXCLUDE_TOOLS: frozenset[str] = frozenset(
     {
         "Read",
@@ -188,10 +183,8 @@ class FurlConfig:
 
     cache_aligner: CacheAlignerConfig = field(default_factory=CacheAlignerConfig)
 
-    # Cross-message dedup: replace later byte-identical tool outputs with a
-    # recoverable <<ccr:HASH>> pointer to the first occurrence. Operates on
-    # content WITHIN messages only (never drops/reorders messages, never
-    # touches index 0, frozen prefixes, or cache_control blocks).
+    # Cross-message dedup: replace later byte-identical tool outputs with a recoverable <<ccr:HASH>> pointer to the first occurrence. Operates
+    # on content WITHIN messages only (never drops/reorders messages, never touches index 0, frozen prefixes, or cache_control blocks).
     cross_message_dedup_enabled: bool = True
 
 
@@ -214,13 +207,7 @@ class CachePrefixMetrics:
     )
 
 
-#: The minimum token count for a message to be compressed, used as the single
-#: default for ``CompressRequest.min_tokens_to_compress``. Defined here so that
-#: BOTH entry paths agree: ``compress()`` (which forwards
-#: ``CompressConfig.min_tokens_to_compress``, itself defaulting to this value)
-#: and direct ``TransformPipeline.apply(**kwargs)`` callers (who omit it).
-#: Before this constant, the two paths disagreed — ``compress()`` callers got
-#: 250 while direct callers silently got 50 inside ``ContentRouter.apply``.
+# The minimum token count for a message to be compressed, used as the single
 DEFAULT_MIN_TOKENS_TO_COMPRESS = 250
 
 

@@ -21,13 +21,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Annotation-only: the whole point of this registry is that compressor
-    # modules are imported LAZILY inside each getter. These imports never
-    # run at runtime (`from __future__ import annotations` keeps every
-    # annotation a string); they exist so mypy checks the getter contracts
-    # (TYPE-3) instead of trusting `Any`. The ContentRouterConfig import is
-    # reverse-of-runtime (content_router imports this module), which is
-    # cycle-safe under TYPE_CHECKING.
+    # Annotation-only: the whole point of this registry is that compressor modules are imported LAZILY inside each getter. These imports never run at runtime
+    # (`from __future__ import annotations` keeps every annotation a string); they exist so mypy checks the getter contracts (TYPE-3) instead of trusting `Any`.
     from .code_aware_compressor import CodeAwareCompressor
     from .content_router import ContentRouterConfig
     from .diff_compressor import DiffCompressor

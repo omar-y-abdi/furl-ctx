@@ -1,12 +1,5 @@
-//! Array routing — `crush_array` / `crush_array_lossy`, the lossless
-//! byte-savings floors, the CCR-backed keep budget, and the
-//! `MinTokens`/`LosslessFirst` arbitration (ARCH-4: split out of
-//! `crusher.rs` as pure moves, zero behavior change).
-//!
-//! Builds the lossless candidate (compaction stage + savings gates) and
-//! the lossy-recoverable candidate (row-drop + deferred CCR store
-//! writes, P0-4), sizes them against each other, and ships the winner —
-//! committing the lossy candidate's deferred writes iff it ships.
+//! Array routing `crush_array` / `crush_array_lossy`, the lossless byte-savings floors, the CCR-backed keep budget, and the
+//! `MinTokens`/`LosslessFirst` arbitration (ARCH-4: split out of `the Rust module` as pure moves, zero behavior change).
 
 use serde_json::{Number, Value};
 
@@ -18,23 +11,8 @@ use super::persist::{ccr_sentinel_map, CcrWrite, PersistMode};
 use super::types::{ArrayAnalysis, CompressionStrategy, DroppedRef};
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
-/// Result of the lossy-recoverable render attempt in
-/// [`SmartCrusher::crush_array_lossy`].
-///
-/// The routing layer needs to tell two cases apart:
-/// - **Crushed** — a real DROP render exists (a surfaced `<<ccr:HASH>>`
-///   pointer naming the offloadable rows). This is the candidate the
-///   `MinTokens` policy sizes against the lossless render.
-///   `pending_ccr_writes` carries the deferred store writes backing its
-///   markers ([`PersistMode::Collect`]); the routing layer commits them
-///   IFF this render ships — a discarded candidate's writes are dropped
-///   with it, so the store never holds entries no surfaced marker names
-///   (P0-4). Empty under [`PersistMode::Skip`] (mixed dict arm).
-/// - **Skip** — the analyzer refused to crush the array (e.g. all-unique
-///   entities with no signal). There is NO drop alternative; only the
-///   `skip:<reason>` strategy string is carried (PERF-4: no full-array
-///   clone for a candidate that ships only when there's also no lossless
-///   render — and even then the caller re-uses its own borrow).
+/// Result of the lossy-recoverable render attempt in [`SmartCrusher::crush_array_lossy`]. `pending_ccr_writes` carries the deferred store writes backing its markers ([`PersistMode::Collect`]);
+/// the routing layer commits them IFF this render ships — a discarded candidate's writes are dropped with it, so the store never holds entries no surfaced marker names (P0-4).
 enum LossyOutcome {
     Crushed {
         result: CrushArrayResult,
@@ -44,27 +22,17 @@ enum LossyOutcome {
 }
 
 /// Routing outcome of [`SmartCrusher::crush_array_routed`] (PERF-4).
-///
-/// The pre-enum shape cloned the FULL input array into a
-/// `CrushArrayResult` on every passthrough/skip path — immediately
-/// re-wrapped (or discarded) by the caller. The enum makes "nothing
-/// changed" a first-class outcome so no kept-items Vec is materialized
-/// for it; internal callers (`process_value`'s DictArray arm, the mixed
-/// dict arm) re-use their own borrow of the array instead.
 pub(super) enum Routed {
-    /// The array ships unchanged. Carries the strategy string
-    /// (`"none:adaptive_at_limit"` / `"skip:<reason>"` /
-    /// `"skip:lossless_only"` / `""` for a reason-less skip).
+    /// The array ships unchanged. Carries the strategy string (`"none:adaptive_at_limit"`
+    /// / `"skip:<reason>"` / `"skip:lossless_only"` / `""` for a reason-less skip).
     Passthrough(String),
     /// A real render shipped: lossless table, survivor-compacted table,
     /// or lossy row-drop.
     Result(CrushArrayResult),
 }
 
-/// A lossless render that cleared its gates, BEFORE materialization
-/// (PERF-4): carries everything except the `items` clone, which is
-/// deferred until the route decision actually picks this candidate —
-/// a discarded candidate never pays the full-array deep clone.
+/// A lossless render that cleared its gates, BEFORE materialization (PERF-4): carries everything except the `items` clone, which is
+/// deferred until the route decision actually picks this candidate — a discarded candidate never pays the full-array deep clone.
 struct LosslessCandidate {
     rendered: String,
     kind: &'static str,
@@ -87,11 +55,8 @@ impl LosslessCandidate {
     }
 }
 
-/// Render the raw array exactly as the walker ships a passthrough —
-/// element-wise through the python-safe writer, byte-identical to
-/// `python_safe_json_dumps(&Value::Array(items.to_vec()))` without the
-/// deep clone (PERF-4 style). This is the token baseline the small-zone
-/// lossy candidate must strictly beat when no lossless candidate exists.
+/// Render the raw array exactly as the walker ships a passthrough — element-wise through the python-safe writer, byte-identical to `python_safe_json_dumps(&Value::Array(items.to_vec()))`
+/// without the deep clone (PERF-4 style). This is the token baseline the small-zone lossy candidate must strictly beat when no lossless candidate exists.
 fn render_array_string(items: &[Value]) -> String {
     use crate::util::pyjson::write_python_safe_json;
     let mut out = String::new();
@@ -122,57 +87,16 @@ fn passthrough_result(items: &[Value], strategy_info: String) -> CrushArrayResul
 
 impl SmartCrusher {
     /// Compress an array of dict items.
-    ///
-    /// Direct port of `_crush_array` (Python line 2400-2687) with the
-    /// retired optional subsystems (learning / feedback / telemetry)
-    /// in their disabled behavior and CCR wired live. See module-level
-    /// docs for the rationale.
-    ///
-    /// # Pipeline
-    ///
-    /// 1. Compute `item_strings` once (used as input to adaptive
-    ///    sizing and downstream relevance scoring).
-    /// 2. `compute_optimal_k` → `adaptive_k`.
-    /// 3. If `n <= adaptive_k`, route the tier-1 zone
-    ///    (`small_array_route`): lossless candidate vs the EFF-3
-    ///    CCR-backed lossy candidate vs passthrough.
-    /// 4. `analyzer.analyze_array(items)` → `analysis`.
-    /// 5. If `analysis.recommended_strategy == Skip`, return passthrough
-    ///    with a `skip:<reason>` strategy string.
-    /// 6. `planner.create_plan(analysis, items, query_context, ...)`.
-    /// 7. `execute_plan(plan, items)` → result.
-    /// 8. Strategy info = `analysis.recommended_strategy.as_str()`.
     pub fn crush_array(&self, items: &[Value], query_context: &str, bias: f64) -> CrushArrayResult {
         match self.crush_array_routed(items, query_context, bias, true) {
-            // Public contract: a passthrough result mirrors the unchanged
-            // input in `items`. Internal callers use the enum directly
-            // and skip this clone (PERF-4).
+            // Public contract: a passthrough result mirrors the unchanged input in `items`. Internal callers use the enum directly and skip this clone (PERF-4).
             Routed::Passthrough(strategy_info) => passthrough_result(items, strategy_info),
             Routed::Result(result) => result,
         }
     }
 
-    /// [`SmartCrusher::crush_array`] with the CCR store writes
-    /// switchable (COR-28) and the passthrough outcome unmaterialized
-    /// (PERF-4 — see [`Routed`]).
-    ///
-    /// `persist = false` — used by the mixed-array dict arm — runs the
-    /// exact same pipeline and returns a byte-identical result: the
-    /// hash, marker text and therefore the `MinTokens` routing decision
-    /// are all computed as usual; ONLY the store writes are skipped.
-    /// That caller consumes just the kept-items set (plus a PURE
-    /// lossless `compacted` render) and surfaces no marker naming the
-    /// inner hash — its caller appends a whole-mixed-array sentinel of
-    /// its own — so a persisted blob + chunks + index would be orphan
-    /// entries nothing can ever retrieve, burning the COR-4-bounded
-    /// store capacity.
-    ///
-    /// Contract for `persist = false` callers: NEVER surface
-    /// `dropped_summary` / `ccr_hash` / a sentinel-bearing survivor
-    /// `compacted` render from the result — a surfaced pointer to an
-    /// unpersisted hash would dangle (and trip the Python mirror's
-    /// COR-5 fail-open). The pure lossless `compacted` render
-    /// (`dropped_summary` empty) carries no pointer and is safe to ship.
+    /// `persist=false` computes the same candidate and routing metadata without store writes. Callers may use
+    /// only pointer-free lossless output; never surface hashes or dropped summaries that were not persisted.
     pub(super) fn crush_array_routed(
         &self,
         items: &[Value],
@@ -193,11 +117,8 @@ impl SmartCrusher {
         };
         let adaptive_k = compute_optimal_k(&item_str_refs, bias, 3, max_k);
 
-        // Tier-1 boundary: the array fits inside the adaptive budget.
-        // Historically this zone was LOSSLESS-OR-PASSTHROUGH only; EFF-3
-        // adds the lossy-recoverable candidate (CCR-store-backed, default
-        // MinTokens policy only) so small arrays — the COMMON case for
-        // real tool output — can offload too. See `small_array_route`.
+        // Tier-1 boundary: the array fits inside the adaptive budget. this zone was LOSSLESS-OR-PASSTHROUGH only; EFF-3 adds the lossy-recoverable
+        // candidate (CCR-store-backed, default MinTokens policy only) so small arrays — the COMMON case for real tool output — can offload too.
         if items.len() <= adaptive_k {
             return self.small_array_route(
                 items,
@@ -208,32 +129,15 @@ impl SmartCrusher {
             );
         }
 
-        // ── Lossless candidate ──
-        //
-        // Run the compaction stage ONCE if present. The lossless render keeps
-        // every row (nothing dropped); it is a valid candidate only when
-        // it actually compacted into a decoder-verifiable shape (COR-13:
-        // a flat `Table` — `Buckets`/`Nested` renders are unverifiable by
-        // the reference decoder and DECLINE, fail-closed) and clears the
-        // byte-savings gate — below that gate the rendering is not worth
-        // shipping over either the raw array or the lossy view, so it is
-        // not a real alternative.
-        //
-        // The single run also supplies `lossless_uses_opaque` (computed from
-        // the same `Compaction` value below) so we do NOT call stage.run a
-        // second time — that was the redundant hot-path double-compaction
-        // eliminated by U8.
+        // ── Lossless candidate ── Run the compaction stage ONCE if present. The lossless render keeps every row (nothing
+        // dropped); it is a valid candidate only when it actually compacted into a decoder-verifiable shape (COR-13: a flat `Table`
         let (lossless_candidate, lossless_uses_opaque) =
             if let Some(stage) = self.compaction.as_ref() {
                 let (c, rendered) = stage.run(items);
                 // Read `contains_opaque_ref` before `c` is potentially moved.
                 let uses_opaque = c.contains_opaque_ref();
-                // Strict mode tightens the lossless claim to "reconstructible
-                // from the visible output ALONE": an opaque-substituted render
-                // hides blob bytes behind a `<<ccr:` pointer (recoverable, but
-                // a visible information reduction), so it is NOT a candidate
-                // under `lossless_only` — same rule the small-array zone
-                // already applies unconditionally.
+                // Strict mode tightens the lossless claim to "reconstructible from the visible output ALONE": an opaque-substituted render hides blob
+                // bytes behind a `<<ccr:` pointer (recoverable, but a visible information reduction), so it is NOT a candidate under `lossless_only`.
                 let opaque_ok = !(self.config.lossless_only && uses_opaque);
                 let candidate = if c.is_decoder_verifiable() && opaque_ok {
                     let input_bytes = estimate_array_bytes(&item_strings);
@@ -244,14 +148,7 @@ impl SmartCrusher {
                     };
                     if savings_ratio >= self.config.lossless_min_savings_ratio {
                         let kind = compaction_kind_str(&c);
-                        // This render CAN carry opaque substitutions
-                        // (decoder-verifiability excludes only Nested
-                        // cells) — collect them typed (§4.2 R2). The refs
-                        // ride the candidate: they ship iff it ships, and
-                        // a discarded candidate's refs drop with it —
-                        // exactly like its pending store writes. The
-                        // `items` clone is deferred until the candidate
-                        // WINS (PERF-4) — see [`LosslessCandidate`].
+                        // This render CAN carry opaque substitutions (decoder-verifiability excludes only Nested cells) — collect them typed (§4.2 R2).
                         let mut dropped_refs: Vec<DroppedRef> = Vec::new();
                         c.collect_opaque_refs(&mut dropped_refs);
                         Some(LosslessCandidate {
@@ -270,14 +167,8 @@ impl SmartCrusher {
                 (None, false)
             };
 
-        // ── Strict lossless-or-passthrough (`lossless_only`) ──
-        //
-        // The lossy-recoverable candidate is NEVER BUILT in this mode: no
-        // rows are dropped, no `<<ccr:HASH>>` sentinel is minted, and no
-        // CCR store write happens (`crush_array_lossy` is not invoked, so
-        // there are no deferred writes to leak either). Ship the proven-
-        // lossless render when it cleared its gates; otherwise pass every
-        // row through untouched.
+        // ── Strict lossless-or-passthrough (`lossless_only`) ── The lossy-recoverable candidate is NEVER BUILT in this mode: no rows are dropped, no
+        // `<<ccr:HASH>>` sentinel is minted, and no CCR store write happens (`crush_array_lossy` is not invoked, so there are no deferred writes to leak either).
         if self.config.lossless_only {
             return match lossless_candidate {
                 Some(lossless) => Routed::Result(lossless.into_result(items)),
@@ -285,41 +176,11 @@ impl SmartCrusher {
             };
         }
 
-        // ── Lossy-recoverable candidate ──
-        //
-        // Compress inline + cache the full original via CCR. The runtime
-        // caller stashes the full input keyed by `ccr_hash` so a retrieval
-        // tool can serve dropped rows back to the LLM on demand. **No data
-        // is lost** — "lossy" means "compressed view inline; full payload
-        // retrievable via CCR cache." When the array is not safe to crush
-        // (the analyzer's `Skip` gate) there is NO lossy alternative — the
-        // outcome carries the `skip:<reason>` passthrough so the routing
-        // layer can ship it when there's also no lossless render.
-        // Does the lossless compaction render rely on opaque-blob
-        // substitution (heavy base64/hex fields replaced by an
-        // `<<ccr:HASH,KIND,SIZE>>` pointer while EVERY row stays visible)?
-        // That path is the dedicated, better-suited treatment for blob-
-        // bearing rows: it preserves each row's light fields (id/name/…)
-        // inline instead of dropping whole rows. When it applies, the
-        // entropy-floor override must stand down so it does not hijack
-        // blob data into a row-drop render — both are recoverable, but the
-        // opaque-substitution view keeps strictly more visible per row.
-        //
-        // `lossless_uses_opaque` is derived from the SAME Compaction value
-        // produced by the single stage.run call above (U8 dedup).
+        // Build a CCR-backed row-drop candidate only when the full original remains recoverable. If lossless compaction
+        // already uses opaque substitution, prefer it because it keeps each row's non-opaque fields visible.
 
-        // P0-4: build the lossy candidate with its CCR store writes
-        // DEFERRED (collect-only). Committing at build time orphaned the
-        // blob + chunks + index in the store whenever the routing below
-        // chose the lossless render — wasted COR-4-bounded capacity and
-        // misleading store stats under hashes no surfaced marker names.
-        // The deferred writes are committed exactly when the lossy render
-        // ships (the two ship-lossy arms below), so persistence for
-        // SHIPPED lossy output remains UNCONDITIONAL — the recovery
-        // invariant is timing-shifted, never weakened. Hash/marker
-        // computation is mode-independent, so routing cannot shift.
-        // `persist = false` (COR-28, mixed dict arm) still means NO
-        // writes ever: Skip mode.
+        // P0-4: build the lossy candidate with its CCR store writes DEFERRED (collect-only). Committing at build time orphaned the blob + chunks + index in the store
+        // whenever the routing below chose the lossless render — wasted COR-4-bounded capacity and misleading store stats under hashes no surfaced marker names.
         let persist_mode = if persist {
             PersistMode::Collect
         } else {
@@ -334,16 +195,8 @@ impl SmartCrusher {
             persist_mode,
         );
 
-        // ── Route between the recoverable renders ──
-        //
-        // When BOTH a lossless render and a lossy DROP render exist they
-        // are each 100% recoverable: lossless shows every row; lossy
-        // surfaces a `<<ccr:HASH>>` pointer to the CCR-stored originals.
-        // So the choice is a pure size decision with no information loss.
-        // Under `MinTokens` (the default) ship the fewer-TOKEN render
-        // (bytes mislead — hex vs base64); ties prefer lossless (more rows
-        // visible). Under `LosslessFirst` keep the legacy behavior:
-        // lossless wins whenever it cleared its gate.
+        // Route between the recoverable renders ── When BOTH a lossless render and a lossy DROP render exist they are each 100% recoverable lossless shows every
+        // row; lossy surfaces a `<<ccr:HASH>>` pointer to the CCR-stored originals. Under `MinTokens` (the default) ship the fewer-TOKEN render (bytes mislead
         match (lossless_candidate, lossy) {
             (
                 Some(lossless),
@@ -356,14 +209,10 @@ impl SmartCrusher {
                 // its deferred writes drop with it (no orphans, P0-4).
                 RoutingPolicy::LosslessFirst => Routed::Result(lossless.into_result(items)),
                 RoutingPolicy::MinTokens => {
-                    // The lossless candidate's render IS its final
-                    // model-visible string — count it directly (PERF-4:
-                    // no materialized result, no clone, same count).
+                    // The lossless candidate's render IS its final model-visible string — count it directly (PERF-4: no materialized result, no clone, same count).
                     let lossless_tokens = self.tokenizer.count_text(&lossless.rendered);
                     let lossy_tokens = self.render_token_count(&lossy);
-                    // Lossy wins only when STRICTLY fewer tokens; ties (and
-                    // lossless-fewer) → lossless: more rows visible at no
-                    // extra token cost.
+                    // Lossy wins only when STRICTLY fewer tokens; ties (and lossless-fewer) → lossless: more rows visible at no extra token cost.
                     if lossy_tokens < lossless_tokens {
                         // Lossy SHIPS → commit its recovery entries now
                         // (unconditional persist for shipped output).
@@ -376,13 +225,11 @@ impl SmartCrusher {
                     }
                 }
             },
-            // Lossless render valid but the array isn't droppable (Skip):
-            // ship lossless — it shows every row losslessly. (A non-
-            // droppable array should never drop, and lossless never drops.)
+            // Lossless render valid but the array isn't droppable (Skip): ship lossless — it shows every
+            // row losslessly. (A non- droppable array should never drop, and lossless never drops.)
             (Some(lossless), LossyOutcome::Skip(_)) => Routed::Result(lossless.into_result(items)),
-            // Only the lossy DROP render is valid → ship it. Its recovery
-            // entries are committed on the way out (same unconditional
-            // guarantee as before the deferral; only the timing moved).
+            // Only the lossy DROP render is valid → ship it. Its recovery entries are committed on the
+            // way out (same unconditional guarantee as before the deferral; only the timing moved).
             (
                 None,
                 LossyOutcome::Crushed {
@@ -399,52 +246,8 @@ impl SmartCrusher {
         }
     }
 
-    /// Route an array inside the tier-1 zone (`items.len() <= adaptive_k`).
-    ///
-    /// Historically this zone was LOSSLESS-OR-PASSTHROUGH: a cleanly-
-    /// tabular small array (df/ps-style tool output) ships the verified
-    /// lossless render, everything else passes through — small arrays
-    /// NEVER produced a lossy-recoverable candidate, capping the most
-    /// common real tool-output size at the lossless ceiling (EFF-3:
-    /// disk@9 landed 50% where its size-90 twin reached 91%+).
-    ///
-    /// The zone now builds up to TWO candidates and arbitrates:
-    ///
-    /// - **Lossless** — same four gates as before, extracted verbatim
-    ///   into [`SmartCrusher::small_array_lossless_candidate`].
-    /// - **Lossy-recoverable** (EFF-3) — the same row-drop candidate the
-    ///   big-array path builds, eligible ONLY when every guarantee
-    ///   holds:
-    ///   - `lossless_only` is off (strict mode never builds lossy);
-    ///   - the policy is `MinTokens` (`LosslessFirst` keeps the legacy
-    ///     lossless-or-passthrough zone — the lossless round-trip suite
-    ///     asserts that shape directly);
-    ///   - a CCR store is configured — a small-zone drop MUST be
-    ///     recoverable. Unlike the big path there is NO storeless legacy
-    ///     mode here: pre-EFF-3 this zone never dropped, so a storeless
-    ///     drop would be a brand-new unrecoverable loss;
-    ///   - a drop is actually possible under the CCR-backed keep budget
-    ///     (floor 5): `items.len() > ccr_backed_keep_budget(adaptive_k)`.
-    ///
-    ///   Query pins and critical rows (errors / outliers / anomalies)
-    ///   are respected by construction — the candidate is built by the
-    ///   same `crush_array_lossy` planner path whose
-    ///   `prioritize_indices` pins them beyond budget.
-    ///
-    /// Arbitration (MinTokens semantics, ties → more rows visible):
-    /// - both candidates → lossy ships IFF strictly fewer tokens than
-    ///   the lossless render;
-    /// - lossy only → lossy ships IFF strictly fewer tokens than the RAW
-    ///   passthrough render (the sentinel must pay for itself — a
-    ///   token-inflating drop never ships);
-    /// - lossless only → lossless ships (pre-EFF-3 contract, unchanged);
-    /// - neither → passthrough (`"none:adaptive_at_limit"`).
-    ///
-    /// P0-4 semantics carry over: the lossy candidate's store writes are
-    /// deferred ([`PersistMode::Collect`]) and committed IFF it ships —
-    /// a discarded candidate leaves no orphan entries. `persist = false`
-    /// (COR-28 mixed dict arm) still means [`PersistMode::Skip`]: no
-    /// writes ever, routing byte-identical.
+    /// For small arrays, compare lossless and CCR-backed lossy candidates under `MinTokens`. Lossy requires a store, an
+    /// actual drop, and fewer tokens than the alternative; strict/lossless-first policies retain passthrough semantics.
     fn small_array_route(
         &self,
         items: &[Value],
@@ -456,10 +259,8 @@ impl SmartCrusher {
         let (lossless_candidate, lossless_uses_opaque) =
             self.small_array_lossless_candidate(items, item_strings);
 
-        // Strict lossless-or-passthrough: the lossy candidate is NEVER
-        // BUILT (no drops, no markers, no store writes) — same rule as
-        // the big-array path, same passthrough strategy string this
-        // zone always used.
+        // Strict lossless-or-passthrough: the lossy candidate is NEVER BUILT (no drops, no markers, no store
+        // writes) — same rule as the big-array path, same passthrough strategy string this zone always used.
         if self.config.lossless_only {
             return match lossless_candidate {
                 Some(lossless) => Routed::Result(lossless.into_result(items)),
@@ -476,12 +277,8 @@ impl SmartCrusher {
             } else {
                 PersistMode::Skip
             };
-            // `!lossless_uses_opaque` mirrors the big path: when the
-            // compactor wants opaque-blob substitution for this array
-            // (a render the small zone REJECTS as a candidate — values
-            // must stay verbatim), the entropy-floor override stands
-            // down so blob-bearing rows are not hijacked into a
-            // row-drop render instead.
+            // `!lossless_uses_opaque` mirrors the big path: when the compactor wants opaque-blob
+            // substitution for this array (a render the small zone REJECTS as a candidate.
             Some(self.crush_array_lossy(
                 items,
                 query_context,
@@ -504,9 +301,8 @@ impl SmartCrusher {
             ) => {
                 let lossless_tokens = self.tokenizer.count_text(&lossless.rendered);
                 let lossy_tokens = self.render_token_count(&lossy);
-                // Lossy wins only when STRICTLY fewer tokens; ties (and
-                // lossless-fewer) → lossless: more rows visible at no
-                // extra token cost. Same rule as the big-array race.
+                // Lossy wins only when STRICTLY fewer tokens; ties (and lossless-fewer) → lossless:
+                // more rows visible at no extra token cost. Same rule as the big-array race.
                 if lossy_tokens < lossless_tokens {
                     self.commit_ccr_writes(pending_ccr_writes);
                     Routed::Result(lossy)
@@ -524,10 +320,8 @@ impl SmartCrusher {
                     pending_ccr_writes,
                 }),
             ) => {
-                // No lossless candidate: the alternative is the RAW
-                // passthrough, so the drop render must strictly beat
-                // THAT — near the keep floor a sentinel can cost more
-                // than the rows it hides.
+                // No lossless candidate: the alternative is the RAW passthrough, so the drop render must
+                // strictly beat THAT — near the keep floor a sentinel can cost more than the rows it hides.
                 let passthrough_tokens = self.tokenizer.count_text(&render_array_string(items));
                 let lossy_tokens = self.render_token_count(&lossy);
                 if lossy_tokens < passthrough_tokens {
@@ -543,29 +337,8 @@ impl SmartCrusher {
         }
     }
 
-    /// The small-array LOSSLESS attempt (pre-EFF-3 gate logic, extracted
-    /// verbatim). Returns the candidate plus whether the compacted form
-    /// relies on `OpaqueRef` substitution (the big path's
-    /// `lossless_uses_opaque`, consumed by the override stand-down).
-    ///
-    /// Four gates protect the passthrough default beyond the big-array
-    /// ratio check:
-    /// - decoder-verifiable shape only (COR-13, fail-closed): the
-    ///   lossless claim is "exact reconstruction through the reference
-    ///   decoder", which today covers flat `Table`s only — `Buckets`
-    ///   renders and `Nested` cells DECLINE until the decoder covers
-    ///   them;
-    /// - no `OpaqueRef` substitution anywhere — on a small array every
-    ///   value must stay verbatim in the visible output (substituting a
-    ///   file's content with a CCR pointer would hide exactly what the
-    ///   model was asked to read);
-    /// - absolute saving ≥ `SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES` — the
-    ///   schema line must pay for itself; toy arrays stay passthrough;
-    /// - the same `lossless_min_savings_ratio` gate as the big-array
-    ///   attempt. (EFF-4 measured relaxing this gate to 0.15 for the
-    ///   small zone: exactly neutral on every benchmark dataset — the
-    ///   EFF-3 lossy candidate out-arbitrates mid-window lossless
-    ///   renders under `MinTokens` — so the relaxation was reverted.)
+    /// Small-array lossless compaction requires decoder-verifiable flat tables, no opaque substitutions,
+    /// a minimum absolute byte saving, and the normal savings-ratio gate. Otherwise return passthrough.
     fn small_array_lossless_candidate(
         &self,
         items: &[Value],
@@ -593,9 +366,8 @@ impl SmartCrusher {
             && savings_ratio >= self.config.lossless_min_savings_ratio
         {
             let kind = compaction_kind_str(&c);
-            // The `!contains_opaque_ref` gate above means this collects
-            // nothing today; collecting anyway keeps the typed carrier
-            // correct by construction if the gate ever changes.
+            // The `!contains_opaque_ref` gate above means this collects nothing today; collecting
+            // anyway keeps the typed carrier correct by construction if the gate ever changes.
             let mut dropped_refs: Vec<DroppedRef> = Vec::new();
             c.collect_opaque_refs(&mut dropped_refs);
             (
@@ -611,47 +383,23 @@ impl SmartCrusher {
         }
     }
 
-    /// Build the lossy-recoverable render of `items` (row-drop + CCR
-    /// sentinel). Returns [`LossyOutcome::Skip`] (carrying the
-    /// `skip:<reason>` passthrough) when the array is not safe to crush
-    /// (the analyzer's `Skip` gate) — there is no DROP render in that
-    /// case. Otherwise returns [`LossyOutcome::Crushed`] with the
-    /// row-dropped render plus its deferred store writes: a chosen lossy
-    /// render is ALWAYS recoverable — the routing layer commits the
-    /// writes iff this render ships (P0-4).
-    ///
-    /// Factored out of `crush_array` so the routing layer can size this
-    /// candidate against the lossless one before deciding which to ship.
-    /// The rendered bytes are byte-identical to the pre-routing lossy
-    /// path — only the place it is *called from* (and, since P0-4, the
-    /// store-write timing) changed.
+    /// Build the lossy-recoverable render of `items` (row-drop + CCR sentinel). there is no DROP render in that case. Factored
+    /// out of `crush_array` so the routing layer can size this candidate against the lossless one before deciding which to ship.
     fn crush_array_lossy(
         &self,
         items: &[Value],
         query_context: &str,
         item_strings: &[String],
         adaptive_k: usize,
-        // When false, the entropy-floor crushability override stands down
-        // (a better-suited lossless render — e.g. opaque-blob substitution
-        // — exists for this array, so we must not hijack it into a drop).
+        // When false, the entropy-floor crushability override stands down (a better-suited lossless render
+        // — e.g. opaque-blob substitution — exists for this array, so we must not hijack it into a drop).
         allow_skip_override: bool,
-        // How the drop's store writes are handled (hash + markers are
-        // computed identically in every mode — routing stays
-        // byte-identical). `Collect` defers them into the returned
-        // outcome for commit-on-ship (P0-4); `Skip` (COR-28, mixed dict
-        // arm) never writes. See `crush_array_inner` for the contract.
+        // How the drop's store writes are handled (hash + markers are computed identically in every mode — routing stays byte-identical).
+        // `Collect` defers them into the returned outcome for commit-on-ship (P0-4); `Skip` (COR-28, mixed dict arm) never writes.
         persist_mode: PersistMode,
     ) -> LossyOutcome {
-        // CCR-BACKED AGGRESSIVE BUDGET: when a CCR store is configured,
-        // every dropped row is guaranteed recoverable (unconditional
-        // persist + surfaced `<<ccr:HASH>>` pointer — the invariant the
-        // adversarial loop locked). Under that guarantee the visible
-        // sample only has to carry the *signal* — errors, outliers,
-        // anomalies, query-relevant rows (all pinned beyond budget by
-        // `prioritize_indices`) — not a generic cross-section, so the
-        // keep budget is halved. Without a store the drop would be
-        // unrecoverable and the budget stays at the full `adaptive_k`
-        // (legacy / parity mode).
+        // CCR-BACKED AGGRESSIVE BUDGET when a CCR store is configured, every dropped row is guaranteed recoverable (unconditional persist + surfaced `<<ccr:HASH>>`
+        // pointer the invariant the adversarial loop locked). errors, outliers, anomalies, query-relevant rows (all pinned beyond budget by `prioritize_indices`)
         let effective_max_items = if self.ccr_store.is_some() {
             ccr_backed_keep_budget(adaptive_k)
         } else {
@@ -663,41 +411,8 @@ impl SmartCrusher {
             .analyzer
             .analyze_array_with_strings(items, Some(item_strings));
 
-        // ── CCR-backed crushability override (entropy floor) ──
-        //
-        // The analyzer's crushability gate refuses to crush near-unique,
-        // high-uniqueness arrays UNLESS a "signal" (a numeric anomaly, a
-        // change point, an error keyword) happens to be present — see
-        // `analyze_crushability` cases 2 & 4 (`unique_entities_no_signal`,
-        // `medium_uniqueness_no_signal`). That gate was written for the
-        // PERMANENT-LOSS world: with no signal telling us which distinct
-        // row matters, dropping any of them risked losing it forever, so
-        // the safe choice was to keep them all visible.
-        //
-        // Under the CCR recovery invariant that premise is gone. When a
-        // store is configured every dropped row is persisted + surfaced
-        // via a `<<ccr:HASH>>` pointer, so a smaller visible sample loses
-        // NO information — the rest is retrievable from the output alone.
-        // "We don't know which row matters" therefore no longer argues for
-        // keeping everything visible; it argues for a bounded recoverable
-        // sample. Worse, the gate is NON-DETERMINISTIC on exactly this
-        // data: whether a uniformly-random integer column produces a >2σ
-        // anomaly is a per-seed coin-flip, so the SAME near-unique shape
-        // flips between "skip → ship all rows" (~34% reduction) and
-        // "crush → drop+recover" (~94%) across seeds. That is the
-        // erratic 24-94% scatter the verifier measured.
-        //
-        // Fix: when a CCR store guarantees recovery, do NOT skip on a
-        // no-signal reason — re-derive the real pattern strategy (the one
-        // `select_strategy` would pick if `crushable` were true) and crush.
-        // This is deterministic (independent of the noise signals) and
-        // aggressive at the entropy floor. The result still flows through
-        // `MinTokens` routing below, so the lossy render only SHIPS when it
-        // is actually fewer tokens — the override just makes the
-        // recoverable candidate EXIST every time, not at the mercy of a
-        // random anomaly. STRUCTURAL skips (mixed types, too-few-items,
-        // non-dict) are NOT overridden: those arrays are genuinely
-        // un-sampleable, not merely signal-free.
+        // With CCR backing, override only no-signal crushability skips: distinct sampleable rows remain recoverable,
+        // so random anomaly presence must not decide whether a candidate exists. Structural skips remain fail-closed.
         if analysis.recommended_strategy == CompressionStrategy::Skip
             && allow_skip_override
             && self.ccr_store.is_some()
@@ -714,10 +429,7 @@ impl SmartCrusher {
             }
         }
 
-        // Crushability gate: not safe to crush → no DROP candidate. Carry
-        // the `skip:<reason>` strategy string so the caller can ship a
-        // passthrough when there's also no lossless render (PERF-4: the
-        // unchanged items are never cloned here).
+        // Crushability gate: not safe to crush → no DROP candidate.
         if analysis.recommended_strategy == CompressionStrategy::Skip {
             let reason = match &analysis.crushability {
                 Some(c) => format!("skip:{}", c.reason),
@@ -739,16 +451,8 @@ impl SmartCrusher {
         // never changes the row count) so it can gate the stamping below.
         let dropped_count = items.len().saturating_sub(result.len());
 
-        // Field-aware multiplicity (DESIGN.md Imp2). When rows that are
-        // identical-except-identity collapse under the stable-projection
-        // hash, the kept representative carries a `_dup_count` so the
-        // model knows N rows existed. This fires ONLY when the plan
-        // actually dropped rows (COR-33: on a no-drop plan every original
-        // row is already visible, so stamping is token inflation with
-        // zero compression) AND real duplication is present (group size
-        // > 1); for all-distinct data (e.g. unique-subject git logs,
-        // search results) every group is size 1, no key is added, and
-        // the output bytes are unchanged.
+        // When identity-only variants collapse under the stable-projection hash, annotate the
+        // kept representative with `_dup_count`; emit it only when rows were actually dropped.
         if dropped_count > 0 {
             let exclude = compute_exclude_set(&analysis.field_stats, items);
             if !exclude.is_empty() {
@@ -756,14 +460,8 @@ impl SmartCrusher {
             }
         }
 
-        // CCR persistence + marker emission. **The store write is the
-        // cornerstone of CCR's no-data-loss guarantee:** whenever rows
-        // are dropped we hash the full original and stash it in the
-        // configured store so a dropped needle is *always* recoverable
-        // — never silently lost. The plan's `keep_indices` name the
-        // surviving rows, so their complement is EXACTLY the dropped
-        // set — threaded through so only dropped rows get granular
-        // chunks (COR-4: kept rows must never flood the bounded store).
+        // CCR persistence + marker emission. **The store write is the cornerstone of CCR's no-data-loss guarantee:** whenever rows are dropped
+        // we hash the full original and stash it in the configured store so a dropped needle is *always* recoverable — never silently lost.
         let (ccr_hash, dropped_summary, row_drop_refs, pending_ccr_writes) =
             match self.persist_dropped(items, dropped_count, persist_mode) {
                 Some(persisted) => {
@@ -780,44 +478,16 @@ impl SmartCrusher {
                 None => (None, String::new(), Vec::new(), Vec::new()),
             };
 
-        // ── Survivor compaction: lossless re-encoding of the kept rows ──
-        //
-        // The lossy selection above decides WHICH rows stay visible; this
-        // step only decides how those rows are RENDERED. When the
-        // compaction stage can render the survivors as a CSV-schema
-        // table that is meaningfully smaller than the JSON array form,
-        // ship that rendering with the `{"_ccr_dropped": ...}` sentinel
-        // appended as a final line. Every kept value stays verbatim in
-        // the output and the recovery pointer still names the full
-        // original. Gated on:
-        // - decoder-verifiable shape only (COR-13, fail-closed): the
-        //   survivor render must be provable by the same reference
-        //   decoder as the lossless tier — flat `Table` only,
-        //   `Buckets`/`Nested` renders decline to the plain JSON form;
-        // - no `OpaqueRef` substitution (survivor values must stay
-        //   verbatim — same rule as the small-array lossless zone);
-        // - absolute saving ≥ `LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES`
-        //   vs the exact bytes the JSON form would ship.
+        // Survivor compaction this step only decides how those rows are RENDERED. When the compaction stage can render the survivors as a CSV-schema table
+        // that is meaningfully smaller than the JSON array form, ship that rendering with the `{"_ccr_dropped": ...}` sentinel appended as a final line.
         if !dropped_summary.is_empty() {
             if let Some(stage) = &self.compaction {
                 let (mut c, _) = stage.run(&result);
-                // F4: the survivor compaction only saw the KEPT rows, so its
-                // `original_count` is the survivor count. Restore the TRUE
-                // original total (`items.len()`) so the inline `[kept/total]`
-                // header lets a consumer recover the original row count from
-                // the text itself, not only from the offload marker.
+                // F4: the survivor compaction only saw the KEPT rows, so its `original_count` is the survivor count. Restore the TRUE original total (`items.len()`)
+                // so the inline `[kept/total]` header lets a consumer recover the original row count from the text itself, not only from the offload marker.
                 set_table_original_count(&mut c, items.len());
-                // review F1b: the survivor render's per-column constant folds
-                // and dictionary encodings are computed over the SURVIVOR subset
-                // only. Left alone they would assert, over the whole array, a
-                // fact that only holds for the shown rows — a false-universal
-                // `col:type=value` constant (e.g. every event is a
-                // `payout_request` when only the payout_request rows survived)
-                // or a `__dict:` that enumerates only the categories present in
-                // the survivors while others live solely in the offloaded rows.
-                // Demote any such encoding that does NOT hold over ALL rows
-                // (checked against the full `items`). Lossless: the IR rows keep
-                // every survivor cell, so a demoted column just renders per-row.
+                // review F1b: the survivor render's per-column constant folds and dictionary encodings are computed over the SURVIVOR
+                // subset only. Left alone they would assert, over the whole array, a fact that only holds for the shown rows.
                 let _ = demote_subset_only_encodings(&mut c, items);
                 // The header now carries the true total, so render from the
                 // adjusted compaction.
@@ -834,18 +504,8 @@ impl SmartCrusher {
                     let compact_len = rendered.len() + 1 + sentinel_line.len();
                     if clears_lossy_survivor_floor(json_form.len().saturating_sub(compact_len)) {
                         let kind = compaction_kind_str(&c);
-                        // F4: a whole-array numeric summary (min/max/sum/count
-                        // over ALL original rows, not just survivors) so counts
-                        // and aggregates survive the row-drop. Appended AFTER the
-                        // survivor-vs-JSON savings-floor gate (`compact_len` above
-                        // excludes it), so it never changes THAT gate's decision.
-                        // It IS part of the final shipped render, though, so its
-                        // token weight DOES count in the outer lossy-vs-lossless
-                        // `MinTokens` race (via `render_token_count`): a heavy
-                        // stats line can tip a small array to its all-rows lossless
-                        // render — that is exactly what flips disk@9 today. The
-                        // reference decoder skips `__stats:` lines when
-                        // reconstructing rows.
+                        // Appended AFTER the survivor-vs-JSON savings-floor gate (`compact_len` above excludes it) so it never changes THAT gate's decision. It IS part
+                        // of the final shipped render, though so its token weight DOES count in the outer lossy-vs-lossless `MinTokens` race (via `render_token_count`)
                         let table_body = rendered.trim_end_matches('\n');
                         let rendered_with_sentinel = match numeric_stats_line(&c, items) {
                             Some(stats_line) => {
@@ -853,11 +513,7 @@ impl SmartCrusher {
                             }
                             None => format!("{table_body}\n{sentinel_line}"),
                         };
-                        // Survivor renders are gated opaque-free
-                        // (`!contains_opaque_ref` above) so this collects
-                        // nothing today — kept for correctness under gate
-                        // changes. Render order: opaque cells first, the
-                        // sentinel (row-drop) is the render's last line.
+                        // Survivor renders are gated opaque-free (`!contains_opaque_ref` above) so this collects nothing today — kept for correctness under gate changes.
                         let mut dropped_refs: Vec<DroppedRef> = Vec::new();
                         c.collect_opaque_refs(&mut dropped_refs);
                         dropped_refs.extend(row_drop_refs);
@@ -895,34 +551,15 @@ impl SmartCrusher {
         }
     }
 
-    /// Count the tokens of the FINAL model-visible string a
-    /// `CrushArrayResult` renders to — the exact text `process_value`
-    /// substitutes for this array. Used by the `MinTokens` routing policy
-    /// to size the lossless vs lossy-recoverable candidates against each
-    /// other. The two renders are:
-    ///
-    /// - `compacted = Some(s)` → the string `s` (lossless table, or lossy
-    ///   survivor-compacted table whose last line is the sentinel).
-    /// - `compacted = None` → the JSON array `[..items, {"_ccr_dropped":
-    ///   marker}]` exactly as `process_value` emits it (the sentinel is
-    ///   only appended when something was dropped).
-    ///
-    /// This mirrors `process_value`'s `DictArray` substitution so the
-    /// token count reflects what the model actually sees, not an
-    /// approximation.
+    /// Count the tokens of the FINAL model-visible string a `CrushArrayResult` renders to — the exact text `process_value` substitutes
+    /// for this array. Used by the `MinTokens` routing policy to size the lossless vs lossy-recoverable candidates against each other.
     fn render_token_count(&self, result: &CrushArrayResult) -> usize {
         let rendered = self.render_result_string(result);
         self.tokenizer.count_text(&rendered)
     }
 
-    /// Render a `CrushArrayResult` to the string `process_value`
-    /// substitutes for the array (see [`SmartCrusher::render_token_count`]).
-    ///
-    /// Composes the `[item0,item1,...,sentinel?]` render element-wise —
-    /// byte-identical to `python_safe_json_dumps(&Value::Array(...))`
-    /// (the serializer is context-free; `,` separators are appended
-    /// here) — without deep-cloning the items into a temporary array
-    /// just to count tokens (PERF-4).
+    /// Render a `CrushArrayResult` to the string `process_value` substitutes for the array (see [`SmartCrusher::render_token_count`]). Composes the `[item0,item1,...,sentinel?]` render element-wise — byte-identical
+    /// to `python_safe_json_dumps(&Value::Array(...))` (the serializer is context-free; `,` separators are appended here) — without deep-cloning the items into a temporary array just to count tokens (PERF-4).
     fn render_result_string(&self, result: &CrushArrayResult) -> String {
         use crate::util::pyjson::write_python_safe_json;
 
@@ -947,13 +584,8 @@ impl SmartCrusher {
     }
 }
 
-/// Per-family variance of one excluded (identity) column, folded in a
-/// single pass over the original array. Drives the T5 display fix: an
-/// identity column is safe to SHOW on the representative only when every
-/// object member of the collapsed family carries it with the SAME value;
-/// otherwise row-0's concrete value there is not shared by the family, and
-/// leaving it in place asserts one id recurred `_dup_count` times when N
-/// distinct ids each occurred once.
+/// Drives the T5 display fix: an identity column is safe to SHOW on the representative
+/// only when every object member of the collapsed family carries it with the SAME value.
 struct ColVariance {
     /// First value seen for the column, or `None` until a member carries it.
     first: Option<Value>,
@@ -982,38 +614,15 @@ impl ColVariance {
         }
     }
 
-    /// The column holds one identical value on EVERY object member of the
-    /// family, so displaying that concrete value on the representative is
-    /// truthful (a genuine duplicate) rather than a fabricated recurrence.
+    /// The column holds one identical value on EVERY object member of the family, so displaying that concrete
+    /// value on the representative is truthful (a genuine duplicate) rather than a fabricated recurrence.
     fn is_uniform(&self, family_object_members: usize) -> bool {
         self.first.is_some() && !self.varies && self.present == family_object_members
     }
 }
 
-/// Stamp `_dup_count` on the kept REPRESENTATIVE of each
-/// stable-projection-hash family (over ALL original `items`, with
-/// `exclude` identity columns filtered) that has more than one member
-/// (DESIGN.md Imp2), and render its VARYING identity columns as the
-/// `<varies>` sentinel (T5).
-///
-/// `_dup_count = N` records that N original rows shared this row's
-/// value-bearing content (differing only in excluded identity columns).
-/// Only the FIRST kept member of a family — its representative — is
-/// stamped (COR-33): when several members of the same family stay
-/// visible, stamping each of them made N rows each claim N duplicates,
-/// reading like N² originals — token inflation, not information. Rows
-/// in a singleton family are left untouched, so all-distinct input is
-/// byte-for-byte unchanged.
-///
-/// The representative's excluded identity columns are exactly the ones
-/// that DROVE the collapse, so row-0's concrete value there is not shared
-/// by the family: leaving it in place made the model read one id /
-/// timestamp as recurring N times when N DISTINCT ids each occurred once
-/// (T5). Each such column that actually VARIES across the family is
-/// replaced with the `<varies>` sentinel; a column that is CONSTANT across
-/// the family (a genuine duplicate) keeps its real value. Only the DISPLAY
-/// changes — `_dup_count` is preserved and the dropped rows stay
-/// CCR-recoverable from the full-original store entry, so no data is lost.
+/// Annotate only the first kept representative of each stable-hash duplicate family with `_dup_count`. Replace
+/// identity fields that vary across the family with `<varies>` so one concrete ID is not misrepresented as repeated.
 fn annotate_dup_counts(
     kept: &mut [Value],
     all_items: &[Value],
@@ -1026,12 +635,7 @@ fn annotate_dup_counts(
     /// across its collapsed family (see the function doc; T5).
     const VARIES_SENTINEL: &str = "<varies>";
 
-    // One pass over the WHOLE original array builds, per family hash:
-    //   * `family_size` — objects AND arrays: the `_dup_count` value, kept
-    //     deliberately UNCHANGED so the recorded multiplicity is identical.
-    //   * `object_members` — object members only: the denominator for the
-    //     "present on every member" uniform check below.
-    //   * `col_variance` — per excluded column, whether it varies.
+    // One pass over the WHOLE original array builds, per family hash: * `family_size`.
     let mut family_size: HashMap<String, usize> = HashMap::new();
     let mut object_members: HashMap<String, usize> = HashMap::new();
     let mut col_variance: HashMap<String, HashMap<String, ColVariance>> = HashMap::new();
@@ -1071,9 +675,8 @@ fn annotate_dup_counts(
         let members = object_members.get(&h).copied().unwrap_or(0);
         let family_cols = col_variance.get(&h);
         if let Some(obj) = row.as_object_mut() {
-            // Blank every excluded identity column that VARIES across the
-            // family; a column constant across the family keeps its value
-            // (genuine-duplicate preservation). T5.
+            // Blank every excluded identity column that VARIES across the family; a column
+            // constant across the family keeps its value (genuine-duplicate preservation). T5.
             for name in exclude {
                 if !obj.contains_key(name.as_str()) {
                     continue;
@@ -1093,71 +696,35 @@ fn annotate_dup_counts(
     }
 }
 
-/// Minimum ABSOLUTE byte saving required before a small array
-/// (`len <= adaptive_k`, the tier-1 passthrough zone) ships the
-/// lossless compacted rendering instead of passing through. The
-/// big-array path uses the ratio gate alone; small arrays additionally
-/// need the `[N]{cols}` schema line to pay for itself — re-encoding a
-/// 3-row toy array to save a dozen bytes is churn, not compression.
+/// Minimum ABSOLUTE byte saving required before a small array (`len <= adaptive_k`, the tier-1
+/// passthrough zone) ships the lossless compacted rendering instead of passing through.
 const SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES: usize = 256;
 
-/// Whether an absolute byte saving clears the small-array lossless floor
-/// (`>= SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES`, inclusive). Extracted from the
-/// inline gate so the boundary is unit-testable directly (255/256/257) without
-/// crafting a renderer-byte-exact fixture through the whole crush pipeline — a
-/// directional fixture (well-above / well-below) would survive a `>=`→`>`
-/// operator mutation; the boundary test kills it.
+/// Whether an absolute byte saving clears the small-array lossless floor (`>= SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES`, inclusive).
 #[inline]
 fn clears_small_array_lossless_floor(saved: usize) -> bool {
     saved >= SMALL_ARRAY_LOSSLESS_MIN_SAVED_BYTES
 }
 
-/// Divisor applied to `adaptive_k` for the lossy keep budget when a CCR
-/// store guarantees recovery of every dropped row. 2 (halving) keeps a
-/// meaningful visible sample while the critical signals (errors /
-/// outliers / anomalies / query pins) remain exempt from the budget.
+/// Divisor applied to `adaptive_k` for the lossy keep budget when a CCR store guarantees recovery of every dropped row.
 const CCR_BACKED_KEEP_DIVISOR: usize = 2;
 
-/// Floor for the CCR-backed keep budget. `min_items_to_analyze` (5) is
-/// the engine's own notion of "too small to even analyze" — the visible
-/// sample never shrinks below it.
+/// Floor for the CCR-backed keep budget. `min_items_to_analyze` (5) is the engine's own
+/// notion of "too small to even analyze" — the visible sample never shrinks below it.
 const CCR_BACKED_KEEP_FLOOR: usize = 5;
 
-/// Minimum ABSOLUTE byte saving required before the lossy path ships
-/// its survivors as a CSV-schema rendering instead of a JSON array.
-/// Same churn-protection rationale as the small-array gate: re-encoding
-/// a handful of rows to save a few bytes is noise, not compression.
+/// Minimum ABSOLUTE byte saving required before the lossy path ships its survivors as a CSV-schema rendering instead of a JSON array.
 const LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES: usize = 64;
 
-/// Whether an absolute byte saving clears the lossy-survivor render floor
-/// (`>= LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES`, inclusive). Extracted for the
-/// same reason as the small-array floor helper: the inclusive boundary
-/// (63/64/65) is unit-testable here without a pipeline-byte-exact fixture.
+/// Whether an absolute byte saving clears the lossy-survivor render floor (`>= LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES`, inclusive). Extracted for
+/// the same reason as the small-array floor helper: the inclusive boundary (63/64/65) is unit-testable here without a pipeline-byte-exact fixture.
 #[inline]
 fn clears_lossy_survivor_floor(saved: usize) -> bool {
     saved >= LOSSY_SURVIVOR_RENDER_MIN_SAVED_BYTES
 }
 
-/// Is the analyzer's `Skip` a "no SIGNAL on distinct data" skip (as
-/// opposed to a STRUCTURAL skip)?
-///
-/// The crushability gate produces two flavors of `Skip`:
-/// - **no-signal skips** — the data IS sampleable (rows are well-formed
-///   dicts with comparable fields) but the analyzer found no anomaly /
-///   change-point / error-keyword to anchor the sample on, so under the
-///   permanent-loss assumption it refused to drop. Reasons:
-///   [`SkipReason::UniqueEntitiesNoSignal`],
-///   [`SkipReason::MediumUniquenessNoSignal`].
-/// - **structural skips** — the array is genuinely un-sampleable
-///   (too few items, non-dict items, mixed value types). Those carry
-///   different reasons and MUST keep skipping even with CCR backing.
-///
-/// Only the no-signal flavor is eligible for the CCR-backed override:
-/// recovery removes the loss risk that justified the veto, and the data
-/// is structurally fine to sample. The eligibility now lives on the
-/// typed [`SkipReason::is_no_signal`] (TYPE-1) — its match is
-/// exhaustive, so a NEW reason variant is excluded by default
-/// (fail-closed), enforced by the compiler instead of a string match.
+/// Only typed no-signal skip reasons are eligible for the CCR override. Structural skips remain
+/// ineligible, and new skip variants default to fail-closed through the exhaustive typed match.
 fn skip_reason_is_no_signal(analysis: &ArrayAnalysis) -> bool {
     analysis
         .crushability
@@ -1165,9 +732,7 @@ fn skip_reason_is_no_signal(analysis: &ArrayAnalysis) -> bool {
         .is_some_and(|c| c.reason.is_no_signal())
 }
 
-/// Lossy keep budget when every dropped row is CCR-recoverable.
-/// `adaptive_k / 2`, floored at [`CCR_BACKED_KEEP_FLOOR`], never above
-/// `adaptive_k` itself.
+/// Lossy keep budget when every dropped row is CCR-recoverable. `adaptive_k / 2`, floored at [`CCR_BACKED_KEEP_FLOOR`], never above `adaptive_k` itself.
 fn ccr_backed_keep_budget(adaptive_k: usize) -> usize {
     (adaptive_k / CCR_BACKED_KEEP_DIVISOR)
         .max(CCR_BACKED_KEEP_FLOOR)
@@ -1199,41 +764,16 @@ fn compaction_kind_str(c: &Compaction) -> &'static str {
     }
 }
 
-/// F4: overwrite a [`Compaction::Table`]'s `original_count` with the TRUE
-/// original total. The survivor render compacts only the KEPT rows, so the
-/// IR count is the survivor count; the row-drop path knows the real total
-/// (`items.len()`) and restores it so the inline `[kept/total]` header
-/// carries it. A non-table compaction is left untouched.
+/// The survivor render compacts only the KEPT rows, so the IR count is the survivor count; the row-drop path
+/// knows the real total (`items.len()`) and restores it so the inline `[kept/total]` header carries it.
 fn set_table_original_count(c: &mut Compaction, total: usize) {
     if let Compaction::Table { original_count, .. } = c {
         *original_count = total;
     }
 }
 
-/// F4: build the whole-array numeric summary line
-/// `__stats:col=min/max/sum/count,...` for every NON-CONSTANT numeric
-/// (int/float) column of a flat [`Compaction::Table`], computed over ALL
-/// `items` (kept AND dropped) so counts and aggregates survive the row-drop.
-/// Returns `None` for a non-table compaction or when no non-constant numeric
-/// column is present (so the caller emits no `__stats:` line at all — the
-/// stats line is only worth its bytes when a dropped-row aggregate cannot be
-/// read straight off the header).
-///
-/// A constant-folded column is DELIBERATELY skipped (dead-weight trim): it
-/// already declares `name:type=V` in the `[kept/total]{...}` header, so its
-/// whole-array `min = max = V`, `sum = count * V` and `count = total` all
-/// follow from that value and the header's original total — a stats segment
-/// for it would be pure waste. `demote_subset_only_encodings` runs first (see
-/// the caller) and clears any const fold that does NOT hold over every row, so
-/// a `const_value` that survives to here is universal over all `items` and the
-/// derivation is exact. Arithmetic/positional folds (`ArithInt` etc.) keep
-/// `const_value = None` and are NOT skipped: their survivor-render fold only
-/// describes the shown rows, so their whole-array aggregates are not derivable.
-///
-/// CONTRACT: the wire prefix + `col=min/max/sum/count` shape is read by the
-/// Python reference decoder (`csv_schema_decoder._STATS_PREFIX` /
-/// `decode_stats_line`); the formatter reserves `__stats:` so no data cell
-/// starts a line with it.
+/// Emit `__stats:col=min/max/sum/count` for non-constant numeric columns over all original rows. Skip
+/// universal constants because the header value plus total row count already determines their aggregates.
 fn numeric_stats_line(c: &Compaction, items: &[Value]) -> Option<String> {
     let schema = match c {
         Compaction::Table { schema, .. } => schema,
@@ -1244,9 +784,8 @@ fn numeric_stats_line(c: &Compaction, items: &[Value]) -> Option<String> {
         if f.type_tag != "int" && f.type_tag != "float" {
             continue;
         }
-        // Dead-weight trim: a constant-folded column already carries `=V` in
-        // the header, so its min/max/sum/count are all derivable from V and the
-        // original total — emitting a stats segment for it is pure waste.
+        // Dead-weight trim: a constant-folded column already carries `=V` in the header, so its min/max/sum/count
+        // are all derivable from V and the original total — emitting a stats segment for it is pure waste.
         if f.const_value.is_some() {
             continue;
         }
@@ -1261,13 +800,8 @@ fn numeric_stats_line(c: &Compaction, items: &[Value]) -> Option<String> {
     }
 }
 
-/// Accumulate `min/max/sum/count` over every numeric value at column `name`
-/// across the FULL `items` array. Values are resolved with
-/// [`resolve_flattened`] (literal key, then dotted path) so a flattened
-/// nested column is measured against the real nested value. Integer columns
-/// sum exactly via `i128`; a float anywhere switches the sum to `f64`.
-/// Returns `None` when no numeric value is present. Rendered as
-/// `min/max/sum/count` (each a bare JSON number).
+/// Accumulate `min/max/sum/count` over every numeric value at column `name` across the FULL `items`
+/// array. Integer columns sum exactly via `i128`; a float anywhere switches the sum to `f64`.
 fn column_numeric_stats(items: &[Value], name: &str) -> Option<String> {
     let mut count: u64 = 0;
     let mut min: Option<Number> = None;
@@ -1348,10 +882,7 @@ mod numeric_stats_tests {
             const_value: konst,
             encoding: None,
         };
-        // Two int columns: `k` is a universal constant (=64, already declared in
-        // the header), `v` varies row to row; `s` is non-numeric. The stats line
-        // must carry ONLY `v` — the constant `k`'s min/max/sum/count are all
-        // derivable from its header value, so a segment for it is pure waste.
+        // The stats line should include only varying numeric column `v`; constant `k=64` is derivable from the header and row count, while `s` is non-numeric.
         let items: Vec<Value> = (0..3)
             .map(|i| json!({"k": 64, "v": (i + 1) * 10, "s": "x"}))
             .collect();
@@ -1396,31 +927,8 @@ mod numeric_stats_tests {
     }
 }
 
-/// Demote survivor-render column encodings that hold ONLY over the shown
-/// rows, checked against the FULL `all_rows` array (review F1b / RF2 / RF3).
-///
-/// The survivor compaction stamps its constant folds and category encodings
-/// from the kept subset alone, so on the offload path they can present a subset
-/// fact as universal. For every column of a flat [`Compaction::Table`] this
-/// clears any such claim that does not hold over EVERY row in `all_rows`:
-/// - a `const_value` unless every row holds that exact value;
-/// - a `DictString` unless its value list already covers every string the
-///   column takes;
-/// - an `Affix` unless every string cell carries the declared prefix and suffix
-///   (review RF3);
-/// - a `HeadDict` unless every string cell's last-delimiter head is in the
-///   declared head set (review RF3).
-///
-/// The positional encodings (`ArithInt` / `IsoDeltaSeconds` / `DecimalScaled`)
-/// describe the shown rows by index and make no category claim, so they are
-/// left untouched. Column values are resolved with [`resolve_flattened`] so a
-/// flattened nested (dotted) column is checked against the real nested value,
-/// not a literal-key miss (review RF2).
-///
-/// Demotion is lossless: the IR rows keep every survivor cell, so a cleared
-/// column simply renders per-row. Returns whether anything changed, so the
-/// caller re-renders only then and the offload output stays byte-identical
-/// whenever every survivor encoding was already universal.
+/// Before survivor rendering, clear subset-only constant/dictionary/affix/head encodings unless they hold over
+/// every original row. Positional encodings remain; demotion is lossless because survivor cells are still present.
 fn demote_subset_only_encodings(c: &mut Compaction, all_rows: &[Value]) -> bool {
     use super::compaction::encodings::{encode_affix_cell, split_head};
     use std::collections::HashSet;
@@ -1430,12 +938,8 @@ fn demote_subset_only_encodings(c: &mut Compaction, all_rows: &[Value]) -> bool 
     };
     let mut changed = false;
     for spec in schema.fields.iter_mut() {
-        // review RF2: a flattened nested column carries a DOTTED name
-        // (`meta.region`) whose value lives at `row["meta"]["region"]`, not under
-        // a literal `"meta.region"` key — a plain `row.get(name)` was always
-        // None there, OVER-demoting genuinely-universal nested consts and
-        // UNDER-demoting subset-only nested dicts. `resolve_flattened` resolves
-        // the name the same way the compactor flattened it.
+        // review RF2: a flattened nested column carries a DOTTED name (`meta.region`) whose value lives at `row["meta"]["region"]`, not under a literal `"meta.region"`
+        // key — a plain `row.get(name)` was always None there, OVER-demoting genuinely-universal nested consts and UNDER-demoting subset-only nested dicts.
         let demote_const = match &spec.const_value {
             Some(v) => !all_rows
                 .iter()
@@ -1447,16 +951,8 @@ fn demote_subset_only_encodings(c: &mut Compaction, all_rows: &[Value]) -> bool 
             changed = true;
         }
 
-        // Category-claim encodings each assert the WHOLE column ranges over a
-        // fixed set stamped from the SURVIVOR subset, so on the offload path any
-        // of them can present a subset fact as universal (review F1b/RF3): a
-        // `__dict:` missing categories, a `__affix:` whose prefix/suffix is false
-        // for offloaded rows, a `__head:` whose heads do not cover them. Each is
-        // cleared unless it holds over ALL rows. The positional encodings
-        // (ArithInt / IsoDeltaSeconds / DecimalScaled) describe the shown rows by
-        // index, make no category claim, and are left untouched. A non-string /
-        // absent / null cell cannot be represented by any of these string
-        // encodings, so it never makes one incomplete (mirrors the dict arm).
+        // Category-claim encodings each assert the WHOLE column ranges over a fixed set stamped from the SURVIVOR subset, so on the
+        // offload path any of them can present a subset fact as universal (review F1b/RF3). Each is cleared unless it holds over ALL rows.
         let demote_encoding = match &spec.encoding {
             Some(ColumnEncoding::DictString { values }) => {
                 let known: HashSet<&str> = values.iter().map(String::as_str).collect();
@@ -1468,10 +964,8 @@ fn demote_subset_only_encodings(c: &mut Compaction, all_rows: &[Value]) -> bool 
                     })
             }
             Some(ColumnEncoding::Affix { prefix, suffix }) => {
-                // `encode_affix_cell` is the exact strip-and-check the compactor
-                // proved the round-trip with: it returns `Some` iff the cell
-                // carries both affixes without overlap, so an affix-free or
-                // overlap-length string fails here just as it failed to stamp.
+                // `encode_affix_cell` is the exact strip-and-check the compactor proved the round-trip with: it returns `Some` iff the cell
+                // carries both affixes without overlap, so an affix-free or overlap-length string fails here just as it failed to stamp.
                 !all_rows
                     .iter()
                     .all(|row| match resolve_flattened(row, &spec.name) {
@@ -1484,9 +978,8 @@ fn demote_subset_only_encodings(c: &mut Compaction, all_rows: &[Value]) -> bool 
                 !all_rows
                     .iter()
                     .all(|row| match resolve_flattened(row, &spec.name) {
-                        // `split_head` is the compactor's own last-delimiter
-                        // split; a cell without the delimiter, or whose head is
-                        // not in the declared set, is not covered by the fold.
+                        // `split_head` is the compactor's own last-delimiter split; a cell without the
+                        // delimiter, or whose head is not in the declared set, is not covered by the fold.
                         Some(Value::String(s)) => match split_head(s, *delim) {
                             Some((head, _tail)) => known.contains(head),
                             None => false,
@@ -1504,16 +997,8 @@ fn demote_subset_only_encodings(c: &mut Compaction, all_rows: &[Value]) -> bool 
     changed
 }
 
-/// Resolve a (possibly dotted, flattened) column name against an ORIGINAL
-/// un-flattened row, mirroring the compactor's `flatten_uniform_nested`.
-///
-/// A literal top-level key wins first — this covers every non-dotted column and
-/// any key that literally contains a dot. Otherwise the name is a flattening
-/// path (`parent.inner`) traversed segment by segment through nested objects,
-/// exactly the structure the compactor folded into the dotted column. Returns
-/// `None` when any segment is absent or a non-object (the compactor's `Missing`
-/// cell), which the demote check reads as "not this value" (a constant) or "not
-/// represented" (a string encoding).
+/// Otherwise the name is a flattening path (`parent.inner`) traversed segment by segment
+/// through nested objects, exactly the structure the compactor folded into the dotted column.
 fn resolve_flattened<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
     if let Some(v) = row.get(name) {
         return Some(v);
@@ -1528,9 +1013,8 @@ fn resolve_flattened<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
     Some(cur)
 }
 
-/// Approximate byte size of `[v0, v1, ...]` JSON serialization, given
-/// each item's already-serialized form. Adds 2 for outer brackets and
-/// 1 per inter-item comma. Used by the lossless savings-ratio check.
+/// Approximate byte size of `[v0, v1, ...]` JSON serialization, given each item's already-serialized
+/// form. Adds 2 for outer brackets and 1 per inter-item comma. Used by the lossless savings-ratio check.
 fn estimate_array_bytes(item_strings: &[String]) -> usize {
     let payload: usize = item_strings.iter().map(|s| s.len()).sum();
     let separators = item_strings.len().saturating_sub(1);
@@ -1562,19 +1046,8 @@ mod tests {
 
     #[test]
     fn small_array_ships_lossless_when_savings_substantial() {
-        // 8 rows whose columnar table DECISIVELY beats the lossy render:
-        // only `filesystem` varies, so the CSV schema folds four constant
-        // columns to one-line preambles and the 8-row table is far smaller
-        // than a keep-1 lossy render plus its recovery sentinel — lossless
-        // wins MinTokens robustly, nothing dropped.
-        //
-        // (This fixture previously varied three fields and sat on the
-        // MinTokens knife-edge: it shipped lossless ONLY because the old
-        // `_ccr_rows` granular marker padded the lossy candidate. With that
-        // unusable marker removed the lossy render is honestly smaller, so
-        // such borderline shapes now ship lossy — a deliberate, recoverable
-        // "output smaller" outcome. The fixture is tightened here to pin the
-        // lossless path off that knife-edge.)
+        // 8 rows whose columnar table DECISIVELY beats the lossy render only `filesystem` varies it
+        // shipped lossless ONLY because the old `_ccr_rows` granular marker padded the lossy candidate.
         let c = crusher();
         let items: Vec<Value> = (0..8)
             .map(|i| {
@@ -1604,9 +1077,7 @@ mod tests {
     fn demote_clears_subset_only_constant_and_dict_keeps_universal_review_f1b() {
         use super::super::compaction::{CellValue, FieldSpec, Row, Schema};
 
-        // A survivor render (kept rows all `payout_request`, status all `ok`)
-        // whose header would assert those as universal + a genuinely-constant
-        // `region`.
+        // A survivor render (kept rows all `payout_request`, status all `ok`) whose header would assert those as universal + a genuinely-constant `region`.
         let mut c = Compaction::Table {
             schema: Schema {
                 fields: vec![
@@ -1723,9 +1194,8 @@ mod tests {
     fn demote_resolves_flattened_nested_columns_review_rf2() {
         use super::super::compaction::{CellValue, FieldSpec, Row, Schema};
 
-        // A survivor render of a FLATTENED nested object: the compactor split
-        // `meta` into dotted columns `meta.region` (const "us") and
-        // `meta.status` (dict ["ok"]) because the kept rows all shared them.
+        // A survivor render of a FLATTENED nested object: the compactor split `meta` into dotted columns
+        // `meta.region` (const "us") and `meta.status` (dict ["ok"]) because the kept rows all shared them.
         let mut c = Compaction::Table {
             schema: Schema {
                 fields: vec![
@@ -1754,9 +1224,7 @@ mod tests {
             original_count: 2,
         };
 
-        // The FULL array is UN-flattened: values live under a nested `meta`.
-        // region is genuinely universal ("us"); status also takes "fail" in an
-        // offloaded row.
+        // The FULL array is UN-flattened: values live under a nested `meta`. region is genuinely universal ("us"); status also takes "fail" in an offloaded row.
         let all_rows = vec![
             json!({"meta": {"region": "us", "status": "ok"}}),
             json!({"meta": {"region": "us", "status": "fail"}}),
@@ -1767,9 +1235,8 @@ mod tests {
             panic!("still a table");
         };
         let field = |n: &str| schema.fields.iter().find(|f| f.name == n).unwrap();
-        // Pre-fix a dotted-name lookup was always None, so a universal nested
-        // const was OVER-demoted and a subset-only nested dict UNDER-demoted;
-        // resolve_flattened fixes BOTH directions.
+        // Pre-fix a dotted-name lookup was always None, so a universal nested const was OVER-demoted
+        // and a subset-only nested dict UNDER-demoted; resolve_flattened fixes BOTH directions.
         assert_eq!(
             field("meta.region").const_value,
             Some(json!("us")),
@@ -1785,9 +1252,8 @@ mod tests {
     fn demote_clears_subset_only_affix_and_head_review_rf3() {
         use super::super::compaction::{CellValue, FieldSpec, Row, Schema};
 
-        // Survivor render whose header would claim, from the kept rows alone: a
-        // shared endpoint prefix, a shared token affix, an `/api/` route head,
-        // and a `logs/` dir head.
+        // Survivor render whose header would claim, from the kept rows alone: a shared endpoint
+        // prefix, a shared token affix, an `/api/` route head, and a `logs/` dir head.
         let mut c = Compaction::Table {
             schema: Schema {
                 fields: vec![
@@ -1842,9 +1308,8 @@ mod tests {
             original_count: 3,
         };
 
-        // The FULL array: an offloaded `/api/purchase/9` breaks the endpoint
-        // prefix and a `/web/health` breaks the `/api/` route head; the token
-        // affix and the `logs/` dir head hold over every row.
+        // The FULL array: an offloaded `/api/purchase/9` breaks the endpoint prefix and a `/web/health`
+        // breaks the `/api/` route head; the token affix and the `logs/` dir head hold over every row.
         let all_rows = vec![
             json!({"endpoint": "/api/payout/1", "token": "req-a-v1", "route": "/api/one", "dir": "logs/a"}),
             json!({"endpoint": "/api/payout/2", "token": "req-b-v1", "route": "/api/two", "dir": "logs/b"}),
@@ -1885,14 +1350,8 @@ mod tests {
         assert!(result.compacted.is_none());
     }
 
-    // The two tests above pin the SMALL_ARRAY_LOSSLESS floor DIRECTIONALLY
-    // (well-above ships lossless, well-below stays passthrough). The two below
-    // pin the EXACT inclusive boundary of each absolute-saved gate. Because
-    // `saved = estimate_array_bytes - rendered.len()` is a coupled function of
-    // the compaction renderer's output, a byte-exact pipeline fixture would be
-    // brittle; testing the extracted predicate isolates the `>=` boundary
-    // cleanly and kills a `>=`→`>` operator mutation a directional fixture
-    // would survive.
+    // The two tests above pin the SMALL_ARRAY_LOSSLESS floor DIRECTIONALLY (well-above ships lossless,
+    // well-below stays passthrough). The two below pin the EXACT inclusive boundary of each absolute-saved gate.
     #[test]
     fn small_array_lossless_floor_boundary_is_inclusive_256() {
         assert!(!clears_small_array_lossless_floor(255));
@@ -1909,9 +1368,8 @@ mod tests {
 
     #[test]
     fn small_array_with_opaque_cells_stays_passthrough() {
-        // A small array whose cells would be CCR-substituted (file
-        // contents!) must NOT take the small-array lossless path — the
-        // model needs those values visible verbatim.
+        // A small array whose cells would be CCR-substituted (file contents!) must NOT take
+        // the small-array lossless path — the model needs those values visible verbatim.
         let c = crusher();
         let blob = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(64);
         let items: Vec<Value> = (0..4)
@@ -1923,9 +1381,8 @@ mod tests {
         assert_eq!(result.items.len(), 4);
     }
 
-    /// The COR-13 nested-cell fixture: long constant columns clear both
-    /// byte-savings gates, so ONLY the decoder-coverage gate keeps the
-    /// shape out of the lossless tier.
+    /// The COR-13 nested-cell fixture: long constant columns clear both byte-savings
+    /// gates, so ONLY the decoder-coverage gate keeps the shape out of the lossless tier.
     fn nested_cell_items() -> Vec<Value> {
         (0..6)
             .map(|i| {
@@ -1943,13 +1400,8 @@ mod tests {
 
     #[test]
     fn small_array_with_nested_cells_stays_passthrough_without_store() {
-        // COR-13 fail-closed: an array-of-objects cell becomes
-        // `CellValue::Nested`, whose CSV-quoted IR-JSON rendering the
-        // reference decoder cannot invert — the small-array lossless
-        // zone must DECLINE it (verbatim passthrough), never ship it as
-        // "lossless"-verified. Storeless crusher: the EFF-3 lossy
-        // candidate is ineligible too, so the decline lands on plain
-        // passthrough — pinning the lossless gate in isolation.
+        // COR-13 fail-closed: an array-of-objects cell becomes `CellValue::Nested`, whose CSV-quoted IR-JSON rendering the reference decoder
+        // cannot invert — the small-array lossless zone must DECLINE it (verbatim passthrough), never ship it as "lossless"-verified.
         let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
             .with_default_oss_setup()
             .with_default_compaction()
@@ -1967,11 +1419,8 @@ mod tests {
 
     #[test]
     fn small_array_with_nested_cells_never_claims_lossless_with_store() {
-        // Same COR-13 shape WITH a store: the EFF-3 small-zone lossy
-        // candidate may legitimately drop rows (recoverably!), but the
-        // lossless claim must still be declined — no `lossless:*`
-        // strategy and no compacted render (nested cells also fail the
-        // survivor-render decoder gate). Any drop must stay CCR-backed.
+        // Same COR-13 shape WITH a store: the EFF-3 small-zone lossy candidate may legitimately drop rows (recoverably!), but the lossless claim
+        // must still be declined — no `lossless:*` strategy and no compacted render (nested cells also fail the survivor-render decoder gate).
         let (c, store) = crusher_with_store();
         let items = nested_cell_items();
         let result = c.crush_array(&items, "", 1.0);
@@ -1997,13 +1446,8 @@ mod tests {
 
     #[test]
     fn heterogeneous_buckets_array_never_ships_lossless() {
-        // COR-13 fail-closed: a heterogeneous array with a clean string
-        // discriminator compacts to `Compaction::Buckets`, whose
-        // `__buckets:` grammar the reference decoder cannot decode —
-        // the lossless accept gates must DECLINE it. The corpus routes
-        // through the big-array candidate gate (60 rows) so the lossy
-        // path stays available; whatever wins, no `lossless:` strategy
-        // and no `__buckets:` render may ship.
+        // COR-13 fail-closed: a heterogeneous array with a clean string discriminator compacts to `Compaction::Buckets`,
+        // whose `__buckets:` grammar the reference decoder cannot decode — the lossless accept gates must DECLINE it.
         let c = crusher();
         let items: Vec<Value> = (0..60_i64)
             .map(|i| {
@@ -2040,11 +1484,7 @@ mod tests {
 
     #[test]
     fn small_array_without_compaction_stage_never_ships_compacted() {
-        // No compaction stage → no lossless candidate can exist, so the
-        // small zone routes lossy-vs-passthrough only. Whatever ships,
-        // `compacted` stays None (there is nothing to render it with)
-        // and any drop is CCR-backed (`without_compaction` installs the
-        // default store).
+        // No compaction stage → no lossless candidate can exist, so the small zone routes lossy-vs-passthrough only.
         let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
         let items: Vec<Value> = (0..8)
             .map(|i| {
@@ -2074,34 +1514,14 @@ mod tests {
         }
     }
 
-    // ---------- EFF-3: small-array lossy-recoverable candidate ----------
-    //
-    // The tier-1 zone (`items.len() <= adaptive_k`) historically shipped
-    // lossless-or-passthrough ONLY — small arrays never produced a
-    // lossy-recoverable candidate, capping disk@9-style tool output at
-    // the lossless ceiling (~50%) while size-90 twins reached 91%+.
-    // These tests pin the EFF-3 contract: WITH a CCR store, under the
-    // default MinTokens policy, the small zone also builds the drop
-    // candidate (keep-budget floor 5, query pins / critical rows
-    // respected) and ships it iff strictly fewer tokens; `lossless_only`
-    // still suppresses it entirely; without a store nothing ever drops.
+    // EFF-3: small-array lossy-recoverable candidate ---------- The tier-1 zone (`items.len() <= adaptive_k`) shipped lossless-or-passthrough ONLY — small
+    // arrays never produced a lossy-recoverable candidate, capping disk@9-style tool output at the lossless ceiling (~50%) while size-90 twins reached 91%+.
 
-    /// One high-entropy small-zone row: distinct at BOTH ends and
-    /// hex-dominated in the middle, defeating every lossless fold
-    /// (constant/arith/iso/decimal/dict/head-dict/affix) — only the two
-    /// short keys fold (~10% savings, far under the ratio gate with
-    /// margin even for future relaxations) — while each cell stays
-    /// below the 256-byte opaque-substitution threshold (an opaque
-    /// render would stand the entropy-floor override down). Heavy
-    /// enough (~60 tokens/row) that dropping one row decisively
-    /// out-earns the ~40-token sentinel. 8 of these are GUARANTEED
-    /// tier-1 (`compute_optimal_k` returns `n` for `n <= 8`, so
-    /// `items.len() <= adaptive_k` always).
+    /// One high-entropy small-zone row: distinct at BOTH ends and hex-dominated in the middle, defeating every lossless fold
+    /// (constant/arith/iso/decimal/dict/head-dict/affix). Heavy enough (~60 tokens/row) that dropping one row decisively out-earns the ~40-token sentinel.
     fn high_entropy_small_row(i: usize) -> Value {
-        // Full-width odd multipliers: every hex segment fills its width
-        // with a DISTINCT leading digit (no shared zero-padding for the
-        // `__affix` fold to harvest — that fold alone once pushed this
-        // fixture over the relaxed ratio gate).
+        // Full-width odd multipliers: every hex segment fills its width with a DISTINCT leading digit (no shared zero-padding
+        // for the `__affix` fold to harvest — that fold alone once pushed this fixture over the relaxed ratio gate).
         json!({
             "trace_id": format!(
                 "{:032x}",
@@ -2122,10 +1542,8 @@ mod tests {
 
     #[test]
     fn small_array_with_store_emits_lossy_candidate_and_recovers_byte_exact() {
-        // 8 high-entropy rows: the lossless render can't fold genuine
-        // entropy (fails the 0.30 gate), so pre-EFF-3 this passed
-        // through untouched. With every drop CCR-backed, the small zone
-        // now drops to the keep budget and wins the MinTokens race.
+        // 8 high-entropy rows: the lossless render can't fold genuine entropy (fails the 0.30 gate), so pre-EFF-3 this passed
+        // through untouched. With every drop CCR-backed, the small zone now drops to the keep budget and wins the MinTokens race.
         let (c, store) = crusher_with_store();
         let items: Vec<Value> = (0..8).map(high_entropy_small_row).collect();
 
@@ -2195,9 +1613,7 @@ mod tests {
 
     #[test]
     fn small_array_query_pinned_rows_survive_lossy_candidate() {
-        // A deterministic query anchor ("req-7f3a", quoted) names exactly
-        // one row. Whatever render ships out of the small zone, that row
-        // must stay visible — query pins are exempt from the keep budget.
+        // A deterministic query anchor ("req-7f3a", quoted) names exactly one row.
         let (c, _store) = crusher_with_store();
         let mut items: Vec<Value> = (0..8).map(high_entropy_small_row).collect();
         items[3] = json!({
@@ -2237,9 +1653,8 @@ mod tests {
 
     #[test]
     fn small_array_without_store_stays_passthrough() {
-        // No CCR store → a small-zone drop would be UNRECOVERABLE, so
-        // the lossy candidate must not exist: both high-entropy and
-        // low-uniqueness shapes pass through untouched.
+        // No CCR store → a small-zone drop would be UNRECOVERABLE, so the lossy candidate
+        // must not exist: both high-entropy and low-uniqueness shapes pass through untouched.
         let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
             .with_default_oss_setup()
             .with_default_compaction()
@@ -2252,9 +1667,8 @@ mod tests {
         assert_eq!(r_unique.strategy_info, "none:adaptive_at_limit");
         assert!(r_unique.ccr_hash.is_none());
 
-        // Low-uniqueness twin: crushable WITHOUT the entropy-floor
-        // override — the store gate alone must keep it whole (the
-        // lossless render may ship; that drops nothing).
+        // Low-uniqueness twin: crushable WITHOUT the entropy-floor override — the store
+        // gate alone must keep it whole (the lossless render may ship; that drops nothing).
         let dupes: Vec<Value> = (0..8)
             .map(|_| json!({"status": "ok", "note": "identical row"}))
             .collect();
@@ -2291,9 +1705,8 @@ mod tests {
 
     #[test]
     fn small_array_lossy_declined_when_not_fewer_tokens() {
-        // 6 tiny rows: the drop candidate exists (6 > keep floor 5) but
-        // dropping ONE ~5-token row cannot pay for the ~40-token
-        // sentinel — MinTokens must decline it and pass through.
+        // 6 tiny rows: the drop candidate exists (6 > keep floor 5) but dropping ONE ~5-token
+        // row cannot pay for the ~40-token sentinel — MinTokens must decline it and pass through.
         let (c, store) = crusher_with_store();
         let items: Vec<Value> = (0..6).map(|i| json!({"id": i})).collect();
 
@@ -2317,12 +1730,8 @@ mod tests {
 
     #[test]
     fn small_array_lossless_win_leaves_no_orphan_store_writes() {
-        // Constant-heavy tabular rows: the lossless render folds the
-        // heavy constant columns once and ditto-marks the rest, beating
-        // the drop render (which pays a ~40-token sentinel to hide 3
-        // low-residue rows). The discarded lossy candidate's deferred
-        // writes must drop with it (P0-4 Collect semantics) — the store
-        // stays empty on a lossless win.
+        // Constant-heavy tabular rows: the lossless render folds the heavy constant columns once and ditto-marks
+        // the rest, beating the drop render (which pays a ~40-token sentinel to hide 3 low-residue rows).
         let (c, store) = crusher_with_store();
         let items: Vec<Value> = (0..8)
             .map(|i| {
@@ -2354,15 +1763,8 @@ mod tests {
 
     #[test]
     fn crush_array_no_signal_with_ccr_store_crushes_recoverably() {
-        // 30 unique dict items with ID-like fields → the analyzer's
-        // crushability gate labels this `unique_entities_no_signal`.
-        // Pre-fix that SKIPPED (returned all 30 rows). With a CCR store
-        // configured (the `without_compaction` constructor installs the
-        // default store) recovery is guaranteed, so the entropy-floor
-        // override re-derives a real strategy and crushes — DETERMINISTIC
-        // and aggressive, with every dropped row recoverable via the
-        // surfaced `<<ccr:HASH>>` pointer. This is the routing fix that
-        // collapses the 24-94% scatter on near-unique data.
+        // 30 unique dict items with ID-like fields → the analyzer's crushability gate labels this `unique_entities_no_signal`. so the entropy-floor override
+        // re-derives a real strategy and crushes DETERMINISTIC and aggressive, with every dropped row recoverable via the surfaced `<<ccr:HASH>>` pointer.
         let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
         let items: Vec<Value> = (0..30)
             .map(|i| json!({"id": i, "name": format!("user_{}", i)}))
@@ -2394,9 +1796,8 @@ mod tests {
 
     #[test]
     fn crush_array_no_signal_without_ccr_store_still_skips() {
-        // Same near-unique no-signal shape, but NO CCR store: a drop here
-        // would be UNRECOVERABLE, so the override must NOT fire — the
-        // analyzer's skip stands (legacy / parity mode, zero silent loss).
+        // Same near-unique no-signal shape, but NO CCR store: a drop here would be UNRECOVERABLE, so the
+        // override must NOT fire — the analyzer's skip stands (legacy / parity mode, zero silent loss).
         let c = SmartCrusherBuilder::new(SmartCrusherConfig::default())
             .with_default_oss_setup()
             .build(); // no `.with_default_ccr_store()`
@@ -2444,11 +1845,8 @@ mod tests {
 
     #[test]
     fn annotate_dup_counts_stamps_only_the_family_representative() {
-        // COR-33 (representative half): when SEVERAL members of the same
-        // stable-projection family stay visible, only the FIRST kept
-        // member (the representative) may carry `_dup_count`. Stamping
-        // every visible copy made N rows each claim N duplicates —
-        // reading like N² rows — pure token inflation.
+        // COR-33 (representative half): when SEVERAL members of the same stable-projection family
+        // stay visible, only the FIRST kept member (the representative) may carry `_dup_count`.
         let all: Vec<Value> = (0..4)
             .map(|i| json!({"req_id": format!("{i:040x}"), "msg": "dup"}))
             .collect();
@@ -2470,13 +1868,7 @@ mod tests {
 
     #[test]
     fn dup_count_not_stamped_when_plan_drops_nothing() {
-        // COR-33 (no-drop half): `_dup_count` exists to record rows the
-        // plan COLLAPSED. When the plan dropped nothing every original
-        // row is already visible, so stamping is token inflation with
-        // zero compression. Fixture: 30 all-error rows (the error
-        // constraint pins every row through the over-budget path) in 3
-        // identical-except-identity families, with whole-item dedup
-        // disabled so the duplicates stay visible.
+        // COR-33 (no-drop half): `_dup_count` exists to record rows the plan COLLAPSED.
         let config = SmartCrusherConfig {
             dedup_identical_items: false,
             ..SmartCrusherConfig::default()
@@ -2510,25 +1902,10 @@ mod tests {
 
     #[test]
     fn dup_count_representative_blanks_varying_identity_columns_e2e() {
-        // T5 (furl-ctx pre-mortem audit): when rows collapse under the
-        // stable-projection hash because they differ ONLY in VaryingIdentity
-        // columns (hex id / ISO timestamp / monotone counter) while their
-        // content is constant, the kept REPRESENTATIVE must NOT keep row-0's
-        // concrete identity values beside `_dup_count:N`. Otherwise an agent
-        // reading the compressed view — which the skill tells it to trust —
-        // reads ONE concrete id/timestamp as having recurred N times when N
-        // DISTINCT ids/timestamps each occurred once. The fix renders those
-        // columns as the `<varies>` sentinel; `_dup_count` is kept; the
-        // dropped rows stay CCR-recoverable (a display change, not a data
-        // change).
-        //
-        // `without_compaction` runs the lossy dedup path (matching the Python
-        // `_crush_kept_rows` harness) so the collapse-and-stamp actually fires.
+        // T5 (furl-ctx pre-mortem audit): when rows collapse under the stable-projection hash because they differ ONLY in VaryingIdentity columns (hex id / ISO
+        // timestamp / monotone counter) while their content is constant, the kept REPRESENTATIVE must NOT keep row-0's concrete identity values beside `_dup_count:N`.
         let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
-        // A heartbeat/audit trail: three distinct identity shapes per row and
-        // constant content per host. The first 60 rows are one repeated
-        // heartbeat (three hosts -> three families of 20); the last 60 vary so
-        // the array is unambiguously crushable.
+        //
         let items: Vec<Value> = (0..120)
             .map(|i| {
                 let (event, detail) = if i < 60 {
@@ -2586,13 +1963,8 @@ mod tests {
 
     #[test]
     fn annotate_dup_counts_blanks_only_columns_that_vary_within_the_family() {
-        // The blanking is SELECTIVE. Within a collapsed family an excluded
-        // column is replaced with `<varies>` ONLY when its value actually
-        // differs across the family's members. A column that is CONSTANT
-        // across the family (a genuine shared value) keeps its real value, so
-        // the representative still tells the truth. Here `req_id` varies
-        // inside the `login` family while `region` is constant inside it;
-        // both are excluded, but only `req_id` blanks.
+        // The blanking is SELECTIVE. Within a collapsed family an excluded column is replaced
+        // with `<varies>` ONLY when its value actually differs across the family's members.
         let all: Vec<Value> = vec![
             json!({"req_id": format!("{:040x}", 1), "region": "us", "op": "login"}),
             json!({"req_id": format!("{:040x}", 2), "region": "us", "op": "login"}),
@@ -2642,18 +2014,8 @@ mod tests {
 
     #[test]
     fn lossless_wins_when_savings_above_threshold() {
-        // 50 uniform tabular dicts → CSV+schema compaction shrinks the
-        // input well above the 0.30 gate, so the LOSSLESS render is a
-        // valid candidate. Under `LosslessFirst` it MUST ship (all rows
-        // visible, nothing dropped) whenever it clears the gate — that is
-        // exactly what this policy guarantees and what this test pins.
-        //
-        // (The DEFAULT `MinTokens` policy may instead ship the equally-
-        // recoverable lossy survivor render when it is fewer tokens —
-        // both views are 100% recoverable, so that is a pure size win, not
-        // information loss. The MinTokens routing race is covered by the
-        // dedicated routing tests below; here we assert the lossless
-        // render itself is built and chosen by the policy that owns it.)
+        // 50 uniform tabular dicts → CSV+schema compaction shrinks the input well above the 0.30 gate so the LOSSLESS render is
+        // a valid candidate. Under `LosslessFirst` it MUST ship (all rows visible, nothing dropped) whenever it clears the gate
         let cfg = SmartCrusherConfig {
             routing_policy: RoutingPolicy::LosslessFirst,
             ..Default::default()
@@ -2679,11 +2041,7 @@ mod tests {
 
     #[test]
     fn lossy_falls_through_when_savings_below_threshold() {
-        // Force the threshold high enough that even tabular savings
-        // can't satisfy it → lossy path runs → CCR-Dropped fires.
-        // Use low-uniqueness items so the analyzer is willing to
-        // crush (unique id+name per row would trip the
-        // "unique_entities_no_signal" skip gate instead).
+        // Force the threshold high enough that even tabular savings can't satisfy it → lossy path runs → CCR-Dropped fires.
         let cfg = SmartCrusherConfig {
             lossless_min_savings_ratio: 0.99,
             ..Default::default()
@@ -2742,11 +2100,7 @@ mod tests {
 
     #[test]
     fn lossy_without_compaction_still_emits_ccr_hash() {
-        // The CCR-Dropped restoration applies regardless of whether
-        // lossless was attempted — without_compaction also gets the
-        // ccr_hash on row drops. TEST-17: the drop is asserted as a
-        // PRECONDITION — the old `if dropped { assert }` gate made this
-        // test vacuously green whenever the fixture stopped dropping.
+        // The CCR-Dropped restoration applies regardless of whether lossless was attempted — without_compaction also gets the ccr_hash on row drops.
         let c = SmartCrusher::without_compaction(SmartCrusherConfig::default());
         let items: Vec<Value> = (0..30).map(|_| json!({"status": "ok"})).collect();
         let result = c.crush_array(&items, "", 1.0);
@@ -2790,19 +2144,8 @@ mod tests {
 
     #[test]
     fn advertise_retrieval_tool_false_still_surfaces_recovery_pointer() {
-        // Defect 1 (kill silent loss, completed). With
-        // `advertise_retrieval_tool=false` the engine STILL surfaces the
-        // `<<ccr:HASH>>` recovery pointer in `dropped_summary` AND
-        // writes the store. The recovery pointer is the retrieval key,
-        // not a UX nicety: you cannot drop a distinct item without
-        // leaving a pointer to it. Suppressing the pointer while still
-        // dropping rows was the silent-loss bug this test now guards
-        // against.
-        //
-        // (Previously this test asserted the OLD behavior —
-        // `dropped_summary.is_empty()` — which encoded exactly the
-        // silent loss the recovery invariant forbids on the public
-        // path. Fixture flipped to assert the invariant.)
+        // Defect 1 (kill silent loss, completed). With `advertise_retrieval_tool=false` the engine STILL surfaces the `<<ccr:HASH>>` recovery pointer in
+        // `dropped_summary` AND writes the store. `dropped_summary.is_empty()` — which encoded exactly the silent loss the recovery invariant forbids on the public path.
         use crate::ccr::InMemoryCcrStore;
         use crate::transforms::smart_crusher::SmartCrusherBuilder;
         use std::sync::Arc;
@@ -2862,11 +2205,7 @@ mod tests {
     #[test]
     fn lossless_only_droppable_array_passes_through_no_markers_no_store_writes() {
         // The shape that DOES lossy-drop under defaults (see
-        // `lossy_falls_through_when_savings_below_threshold`): low
-        // uniqueness, lossless gate forced unreachable. Under
-        // `lossless_only` the lossy candidate must never be BUILT —
-        // every row passes through, no `<<ccr:` pointer of any shape is
-        // minted, and the store stays empty.
+        // `lossy_falls_through_when_savings_below_threshold`): low uniqueness, lossless gate forced unreachable.
         let (c, store) = lossless_only_crusher(SmartCrusherConfig {
             lossless_min_savings_ratio: 0.99, // lossless never clears
             lossless_only: true,
@@ -2886,9 +2225,8 @@ mod tests {
 
     #[test]
     fn lossless_only_ships_proven_lossless_render_without_markers() {
-        // Cleanly tabular input still compacts LOSSLESSLY in strict mode
-        // — the mode forbids lossy candidates, not the verified lossless
-        // tier. The render must carry every row and no `<<ccr:` pointer.
+        // Cleanly tabular input still compacts LOSSLESSLY in strict mode — the mode forbids lossy candidates,
+        // not the verified lossless tier. The render must carry every row and no `<<ccr:` pointer.
         let (c, store) = lossless_only_crusher(SmartCrusherConfig {
             lossless_only: true,
             ..SmartCrusherConfig::default()
@@ -2914,14 +2252,8 @@ mod tests {
 
     #[test]
     fn lossless_only_rejects_opaque_bearing_lossless_render() {
-        // Long base64 columns normally make the compactor substitute
-        // cells with `<<ccr:HASH,base64,SIZE>>` (opaque refs) — a
-        // recoverable render that still hides visible bytes. Strict mode
-        // must neither ship such a render NOR write the store: the
-        // builder disables the stage's `substitute_opaque` (the Defect-2
-        // store write is EAGER inside `compact()`, so a routing-layer
-        // rejection alone would come after the write), and the blobs-
-        // verbatim render then fails the savings gate → passthrough.
+        // Long base64 columns normally make the compactor substitute cells with `<<ccr:HASH,base64,SIZE>>` (opaque refs) — a
+        // recoverable render that still hides visible bytes. Strict mode must neither ship such a render NOR write the store.
         let (c, store) = lossless_only_crusher(SmartCrusherConfig {
             lossless_only: true,
             ..SmartCrusherConfig::default()
@@ -2931,10 +2263,8 @@ mod tests {
             .map(|i| json!({"path": format!("src/f{i}.py"), "content": blob.clone()}))
             .collect();
 
-        // Counterfactual precondition: under the DEFAULT config this very
-        // fixture ships an opaque-substituted render (pointers in the
-        // output) — proving the strict-mode decline below is the work of
-        // the new gates, not an accident of the fixture.
+        // Counterfactual precondition: under the DEFAULT config this very fixture ships an opaque-substituted render (pointers
+        // in the output) — proving the strict-mode decline below is the work of the new gates, not an accident of the fixture.
         let (default_c, _s) = lossless_only_crusher(SmartCrusherConfig::default());
         let default_result = default_c.crush_array(&items, "", 1.0);
         assert!(
@@ -2956,11 +2286,8 @@ mod tests {
             0,
             "the eager Defect-2 opaque write must not fire in strict mode"
         );
-        // With substitution off, the CONSTANT blob column folds into the
-        // declaration (`content:string=<blob>` — verbatim, exactly once):
-        // a legitimately PURE lossless render that may still win the
-        // savings gate. Whichever way the gate lands, the strict-mode
-        // output must carry the blob bytes verbatim and no pointer.
+        // With substitution off, the CONSTANT blob column folds into the declaration (`content:string=<blob>` — verbatim, exactly once): a legitimately PURE lossless
+        // render that may still win the savings gate. Whichever way the gate lands, the strict-mode output must carry the blob bytes verbatim and no pointer.
         match &result.compacted {
             Some(render) => {
                 assert!(
@@ -2983,11 +2310,8 @@ mod tests {
 
     #[test]
     fn lossless_only_distinct_blob_rows_pass_through_untouched() {
-        // DISTINCT per-row blobs (distinct at BOTH ends, so neither the
-        // constant fold nor the affix/head-dict encoders apply): the
-        // blobs-verbatim render cannot clear the savings gate, and the
-        // opaque-substituted render is disabled in strict mode — so the
-        // array must pass through untouched with an empty store.
+        // DISTINCT per-row blobs (distinct at BOTH ends, so neither the constant fold nor the affix/head-dict encoders apply):
+        // the blobs-verbatim render cannot clear the savings gate, and the opaque-substituted render is disabled in strict mode.
         let (c, store) = lossless_only_crusher(SmartCrusherConfig {
             lossless_only: true,
             ..SmartCrusherConfig::default()
@@ -3015,12 +2339,8 @@ mod tests {
 
     #[test]
     fn lossless_only_routing_gate_declines_opaque_render_even_if_stage_substitutes() {
-        // Belt-and-braces layer: the ROUTING gate (`opaque_ok` in
-        // `crush_array_inner`) must decline an opaque-bearing render even
-        // when a hand-composed crusher pairs `lossless_only` with a stage
-        // that still substitutes (e.g. via `from_parts` — the production
-        // builder always disables `substitute_opaque`, but the strict-mode
-        // output invariant must not depend on wiring).
+        // Belt-and-braces layer: the ROUTING gate (`opaque_ok` in `crush_array_inner`) must decline an opaque-bearing render
+        // even when a hand-composed crusher pairs `lossless_only` with a stage that still substitutes (e.g. via `from_parts`.
         let (mut c, _store) = lossless_only_crusher(SmartCrusherConfig {
             lossless_only: true,
             ..SmartCrusherConfig::default()
@@ -3050,10 +2370,8 @@ mod tests {
 
     #[test]
     fn ccr_backed_store_tightens_lossy_budget_vs_storeless() {
-        // With a CCR store every dropped row is recoverable, so the
-        // lossy keep budget halves; without a store the legacy full
-        // `adaptive_k` budget applies (a tighter budget there would
-        // drop unrecoverable rows for nothing).
+        // With a CCR store every dropped row is recoverable, so the lossy keep budget halves; without a store the
+        // legacy full `adaptive_k` budget applies (a tighter budget there would drop unrecoverable rows for nothing).
         use crate::ccr::InMemoryCcrStore;
         use crate::transforms::smart_crusher::SmartCrusherBuilder;
         use std::sync::Arc;
@@ -3087,9 +2405,8 @@ mod tests {
         assert_eq!(recovered, canonical_array_json(&items));
     }
 
-    /// One realistic git-log-shaped row: identity columns (40-hex commit,
-    /// ISO date), a low-cardinality author, and a genuinely varied unique
-    /// subject built from rotating conventional-commit vocabulary.
+    /// One realistic git-log-shaped row: identity columns (40-hex commit, ISO date), a low-cardinality
+    /// author, and a genuinely varied unique subject built from rotating conventional-commit vocabulary.
     fn log_shaped_row(i: usize) -> Value {
         const PREFIXES: [&str; 8] = [
             "feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci",
@@ -3150,11 +2467,8 @@ mod tests {
 
     #[test]
     fn lossy_survivor_compaction_ships_table_with_sentinel_line() {
-        // When the lossy path drops rows AND the survivors render as a
-        // smaller CSV-schema table, the output is the rendering with the
-        // `{"_ccr_dropped": ...}` sentinel appended as the final line.
-        // Every survivor value stays verbatim; the dropped rows stay
-        // recoverable under the surfaced hash.
+        // When the lossy path drops rows AND the survivors render as a smaller CSV-schema table, the
+        // output is the rendering with the `{"_ccr_dropped": ...}` sentinel appended as the final line.
         use crate::ccr::InMemoryCcrStore;
         use crate::transforms::smart_crusher::SmartCrusherBuilder;
         use std::sync::Arc;
@@ -3168,11 +2482,8 @@ mod tests {
             .with_default_compaction()
             .with_ccr_store(Arc::clone(&store))
             .build();
-        // High-entropy distinct rows (git-log shaped): hex/ISO identity
-        // columns, repeating author, genuinely varied unique subjects
-        // (uniformly-templated subjects trip the
-        // `skip:unique_entities_no_signal` crushability gate and never
-        // reach the lossy path — mirroring how real logs behave).
+        // High-entropy distinct rows (git-log shaped): hex/ISO identity columns, repeating author, genuinely varied unique subjects (uniformly-templated
+        // subjects trip the `skip:unique_entities_no_signal` crushability gate and never reach the lossy path — mirroring how real logs behave).
         let items: Vec<Value> = (0..60).map(log_shaped_row).collect();
 
         let result = c.crush_array(&items, "", 1.0);
@@ -3243,9 +2554,8 @@ mod tests {
 
     // ---------- Phase 7: route-by-min-tokens ----------
 
-    /// Build a default-config crusher (MinTokens) plus a LosslessFirst
-    /// twin, both sharing one in-memory CCR store, so a routing test can
-    /// compare the two policies and still recover any dropped rows.
+    /// Build a default-config crusher (MinTokens) plus a LosslessFirst twin, both sharing one in-memory
+    /// CCR store, so a routing test can compare the two policies and still recover any dropped rows.
     fn min_tokens_and_lossless_first() -> (
         SmartCrusher,
         SmartCrusher,
@@ -3275,11 +2585,8 @@ mod tests {
 
     #[test]
     fn min_tokens_ships_lossy_for_logs_shaped_data() {
-        // Logs-shaped: per-row entropy (40-hex commit + distinct subject)
-        // shipped 90× makes the lossless render token-expensive; dropping
-        // to a small visible sample + a `<<ccr:HASH>>` sentinel is far
-        // fewer tokens. MinTokens must pick the lossy DROP render — and
-        // the dropped rows must remain recoverable from the store.
+        // Logs-shaped: per-row entropy (40-hex commit + distinct subject) shipped 90× makes the lossless render
+        // token-expensive; dropping to a small visible sample + a `<<ccr:HASH>>` sentinel is far fewer tokens.
         let (min_tokens, lossless_first, store) = min_tokens_and_lossless_first();
         let items: Vec<Value> = (0..90).map(log_shaped_row).collect();
 
@@ -3321,11 +2628,8 @@ mod tests {
 
     #[test]
     fn min_tokens_ships_lossless_when_it_is_fewer_tokens() {
-        // A low-cardinality tabular array whose every row collapses under
-        // dedup: the lossy path keeps the same content the lossless table
-        // shows, so the lossless render is ≤ tokens. Under MinTokens the
-        // tie-or-fewer goes to lossless (more rows visible). Nothing is
-        // dropped → the output is recoverable inline, no CCR needed.
+        // A low-cardinality tabular array whose every row collapses under dedup: the lossy path
+        // keeps the same content the lossless table shows, so the lossless render is ≤ tokens.
         let (min_tokens, lossless_first, _store) = min_tokens_and_lossless_first();
         let items: Vec<Value> = (0..12).map(|_| json!({"a": 1, "b": 2})).collect();
 
@@ -3352,11 +2656,8 @@ mod tests {
 
     #[test]
     fn min_tokens_never_ships_more_tokens_than_lossless() {
-        // The core invariant: under MinTokens the shipped render is never
-        // MORE tokens than the lossless render would have been — for any
-        // droppable array where both candidates exist. (Lossy wins only
-        // when STRICTLY fewer; ties go to lossless.) Pin it on the
-        // logs-shaped family where lossy genuinely wins.
+        // The core invariant: under MinTokens the shipped render is never MORE tokens than the
+        // lossless render would have been — for any droppable array where both candidates exist.
         let (min_tokens, lossless_first, _store) = min_tokens_and_lossless_first();
         let items: Vec<Value> = (0..90).map(log_shaped_row).collect();
 
@@ -3372,19 +2673,8 @@ mod tests {
         );
     }
 
-    // ---------- P0-4: no orphan store-writes for a non-shipped lossy candidate ----------
-    //
-    // The defect these pin: `crush_array_inner` builds the lossy candidate
-    // for MinTokens/LosslessFirst arbitration, and `persist_dropped` used
-    // to COMMIT its store writes (whole-blob + granular chunks + row
-    // index) at build time — before the routing decision. When the
-    // LOSSLESS render won and shipped, those writes stayed behind as
-    // orphans: entries no surfaced marker names, burning COR-4-bounded
-    // capacity and inflating store stats. The fix defers the candidate's
-    // writes (collect-only) and commits them exactly when the lossy
-    // render ships — persistence for SHIPPED lossy output stays
-    // unconditional (the recovery invariant is timing-shifted, never
-    // weakened), and hashes/markers are computed identically either way.
+    // P0-4 When the LOSSLESS render won and shipped, those writes stayed behind as orphans
+    // entries no surfaced marker names, burning COR-4-bounded capacity and inflating store stats.
 
     #[test]
     fn lossless_first_win_writes_nothing_for_discarded_lossy_candidate() {
@@ -3403,9 +2693,8 @@ mod tests {
             .with_default_compaction()
             .with_ccr_store(store_dyn)
             .build();
-        // Low-uniqueness (analyzer willing to crush → a real lossy DROP
-        // candidate is built) AND cleanly tabular (lossless clears the
-        // 0.30 gate) → both candidates exist; LosslessFirst ships lossless.
+        // Low-uniqueness (analyzer willing to crush → a real lossy DROP candidate is built) AND cleanly
+        // tabular (lossless clears the 0.30 gate) → both candidates exist; LosslessFirst ships lossless.
         let items: Vec<Value> = (0..50).map(|i| json!({"status": "ok", "seq": i})).collect();
 
         let result = c.crush_array(&items, "", 1.0);
@@ -3444,11 +2733,8 @@ mod tests {
             .with_default_compaction()
             .with_ccr_store(store_dyn)
             .build();
-        // The pinned MinTokens lossless-win shape (see
-        // `min_tokens_ships_lossless_when_it_is_fewer_tokens`): identical
-        // low-cardinality rows dedup so hard that the lossless table is
-        // ≤ tokens vs the drop render — ties go to lossless. The lossy
-        // candidate is still BUILT for arbitration; it must not write.
+        // The pinned MinTokens lossless-win shape (see `min_tokens_ships_lossless_when_it_is_fewer_tokens`): identical
+        // low-cardinality rows dedup so hard that the lossless table is ≤ tokens vs the drop render — ties go to lossless.
         let items: Vec<Value> = (0..12).map(|_| json!({"a": 1, "b": 2})).collect();
 
         let result = c.crush_array(&items, "", 1.0);
@@ -3467,12 +2753,8 @@ mod tests {
 
     #[test]
     fn min_tokens_lossy_win_still_commits_store_writes_unconditionally() {
-        // The P0-4 deferral must NOT weaken the recovery invariant: when
-        // the lossy render SHIPS out of the arbitration arm (both
-        // candidates existed, lossy strictly fewer tokens), its store
-        // writes are committed exactly as before — whole-blob under the
-        // surfaced hash, plus the granular row index when in budget. Only
-        // the write TIMING moved (build → ship decision).
+        // The P0-4 deferral must NOT weaken the recovery invariant: when the lossy render SHIPS out of the arbitration arm (both candidates existed,
+        // lossy strictly fewer tokens), its store writes are committed exactly as before. Only the write TIMING moved (build → ship decision).
         let (min_tokens, _lossless_first, store) = min_tokens_and_lossless_first();
         let items: Vec<Value> = (0..90).map(log_shaped_row).collect();
 
@@ -3505,9 +2787,8 @@ mod tests {
 
     // ---------- U8: single compaction pass on large-array hot path ----------
 
-    /// A [`Formatter`] spy that counts how many times `format` is called.
-    /// Each call to `CompactionStage::run` calls `format` exactly once, so
-    /// this is a direct proxy for the number of `stage.run(items)` calls.
+    /// A [`Formatter`] spy that counts how many times `format` is called. Each call to `CompactionStage::run`
+    /// calls `format` exactly once, so this is a direct proxy for the number of `stage.run(items)` calls.
     struct CountingFormatter {
         inner: Box<dyn super::super::compaction::Formatter>,
         count: Arc<std::sync::atomic::AtomicUsize>,
@@ -3545,25 +2826,12 @@ mod tests {
         (crusher, counter)
     }
 
-    /// RED test (TDD step 1): before the fix, crush_array calls stage.run
-    /// TWICE unnecessarily on a large compactable array — once for
-    /// lossless_candidate (line 796) and a second redundant time for
-    /// lossless_uses_opaque (line 843).  After the fix the second call is
-    /// eliminated and the compaction result is reused.
-    ///
-    /// Shape: unique-entity rows (no CCR store) → lossy path returns Skip
-    /// (no rows dropped → `dropped_summary` is empty → the survivor-
-    /// compaction branch inside crush_array_lossy does NOT fire).  Only the
-    /// lossless_candidate call and the now-redundant lossless_uses_opaque call
-    /// are in-scope.
-    ///
-    /// Before fix: 2 calls (lossless_candidate + lossless_uses_opaque).
-    /// After fix:  1 call  (lossless_candidate only; result reused for opaque).
+    /// RED test (TDD step 1) once for lossless_candidate (line 796) and a second redundant time for lossless_uses_opaque (line 843). Only the
+    /// lossless_candidate call and the now-redundant lossless_uses_opaque call are in-scope. Before fix: 2 calls (lossless_candidate + lossless_uses_opaque).
     #[test]
     fn crush_array_large_compactable_invokes_compaction_stage_exactly_once() {
-        // 30 unique-entity rows (no CCR store → lossy skips, no drops →
-        // survivor compaction doesn't fire).  Uniform tabular shape →
-        // compacts well so lossless_candidate is not None.
+        // 30 unique-entity rows (no CCR store → lossy skips, no drops → survivor compaction
+        // doesn't fire). Uniform tabular shape → compacts well so lossless_candidate is not None.
         let items: Vec<Value> = (0..30)
             .map(|i| json!({"id": i, "user": format!("u_{i}"), "status": "ok"}))
             .collect();
@@ -3579,9 +2847,7 @@ mod tests {
 
         let result = crusher.crush_array(&items, "", 1.0);
 
-        // Lossless wins → nothing dropped → survivor compaction (line 1058)
-        // never runs.  Only the lossless_candidate + optional lossless_uses_opaque
-        // calls count.
+        // Lossless wins → nothing dropped → survivor compaction (line 1058) never runs. Only the lossless_candidate + optional lossless_uses_opaque calls count.
         assert!(
             result.compacted.is_some(),
             "lossless render must win in this test setup (strategy: {})",
@@ -3598,11 +2864,7 @@ mod tests {
         );
     }
 
-    /// Behavioral parity: lossless-wins case — the chosen render must be
-    /// byte-identical before and after the fix. We capture output from the
-    /// reference (standard) crusher and the counting crusher (same stage
-    /// logic, just with the spy) to confirm the refactor does not alter the
-    /// lossless output.
+    /// Behavioral parity: lossless-wins case — the chosen render must be byte-identical before and after the fix.
     #[test]
     fn crush_array_lossless_output_unchanged_after_dedup() {
         let items: Vec<Value> = (0..50)

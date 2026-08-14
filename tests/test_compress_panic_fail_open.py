@@ -134,26 +134,10 @@ def test_fail_open_still_reraises_system_exit(monkeypatch) -> None:
         compress(_messages(), model="gpt-4o")
 
 
-# ─── Full-stack bite: a panic at the ACTUAL bridge position ─────────────────
-#
-# The pipeline-level tests above prove the outermost catch. This one proves the
-# harder thing COR-7 is really about: a ``BaseException`` raised at the Rust
-# BRIDGE (``SmartCrusher.crush``) must survive EVERY intermediate
-# ``except Exception`` layer between it and ``compress()`` — smart_crusher.py,
-# router_dispatch.py:220, content_router.py:754, pipeline.py:120 — and reach the
-# fail-open. If any of those layers were ``except BaseException`` (or if the
-# outer catch were ``except Exception``), the panic would be swallowed
-# mid-pipeline and the lossy output would stand: silent loss. This is the exact
-# stack a real ``pyo3_runtime.PanicException`` traverses.
+# Full-stack bite a panic at the ACTUAL bridge position ───────────────── The pipeline-level tests above prove the outermost catch.
 
-# A 1000-distinct-string row-drop fixture: a homogeneous flat array this large
-# takes SmartCrusher's lossy row-drop path via ``SmartCrusher.crush`` — confirmed
-# to route through the patched bridge method exactly once in the full
-# ``compress()`` path. The ``cor7panicbridge`` nonce makes this content UNIQUE to
-# this test, so the router's process-singleton result-cache (keyed on
-# ``hash(content)``, 30-min TTL) can never serve it from a prior test's run and
-# skip ``SmartCrusher.crush`` — which would make the bridge patch a no-op and the
-# ``calls["n"] > 0`` guard fire under the full suite (it did, before this nonce).
+# A 1000-distinct-string row-drop fixture a homogeneous flat array this large takes SmartCrusher's lossy row-drop path via ``SmartCrusher.crush`` so the
+# router's process-singleton result-cache (keyed on ``hash(content)``, 30-min TTL) can never serve it from a prior test's run and skip ``SmartCrusher.crush``.
 _PANIC_NONCE = "cor7panicbridge"
 _ROW_DROP_ITEMS = [f"{_PANIC_NONCE}-row-{i}-payload" for i in range(1000)]
 

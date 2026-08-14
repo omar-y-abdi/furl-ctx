@@ -1,5 +1,4 @@
-# Furl Rust build targets. `just` is not installed on dev boxes; this
-# Makefile is the source of truth and is mirrored by .github/workflows/rust.yml.
+# Furl Rust build targets. `just` is not required; these targets are the development source of truth and the project configuration mirrors them.
 
 SHELL := /bin/bash
 CARGO ?= cargo
@@ -30,11 +29,7 @@ help:
 test:
 	$(CARGO) test --workspace
 
-# One-command path from a fresh clone to a passing Python suite: builds the native
-# extension (most tests hard-import furl_ctx._core, so a bare `pytest` fails fast
-# with a "build the extension first" message — see conftest.py) then runs pytest.
-# Distinct from `make test` (Rust-only, see RUST_DEV.md) so that target's existing
-# meaning doesn't change underneath anyone.
+# Build the native extension before pytest because most tests import `furl_ctx._core`; a bare test run intentionally fails fast when the extension is missing.
 test-python:
 	@if [ -z "$$VIRTUAL_ENV" ]; then \
 		echo "error: activate a venv first (e.g. source .venv/bin/activate)"; \
@@ -46,19 +41,12 @@ test-python:
 bench:
 	$(CARGO) bench --workspace
 
-# Build the release wheel from the ROOT pyproject.toml — the single wheel
-# that ships the Python package + compiled furl_ctx/_core.so together
-# (rust.yml builds from the root manifest for exactly this reason). Building
-# from crates/furl-py/Cargo.toml directly produces a never-shipped
-# `furl-py 0.1.0` wheel exposing a top-level `_core` nothing imports.
+# Build one release wheel containing both the Python package and compiled `_core` extension.
 build-wheel:
 	$(MATURIN) build --release
 
-# maturin-develop + import-verify in one shot. Run this any time you suspect
-# the engine is silently falling back to Python-only mode because the compiled
-# `furl_ctx._core` extension is stale or unbuilt. SmartCrusher and the
-# diff/log/search compressors hard-import `furl_ctx._core`, so a missing
-# extension is a hard ImportError, not a silent degrade.
+# maturin-develop + import-verify in one shot. Run this any time you suspect the engine is silently
+# falling back to Python-only mode because the compiled `furl_ctx._core` extension is stale or unbuilt.
 verify-rust-core:
 	@if [ -z "$$VIRTUAL_ENV" ]; then \
 		echo "error: activate a venv first (e.g. source .venv/bin/activate)"; \
@@ -78,14 +66,8 @@ clippy lint:
 clean:
 	$(CARGO) clean
 
-# ─── Pre-push CI gate ──────────────────────────────────────────────────────
-#
-# These targets run the same checks GitHub Actions runs, locally. The intent
-# is: if `make ci-precheck` is green, `git push` will not turn red.
-#
-# Run `make ci-precheck` before EVERY `git push`. Install the pre-commit hooks
-# (ruff/format/mypy on every commit) one-time with:
-#   make install-git-hooks
+# ─── Pre-push CI gate ────────────────────────────────────────────────────── These targets run
+# the same checks GitHub Actions runs, locally. Run `make ci-precheck` before EVERY `git push`.
 
 ci-precheck: ci-precheck-rust ci-precheck-python ci-precheck-commitlint
 	@echo ""

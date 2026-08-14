@@ -63,17 +63,8 @@ from typing import Any, Final
 # Widths.
 # --------------------------------------------------------------------------- #
 
-# Accepted CCR hash widths (number of hex characters) — the STRICT consumer set:
-# - 24: the CURRENT width for EVERY producer. SmartCrusher row/opaque keys
-#        (sha256(payload)[:24] via `sha256_recovery_key`, byte-pinned by its
-#        parity tests); diff/log/search (md5_hex_24); cross_message_dedup,
-#        read_lifecycle, and the store default key (sha256(payload)[:24]).
-# - 12: LEGACY SmartCrusher keys (sha256(payload)[:12], 48 bits) emitted before
-#        the recovery key was widened to 96 bits (T3): a 48-bit key collided by
-#        the birthday bound and let one dropped row silently recover as
-#        another's content. Retained ONLY so `<<ccr:HASH>>` markers already in
-#        live transcripts still resolve — no producer emits 12-hex anymore.
-# Do NOT add arbitrary lengths — the exact-width check is the spoofing guard.
+# Accept only 24-hex current CCR hashes and 12-hex legacy SmartCrusher hashes retained for live
+# transcripts. No producer emits 12-hex now; rejecting every other width is part of the spoofing guard.
 HASH_WIDTHS: frozenset[int] = frozenset({12, 24})
 
 # --------------------------------------------------------------------------- #
@@ -108,36 +99,21 @@ def is_valid_ccr_hash(value: object) -> bool:
 # Literal grammar pieces.
 # --------------------------------------------------------------------------- #
 
-# Name of the CCR retrieval tool — the consumer-side verb of this grammar.
-# The MCP server registers it (hosts alias it as
-# ``mcp__<server>__furl_retrieve``), and the router's retrieval-loop guard
-# (router_message_policy.ALWAYS_EXCLUDE_TOOLS) excludes its outputs from
-# re-compression. The tool NAME is wire contract exactly like the marker shapes.
+# Name of the CCR retrieval tool — the consumer-side verb of this grammar. The tool NAME is wire contract exactly like the marker shapes.
 CCR_TOOL_NAME: str = "furl_retrieve"
 
 # The double-angle marker prefix shared by shapes A-F + D.
 CCR_PREFIX: str = "<<ccr:"
 
-# The trailing delimiter that terminates the hash capture in the double-angle
-# family: a single space / comma / hash-sign / single ``>``, OR the ``>>``
-# terminator of a bare ``<<ccr:HASH>>``. Non-capturing on purpose — the scan
-# path extracts the LAST capture group, which must remain the hash.
+# The trailing delimiter that terminates the hash capture in the double-angle family: a single
+# space / comma / hash-sign / single ``>``, OR the ``>>`` terminator of a bare ``<<ccr:HASH>>``.
 DOUBLE_ANGLE_DELIM: str = r"(?:[ ,#>]|>>)"
 
-# The literal width alternation used inside the double-angle pattern. 24 before
-# 12 is fine either way (the trailing delimiter guards width), kept as the
-# original literal for byte-identity.
+# The literal width alternation used inside the double-angle pattern. 24 before 12 is fine either
+# way (the trailing delimiter guards width), kept as the original literal for byte-identity.
 _HASH_WIDTH_ALT: str = rf"({HEX_CLASS}{{24}}|{HEX_CLASS}{{12}})"
 
-# --------------------------------------------------------------------------- #
-# Compiled consumer patterns — built FROM the named parts above.
-#
-# These reproduce the original ``tool_injection._marker_patterns`` literals
-# byte-for-byte (minus the retired dead pattern); this module is the sole
-# owner of the consumer patterns. Equivalence is proven in
-# tests/test_ccr_marker_grammar_characterization.py against frozen copies of
-# the original literals.
-# --------------------------------------------------------------------------- #
+# .
 
 # Shape H — standard bracket form: [N <type> compressed to M. Retrieve more: hash=xxx]
 # Three groups (count, target, hash); the hash is the LAST group (24 hex chars).
@@ -145,26 +121,8 @@ BRACKET_RETRIEVE_PATTERN: re.Pattern = re.compile(
     rf"\[(\d+) \w+ compressed to (\d+)\. Retrieve more: hash=({HEX_CLASS}{{24}})\]"
 )
 
-# Shape G (and any other bracket marker carrying a 24-hex hash) — generic
-# fallback. One group (the hash). IGNORECASE is on THIS pattern only.
-#
-# Span safety (the bracket-family sibling of the T4 fix): the interior
-# wildcards are BRACKET-FREE classes (``[^\[\]]``), not the original lazy
-# dots (``\[.*?compressed.*?hash=…``). ``.`` crossed ``]`` and ``[`` freely,
-# so with any earlier ``[`` on the same line the leftmost match STARTED at
-# that innocent bracket, ``match.group(0)`` covered far more than the
-# marker, and a substitution consumer (``resolve_markers``) deleted every
-# byte between the innocent bracket and the real marker. Proven:
-# ``"See [ticket-42] for context [120 lines compressed to 18. Retrieve full
-# diff: hash=…]"`` resolved to ``"See <original>"`` — the bytes
-# ``"[ticket-42] for context "`` silently gone. Bracket-free interiors make
-# a match span exactly ONE ``[…]`` run — the marker itself — because a
-# candidate start at an earlier ``[`` now dies at the next bracket instead
-# of reaching through it. Every real bracket marker (shape G/H and the
-# retired dead pattern #2 alike) has a bracket-free interior, so the HASH a
-# match extracts is unchanged — pinned by the characterization corpus — and
-# the residual ``re`` engine's backtrack surface only shrinks (a failed
-# start aborts at the first bracket instead of scanning to end-of-line).
+# Bracket-marker substitution must stay within one `[...]` span. Bracket-free interior classes
+# prevent a match from starting at an earlier innocent bracket and deleting intervening text.
 GENERIC_BRACKET_PATTERN: re.Pattern = re.compile(
     rf"\[[^\[\]]*?compressed[^\[\]]*?hash=({HEX_CLASS}{{24}})\]", re.IGNORECASE
 )
@@ -173,67 +131,8 @@ GENERIC_BRACKET_PATTERN: re.Pattern = re.compile(
 # One capturing group (the hash); the trailing delimiter is non-capturing.
 DOUBLE_ANGLE_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}{DOUBLE_ANGLE_DELIM}")
 
-# T4 fix: a SEPARATE full-span variant of the double-angle family, for callers
-# that excise-and-replace the WHOLE marker (resolve_markers's substitution)
-# rather than merely extract the hash. DOUBLE_ANGLE_PATTERN above is an
-# EXTRACTION pattern: its trailing delimiter only needs to consume ONE
-# boundary byte to confirm the hash capture is complete, so match.group(0)
-# stops right there — correct for hashes_in_text (which only reads the
-# capture group), WRONG as a substitution span for any shape with a
-# descriptive tail (A/B/C/E/F: match.group(0) ends mid-marker, e.g.
-# ``"<<ccr:HASH "`` for shape A, leaving ``"N_rows_offloaded>>"`` glued onto
-# whatever replaces it) and even for the bare shape (D: DOUBLE_ANGLE_DELIM's
-# character class matches a single ``">"`` before its own ``">>"``
-# alternative ever gets a chance to fire — alternation takes the first
-# successful branch — so match.group(0) stops one byte short of the real
-# close and a lone ``">"`` is left dangling).
-#
-# ``[^>]{0,64}`` up to a literal ``">>"`` instead: through every byte the
-# double-angle grammar never emits inside a marker body, so it halts at the
-# FIRST ``">>"`` within that window — the marker's real close for every real
-# shape (verified against A-F; none of their tails contain ``">"``).
-# Zero-width for the bare shape (D), where the delimiter IS the terminator.
-# Hash-width disambiguation (24 tried before 12) still holds: the byte
-# immediately after a real hash is always non-hex (space / comma /
-# hash-sign / ``">"``), so the 24-hex branch still fails to find 24
-# consecutive hex characters for a true 12-hex hash and correctly backs
-# off, exactly as it does for DOUBLE_ANGLE_PATTERN.
-#
-# The ``{0,64}`` bound (not an unbounded ``*``) closes a ReDoS the
-# unbounded form reopened: on adversarial input with many ``<<ccr:HASH``
-# starts and no closing ``">>"`` anywhere (e.g. ``"<<ccr:aaaaaaaaaaaa" *
-# 32000``, 562.5 KB), an unbounded ``[^>]*`` must scan to the end of the
-# text, fail to find ``">>"``, then backtrack one byte at a time all the
-# way back — an O(remaining-length) cost repeated at every one of the many
-# match-start attempts, so the whole scan is O(text_length^2). Measured:
-# 562.5 KB took 19.66s unbounded versus 0.0095s bounded here, and bounded
-# scales linearly (roughly 2x time per 2x input) where unbounded scaled
-# roughly 4x. ``finditer_within_budget`` gives this pattern no RE2 twin
-# (only ``GENERIC_BRACKET_PATTERN`` has one, see below), so it stays on
-# Python's backtracking ``re`` engine — the bound is the only thing
-# keeping the worst-case backtrack cost at O(64) per position instead of
-# O(text_length) per position.
-#
-# 64 is chosen with wide headroom over the measured maximum real tail
-# across every shape (arithmetic, `` `` = one literal space):
-#   A ``<<ccr:HASH {n}_rows_offloaded>>``       16 literal chars + digits
-#   B ``<<ccr:HASH#rows {n}_chunks>>``          13 literal chars + digits
-#     (RETIRED shape, F8/#168 — no producer; the bound still covers it so a
-#     stale ``#rows`` marker in cached content parses safely. Historical n was
-#     capped at DEFAULT_CAPACITY/4 = 250, 3 digits.)
-#   C ``<<ccr:HASH,{kind},{size}>>``            2 literal commas + kind
-#     [4-6 chars, kind is one of "base64"/"string"/"html" in every
-#     production call site — OpaqueKind::Other's only construction site
-#     in the whole crate is a #[cfg(test)] fixture in compaction/ir.rs] +
-#     humanize_bytes() output [a handful of chars at any realistic size]
-#   D ``<<ccr:HASH>>`` bare                     0 chars, delimiter IS the close
-#   E ``<<ccr:HASH {n}_bytes_duplicate>>``      17 literal chars + digits
-#   F ``<<ccr:HASH {n}_bytes_near_duplicate>>`` 22 literal chars + digits
-# A/E/F have no in-repo hard cap on the digit run, but digit count grows
-# only as log10(n): even a wildly pessimistic 20-digit byte/row count (the
-# ~64-bit address-space ceiling, far past any real message size) keeps
-# every shape's total under 42 chars, comfortably inside the 64-char
-# window with room to spare.
+# Use a separate full-span double-angle substitution pattern: consume through the first `>>` within a 64-character
+# tail. The bound preserves 24/12-hex disambiguation and prevents quadratic backtracking on unterminated marker starts.
 DOUBLE_ANGLE_FULL_PATTERN: re.Pattern = re.compile(rf"{CCR_PREFIX}{_HASH_WIDTH_ALT}[^>]{{0,64}}>>")
 
 
@@ -291,39 +190,8 @@ def hash_of_match(match: re.Match[str]) -> str:
     return hash_value
 
 
-# --------------------------------------------------------------------------- #
-# Bounded marker scanning (marker-scan DoS).
-#
-# ``GENERIC_BRACKET_PATTERN`` carries two lazy interior wildcards (bracket-free
-# classes since the span-safety fix; originally ``.*?``) and runs over
-# agent/tool-produced text up to the MCP server's 10 MiB read cap. Under
-# CPython's backtracking ``re`` engine that scan is quadratic-or-worse on
-# adversarial input: many ``[`` starts, each forcing a forward scan for
-# ``compressed`` then ``hash=`` (the bracket-free classes shorten each failed
-# scan — it now aborts at the next bracket — but many-``compressed``-tokens
-# input inside one bracket-free run still backtracks quadratically). On the
-# MCP worker thread no SIGALRM watchdog can fire, so a wedged scan is a
-# process-wide freeze, the same DoS class ``regex_budget`` closed for
-# agent-supplied filters.
-#
-# The bound is RE2 (``google-re2``, shipped by the ``mcp`` extra): it matches
-# with an automaton in LINEAR time, so the pathological class does not exist for
-# it, and it is the one engine that holds on a worker thread. RE2 has no flags
-# argument, so an ``re.IGNORECASE`` pattern is compiled from an inline ``(?i)``
-# form. Extraction parity with the ``re`` engine, the same hashes in the same
-# order, is pinned by ``tests/test_marker_scan_budget.py`` over the
-# characterization corpus.
-#
-# Only ``GENERIC_BRACKET_PATTERN`` needs the automaton. ``BRACKET_RETRIEVE_PATTERN``
-# and ``DOUBLE_ANGLE_PATTERN`` are literal-anchored and linear under ``re``, so
-# they keep the exact ``re`` engine and are intentionally NOT twinned. The
-# wildcard-bearing ``DOUBLE_ANGLE_FULL_PATTERN`` is also untwinned, but by its
-# ``[^>]{0,64}`` bound (see above), not by literal-anchoring. When RE2
-# is absent, a base install without the ``re2``/``mcp`` extra, the scan falls back
-# to the residual ``re`` engine: Ctrl-C-interruptible on the main thread, the same
-# residual tier ``regex_budget`` documents. A supported MCP deployment always
-# ships RE2, closing the worker-thread freeze in production.
-# --------------------------------------------------------------------------- #
+# Run the wildcard bracket-marker scan with RE2 when available to guarantee linear worker-thread behavior. Literal/bounded
+# marker patterns remain on Python `re`; base installs fall back to `re` only for the generic bracket pattern.
 
 
 def _load_re2() -> Any | None:

@@ -6,9 +6,8 @@ fixture were removed with the proxy — an exception-to-skip hook can
 only mask genuine bugs in an offline suite (TEST-13/TEST-34).
 """
 
-# Defensive default, set before any imports: silences fork-parallelism warnings
-# from third-party tokenizer libraries if one happens to be installed in the
-# test environment (not a Furl dependency).
+# Defensive default, set before any imports: silences fork-parallelism warnings from third-party
+# tokenizer libraries if one happens to be installed in the test environment (not a Furl dependency).
 import os
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

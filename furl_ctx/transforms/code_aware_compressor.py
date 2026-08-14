@@ -282,9 +282,8 @@ _LANG_CONFIGS: dict[CodeLanguage, LangConfig] = {
 
 # ─── Language detection ──────────────────────────────────────────────────────
 
-# Lightweight pre-filter patterns for language detection. These are ONLY a
-# quick check to avoid parsing with every language; actual detection is done
-# by tree-sitter (fewest parse errors wins).
+# Lightweight pre-filter patterns for language detection. These are ONLY a quick check to avoid
+# parsing with every language; actual detection is done by tree-sitter (fewest parse errors wins).
 _LANGUAGE_PREFILTER: dict[CodeLanguage, list[re.Pattern[str]]] = {
     CodeLanguage.PYTHON: [
         re.compile(r"^\s*(def|class|import|from|async def)\s+\w+", re.MULTILINE),
@@ -1043,9 +1042,8 @@ class CodeAwareCompressor:
 
         visit(root)
 
-        # Capture top-level code that wasn't handled by any of the above.
-        # This preserves global variables, constants, if __name__ blocks,
-        # module-level assignments, etc.
+        # Capture top-level code that wasn't handled by any of the above. This preserves
+        # global variables, constants, if __name__ blocks, module-level assignments, etc.
         for child in root.children:
             child_range = (child.start_byte, child.end_byte)
             if child_range not in captured_byte_ranges:
@@ -1143,9 +1141,7 @@ class CodeAwareCompressor:
         ds_skip_lines = 0
         if language == CodeLanguage.PYTHON and body_node.child_count > 0:
             first_child = body_node.children[0]
-            # tree-sitter Python may represent docstrings as:
-            # - bare `string` node directly in block, OR
-            # - `expression_statement` containing a `string` node
+            # tree-sitter Python may represent docstrings as: - bare `string` node directly in block, OR - `expression_statement` containing a `string` node
             ds_node = None
             if first_child.type == "string":
                 ds_node = first_child
@@ -1215,12 +1211,8 @@ class CodeAwareCompressor:
                 # elif REMOVE: docstring_text stays empty
                 ds_skip_lines = ds_start_rel + ds_lines_count
 
-        # --- Statement-based body truncation (never cuts mid-expression) ---
-        #
-        # Walk body_node.children (AST statements) instead of slicing lines.
-        # Each child is a complete, syntactically valid statement. We keep
-        # whole statements until the line budget is exhausted, so the output
-        # always parses correctly.
+        # Statement-based body truncation (never cuts mid-expression) --- Walk body_node.children (AST statements) instead of
+        # slicing lines. We keep whole statements until the line budget is exhausted, so the output always parses correctly.
 
         # Detect indentation from actual body code (preserves whatever the file uses)
         indent = _detect_indent(body_lines) if body_lines else "    "

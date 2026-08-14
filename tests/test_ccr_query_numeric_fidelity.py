@@ -26,9 +26,8 @@ from furl_ctx.cache.compression_store import CompressionStore
 
 H = "abcdef123456"
 
-# The two regression fixtures the finding names: an overflow literal and a
-# 20-significant-digit decimal — both representable under serde
-# arbitrary_precision, neither by a Python float.
+# The two regression fixtures the finding names: an overflow literal and a 20-significant-digit
+# decimal — both representable under serde arbitrary_precision, neither by a Python float.
 OVERFLOW = '[{"id": 1, "reading": 1e400, "note": "alpha needle"}]'
 HIGH_PRECISION = '[{"id": 1, "price": 0.30000000000000004444, "note": "alpha needle"}]'
 
@@ -88,9 +87,8 @@ def test_items_normalizer_serves_verbatim_chunks_for_lossy_numerics(fixture: str
 
 
 def test_roundtrippable_numerics_keep_structured_items() -> None:
-    # Value-level check, not textual: 1e3 == 1000.0 (same number) and Python
-    # ints are arbitrary-precision — neither may trigger the fallback. The
-    # legacy structured-array result shape is preserved for them.
+    # Value-level check, not textual: 1e3 == 1000.0 (same number) and Python ints are arbitrary-precision
+    # — neither may trigger the fallback. The legacy structured-array result shape is preserved for them.
     store = CompressionStore(max_entries=10)
     original = (
         '[{"id": 1, "price": 0.5, "note": "alpha needle"},'

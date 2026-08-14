@@ -48,9 +48,7 @@ PREFIX_TREE_DEPTH: int = 4
 # an existing cluster rather than spawn a new template.  Drain default ``st``.
 SIMILARITY_THRESHOLD: float = 0.5
 
-# Placeholder used INTERNALLY to mark a variable position in a template's token
-# list.  This is a sentinel object identity, never compared against real string
-# tokens by value, so it can never collide with log content.
+# Placeholder used INTERNALLY to mark a variable position in a template's token list.
 _WILDCARD_TOKEN: object = object()
 
 
@@ -227,9 +225,8 @@ def mine(lines: tuple[tuple[str, ...], ...]) -> MiningResult:
     grow as later lines join; params are therefore extracted against the FINAL
     pattern, not the pattern at join time.
     """
-    # Working clusters keyed by (length_bucket, prefix).  A plain dict preserves
-    # insertion order; we additionally track first-appearance order explicitly for
-    # id assignment so the wire is independent of dict internals.
+    # Working clusters keyed by (length_bucket, prefix). A plain dict preserves insertion order; we additionally
+    # track first-appearance order explicitly for id assignment so the wire is independent of dict internals.
     buckets: dict[tuple[int, tuple[str, ...]], list[_Cluster]] = {}
     ordered_clusters: list[_Cluster] = []
     # Parallel to `lines`: which cluster each line landed in (by identity index).

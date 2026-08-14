@@ -38,17 +38,14 @@ from furl_ctx.tokenizers import get_tokenizer  # noqa: E402
 # The model the MCP server compresses (and therefore counts) with.
 _SERVER_MODEL = "claude-sonnet-4-5-20250929"
 
-# furl_ctx/__init__.py re-exports the `compress` function, shadowing the
-# submodule attribute — resolve the real module object for monkeypatching.
+# the module re-exports the `compress` function, shadowing the submodule attribute — resolve the real module object for monkeypatching.
 compress_mod = importlib.import_module("furl_ctx.compress")
 
 
 @pytest.fixture(autouse=True)
 def _isolate_store(tmp_path, monkeypatch):
-    # Mirror test_mcp_server_handlers isolation: workspace jail in tmp (the
-    # sqlite default backend AND the shared-stats file — whose path follows
-    # FURL_WORKSPACE_DIR per call, SEC-7 — then live under the sandboxed
-    # workspace), fresh store singleton around every test.
+    # Mirror test_mcp_server_handlers isolation: workspace jail in tmp (the sqlite default backend AND the shared-stats file — whose path
+    # follows FURL_WORKSPACE_DIR per call, SEC-7 — then live under the sandboxed workspace), fresh store singleton around every test.
     monkeypatch.setenv("FURL_WORKSPACE_DIR", str(tmp_path))
     monkeypatch.delenv("FURL_CCR_BACKEND", raising=False)
     reset_compression_store()
@@ -63,8 +60,7 @@ def server() -> FurlMCPServer:
 
 def _patch_compress_error(monkeypatch, *, tokens_before: int, error: str) -> None:
     def fake_compress(messages, **kwargs):
-        # Mirror compress()'s fail-open contract (compress.py error path):
-        # ORIGINAL messages back, tokens_after=0, error set.
+        # Mirror compress()'s fail-open contract (the module error path): ORIGINAL messages back, tokens_after=0, error set.
         return CompressResult(
             messages=messages,
             tokens_before=tokens_before,
@@ -165,9 +161,8 @@ async def test_cache_hit_counters_surface_in_stats_dict(server, tmp_path) -> Non
     assert d["cache_hits"] == 1
     assert d["cache_tokens_avoided"] == server._stats.cache_tokens_avoided
     assert d["cache_tokens_avoided"] > 0
-    # Additive shape change: the existing keys keep their meaning — a session
-    # of pure cache hits performed zero compressions and saved zero
-    # compression tokens.
+    # Additive shape change: the existing keys keep their meaning — a session of
+    # pure cache hits performed zero compressions and saved zero compression tokens.
     assert d["compressions"] == 0
     assert d["total_tokens_saved"] == 0
     assert d["savings_percent"] == 0
@@ -177,10 +172,8 @@ async def test_cache_hit_counters_surface_in_stats_dict(server, tmp_path) -> Non
 
 
 async def test_read_original_tokens_uses_tokenizer_not_word_count(server, tmp_path) -> None:
-    # Structured log line: word-split gives 3 "words" but tiktoken produces
-    # 15 tokens (punctuation, path separators, number literals each get their
-    # own token). This divergence proves we're using the real tokenizer, not
-    # a word count. Pin is in o200k_base (claude-* uses it since Q1).
+    # Structured log line: word-split gives 3 "words" but tiktoken produces 15 tokens (punctuation, path separators,
+    # number literals each get their own token). This divergence proves we're using the real tokenizer, not a word count.
     content = "HTTP/2.0 status_code=404 path=/api/v1/users"  # 3 words, 15 o200k tokens
     f = tmp_path / "counted.txt"
     f.write_text(content)

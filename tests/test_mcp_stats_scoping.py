@@ -52,9 +52,8 @@ async def test_hook_activity_is_labeled_lifetime_with_session_delta() -> None:
     assert "LIFETIME" in activity["scope"]
     assert activity["hook_invocations_seen"] == 5
     assert "this_session" in activity
-    # R3 honesty: the this_session label is a per-server DELTA that may include
-    # concurrent processes (the counters are cross-process), and the scope string
-    # must say both plainly rather than imply a clean single-session count.
+    # R3 honesty: the this_session label is a per-server DELTA that may include concurrent processes (the counters
+    # are cross-process), and the scope string must say both plainly rather than imply a clean single-session count.
     session_scope = activity["this_session"]["scope"]
     assert "delta" in session_scope.lower(), "this_session must be labeled a delta"
     assert "concurrent processes" in session_scope, (
@@ -103,10 +102,7 @@ async def test_session_delta_rebaselines_when_a_purge_resets_the_counters() -> N
         "post-purge events must be counted, not clamped to 0 by a stale baseline"
     )
 
-    # And the re-baseline STICKS: once activity climbs past the stale 5 the
-    # counter is no longer detectably below its snapshot, so a per-read
-    # detection that did not persist the new baseline would silently revert to
-    # subtracting 5 here and report 2 instead of 7.
+    # And the re-baseline STICKS: once activity climbs past the stale 5 the counter is no longer detectably below its snapshot.
     store.increment_counter("hook_invocations_seen", 3)
     later = _envelope(await server._handle_stats())["store"]["hook_activity"]
     assert later["hook_invocations_seen"] == 7

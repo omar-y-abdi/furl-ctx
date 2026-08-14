@@ -58,10 +58,7 @@ _MARKETPLACE_JSON = _ROOT / ".claude-plugin" / "marketplace.json"
 
 _SEMVER = r"\d+\.\d+\.\d+"
 _PIN_RE = re.compile(r"furl-ctx\[mcp\]==(" + _SEMVER + r")")
-# Two capture groups in one match, not two separate regexes: this also pins the
-# *relationship* between the halves (plugin version immediately followed by
-# "· engine furl-ctx" immediately followed by the engine version), so a status
-# line with the right two numbers in the wrong shape still fails loud.
+# Two capture groups in one match, not two separate regexes.
 _STATUS_VERSION_RE = re.compile(r"furl (" + _SEMVER + r") · engine furl-ctx (" + _SEMVER + r")")
 _FRONTMATTER_VERSION_RE = re.compile(r"^version:\s*(" + _SEMVER + r")\s*$", re.MULTILINE)
 
@@ -147,19 +144,11 @@ def test_pretool_pin_matches_pyproject_version() -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        # pretool_pipe.py BAKES the pin into the rewritten command (the compressor
-        # the rewrite pipes through), so it MUST equal pyproject too — a separate
-        # pin from the hooks.json command above and, like the prose pins below,
-        # invisible to release-please's updaters. See _FURL_CTX_PIN in
-        # pretool_pipe.py.
+        # The rewrite bakes an engine pin into the compressor command; it must equal the project version independently of the manifest command pin.
         _PRETOOL_SCRIPT,
         _SKILL_MD,
         _PLUGIN_README,
-        # SECURITY.md's supply-chain section documents the plugin's `uv run` pin
-        # twice (once as a plain example, once in the hardening-path paragraph);
-        # like the SKILL.md/README prose pins, release-please cannot rewrite either
-        # and nothing else in the guard suite reads this file, so a stale example
-        # here was invisible to CI until this test.
+        # The supply-chain documentation repeats the plugin `uv run` pin twice; both prose pins must match the project version.
         _SECURITY_MD,
     ],
     ids=lambda p: p.name,

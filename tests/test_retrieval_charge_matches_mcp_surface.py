@@ -66,23 +66,8 @@ from verify.measure import (
 
 MODEL = "gpt-4o"
 
-# Measured bounds. Ranges rather than single values because both terms vary a
-# little with content, and a range must be derived from the space it bounds —
-# NOT from whatever handful of fixtures happened to be at hand. Widening one to
-# make a failure go away defeats the file.
-#
-# SCAFFOLD_RANGE: response minus escaped payload. Measured 64..73 over 40
-#   DISTINCT offloads (median 68, mean 68.22), which is where the constant comes
-#   from. The bound is widened to 60..76 on purpose: the hash appears inside the
-#   response, hash tokenisation alone spans 13 tokens, and 40 samples cannot pin
-#   that tail — a bound that goes red on an unlucky hash is a flaky test, not a
-#   guard. It still catches what it is for: a response-shape change moves this by
-#   tens of tokens, not by one.
-# CALL_RANGE: over 3000 RANDOM 24-hex hashes, because hash tokenisation is the
-#   variable here and no fixture set samples it. First cut of this bound was
-#   (28, 34) from 16 real hashes and a 17th real hash fell outside it at 27 —
-#   the sample was the problem, not the engine. The full distribution is
-#   26..39, mean 30.93, median 31, which is where the constant comes from.
+# Token-cost bounds come from broad measured distributions, especially random 24-hex hashes. Keep ranges wide enough for
+# tokenization variance but narrow enough to catch response/call-shape changes; do not widen them to silence failures.
 SCAFFOLD_RANGE = (60, 76)
 SCAFFOLD_MEDIAN = 68
 CALL_RANGE = (26, 39)
@@ -268,9 +253,7 @@ def test_outgoing_call_constant_matches_a_real_retrieve_call() -> None:
     assert RETRIEVE_CALL_OVERHEAD_TOKENS > 12, (
         "12 was the pre-measurement guess; a real call cannot be that cheap"
     )
-    # Random hex, seeded. Sequential integers formatted to 24 places are 19
-    # leading zeros and tokenise to a median of 26, which would "prove" the
-    # constant wrong by sampling a corner of the space no real hash occupies.
+    # Random hex, seeded.
     rng = random.Random(0x5EED)
     sample = [
         tok.count_text(
@@ -330,10 +313,8 @@ def test_total_charge_tracks_the_real_round_trip_within_the_scaffold_margin() ->
                     json.dumps({"name": "furl_retrieve", "arguments": {"hash": hash_key}})
                 )
             )
-            # This hash's ACTUAL call cost, not the constant: hash tokenisation
-            # spans 13 tokens, and folding that into the margin would slacken it
-            # enough to hide a wrong constant. The constant is checked separately,
-            # against the distribution's centre.
+            # This hash's ACTUAL call cost, not the constant: hash tokenisation spans 13 tokens,
+            # and folding that into the margin would slacken it enough to hide a wrong constant.
             charged = (
                 retrieved_blob_tokens(blob, tok)
                 + MCP_RESPONSE_SCAFFOLD_TOKENS

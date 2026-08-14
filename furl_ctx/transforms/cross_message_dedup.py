@@ -80,18 +80,8 @@ logger = logging.getLogger(__name__)
 # itself is ~190 chars; below this the replacement saves nothing.
 MIN_DEDUP_CHARS = 256
 
-# Near-duplicate gates: a later JSON dict-array is rewritten only when the
-# byte-identical row overlap with an earlier kept-verbatim array is
-# meaningful (count, absolute bytes, fraction of the payload) AND the
-# rewrite beats the COUNTERFACTUAL, not just the raw original: a unit left
-# untouched still gets per-message lossless compression downstream (the
-# CSV-schema table typically lands near ~50% on row-shaped data — measured
-# 50-56% on the real disk/search benchmarks). The near rendering is pinned
-# against further compression, so it must cost LESS than that rendering
-# would — i.e. come in under ~45% of the original bytes. Measured the hard
-# way: without this gate the real drifted `df -k` pair (5/9 rows changed)
-# regressed 347 -> ~430 tokens because 5 raw JSON rows + sentinel outweigh
-# the 9-row lossless table.
+# Near-duplicate gates a unit left untouched still gets per-message lossless compression
+# downstream (the CSV-schema table typically lands near ~50% on row-shaped data
 NEAR_DUP_MIN_SHARED_ROWS = 2
 NEAR_DUP_MIN_SHARED_BYTES = 256
 NEAR_DUP_MIN_SHARED_FRACTION = 0.3
@@ -99,23 +89,14 @@ NEAR_DUP_MIN_SAVED_BYTES = 128
 NEAR_DUP_MAX_RENDERING_FRACTION = 0.45
 
 # Cap on how many kept-verbatim arrays stay eligible as near-dup reference
-# sources. Every array-shaped unit is matched against every live source
-# (PERF-2): without a bound, a long conversation with many array tool
-# outputs makes this transform's cost grow with the SQUARE of the array
-# count (each new array rescans every earlier one) and holds every row
-# signature seen for the conversation's lifetime in memory. Bounding to the
-# most recent N sources caps both to O(N) per array and turns the whole
-# scan linear in conversation length, at the cost of near-dup matches
-# against sources older than N array-shaped units back — a source that
-# stale is unlikely to still be the best match anyway.
+# sources. Every array-shaped unit is matched against every live source (PERF-2).
 NEAR_DUP_MAX_ARRAY_SOURCES = 64
 
 # Roles whose string content is a tool output (OpenAI-style).
 _TOOL_ROLES = frozenset({"tool", "function"})
 
-# Hash length for the surfaced marker / store key. Matches the Python
-# compression_store default (SHA-256[:24]) so the marker hash and the store
-# key are the same string by construction.
+# Hash length for the surfaced marker / store key. Matches the Python compression_store default
+# (SHA-256[:24]) so the marker hash and the store key are the same string by construction.
 _MARKER_HASH_LEN = 24
 
 _SENTINEL_KEY = "_ccr_dropped"
@@ -312,10 +293,8 @@ class CrossMessageDeduper(Transform):
         if state.near_replaced:
             applied.append(f"cross_message_dedup:near:{state.near_replaced}")
 
-        # Per-message delta instead of a second full-conversation recount
-        # (PERF-1): only replaced messages differ, and ``_process_message``
-        # returns the SAME object for untouched ones, so identity picks out
-        # exactly the replacements.
+        # Per-message delta instead of a second full-conversation recount (PERF-1): only replaced messages differ, and
+        # ``_process_message`` returns the SAME object for untouched ones, so identity picks out exactly the replacements.
         token_delta = sum(
             tokenizer.count_message(new) - tokenizer.count_message(orig)
             for orig, new in zip(messages, new_messages)
@@ -645,9 +624,8 @@ class CrossMessageDeduper(Transform):
                 query_context=query_context or None,
                 compression_strategy="cross_message_dedup",
                 explicit_hash=ccr_hash,
-                # A durable write that fell open to volatile storage raises
-                # DurableWriteError → vetoed below (audit #3): no replacement
-                # ships unless the original is durably recoverable.
+                # A durable write that fell open to volatile storage raises DurableWriteError → vetoed
+                # below (audit #3): no replacement ships unless the original is durably recoverable.
                 require_durable=True,
             )
             return True

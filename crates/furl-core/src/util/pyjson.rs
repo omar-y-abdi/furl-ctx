@@ -1,26 +1,5 @@
-//! Python-`json.dumps`-parity serializers (ARCH-8).
-//!
-//! One writer family, exactly reproducing CPython's `json.dumps` byte
-//! output for the three formatting profiles Furl depends on:
-//!
-//! - [`python_json_dumps_sort_keys`] — `json.dumps(v, sort_keys=True)`:
-//!   `", "` / `": "` separators, sorted keys, `ensure_ascii=True`.
-//!   Feeds the MD5 item hashes (`anchor_selector::compute_item_hash` /
-//!   `stable_item_hash`) — a one-byte drift silently changes dedup.
-//! - [`python_safe_json_dumps`] / [`write_python_safe_json`] — Python
-//!   `safe_json_dumps`: compact `(",", ":")` separators,
-//!   `ensure_ascii=False`. This is the format `SmartCrusher` uses to
-//!   re-serialize crushed output, so the Rust bytes match Python's
-//!   exactly (output parity pinned by the crusher grammar tests).
-//!
-//! These serializers are load-bearing for BOTH canonical
-//! serialization/matching in the crusher (match-back, rendering,
-//! value signatures in orchestration) and the anchor-selection dedup
-//! hashes. They live here — not in any one consumer — because they are
-//! a cross-cutting wire-format concern; the hash functions that
-//! consume them stay with their owners (`anchor_selector` for the MD5
-//! item hashes, `ccr::persist` for the CCR keys, which use serde_json's
-//! `canonical_array_json` instead).
+//! Python-`json.dumps`-parity serializers (ARCH-8). Feeds the MD5 item hashes (`anchor_selector::compute_item_hash` / `stable_item_hash`) — a one-byte drift silently
+//! changes dedup. - [`python_safe_json_dumps`] / [`write_python_safe_json`] They live here — not in any one consumer — because they are a cross-cutting wire-format concern.
 
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -36,18 +15,7 @@ struct JsonFmt {
     ensure_ascii: bool,
 }
 
-/// Python `json.dumps(value, sort_keys=True)` — exact format parity.
-///
-/// Differences from `serde_json::to_string`:
-/// 1. Separators: `, ` and `: ` (with spaces, not compact).
-/// 2. Object keys are sorted alphabetically.
-/// 3. Non-ASCII strings are escaped to `\uXXXX` (Python default
-///    `ensure_ascii=True`).
-/// 4. Numbers serialize the same as serde_json for finite f64; serde_json
-///    refuses NaN/Inf which JSON forbids — Python's json.dumps also
-///    refuses by default but `default=str` would coerce them. For
-///    compute_item_hash inputs (already-parsed JSON) NaN/Inf are
-///    impossible so we don't handle them here.
+/// Python `json.dumps(value, sort_keys=True)` — exact format parity. Non-ASCII strings are escaped to `\uXXXX` (Python default `ensure_ascii=True`).
 pub fn python_json_dumps_sort_keys(value: &Value) -> String {
     let mut out = String::new();
     write_python_json_inner(
@@ -62,21 +30,14 @@ pub fn python_json_dumps_sort_keys(value: &Value) -> String {
     out
 }
 
-/// Python `safe_json_dumps(value)` — compact separators `(",", ":")` +
-/// `ensure_ascii=False`, preserving object-key insertion order. This is
-/// the format `SmartCrusher._smart_crush_content` uses to re-serialize
-/// crushed output, so the Rust output bytes match Python's exactly.
+/// Python `safe_json_dumps(value)` — compact separators `(",", ":")` + `ensure_ascii=False`, preserving object-key insertion order.
 pub fn python_safe_json_dumps(value: &Value) -> String {
     let mut out = String::new();
     write_python_safe_json(value, &mut out);
     out
 }
 
-/// Streaming form of [`python_safe_json_dumps`]: renders `value` into
-/// `out` (identical bytes). The serializer is context-free, so callers
-/// can compose an array render element-wise — `[a,b,c]` equals the
-/// elements rendered here joined by `,` inside brackets — without
-/// materializing a temporary `Value::Array` (PERF-4).
+/// Streaming form of [`python_safe_json_dumps`]: renders `value` into `out` (identical bytes).
 pub(crate) fn write_python_safe_json(value: &Value, out: &mut String) {
     write_python_json_inner(
         value,
@@ -89,13 +50,8 @@ pub(crate) fn write_python_safe_json(value: &Value, out: &mut String) {
     );
 }
 
-/// `json.dumps(value, sort_keys=True)` with top-level keys in `exclude`
-/// omitted — the projection serialization behind
-/// `anchor_selector::stable_item_hash`. For the TOP-LEVEL object only,
-/// keys present in `exclude` are skipped; nested values use the
-/// unfiltered writer so the bytes match [`python_json_dumps_sort_keys`]
-/// for everything that survives. Non-objects serialize whole (no
-/// top-level keys to filter).
+/// `json.dumps(value, sort_keys=True)` with top-level keys in `exclude` omitted — the projection serialization behind `anchor_selector::stable_item_hash`. For the TOP-LEVEL
+/// object only, keys present in `exclude` are skipped; nested values use the unfiltered writer so the bytes match [`python_json_dumps_sort_keys`] for everything that survives.
 pub(crate) fn python_json_dumps_sort_keys_filtered(
     value: &Value,
     exclude: &BTreeSet<String>,
@@ -179,16 +135,6 @@ fn write_python_json_inner(value: &Value, out: &mut String, fmt: JsonFmt) {
 }
 
 /// Encode a string value Python-style.
-///
-/// `ensure_ascii=true`:
-/// - Backslash, quote, control chars → standard escapes (`\\`, `\"`,
-///   `\n`, etc.).
-/// - Non-ASCII codepoints → `\uXXXX` (surrogate-paired for codepoints
-///   above 0xFFFF).
-///
-/// `ensure_ascii=false`:
-/// - Same standard escapes for backslash/quote/controls.
-/// - Non-ASCII codepoints emit literal UTF-8 bytes.
 fn write_python_json_string(s: &str, out: &mut String, ensure_ascii: bool) {
     out.push('"');
     for c in s.chars() {
@@ -272,9 +218,7 @@ mod tests {
 
     #[test]
     fn json_dumps_emoji_uses_surrogate_pair() {
-        // Codepoint U+1F600 (😀) → \\ud83d\\ude00 surrogate pair.
-        // Reference: json.dumps({"k": "😀"}, sort_keys=True)
-        // = '{"k": "\\ud83d\\ude00"}'
+        // Codepoint U+1F600 (😀) → \\ud83d\\ude00 surrogate pair. Reference: json.dumps({"k": "😀"}, sort_keys=True) = '{"k": "\\ud83d\\ude00"}'
         let v = json!({"k": "😀"});
         assert_eq!(
             python_json_dumps_sort_keys(&v),

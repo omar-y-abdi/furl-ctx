@@ -898,10 +898,7 @@ def test_nested_content_wrapped_stderr_is_still_redacted(
     assert "SECRET-99999" not in json.dumps(mirrored), "nested stderr leaked through _reinject"
     assert mirrored["content"]["stdout"] == "COMPRESSED"
 
-    # THE WITHHOLD PATH, which the emit path above does not exercise. The
-    # fail-CLOSED mirror recurses through the same code, so before the recursion
-    # threaded its argument the nested stderr was emitted RAW *inside the withheld
-    # response* — the leak wearing the costume of the fix.
+    # THE WITHHOLD PATH, which the emit path above does not exercise.
     withheld = hook._reinject(nested, hook._withheld_message(5.0), hook._STDERR_WITHHELD)
     assert "SECRET-99999" not in json.dumps(withheld), (
         "nested stderr leaked through the WITHHOLD mirror"

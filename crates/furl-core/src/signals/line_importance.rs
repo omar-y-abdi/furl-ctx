@@ -1,13 +1,6 @@
 //! Line-level importance detection trait.
-//!
-//! Compressors call this when deciding which lines to drop under a token
-//! budget. The signal carries category, priority, and confidence — never
-//! a bare bool — so future tiers can short-circuit on high confidence
-//! and lower-priority callers can fall through.
 
-/// Where the line came from. Determines which pattern set fires (e.g.
-/// markdown headers count as priority signals in prose, but not in diff
-/// hunks).
+/// Where the line came from. Determines which pattern set fires (e.g. markdown headers count as priority signals in prose, but not in diff hunks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImportanceContext {
     /// Free-form prose (text_compressor) — markdown structure matters.
@@ -33,10 +26,6 @@ pub enum ImportanceCategory {
 }
 
 /// Output of a single detector for a single line.
-///
-/// `priority` is what compressors rank by; `confidence` says how sure
-/// the detector is (callers composing multiple detectors can use it to
-/// decide whether to consult another one).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImportanceSignal {
     /// The category the detector matched on, if any.
@@ -72,12 +61,7 @@ impl ImportanceSignal {
     }
 }
 
-/// Single-line importance classifier.
-///
-/// Implementations are expected to be cheap (keyword automaton, lexical
-/// features) or amortizable (embedding+classifier head with batched
-/// inference). They MUST be `Send + Sync` because compressors share
-/// detector instances across tokio worker threads.
+/// Single-line importance classifier. They MUST be `Send + Sync` because compressors share detector instances across tokio worker threads.
 pub trait LineImportanceDetector: Send + Sync {
     /// Score a single line in the given context.
     fn score(&self, line: &str, ctx: ImportanceContext) -> ImportanceSignal;

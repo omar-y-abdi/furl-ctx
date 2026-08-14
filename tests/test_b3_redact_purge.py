@@ -24,9 +24,8 @@ from furl_ctx.cache.compression_store import (
 )
 from furl_ctx.transforms.csv_ingest import raw_recovery_hash
 
-# A high-entropy secret that must never survive into the store. Assembled so no
-# verbatim credential literal sits in source (hook-safe, mirrors the redaction
-# suite's ``sk-`` trick).
+# A high-entropy secret that must never survive into the store. Assembled so no verbatim
+# credential literal sits in source (hook-safe, mirrors the redaction suite's ``sk-`` trick).
 _SECRET = "sk-" + "SUPERSECRETvalue0123456789abcdef"
 
 
@@ -82,9 +81,8 @@ def test_redactor_scrubs_content_before_store() -> None:
             config=CompressConfig(redactor=_redactor),
         )
 
-        # The offloaded entry is keyed by the REDACTED bytes (compression only
-        # ever saw redacted content), and retrieving it returns the redacted
-        # original — the secret is not recoverable.
+        # The offloaded entry is keyed by the REDACTED bytes (compression only ever saw redacted
+        # content), and retrieving it returns the redacted original — the secret is not recoverable.
         h = raw_recovery_hash(redacted_env)
         assert h in result.ccr_hashes
         recovered = retrieve(h)
@@ -234,15 +232,13 @@ def test_purge_respects_namespace() -> None:
         store_b = resolve_ccr_namespace_store("tenant-b", None)
         assert store_a is not None and store_b is not None
 
-        # Store the entry in tenant-a's isolated store under the raw-recovery
-        # key (``explicit_hash=h``) so it is addressed exactly like the offload
-        # path does — the store's default key is SHA-256[:24], not this MD5[:24].
+        # Store the entry in tenant-a's isolated store under the raw-recovery key (``explicit_hash=h``) so it is
+        # addressed exactly like the offload path does — the store's default key is SHA-256[:24], not this MD5[:24].
         store_a.store(env, env, explicit_hash=h)
         assert store_a.retrieve(h) is not None
 
-        # Bind tenant-B's store as the active request store, then purge(h): it
-        # resolves store_b (not store_a), finds nothing, returns False — and
-        # tenant-a's entry is untouched.
+        # Bind tenant-B's store as the active request store, then purge(h): it resolves store_b
+        # (not store_a), finds nothing, returns False — and tenant-a's entry is untouched.
         token = _request_ccr_store.set(store_b)
         try:
             assert purge(h) is False

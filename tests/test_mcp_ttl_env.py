@@ -34,17 +34,10 @@ from furl_ctx.ccr.mcp_server import (  # noqa: E402
     _mcp_session_ttl,
 )
 
-# Small, distinct content — enough for a real compress() pass; the wrapper hash
-# is stored regardless of savings.
-#
-# F9: _TINY is a router no-op (below_min_tokens), which is no longer stored by
-# default. These tests assert the TTL carried by the STORED wrapper entry, so
-# they force the store with persist=True — the input and the property under test
-# are unchanged; only the storage that F9 made opt-in is re-requested explicitly.
+# Small, distinct content the wrapper hash is stored regardless of savings. These tests assert the TTL carried by the STORED wrapper entry
 _TINY = "The quick brown fox jumps over the lazy dog near the river bank at dawn."
 
-# Big enough to force at least one CCR offload (embedded ``<<ccr:HASH>>``
-# markers) — the same shape tests/test_cli_persistence.py relies on.
+# Large enough to force at least one CCR offload and produce the marker shape required by the TTL test.
 _OFFLOAD_PAYLOAD = "\n".join(f"line {i} padding-token-{i} more-filler-{i}" for i in range(1, 401))
 
 _MARKER_RE = re.compile(r"<<ccr:([0-9a-f]{12,24})>>")

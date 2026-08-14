@@ -132,18 +132,16 @@ def _with_cache_marker(message: dict[str, Any]) -> dict[str, Any]:
     content = marked.get("content")
 
     if isinstance(content, str):
-        # An EMPTY string would produce an empty ``"text": ""`` block, which the
-        # Anthropic API rejects with a 400 (Bug-5) — anchor a single space
-        # instead so the cache_control marker still rides a valid block.
+        # An EMPTY string would produce an empty ``"text": ""`` block, which the Anthropic API rejects with a
+        # 400 (Bug-5) — anchor a single space instead so the cache_control marker still rides a valid block.
         marked["content"] = [
             {"type": "text", "text": content or " ", "cache_control": {"type": "ephemeral"}}
         ]
         return marked
 
     if isinstance(content, list) and content:
-        # Mark the LAST dict block (searching from the end): attaching
-        # cache_control to a real block avoids appending an empty text block —
-        # which the Anthropic API rejects with a 400 (Bug-5).
+        # Mark the LAST dict block (searching from the end): attaching cache_control to a real block
+        # avoids appending an empty text block — which the Anthropic API rejects with a 400 (Bug-5).
         for block in reversed(content):
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
@@ -152,10 +150,7 @@ def _with_cache_marker(message: dict[str, Any]) -> dict[str, Any]:
         content.append({"type": "text", "text": " ", "cache_control": {"type": "ephemeral"}})
         return marked
 
-    # No usable content block to hang the marker on (empty/None/other): add a
-    # minimal NON-EMPTY text block so the frozen-prefix floor still advances past
-    # this message. Non-empty is required — an empty ``"text": ""`` block is a 400
-    # from the Anthropic API (Bug-5). lazy: covers only the shapes compress()
-    # itself reads; exotic provider block layouts fall back to this benign block.
+    # No usable content block to hang the marker on (empty/None/other): add a minimal
+    # NON-EMPTY text block so the frozen-prefix floor still advances past this message.
     marked["content"] = [{"type": "text", "text": " ", "cache_control": {"type": "ephemeral"}}]
     return marked

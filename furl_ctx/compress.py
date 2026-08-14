@@ -81,28 +81,15 @@ logger = logging.getLogger(__name__)
 _pipeline = None
 _pipeline_lock = threading.Lock()
 
-# Warn when the frozen prefix swallows (nearly) the whole conversation:
-# cache_control on the LAST message — the multi-turn idiom Anthropic's docs
-# teach — freezes everything, every transform skips, and compression reports
-# 0 saved with no error. > 0.9 also catches the "all but the newest turn"
-# shape, where the same surprise applies.
+# Warn when the frozen prefix swallows (nearly) the whole conversation: cache_control on the LAST message.
 _FROZEN_WARN_FRACTION = 0.9
 
-# Roles whose string content is a tool output the replacement transforms
-# rewrite (mirrors cross_message_dedup._TOOL_ROLES; ReadLifecycleManager
-# handles the "tool" subset). Used by the frozen-prefix conflict detector.
+# Roles whose string content is a tool output the replacement transforms rewrite (mirrors cross_message_dedup._TOOL_ROLES;
+# ReadLifecycleManager handles the "tool" subset). Used by the frozen-prefix conflict detector.
 _TOOL_OUTPUT_ROLES = frozenset({"tool", "function"})
 
-# Per-retrieve token overhead used to price a CCR round trip, beyond the payload
-# itself. MEASURED against the production `furl_retrieve` surface, not assumed:
-# the outgoing call is 31 tokens (median over 3000 random 24-hex hashes), the
-# response's non-payload scaffolding 68 (median over 40 distinct offloads), and
-# the tool-result message envelope 7. Was 12 — "tool name plus hash argument,
-# conservative" — which was a guess, and low by 94.
-#
-# Matches the verify harness's RETRIEVE_ROUND_TRIP_TOKENS so opaque_offloads
-# economics and the effective-savings benchmark price a round trip the same way;
-# `tests/test_retrieve_overhead_drift_pin.py` holds them equal.
+# Per-retrieve token overhead used to price a CCR round trip, beyond the payload itself. the outgoing call is 31 tokens (median over 3000
+# random 24-hex hashes), the response's non-payload scaffolding 68 (median over 40 distinct offloads), and the tool-result message envelope 7.
 _CCR_RETRIEVE_OVERHEAD_TOKENS = 106
 
 
@@ -340,25 +327,20 @@ def _detect_opaque_offloads(
     for ccr_hash in surfaced:
         if ccr_hash in pre_existing:
             continue
-        # The whole per-hash body is guarded: a lookup failure OR a malformed
-        # entry (e.g. a non-numeric token value) must skip that entry, never
-        # turn a successful compression into a fail-open no-op.
+        # The whole per-hash body is guarded: a lookup failure OR a malformed entry (e.g. a non-numeric
+        # token value) must skip that entry, never turn a successful compression into a fail-open no-op.
         try:
             meta = store.get_metadata(ccr_hash)
             if not meta or meta.get("compression_strategy") != opaque_strategy:
                 continue
             offloaded_tokens = int(meta.get("original_tokens") or 0)
             preview_tokens = int(meta.get("compressed_tokens") or 0)
-            # Independently-computed terms: what the offload saved vs what a
-            # retrieval pays back (the whole blob plus one call). The sign of
-            # their difference is the round-trip economics.
+            # Independently-computed terms: what the offload saved vs what a retrieval pays back (the
+            # whole blob plus one call). The sign of their difference is the round-trip economics.
             saved = offloaded_tokens - preview_tokens
             retrieval_cost = offloaded_tokens + _CCR_RETRIEVE_OVERHEAD_TOKENS
-            # Signed net token change if this offloaded blob is retrieved back:
-            # the two terms are INDEPENDENT inputs, so their difference is a
-            # real economic comparison, not a restatement of either one. A
-            # negative result means the round trip costs more than the
-            # offload saved; a positive result means it is still ahead.
+            # Signed net token change if this offloaded blob is retrieved back: the two terms are INDEPENDENT
+            # inputs, so their difference is a real economic comparison, not a restatement of either one.
             net = saved - retrieval_cost
             offloads.append(
                 OpaqueOffload(
@@ -512,9 +494,8 @@ def _frozen_transformed_content_warning(messages: list[dict[str, Any]], frozen: 
         for index in range(min(frozen, len(messages))):
             for unit in _frozen_tool_output_units(messages[index]):
                 if len(unit) < MIN_DEDUP_CHARS:
-                    # Below the smallest unit any replacement transform
-                    # rewrites — and well-behaved callers' frozen sentinels
-                    # land here, so the common path does zero store lookups.
+                    # Below the smallest unit any replacement transform rewrites — and well-behaved
+                    # callers' frozen sentinels land here, so the common path does zero store lookups.
                     continue
                 unit_hash = _content_hash(unit)
                 duplicate_of_frozen = unit_hash in seen_frozen_hashes
@@ -728,12 +709,8 @@ def compress(
             protect_recent=0,
         )
     """
-    # A6: validate the message-list shape at the boundary so a programmer error
-    # (a bare string / dict instead of a list of message dicts) is ONE concise,
-    # actionable TypeError — not a bare ``str.get`` AttributeError raised from the
-    # redaction step, nor the doubled fail-open + token-count-fallback tracebacks
-    # the hook and MCP paths otherwise spilled on every such call. Mirrors the
-    # unexpected-kwarg TypeError raised at this same boundary below.
+    # A6: validate the message-list shape at the boundary so a programmer error (a bare string / dict instead of a list of message
+    # dicts) is ONE concise, actionable TypeError. Mirrors the unexpected-kwarg TypeError raised at this same boundary below.
     if not isinstance(messages, list):
         raise TypeError(
             "compress() expects a list of message dicts "
@@ -744,19 +721,14 @@ def compress(
     if not messages or not optimize:
         return CompressResult(messages=messages)
 
-    # Build config from explicit config + kwargs. Never mutate the
-    # caller's CompressConfig — a reused config object must not carry
-    # one call's kwarg overrides into the next call.
+    # Build config from explicit config + kwargs. Never mutate the caller's CompressConfig
+    # — a reused config object must not carry one call's kwarg overrides into the next call.
     cfg = config or CompressConfig()
     config_fields = {f.name for f in cfg.__dataclass_fields__.values()}
     overrides = {key: value for key, value in kwargs.items() if key in config_fields}
     unknown = sorted(set(kwargs) - config_fields)
     if unknown:
         # Fail fast at the public boundary — a typo'd field (e.g.
-        # ``target_ration``) silently defaulting would hand back differently
-        # compressed output than the caller asked for. Matches the strict
-        # ``ContentRouter.apply()`` contract (and Python's own unexpected-kwarg
-        # behaviour) rather than warning-and-ignoring.
         raise TypeError(
             f"compress() got unexpected keyword argument(s) "
             f"{', '.join(unknown)}; valid CompressConfig fields: "
@@ -765,37 +737,14 @@ def compress(
     if overrides:
         cfg = replace(cfg, **overrides)
 
-    # B3 SECURITY — fail-closed content redaction. This runs BEFORE and OUTSIDE
-    # the fail-open ``try/except BaseException`` boundary below ON PURPOSE: if a
-    # configured redactor RAISES, the exception must propagate (compress()
-    # raises) so unredacted content is NEVER compressed, offloaded to the CCR
-    # store, returned, or swallowed by the fail-open path. That is the security
-    # invariant: on redactor error, no output rather than a leak. When redaction
-    # succeeds, every downstream step (pipeline, offload, store) only ever sees
-    # redacted content — so a later retrieve() returns the REDACTED original.
-    #
-    # Three redactors compose here (all apply, defense in depth): the ON-by-default
-    # built-in credential patterns (audit Crit-4 / B3) run FIRST, then the
-    # env-expressible ``FURL_REDACT_PATTERNS`` redactor — the ONLY redaction
-    # channels the env-configured Claude Code plugin (hook + MCP server) can reach
-    # — then the library ``CompressConfig.redactor`` callback. ``build_store_redactor()``
-    # is ``None`` only when the built-ins are opted out (``FURL_REDACT_BUILTINS=0``)
-    # AND no env patterns are set, so a caller who disables both plus passes no
-    # callback keeps byte-identical behavior; otherwise credentials are scrubbed
-    # before anything is compressed, offloaded, or stored.
+    # Redact before the fail-open compression boundary. If redaction raises, propagate the error so unredacted
+    # content is never compressed, stored, or returned; downstream stages see only successfully redacted messages.
     _active_redactor = compose_redactors(build_store_redactor(), cfg.redactor)
     if _active_redactor is not None:
         messages = _redact_messages(messages, _active_redactor)
 
-    # Per-tenant CCR isolation (B2). When a namespace is active
-    # (``session_id`` / ``agent_id`` / ``FURL_CCR_NAMESPACE``) bind that
-    # tenant's isolated store to the request ContextVar for the duration of
-    # this call, so the inline get_compression_store() reads in the transforms
-    # and the diagnostic helper above resolve the tenant store instead of the
-    # global one. Default (no namespace) resolves to None and the ContextVar is
-    # left untouched — today's global behavior, byte-for-byte. The token is
-    # RESET (never cleared) in the finally so an outer middleware store is
-    # restored, and reset-always keeps the fail-open path clean.
+    # Per-tenant CCR isolation (B2). The token is RESET (never cleared) in the finally so an
+    # outer middleware store is restored, and reset-always keeps the fail-open path clean.
     from .cache.compression_store import (
         _request_ccr_store,
         _request_tool_name,
@@ -805,38 +754,22 @@ def compress(
     _ccr_token = None
     _tool_name_token = None
     try:
-        # content_kind threading: bind the originating tool for the whole call
-        # so every store.store() this compression triggers (router offload,
-        # SmartCrusher, dedup) inherits it as its default tool_name. RESET (not
-        # cleared) in finally so a nested/outer compress() binding is restored.
+        # content_kind threading: bind the originating tool for the whole call so every store.store() this compression triggers (router offload,
+        # SmartCrusher, dedup) inherits it as its default tool_name. RESET (not cleared) in finally so a nested/outer compress() binding is restored.
         if tool_name is not None:
             _tool_name_token = _request_tool_name.set(tool_name)
-        # Namespace resolution + the ContextVar bind sit INSIDE the fail-open
-        # boundary too: this is the first place compress() constructs a store,
-        # and a store-construction failure (e.g. a bad workspace path) must
-        # fail open like every other compression error, never raise out of the
-        # namespaced call.
+        # Namespace resolution + the ContextVar bind sit INSIDE the fail-open boundary too.
         _ccr_store = resolve_ccr_namespace_store(session_id, agent_id)
         if _ccr_store is not None:
             _ccr_token = _request_ccr_store.set(_ccr_store)
 
-        # Pipeline construction sits INSIDE the fail-open boundary (COR-43):
-        # the import chain behind TransformPipeline hard-requires the
-        # furl_ctx._core extension, so a broken/missing wheel raises
-        # ModuleNotFoundError at first request — exactly the deployment
-        # where "worst case: passthrough" must hold. The BaseException
-        # handler below turns that into a passthrough CompressResult with
-        # `error` set instead of letting it escape to the host. (Nothing is
-        # cached on failure, so a later fixed environment recovers without
-        # a restart.)
+        # Pipeline construction sits INSIDE the fail-open boundary (COR-43) the import chain behind TransformPipeline hard-requires the furl_ctx._core
+        # extension The BaseException handler below turns that into a passthrough CompressResult with `error` set instead of letting it escape to the host.
         pipeline = pipeline if pipeline is not None else _get_pipeline()
         pipeline_extensions = PipelineExtensionManager(hooks=hooks)
 
-        # Compute biases from hooks if provided. The user query is extracted
-        # HERE, before the hook invocations, so bias hooks following this
-        # module's own examples can score by relevance instead of seeing an
-        # empty query forever (API-2). The pipeline re-extracts below because
-        # pre_compress / INPUT_RECEIVED may rewrite the messages.
+        # Compute biases from hooks if provided. The user query is extracted HERE, before the hook invocations, so bias
+        # hooks following this module's own examples can score by relevance instead of seeing an empty query forever (API-2).
         biases = None
         if hooks:
             from furl_ctx.hooks import CompressContext
@@ -854,32 +787,20 @@ def compress(
         if received_event.messages is not None:
             messages = received_event.messages
 
-        # Extract user query from messages so transforms can score by
-        # relevance.  Without this, SmartCrusher selects items by statistics
-        # alone (position, anomaly) and may drop relevant content.
+        # Extract user query from messages so transforms can score by relevance. Without this, SmartCrusher
+        # selects items by statistics alone (position, anomaly) and may drop relevant content.
         context = _extract_user_query(messages)
 
-        # Compute the frozen-prefix count from cache_control markers.
-        # Must run AFTER pre_compress hook and INPUT_RECEIVED event may have
-        # rewritten messages, so the index aligns with what pipeline sees.
-        # ``_compute_frozen_message_count`` (above) is the sole owner of the
-        # contract: only messages[i].content[*].cache_control bumps the
-        # floor; system/tools are never passed here.
+        # Compute the cache-control frozen prefix after hooks and events may rewrite messages so
+        # indices match pipeline input. Only message-content cache-control markers contribute.
         frozen = _compute_frozen_message_count(messages)
 
-        # Snapshot the CCR hashes the INPUT already carries (previous turns'
-        # markers) so the post_compress event can report only the hashes THIS
-        # compression surfaces. Hook-path-only cost: one scan, skipped
-        # entirely when no hooks are installed.
+        # Snapshot the CCR hashes the INPUT already carries (previous turns' markers) so
+        # the post_compress event can report only the hashes THIS compression surfaces.
         pre_existing_ccr_hashes: set[str] = _surfaced_ccr_hashes(messages) if hooks else set()
 
-        # cache_control interactions must be LOUD but non-fatal. A breakpoint
-        # on (nearly) the last message freezes everything — every transform
-        # skips, 0 tokens saved, error=None — and a breakpoint moved forward
-        # past a turn that previously shipped compressed guarantees a
-        # prefix-cache miss at the very message the caller asserts is cached.
-        # Neither is a failure (fail-open stays for real failures); both
-        # surface in CompressResult.warnings and the log.
+        # cache_control interactions must be LOUD but non-fatal. every transform skips, 0 tokens saved, error=None and a breakpoint moved forward past a turn that
+        # shipped compressed guarantees a prefix-cache miss at the very message the caller asserts is cached. Neither is a failure (fail-open stays for real failures);
         compress_warnings: list[str] = []
         frozen_floor_warning = _frozen_prefix_warning(len(messages), frozen)
         if frozen_floor_warning is not None:
@@ -887,9 +808,7 @@ def compress(
         frozen_content_warning = _frozen_transformed_content_warning(messages, frozen)
         if frozen_content_warning is not None:
             compress_warnings.append(frozen_content_warning)
-        # F-alpha4: an unrecognized model silently falls back to generic
-        # character-estimation for token counting. Surface that fallback so a
-        # caller is not misled by counts computed for a model Furl does not know.
+        # F-alpha4: an unrecognized model silently falls back to generic character-estimation for token counting.
         unknown_model_warning = _unknown_model_warning(model)
         if unknown_model_warning is not None:
             compress_warnings.append(unknown_model_warning)
@@ -915,19 +834,15 @@ def compress(
         tokens_after = result.tokens_after
         compressed_messages = result.messages
 
-        # Guard: if "optimization" inflated tokens, revert to originals.
-        # The inflation guard the compression path always applies before
-        # returning a result.
+        # Guard: if "optimization" inflated tokens, revert to originals. The inflation guard the compression path always applies before returning a result.
         if tokens_after > tokens_before:
             logger.warning(
                 "Optimization inflated tokens (%d -> %d); reverting to original messages",
                 tokens_before,
                 tokens_after,
             )
-            # The inflation revert is a success-path outcome the documented
-            # A/B-testing and anomaly-detection hook use-cases must see
-            # (API-2): report the REVERTED state (nothing shipped compressed,
-            # nothing newly surfaced).
+            # The inflation revert is a success-path outcome the documented A/B-testing and anomaly-detection hook
+            # use-cases must see (API-2): report the REVERTED state (nothing shipped compressed, nothing newly surfaced).
             if hooks:
                 from furl_ctx.hooks import CompressEvent
 
@@ -984,11 +899,7 @@ def compress(
         tokens_saved = tokens_before - tokens_after
         ratio = tokens_saved / tokens_before if tokens_before > 0 else 0.0
 
-        # Post-compress hook — fires on EVERY success-path completion, zero
-        # savings included, so subclasses see the negative class too (API-2).
-        # ``ccr_hashes`` carries the recovery pointers newly surfaced by this
-        # compression. Fail-open failures (the except path below) do not
-        # emit an event — no compression happened.
+        # Post-compress hook — fires on EVERY success-path completion, zero savings included, so subclasses see the negative class too (API-2).
         if hooks:
             from furl_ctx.hooks import CompressEvent
 
@@ -1009,13 +920,8 @@ def compress(
                 )
             )
 
-        # T9: surface opaque whole-blob CCR offloads as a typed field the caller
-        # reads at its own cadence, a marker replacing content that nothing could
-        # structurally shrink whose retrieval round trip is net-negative. Runs
-        # INSIDE the request-scoped CCR store binding, so a namespaced call reads
-        # its own store. Guarded here as well as internally: this is an
-        # observation-only diagnostic, so a failure computing it must never
-        # revert a successful compression to the fail-open no-op path.
+        # T9 surface opaque whole-blob CCR offloads as a typed field the caller reads at its own cadence, a marker replacing content that nothing could structurally
+        # shrink whose retrieval round trip is net-negative. so a failure computing it must never revert a successful compression to the fail-open no-op path.
         try:
             opaque_offloads = _detect_opaque_offloads(compressed_messages, messages)
         except Exception:  # noqa: BLE001 - the diagnostic must never break a success
@@ -1029,45 +935,26 @@ def compress(
             tokens_saved=tokens_saved,
             compression_ratio=ratio,
             transforms_applied=result.transforms_applied,
-            # Transform warnings (TransformResult.warnings) are plumbed through
-            # alongside the compress()-level frozen-prefix diagnostics so
-            # callers can actually see them.
+            # Transform warnings (TransformResult.warnings) are plumbed through alongside the
+            # compress()-level frozen-prefix diagnostics so callers can actually see them.
             warnings=[*compress_warnings, *result.warnings],
             opaque_offloads=opaque_offloads,
         )
 
     except (KeyboardInterrupt, SystemExit):
-        # NEVER swallow these: a Ctrl-C or an interpreter shutdown during
-        # compression must tear down exactly as the operator intended, not be
-        # masked as a fail-open no-op. Re-raise before the BaseException catch
-        # below can reach them.
+        # NEVER swallow these: a Ctrl-C or an interpreter shutdown during compression must
+        # tear down exactly as the operator intended, not be masked as a fail-open no-op.
         raise
     except BaseException as e:  # noqa: BLE001
-        # Fail-open: a compression bug must NEVER break the host's request, so
-        # we return the ORIGINAL messages and do not re-raise. This covers
-        # pipeline CONSTRUCTION too (COR-43): a broken/missing native
-        # extension fails open here, not as a ModuleNotFoundError to the
-        # host. But the failure must be LOUD and HONEST — log at ERROR with a
-        # full traceback (this may be a genuine bug or a Rust panic, not a
-        # benign no-op) and report the real input token count instead of a
-        # fabricated 0, so a caller cannot mistake a swallowed failure for
-        # "nothing to compress".
-        #
-        # We catch BaseException (not just Exception) on purpose: a Rust panic
-        # crosses the PyO3 FFI as ``pyo3_runtime.PanicException``, which is a
-        # ``BaseException`` and would otherwise escape ``except Exception`` —
-        # crashing the host request, the exact class this fail-open exists for.
-        # The bridge methods also convert panics to ``PyRuntimeError`` at the
-        # Rust edge (see crates/furl-py/src/lib.rs); this is the
-        # belt-and-braces backstop for any entry point not wrapped there.
+        # Compression failures fail open to the original messages but log an ERROR with traceback and real input
+        # token count. Catch `BaseException` so PyO3 panic exceptions cannot escape and break the host request.
         logger.error(
             "compress() failed; returning original messages (fail-open): %s",
             e,
             exc_info=True,
         )
-        # Count the untouched input the same way the pipeline does, but never
-        # let token counting break fail-open: if even counting fails, fall back
-        # to 0 rather than crash the caller.
+        # Count the untouched input the same way the pipeline does, but never let token counting
+        # break fail-open: if even counting fails, fall back to 0 rather than crash the caller.
         try:
             from furl_ctx.tokenizers import get_tokenizer
 
@@ -1088,9 +975,8 @@ def compress(
             error=str(e),
         )
     finally:
-        # Restore the prior CCR store (reset the token, do not clear) on BOTH
-        # the success and fail-open paths, so a per-tenant binding never leaks
-        # past this call and an outer middleware store is preserved.
+        # Restore the prior CCR store (reset the token, do not clear) on BOTH the success and fail-open paths,
+        # so a per-tenant binding never leaks past this call and an outer middleware store is preserved.
         if _ccr_token is not None:
             _request_ccr_store.reset(_ccr_token)
         # Same discipline for the request-scoped originating tool name.
@@ -1111,15 +997,8 @@ def _get_pipeline() -> Any:
 
         from furl_ctx.transforms import TransformPipeline
 
-        # Default pipeline: CrossMessageDeduper → ContentRouter.
-        # CacheAligner is opt-in (FurlConfig.cache_aligner.enabled,
-        # default False): when enabled it runs first and only WARNS about
-        # unstable prefixes — detector-only, never rewrites the prompt.
-        # ContentRouter: routes to the right compressor per content type
-        #   (SmartCrusher for JSON; log/search/diff compressors;
-        #   plain text and source code pass through)
-        # There is no trailing context-management stage —
-        # live-zone-only compression never drops messages.
+        # Default pipeline is CrossMessageDeduper → ContentRouter; optional CacheAligner runs first as
+        # detector-only. Routing compresses supported content while live-zone processing never drops whole messages.
         _pipeline = TransformPipeline()
         logger.debug("Furl compression pipeline initialized")
         return _pipeline

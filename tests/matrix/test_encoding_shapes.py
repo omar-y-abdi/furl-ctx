@@ -42,15 +42,8 @@ import pytest
 from furl_ctx import compress
 from tests.matrix import _matrix as m
 
-# Both CCR backends for the tests that actually WRITE the store (see the module
-# docstring). Applied per-test, indirect: it feeds ``tests/matrix/conftest.py``'s
-# ``ccr_backend`` fixture, which the autouse ``_isolate_ccr_store`` consumes to
-# pin ``FURL_CCR_BACKEND``. Each leg gets its own per-test ``ccr.sqlite3`` (fresh
-# ``FURL_WORKSPACE_DIR``), and the per-test ``salt`` is the node name — which
-# carries the backend as its LAST id component (``[nul_bytes-sqlite]``,
-# ``[crlf_log-sqlite]``, or bare ``[sqlite]`` where this is the only parametrize)
-# — so the two legs salt differently, every offload stays a cold compress, and
-# they never collide in the process-global Rust store.
+# Both CCR backends for the tests that actually WRITE the store (see the module docstring). Each leg gets its
+# own per-test ``ccr.sqlite3`` (fresh ``FURL_WORKSPACE_DIR``), and the per-test ``salt`` is the node name.
 _BOTH_BACKENDS = pytest.mark.parametrize("ccr_backend", ["memory", "sqlite"], indirect=True)
 
 
@@ -73,30 +66,8 @@ _OFFLOAD_SHAPES = [
 )
 def test_offload_shape_is_byte_exact_recoverable(shape_id, generator, salt, ccr_backend) -> None:
     result = m.assert_text_lossless_byte_exact(generator(), salt=salt)
-    # The helper proved byte-exact store recovery for whatever surfaced — but it
-    # is PATH-AGNOSTIC and also accepts a byte-exact PASSTHROUGH. That loophole is
-    # exactly how a backend that mangles hostile bytes hides: the router's
-    # ccr_offload does a store round-trip verify (``router_engine`` — store, read
-    # back, compare) and, on a readback mismatch, KEEPS THE ORIGINAL (passthrough)
-    # — no silent loss, but no offload either. These shapes are sized to offload
-    # and DO on the memory backend; requiring the offload makes the sqlite leg go
-    # RED if the ``surrogatepass`` BLOB round-trip ever stops reproducing
-    # NUL/latin-1/CJK bytes (the whole reason these tests now run on sqlite),
-    # instead of silently degrading to a passthrough this assertion would wave
-    # through. It is what gives the deliberate-break test its teeth.
-    #
-    # FALSE-RED VECTORS, so a future failure here is read correctly. The offload
-    # gate is BOTH ``len(content) >= _OFFLOAD_MIN_CHARS`` (4000) AND
-    # ``compression_ratio >= _OFFLOAD_TRIGGER_RATIO`` (0.9) —
-    # ``router_engine._should_ccr_offload``. The char margin is comfortable
-    # (thinnest is nul_bytes at ~6.6k, 1.6x), so the floor would have to more
-    # than half again before it bites. The RATIO gate is the live risk: 0.9
-    # means "nothing upstream meaningfully shrank this", so teaching any
-    # upstream strategy to compress NUL-delimited rows or bidi text stops the
-    # offload firing and reddens this assertion on content that is still
-    # perfectly byte-exact. That is a routing change, NOT a fidelity
-    # regression — retune the fixture or move the shape to the passthrough
-    # family; do not weaken the assertion.
+    # These hostile-byte fixtures must actually offload, not merely round-trip via passthrough. A backend encoding regression should fail
+    # the offload assertion; if upstream compression legitimately changes routing, retune the fixture instead of weakening fidelity checks.
     assert result.ccr_hashes, (
         f"{shape_id} did not offload on the {ccr_backend} backend: the CCR store "
         f"round-trip verify rejected it, so these hostile bytes are NOT faithfully "
@@ -171,17 +142,8 @@ def test_tiny_and_empty_inputs_are_byte_exact(content) -> None:
 
 
 def test_huge_single_line_fails_open_byte_exact() -> None:
-    # A 2 MB single line trips tiktoken's catastrophic regex backtracking. That
-    # failure used to be PLATFORM-DIVERGENT — a hard raise on macOS (small stack)
-    # vs a silent super-linear passthrough on CI Linux (bigger stack), where the
-    # router handed the input back with error=None (MATRIX-03 silent decline).
-    # The tokenizer now rejects any long same-class run BEFORE the encode
-    # (TiktokenCounter._MAX_SAFE_SAME_CLASS_RUN), so the decline is LOUD and
-    # DETERMINISTIC on every platform: the ValueError rides compress()'s fail-open
-    # into result.error. error_contains="backtracking" is a substring the guard's
-    # message guarantees on BOTH platforms (the guard names that same failure
-    # mode and fires before the encode), so this assertion holds cross-platform —
-    # no per-route substring split is needed.
+    # A 2 MB single line trips tiktoken's catastrophic regex backtracking. That failure used to be PLATFORM-DIVERGENT — a hard raise on macOS (small stack)
+    # vs a silent super-linear passthrough on CI Linux (bigger stack), where the router handed the input back with error=None (MATRIX-03 silent decline).
     m.assert_text_failopen_byte_exact(
         m.huge_single_line(megabytes=2), error_contains="backtracking"
     )
@@ -202,6 +164,5 @@ def test_bytes_content_ccr_hashes_is_total() -> None:
     assert result.error is None
     assert result.messages[0]["content"] == payload  # byte-exact passthrough
     # The documented intent is "non-string content passes through untouched", so a
-    # successfully-returned result's public ``ccr_hashes`` must be TOTAL (no markers
-    # in bytes → []). It currently raises TypeError from json.dumps(content).
+    # successfully-returned result's public ``ccr_hashes`` must be TOTAL (no markers in bytes → []).
     assert result.ccr_hashes == []

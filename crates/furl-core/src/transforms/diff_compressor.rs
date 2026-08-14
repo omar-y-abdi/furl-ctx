@@ -1,43 +1,5 @@
-//! Unified-diff compressor — Rust port of `furl_ctx.transforms.diff_compressor`.
-//!
-//! Compresses verbose `git diff` output by:
-//! 1. Parsing the unified-diff format into files + hunks.
-//! 2. Capping the file count (`max_files`) — when fired, sorts by total
-//!    changes and keeps the heaviest files.
-//! 3. Capping per-file hunk count (`max_hunks_per_file`) — keeps first +
-//!    last + top-scored middle hunks (relevance-aware via priority patterns
-//!    + user query-context word overlap).
-//! 4. Trimming context lines around each `+`/`-` to `max_context_lines`
-//!    on either side.
-//! 5. Hashing the original with MD5 truncated to 24 hex chars for a CCR
-//!    cache_key (only emitted if compression saved >20% of lines).
-//!
-//! # Output contract
-//! This Rust implementation is canonical — the Python
-//! `furl_ctx.transforms.diff_compressor` shim wraps it (the pure-Python
-//! original and its parity fixtures are retired). The spec is the
-//! recovery contract exercised by the test suites: every dropped hunk /
-//! trimmed context line must stay CCR-recoverable via the emitted
-//! `cache_key`, and the in-crate unit tests + Python wrapper tests pin
-//! the output grammar directly.
-//!
-//! # Information preservation hardening
-//! - Below `min_lines_for_ccr`, we return the input unchanged (matches
-//!   Python). Important for short diffs that don't benefit from compression
-//!   and would lose context-trim slack.
-//! - On parse failure (no `diff --git` headers found), we return the input
-//!   unchanged (matches Python). Malformed input is preserved verbatim.
-//! - `\ No newline at end of file` markers and any other non-`+`/`-`/space
-//!   "other" lines inside a hunk are appended to the hunk's lines. Whether
-//!   they survive the context trim is determined by their distance from
-//!   the nearest `+`/`-` line (matches Python `_reduce_context`).
-//!
-//! # Observability
-//! [`DiffCompressorStats`] carries the granular metrics Python doesn't
-//! emit (per-file hunk drop counts, dropped file names, largest dropped
-//! hunk, parse warnings). The `compress_with_stats` method returns it
-//! alongside the parity-equal result; `compress` is the parity-only API
-//! that discards the sidecar stats.
+//! Compress unified diffs by capping files/hunks, scoring middle hunks, and trimming context. Parse failures and
+//! small diffs pass through unchanged; any dropped content must remain CCR-recoverable through the emitted key.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -47,13 +9,8 @@ use regex::Regex;
 use crate::ccr::persist::md5_hex_24;
 use crate::ccr::{marker_for_diff, CcrStore};
 
-// ─── Score-weight constants ────────────────────────────────────────────────
-//
-// These knobs tune the relevance scorer (used only when `max_hunks_per_file`
-// fires and we have to rank middle hunks). Promoted from inline magic numbers
-// so a future tuning PR can move them with full visibility, and so reviewers
-// can see exactly what bias the scorer encodes. Defaults match the Python
-// implementation byte-for-byte.
+// ─── Score-weight constants ──────────────────────────────────────────────── These knobs tune the relevance scorer (used only when `max_hunks_per_file` fires and we have to
+// rank middle hunks). Promoted from inline magic numbers so a future tuning PR can move them with full visibility, and so reviewers can see exactly what bias the scorer encodes.
 
 /// Per-line-change weight in the change-density base term. The base score is
 /// `min(CHANGE_DENSITY_CAP, change_count * CHANGE_DENSITY_WEIGHT)`.
@@ -64,9 +21,8 @@ pub const SCORE_CHANGE_DENSITY_CAP: f64 = 0.3;
 /// Boost added per matching word from the user-query context that appears in
 /// the hunk content (case-insensitive substring match).
 pub const SCORE_CONTEXT_WORD_WEIGHT: f64 = 0.2;
-/// Minimum word length (exclusive of) for context-word matching. Words of
-/// length ≤ this are skipped (matches Python's `len(word) > 2`). Filters out
-/// stop-words like "is", "to", "a".
+/// Minimum word length (exclusive of) for context-word matching. Words of length ≤ this are
+/// skipped (matches Python's `len(word) > 2`). Filters out stop-words like "is", "to", "a".
 pub const SCORE_CONTEXT_MIN_WORD_LEN: usize = 2;
 /// Boost added when ANY priority pattern matches (only one boost per hunk —
 /// matches Python's `break` after first match).
@@ -85,56 +41,24 @@ pub struct DiffCompressorConfig {
     /// Cap on the number of hunks kept per file. When exceeded, keeps first
     /// + last + top-scored middle. Python default: 10.
     pub max_hunks_per_file: usize,
-    /// Cap on the number of files kept across the whole diff. When exceeded,
-    /// sorts files by total changes (desc) and keeps top N. Files beyond
-    /// the cap are silently dropped from the output (their names appear in
-    /// [`DiffCompressorStats::files_dropped`] for observability). Python
-    /// default: 20.
+    /// Cap on the number of files kept across the whole diff. When exceeded, sorts files by total changes (desc) and keeps top N.
     pub max_files: usize,
     /// If true, attach an MD5-based CCR retrieval marker to the compressed
     /// output when compression met the savings threshold. Python default: true.
     pub enable_ccr: bool,
-    /// **Misnomer alert.** This actually gates the entire compression path,
-    /// not just the CCR marker: when `original_line_count <
-    /// min_lines_for_ccr`, the input is returned unchanged, no parsing, no
-    /// summary, no CCR. The name comes from the Python implementation; we
-    /// keep it to maintain fixture-config compatibility. Treat it as
-    /// "minimum diff size before we bother compressing." Python default: 50.
+    /// **Misnomer alert.** This actually gates the entire compression path, not just the CCR marker: when
+    /// `original_line_count < min_lines_for_ccr`, the input is returned unchanged, no parsing, no summary, no CCR.
     pub min_lines_for_ccr: usize,
-    /// CCR retrieval marker is emitted only when
-    /// `compressed_line_count < original_line_count *
-    /// min_compression_ratio_for_ccr`. Lower values demand more aggressive
-    /// compression before we bother emitting the marker. **Rust-only knob**
-    /// — Python hardcodes 0.8. Default: 0.8 (matches Python).
+    /// CCR retrieval marker is emitted only when `compressed_line_count < original_line_count * min_compression_ratio_for_ccr`.
+    /// Lower values demand more aggressive compression before we bother emitting the marker. **Rust-only knob**
     pub min_compression_ratio_for_ccr: f64,
-    /// Drop "noise" hunks before compression (upstream's DiffNoise,
-    /// restored per ENGINE-COMPARISON P2-14). When enabled, two hunk
-    /// classes are elided from the output:
-    ///
-    /// 1. **Lockfile churn** — every hunk in a file whose basename is one
-    ///    of [`NOISE_LOCKFILE_BASENAMES`] (`package-lock.json`,
-    ///    `Cargo.lock`, `uv.lock`, `yarn.lock`).
-    /// 2. **Whitespace-only hunks** — hunks with at least one `+`/`-`
-    ///    line where EVERY changed line's content (after the `+`/`-`
-    ///    prefix) is empty or whitespace.
-    ///
-    /// Each file with elisions gets one summary line in its section:
-    /// `[noise hunk elided: <path> (+A/-B)]`, where A/B total the elided
-    /// additions/deletions. Elided hunks count toward `hunks_removed`
-    /// (and the `N hunks omitted` footer); their +/- counts are carried
-    /// on the noise line rather than the footer totals. Elision runs
-    /// BEFORE the `max_files` sort so a 5000-line lockfile churn can't
-    /// crowd real files out of the cap. Recovery discipline is unchanged:
-    /// the CCR marker (when emitted) backs the FULL original diff,
-    /// including elided hunks, and the Python shim's store-write veto
-    /// still applies. Default: false — output byte-identical to the
-    /// parity contract.
+    /// Optional noise filtering drops lockfile churn and whitespace-only hunks before file ranking.
+    /// Elided counts remain visible, and the CCR marker still backs the complete original diff.
     pub drop_noise_hunks: bool,
 }
 
-/// Basenames whose diffs are lockfile churn under `drop_noise_hunks`.
-/// Matching is by exact basename (path segments split on `/` and `\`),
-/// so `frontend/package-lock.json` matches and `Cargo.lock.bak` does not.
+/// Basenames whose diffs are lockfile churn under `drop_noise_hunks`. Matching is by exact basename (path
+/// segments split on `/` and `\`), so a real `package-lock.json` basename matches while `.bak` variants do not.
 pub const NOISE_LOCKFILE_BASENAMES: [&str; 4] =
     ["package-lock.json", "Cargo.lock", "uv.lock", "yarn.lock"];
 
@@ -152,9 +76,8 @@ impl Default for DiffCompressorConfig {
     }
 }
 
-/// Parity-equal result. Field set matches Python `DiffCompressionResult`'s
-/// non-`@property` fields — `compression_ratio` and `tokens_saved_estimate`
-/// are computed properties on the Python side and not in fixture outputs.
+/// Parity-equal result. Field set matches Python `DiffCompressionResult`'s non-`@property` fields — `compression_ratio`
+/// and `tokens_saved_estimate` are computed properties on the Python side and not in fixture outputs.
 #[derive(Debug, Clone)]
 pub struct DiffCompressionResult {
     pub compressed: String,
@@ -168,9 +91,8 @@ pub struct DiffCompressionResult {
     pub cache_key: Option<String>,
 }
 
-/// Sidecar stats. Not part of the parity output; surfaced to callers for
-/// prod observability. None of these fields exist in
-/// Python's `DiffCompressionResult`.
+/// Sidecar stats. Not part of the parity output; surfaced to callers for prod
+/// observability. None of these fields exist in Python's `DiffCompressionResult`.
 #[derive(Debug, Clone, Default)]
 pub struct DiffCompressorStats {
     pub input_lines: usize,
@@ -194,37 +116,13 @@ pub struct DiffCompressorStats {
     /// Lines in the largest hunk we dropped (per-file cap). 0 if none dropped.
     pub largest_hunk_dropped_lines: usize,
 
-    /// Files whose original `new file mode` / `deleted file mode` line was
-    /// normalized to `100644` on output. Each entry is `(file_label,
-    /// original_mode_line)` — e.g. `("a/foo.sh -> b/foo.sh", "new file
-    /// mode 100755")`. Empty when no normalization occurred (mode was
-    /// already 100644, or no mode line was present).
     ///
-    /// Why this matters: the emit path hardcodes `100644` regardless of
-    /// what the input said (kept deliberately — owner Q7: document +
-    /// keep). An input with executable bit `100755` becomes a
-    /// non-executable `100644` on output — silent information loss.
-    /// Surfacing this lets prod monitoring catch real cases where it
-    /// bites.
     pub file_mode_normalizations: Vec<(String, String)>,
 
-    /// Binary file marker lines whose original detail (e.g. `Binary files
-    /// a/x.png and b/x.png differ`) was simplified to `Binary files differ`
-    /// on output. Each entry is the full original line. Empty when no
-    /// simplification occurred (input was already `Binary files differ`,
-    /// or the file wasn't binary).
-    ///
-    /// Same loss pattern as `file_mode_normalizations`: the emitter
-    /// hardcodes `Binary files differ` (kept deliberately — owner Q7),
-    /// dropping the filename detail. This stat surfaces what was lost.
+    /// Binary file marker lines whose original detail (e.g.
     pub binary_files_simplified: Vec<String>,
 
-    /// Hunks elided by the `drop_noise_hunks` pass (lockfile churn +
-    /// whitespace-only hunks). Always 0 when the flag is off. These are
-    /// included in `hunks_dropped` so `hunks_total == hunks_kept +
-    /// hunks_dropped` still holds; this counter attributes how many of
-    /// the drops were noise elisions rather than `max_hunks_per_file`
-    /// cap drops.
+    /// Hunks elided by the `drop_noise_hunks` pass (lockfile churn + whitespace-only hunks). Always 0 when the flag is off.
     pub noise_hunks_elided: usize,
 
     /// Non-fatal parser hiccups: unrecognized line patterns, malformed
@@ -256,20 +154,14 @@ impl DiffCompressor {
         Self { config }
     }
 
-    /// Compress `content`. `context` is an optional user-query string used
-    /// for relevance scoring when `max_hunks_per_file` fires; pass `""` if
-    /// not applicable. Parity-only API: discards the granular sidecar
-    /// stats. Use [`compress_with_stats`] when you want them.
-    ///
-    /// [`compress_with_stats`]: Self::compress_with_stats
+    /// Compress `content`. `context` is an optional user-query string used for relevance scoring when
+    /// `max_hunks_per_file` fires; pass `""` if not applicable. Parity-only API: discards the granular sidecar stats.
     pub fn compress(&self, content: &str, context: &str) -> DiffCompressionResult {
         self.compress_with_stats(content, context).0
     }
 
-    /// Same as [`compress`] but also returns rich observability stats.
-    /// Equivalent to `compress_with_store(content, context, None).0`.
-    ///
-    /// [`compress`]: Self::compress
+    /// Same as [`compress`] but also returns rich observability stats. Equivalent to
+    /// `compress_with_store(content, context, None).0`. [`compress`]: Self::compress
     pub fn compress_with_stats(
         &self,
         content: &str,
@@ -278,21 +170,8 @@ impl DiffCompressor {
         self.compress_with_store(content, context, None)
     }
 
-    /// Compress with optional CCR persistence.
-    ///
-    /// Mirrors [`crate::transforms::log_compressor::LogCompressor::compress_with_store`]
-    /// and the search-compressor sibling: when `store` is `Some`, the
-    /// original `content` is written to it under the same `cache_key`
-    /// the wire-output marker carries. When `store` is `None`, the
-    /// `cache_key` is still emitted but the caller is responsible for
-    /// persisting (e.g. the Python shim's `_persist_to_python_ccr` path).
-    ///
-    /// **Why this exists:** prior to this method, `DiffCompressor` minted
-    /// a `cache_key` and embedded it in the output marker but never
-    /// stored — leaving Python ContentRouter with a dangling marker that
-    /// would 404 on retrieval. The `DiffOffload` orchestrator wrapper
-    /// papered over this for the new pipeline path; this method
-    /// upstreams the fix so any caller can wire in storage cleanly.
+    /// Compress with optional CCR persistence. Mirrors [`crate::transforms::log_compressor::LogCompressor::compress_with_store`] and the search-compressor
+    /// sibling: when `store` is `Some`, the original `content` is written to it under the same `cache_key` the wire-output marker carries.
     pub fn compress_with_store(
         &self,
         content: &str,
@@ -301,16 +180,14 @@ impl DiffCompressor {
     ) -> (DiffCompressionResult, DiffCompressorStats) {
         let mut stats = DiffCompressorStats::default();
 
-        // Python: `lines = content.split("\n")`. Rust `split` matches `str.split`
-        // semantics: a trailing newline produces an empty final element, exactly
-        // like Python. Critical for byte-equal `original_line_count`.
+        // Python: `lines = content.split("\n")`. Rust `split` matches `str.split` semantics: a trailing newline
+        // produces an empty final element, exactly like Python. Critical for byte-equal `original_line_count`.
         let lines: Vec<&str> = content.split('\n').collect();
         let original_line_count = lines.len();
         stats.input_lines = original_line_count;
 
-        // Short-circuit 1: input below CCR threshold → pass through unchanged.
-        // This is the information-preservation path: a 5-line diff isn't worth
-        // compressing and the original carries all the signal.
+        // Short-circuit 1: input below CCR threshold → pass through unchanged. This is the information-preservation
+        // path: a 5-line diff isn't worth compressing and the original carries all the signal.
         if original_line_count < self.config.min_lines_for_ccr {
             stats.output_lines = original_line_count;
             stats.compression_ratio = 1.0;
@@ -318,9 +195,8 @@ impl DiffCompressor {
             return (pass_through_result(content, original_line_count), stats);
         }
 
-        // Parse the unified diff into files + hunks (and any pre-diff
-        // content — commit headers, email headers — which gets re-emitted
-        // verbatim by `format_output`).
+        // Parse the unified diff into files + hunks (and any pre-diff content — commit
+        // headers, email headers — which gets re-emitted verbatim by `format_output`).
         let parsed = parse_diff(&lines);
         let pre_diff_lines = parsed.pre_diff_lines;
         let mut diff_files = parsed.files;
@@ -328,9 +204,8 @@ impl DiffCompressor {
         stats.files_total = diff_files.len();
         stats.hunks_total = diff_files.iter().map(|f| f.hunks.len()).sum();
 
-        // Short-circuit 2: parser found no diff sections → pass through.
-        // Same info-preservation rationale: malformed or non-diff input is
-        // returned verbatim rather than emitted as an empty compressed result.
+        // Short-circuit 2: parser found no diff sections → pass through. Same info-preservation rationale:
+        // malformed or non-diff input is returned verbatim rather than emitted as an empty compressed result.
         if diff_files.is_empty() {
             stats.output_lines = original_line_count;
             stats.compression_ratio = 1.0;
@@ -339,10 +214,6 @@ impl DiffCompressor {
         }
 
         // Noise elision (DiffNoise, P2-14; config-gated, default off).
-        // Runs BEFORE scoring and the max_files sort so lockfile churn
-        // can't dominate the total-changes ranking and crowd out real
-        // files. The elided hunks stay recoverable: the CCR marker below
-        // (when emitted) backs the FULL original `content`.
         if self.config.drop_noise_hunks {
             elide_noise_hunks(&mut diff_files, &mut stats);
         }
@@ -351,9 +222,7 @@ impl DiffCompressor {
         // `max_hunks_per_file` fires).
         score_hunks(&mut diff_files, context);
 
-        // File cap: if too many, sort by total changes (most first) and
-        // keep the top `max_files`. The dropped files' names are kept in
-        // stats for observability — Python silently discards them.
+        // File cap: if too many, sort by total changes (most first) and keep the top `max_files`.
         if diff_files.len() > self.config.max_files {
             diff_files.sort_by(|a, b| {
                 let a_changes = a.total_additions() + a.total_deletions();
@@ -369,17 +238,9 @@ impl DiffCompressor {
         stats.files_kept = diff_files.len();
 
         // Capture lossy-emit signals on the files that survived the file cap.
-        // The emit path hardcodes `100644` and `Binary files differ`
-        // regardless of input — originally a Python-parity constraint, now
-        // KEPT DELIBERATELY (owner decision, QUESTIONS-FOR-USER Q7:
-        // document + keep — lifting would churn every diff render for a
-        // marginal fidelity win). The loss is surfaced via observability.
         for file in diff_files.iter() {
             let label = format!("{} -> {}", file.old_file, file.new_file);
-            // File-mode normalization: any original mode line not literally
-            // `new file mode 100644` / `deleted file mode 100644` is lost on
-            // emit. Includes `100755` (executable), `100600` (private),
-            // `120000` (symlink), `160000` (gitlink/submodule), etc.
+            //
             if let Some(orig) = &file.original_new_file_mode_line {
                 if orig != "new file mode 100644" {
                     stats
@@ -394,9 +255,7 @@ impl DiffCompressor {
                         .push((label.clone(), orig.clone()));
                 }
             }
-            // Binary detail: any line richer than the bare `Binary files
-            // differ` (which is virtually all of them — git emits filenames)
-            // gets simplified on emit.
+            // Binary detail: any line richer than the bare `Binary files differ` (which is virtually all of them — git emits filenames) gets simplified on emit.
             if let Some(orig) = &file.original_binary_line {
                 if orig != "Binary files differ" {
                     stats.binary_files_simplified.push(orig.clone());
@@ -440,10 +299,7 @@ impl DiffCompressor {
 
             hunks_kept_total += compressed_hunks.len();
             hunks_removed_total += original_hunk_count - compressed_hunks.len();
-            // Noise-elided hunks are removed hunks too: keeps the
-            // `hunks_total == hunks_kept + hunks_dropped` identity and
-            // the `N hunks omitted` footer honest. (0 when the flag is
-            // off — `noise_elision` is only ever set by the gated pass.)
+            // Noise-elided hunks are removed hunks too: keeps the `hunks_total == hunks_kept + hunks_dropped` identity and the `N hunks omitted` footer honest.
             hunks_removed_total += file.noise_elision.as_ref().map_or(0, |n| n.hunks);
 
             compressed_files.push(DiffFile {
@@ -458,9 +314,8 @@ impl DiffCompressor {
 
         let files_affected = compressed_files.len();
 
-        // Format compressed output. The footer summary line goes inside
-        // `compressed`; the CCR retrieval marker (if present) is appended
-        // after — both must match Python's emitter byte-for-byte.
+        // Format compressed output. The footer summary line goes inside `compressed`; the CCR retrieval
+        // marker (if present) is appended after — both must match Python's emitter byte-for-byte.
         let mut compressed_output = format_output(
             &pre_diff_lines,
             &compressed_files,
@@ -471,17 +326,8 @@ impl DiffCompressor {
         );
         let compressed_line_count = count_split_lines(&compressed_output);
 
-        // CCR layer: hash original with MD5[:24], append retrieval marker
-        // *only* if compression met `min_compression_ratio_for_ccr`. Python
-        // hardcodes 0.8 (>20% savings); we expose it as a config knob with
-        // the same default.
-        //
-        // CRITICAL: `compressed_line_count` is captured BEFORE the CCR marker
-        // is appended, both for the marker's own text ("compressed to N")
-        // and for the result field. The output string ends up with one more
-        // line than `compressed_line_count` reports, by design — Python
-        // does the same. Mismatching this by recounting after the append
-        // breaks parity by 1.
+        // CCR layer: hash original with MD5[:24], append retrieval marker *only* if compression met `min_compression_ratio_for_ccr`. CRITICAL:
+        // `compressed_line_count` is captured BEFORE the CCR marker is appended, both for the marker's own text ("compressed to N") and for the result field.
         let savings_threshold = self.config.min_compression_ratio_for_ccr;
         let mut cache_key: Option<String> = None;
         if self.config.enable_ccr
@@ -494,11 +340,8 @@ impl DiffCompressor {
                 compressed_line_count,
                 &key,
             ));
-            // Persist the original under the same key. When `store` is
-            // `Some`, the marker we just emitted resolves through it on
-            // the LLM's retrieval tool call. When `None`, the caller
-            // (typically the Python shim) is responsible — see the
-            // method-level docs.
+            // When `store` is `Some`, the marker we just emitted resolves through it on the LLM's retrieval tool
+            // call. When `None`, the caller (typically the Python shim) is responsible — see the method-level docs.
             if let Some(s) = store {
                 s.put(&key, content);
             }
@@ -564,37 +407,21 @@ struct DiffFile {
     is_new_file: bool,
     is_deleted_file: bool,
     is_renamed: bool,
-    /// Bug-fix: rename / similarity / dissimilarity / copy marker lines
-    /// captured verbatim from the parser (e.g. `rename from old.py`,
-    /// `rename to new.py`, `similarity index 95%`). Re-emitted after the
-    /// `diff --git` header so the LLM can see that a file was renamed
-    /// rather than modified-in-place. Previously dropped in both Python
-    /// and Rust — fixed in both as part of the same change.
+    /// Bug-fix: rename / similarity / dissimilarity / copy marker lines captured verbatim from the parser (e.g.
+    /// Re-emitted after the `diff --git` header so the LLM can see that a file was renamed rather than modified-in-place.
     rename_lines: Vec<String>,
-    /// Full original `new file mode <NNNNNN>` line if present. Captured so
-    /// we can detect when emit-time normalization to `100644` lost the
-    /// executable bit (or any other mode signal).
+    /// Full original `new file mode <NNNNNN>` line if present. Captured so we can detect when
+    /// emit-time normalization to `100644` lost the executable bit (or any other mode signal).
     original_new_file_mode_line: Option<String>,
     /// Full original `deleted file mode <NNNNNN>` line if present.
     original_deleted_file_mode_line: Option<String>,
     /// Full original `Binary files X and Y differ` line if present.
     /// Captured so we can detect when emit simplifies to `Binary files differ`.
     original_binary_line: Option<String>,
-    /// Full original `old mode <NNNNNN>` line: present on a permission
-    /// change (`chmod`) or a type change (e.g. regular file <-> symlink via
-    /// 100644 <-> 120000). When the mode change is the ONLY change, git
-    /// emits just this pair with no `---`/`+++`/hunks at all (verified
-    /// against real `git diff` output); the pair can also precede an
-    /// `index`/`---`/`+++`/hunks block when mode and content both changed
-    /// in the same commit. Bug-fix: previously unrecognized by the parser
-    /// entirely (distinct prefix from `new file mode`/`deleted file mode`),
-    /// so these lines silently vanished with no CCR marker to recover them
-    /// when nothing else in the diff compressed enough to clear the ratio
-    /// gate.
+    /// When the mode change is the ONLY change, git emits just this pair with no `---`/`+++`/hunks at all (verified against real `git
+    /// diff` output); the pair can also precede an `index`/`---`/`+++`/hunks block when mode and content both changed in the same commit.
     original_old_mode_line: Option<String>,
-    /// Full original `new mode <NNNNNN>` line, paired with
-    /// `original_old_mode_line`. See that field's doc for the bug this
-    /// fixes.
+    /// Full original `new mode <NNNNNN>` line, paired with `original_old_mode_line`. See that field's doc for the bug this fixes.
     original_new_mode_line: Option<String>,
     /// Populated by the `drop_noise_hunks` pass when hunks were elided
     /// from this file. `None` when the flag is off or nothing matched.
@@ -605,9 +432,8 @@ struct DiffFile {
 /// Rendered as `[noise hunk elided: <path> (+A/-B)]` in the file's section.
 #[derive(Debug, Clone)]
 struct NoiseElision {
-    /// Bare new-side path (from the `diff --git a/X b/Y` header's b-side,
-    /// or the `--combined`/`--cc` single path) — also what the lockfile
-    /// basename match ran against.
+    /// Bare new-side path (from the `diff --git a/X b/Y` header's b-side, or the
+    /// `--combined`/`--cc` single path) — also what the lockfile basename match ran against.
     path: String,
     /// Number of hunks elided.
     hunks: usize,
@@ -628,23 +454,8 @@ impl DiffFile {
 
 // ─── Parser ────────────────────────────────────────────────────────────────
 
-/// Matches any hunk header — regular `@@ -A,B +C,D @@` AND combined-diff
-/// `@@@ -A,B -C,D +E,F @@@` (3-way merge) and `@@@@ ... @@@@` (4-way merge,
-/// extremely rare).
-///
-/// Bug-fix: the previous regex only matched `@@`, so combined-diff hunks
-/// from merge commits had ALL their content silently dropped — `current_hunk`
-/// was never set, so subsequent +/- lines fell through to the no-op branch.
-/// Fixed in tandem with the Python source.
-///
-/// Implementation note: Rust's `regex` crate (RE2-based) doesn't support
-/// backreferences, so the matched-pair count of `@`s on each side is
-/// hand-rolled as alternation. Octopus merges with >3 parents (5+ `@`s)
-/// would slip through this regex back to the content-line branch — they're
-/// vanishingly rare in practice (n-parent merges with n>3 essentially
-/// never appear in real repos). When they do, a `parse_warnings` entry is
-/// emitted so prod monitoring can flag the case rather than silently
-/// dropping it.
+/// Matches any hunk header — regular `@@ -A,B +C,D @@` AND combined-diff `@@@ -A,B -C,D +E,F @@@` (3-way merge) and `@@@@ ...
+/// @@@@` (4-way merge, extremely rare). `current_hunk` was never set, so subsequent +/- lines fell through to the no-op branch.
 fn hunk_header_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -664,9 +475,8 @@ fn hunk_header_regex() -> &'static Regex {
     })
 }
 
-/// Extracts the new-file starting line number (`+N`) from any hunk header,
-/// regardless of whether it's regular or combined-diff. Used for in-order
-/// resort after middle-hunk selection.
+/// Extracts the new-file starting line number (`+N`) from any hunk header, regardless of
+/// whether it's regular or combined-diff. Used for in-order resort after middle-hunk selection.
 fn hunk_new_range_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\+(\d+)").expect("static regex compiles"))
@@ -677,11 +487,7 @@ fn diff_git_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^diff --git a/(.+) b/(.+)$").expect("static regex compiles"))
 }
 
-/// Bug-fix (2026-04-25): merge-commit headers `diff --combined <path>` and
-/// `diff --cc <path>`. Single-path file diffs paired with combined-diff
-/// hunk syntax (`@@@`+). Previously not recognized — merge diffs from
-/// `git log -p` were treated as a single non-diff blob because the header
-/// didn't match `diff --git`, so they fell into pre-diff content.
+/// Bug-fix (2026-04-25): merge-commit headers `diff --combined <path>` and `diff --cc <path>`.
 fn diff_combined_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^diff --combined (.+)$").expect("static regex compiles"))
@@ -710,21 +516,15 @@ fn new_file_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^\+\+\+ (b/(.+)|/dev/null)$").expect("static regex compiles"))
 }
 
-/// Matches both git's `Binary files a/x and b/x differ` and the
-/// compressor's own bare `Binary files differ` output form
-/// (fixed_in_cor27: the old `.+`-form required ≥1 char between
-/// "files " and " differ", so recompressing compressor output silently
-/// dropped the marker). Tolerates a trailing `\r` left behind when CRLF
-/// input is split on `\n`.
+/// Matches both git's `Binary files a/x and b/x differ` and the compressor's own bare `Binary files differ` output form (fixed_in_cor27:
+/// the old `.+`-form required ≥1 char between "files " and " differ", so recompressing compressor output silently dropped the marker).
 fn binary_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^Binary files (.+ )?differ\r?$").expect("static regex compiles"))
 }
 
-/// Parser output: pre-diff content (commit headers, email headers from
-/// `git format-patch`, anything before the first `diff --git`), plus the
-/// parsed file structures. Bug-fix: pre-diff content used to be dropped
-/// silently; now preserved verbatim and re-emitted by `format_output`.
+/// Parser output: pre-diff content (commit headers, email headers from `git format-patch`,
+/// anything before the first `diff --git`), plus the parsed file structures.
 struct ParsedDiff {
     pre_diff_lines: Vec<String>,
     files: Vec<DiffFile>,
@@ -739,11 +539,7 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
     let warnings: Vec<String> = Vec::new();
 
     for &line in lines {
-        // New file section. Includes regular `diff --git` AND merge-commit
-        // `diff --combined <path>` / `diff --cc <path>` (bug-fix
-        // 2026-04-25). Without these, merge diffs from `git log -p` got
-        // treated as one giant pre-diff blob and never reached the
-        // hunk-parsing path.
+        // New file section. Without these, merge diffs from `git log -p` got treated as one giant pre-diff blob and never reached the hunk-parsing path.
         if is_diff_header(line) {
             if let Some(h) = current_hunk.take() {
                 if let Some(f) = current_file.as_mut() {
@@ -773,19 +569,13 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
             continue;
         }
 
-        // Bug-fix: lines before the first `diff --git` are pre-diff content
-        // (commit metadata, email headers, etc.) — capture verbatim rather
-        // than drop silently. They get re-emitted at the head of the
-        // compressed output.
+        // Bug-fix: lines before the first `diff --git` are pre-diff content (commit metadata, email headers, etc.) — capture verbatim rather than drop silently.
         if current_file.is_none() {
             pre_diff_lines.push(line.to_string());
             continue;
         }
 
-        // File-level mode/binary/rename markers. Capture the full original
-        // line in addition to the boolean — Python only sets the flag and
-        // discards the actual mode/detail, but we want the original around
-        // so we can surface emit-time normalizations as observability.
+        // File-level mode/binary/rename markers.
         if let Some(f) = current_file.as_mut() {
             if line.starts_with("new file mode") {
                 f.is_new_file = true;
@@ -798,19 +588,16 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
                 || line.starts_with("copy ")
                 || line.starts_with("dissimilarity ")
             {
-                // Bug-fix: capture the rename / similarity / dissimilarity /
-                // copy marker lines verbatim. Previously only `is_renamed`
-                // was set and the lines were dropped, so emit looked like
-                // a plain modification.
+                // Bug-fix: capture the rename / similarity / dissimilarity / copy marker lines verbatim. Previously
+                // only `is_renamed` was set and the lines were dropped, so emit looked like a plain modification.
                 f.is_renamed = true;
                 f.rename_lines.push(line.to_string());
             } else if binary_regex().is_match(line) {
                 f.is_binary = true;
                 f.original_binary_line = Some(line.to_string());
             } else if line.starts_with("old mode ") {
-                // "old mode"/"new mode" (chmod-only or type-change diffs)
-                // have a distinct prefix from "new file mode"/"deleted file
-                // mode" handled above, so this branch never shadows those.
+                // "old mode"/"new mode" (chmod-only or type-change diffs) have a distinct prefix from
+                // "new file mode"/"deleted file mode" handled above, so this branch never shadows those.
                 f.original_old_mode_line = Some(line.to_string());
             } else if line.starts_with("new mode ") {
                 f.original_new_mode_line = Some(line.to_string());
@@ -863,10 +650,8 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
                 h.context_lines += 1;
                 h.lines.push(line.to_string());
             } else {
-                // "Other" line: `\ No newline at end of file`, trailing
-                // junk like comments, etc. Append verbatim — the context
-                // trim later decides whether it survives based on
-                // proximity to a `+`/`-` line.
+                // "Other" line: `\ No newline at end of file`, trailing junk like comments, etc. Append verbatim
+                // — the context trim later decides whether it survives based on proximity to a `+`/`-` line.
                 h.lines.push(line.to_string());
             }
         }
@@ -890,9 +675,8 @@ fn parse_diff(lines: &[&str]) -> ParsedDiff {
 
 // ─── Scoring ───────────────────────────────────────────────────────────────
 
-/// Priority patterns matching `furl_ctx.transforms.error_detection.PRIORITY_PATTERNS_DIFF`:
-/// ERROR + IMPORTANCE + SECURITY. Used in scoring so error-relevant hunks
-/// survive `max_hunks_per_file` capping.
+/// Priority patterns matching `furl_ctx.transforms.error_detection.PRIORITY_PATTERNS_DIFF`: ERROR +
+/// IMPORTANCE + SECURITY. Used in scoring so error-relevant hunks survive `max_hunks_per_file` capping.
 fn priority_patterns() -> &'static [Regex] {
     static RES: OnceLock<Vec<Regex>> = OnceLock::new();
     RES.get_or_init(|| {
@@ -943,12 +727,8 @@ fn score_hunks(files: &mut [DiffFile], context: &str) {
 
 // ─── Noise elision (drop_noise_hunks, P2-14) ───────────────────────────────
 
-/// Bare new-side path for a file section: the `b/` side of a
-/// `diff --git a/X b/Y` header (renames report the new name), or the
-/// single path of a `diff --combined` / `diff --cc` header. Falls back to
-/// the `+++ b/<path>` line, then the raw header — total: always returns
-/// SOMETHING to display, and the fallbacks can't accidentally match a
-/// lockfile basename check because they carry their prefixes.
+/// Bare new-side path for a file section: the `b/` side of a `diff --git a/X b/Y` header (renames
+/// report the new name), or the single path of a `diff --combined` / `diff --cc` header.
 fn file_display_path(file: &DiffFile) -> String {
     // `or_else` keeps the fall-through lazy: a later regex only runs
     // when every earlier one missed, same as the `return`-on-hit chain.
@@ -964,19 +744,15 @@ fn file_display_path(file: &DiffFile) -> String {
         .unwrap_or_else(|| file.header.clone())
 }
 
-/// True when the path's basename is one of [`NOISE_LOCKFILE_BASENAMES`].
-/// Split on both separators so Windows-style paths match too. Exact
-/// basename equality — `Cargo.lock.bak` is NOT a lockfile.
+/// True when the path's basename is one of [`NOISE_LOCKFILE_BASENAMES`]. Split on both separators
+/// so Windows-style paths match too. Exact basename equality — `Cargo.lock.bak` is NOT a lockfile.
 fn is_lockfile_path(path: &str) -> bool {
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
     NOISE_LOCKFILE_BASENAMES.contains(&base)
 }
 
-/// True for hunks with at least one `+`/`-` line where EVERY changed
-/// line's content (after the one-byte prefix) is empty or whitespace —
-/// blank-line churn. Pure-context hunks (no changes at all) are NOT
-/// noise: there is nothing to elide and the context trim already
-/// handles them.
+/// True for hunks with at least one `+`/`-` line where EVERY changed line's
+/// content (after the one-byte prefix) is empty or whitespace — blank-line churn.
 fn is_whitespace_only_hunk(hunk: &DiffHunk) -> bool {
     if hunk.additions + hunk.deletions == 0 {
         return false;
@@ -989,12 +765,7 @@ fn is_whitespace_only_hunk(hunk: &DiffHunk) -> bool {
     })
 }
 
-/// The `drop_noise_hunks` pass: strip lockfile-churn and whitespace-only
-/// hunks from each file, recording a per-file [`NoiseElision`] summary
-/// that `format_output` renders as `[noise hunk elided: <path> (+A/-B)]`.
-/// Recoverability is owned by the caller: the CCR layer stores the FULL
-/// original diff, so elided hunks remain byte-exact retrievable whenever
-/// the marker ships.
+/// Elide lockfile or whitespace-only hunks and record per-file counts for the summary. Recoverability stays with the caller’s full-original CCR entry.
 fn elide_noise_hunks(files: &mut [DiffFile], stats: &mut DiffCompressorStats) {
     for file in files.iter_mut() {
         let path = file_display_path(file);
@@ -1066,9 +837,8 @@ fn select_hunks(hunks: Vec<DiffHunk>, max_per_file: usize) -> (Vec<DiffHunk>, Ve
     if let Some(l) = last {
         selected.push(l);
     }
-    // Python sorts by `_extract_line_number(header)` (the @@ start line);
-    // we match that exactly because two hunks could in principle share an
-    // index (they don't in practice but match Python's tiebreak).
+    // Python sorts by `_extract_line_number(header)` (the @@ start line); we match that exactly because
+    // two hunks could in principle share an index (they don't in practice but match Python's tiebreak).
     selected.sort_by(|a, b| {
         let la = extract_line_number(&a.1.header);
         let lb = extract_line_number(&b.1.header);
@@ -1084,9 +854,6 @@ fn select_hunks(hunks: Vec<DiffHunk>, max_per_file: usize) -> (Vec<DiffHunk>, Ve
 
 fn extract_line_number(header: &str) -> usize {
     // Use the dedicated `+N` regex — works for both `@@` and `@@@` headers.
-    // The previous implementation captured group(1) of the hunk-header
-    // regex, which was the line number for `@@` only; under the new combined
-    // diff regex, group(1) is the `@`-prefix.
     hunk_new_range_regex()
         .captures(header)
         .and_then(|caps| caps.get(1))
@@ -1139,12 +906,8 @@ fn reduce_context(hunk: &DiffHunk, max_context: usize) -> DiffHunk {
         }
     }
 
-    // Bug-fix: ALWAYS keep `\ No newline at end of file` markers (and any
-    // other backslash-prefixed metadata) regardless of distance from a
-    // change. These are structural patch markers, not context — losing
-    // them breaks round-trippable patches and changes the semantic
-    // meaning of the trailing line in the file. Mirrors the same fix in
-    // the Python source.
+    // Bug-fix: ALWAYS keep `\ No newline at end of file` markers (and any other backslash-prefixed metadata) regardless of distance from a change. These are
+    // structural patch markers, not context — losing them breaks round-trippable patches and changes the semantic meaning of the trailing line in the file.
     for (i, line) in hunk.lines.iter().enumerate() {
         if line.starts_with('\\') {
             keep.insert(i);
@@ -1198,11 +961,7 @@ fn format_output(
     for f in files {
         out_lines.push(f.header.clone());
 
-        // Bug-fix: emit rename / similarity / dissimilarity / copy marker
-        // lines immediately after `diff --git`, matching git's canonical
-        // output ordering. Previously these were captured into
-        // `is_renamed=true` and dropped — output looked like a plain
-        // modification of the old path.
+        // Bug-fix: emit rename / similarity / dissimilarity / copy marker lines immediately after `diff --git`, matching git's canonical output ordering.
         for l in &f.rename_lines {
             out_lines.push(l.clone());
         }
@@ -1213,12 +972,8 @@ fn format_output(
             out_lines.push("deleted file mode 100644".into());
         }
 
-        // Bug-fix: re-emit a permission-only or type-change mode pair
-        // verbatim (`old mode`/`new mode`, mutually exclusive with the
-        // new-file/deleted-file lines above — git never emits both for the
-        // same file section). Previously dropped entirely: a chmod-only
-        // section carried nothing past its `diff --git` header, and below
-        // the CCR ratio gate nothing recovered the lost permission bit.
+        // Bug-fix git never emits both for the same file section). a chmod-only section carried nothing past
+        // its `diff --git` header, and below the CCR ratio gate nothing recovered the lost permission bit.
         if let Some(old_mode) = &f.original_old_mode_line {
             out_lines.push(old_mode.clone());
         }
@@ -1245,10 +1000,8 @@ fn format_output(
             }
         }
 
-        // Noise-elision summary (drop_noise_hunks): one line per file,
-        // after its kept hunks — mirrors the search compressor's
-        // "content, then omission summary" convention. `+A/-B` totals
-        // the elided additions/deletions for the file.
+        // Noise-elision summary (drop_noise_hunks): one line per file, after its kept hunks
+        // — mirrors the search compressor's "content, then omission summary" convention.
         if let Some(n) = &f.noise_elision {
             out_lines.push(format!(
                 "[noise hunk elided: {} (+{}/-{})]",
@@ -1293,10 +1046,8 @@ fn count_split_lines(s: &str) -> usize {
     s.split('\n').count()
 }
 
-// `md5_hex_24` (the CCR cache key) lives in `crate::ccr::persist` — one
-// shared implementation for the diff/log/search/text family (ARCH-5),
-// imported at the top of this module. Its Python-parity pin
-// (`md5_24_matches_python`) moved there with it.
+// `md5_hex_24` (the CCR cache key) lives in `crate::ccr::persist` — one shared implementation
+// for the diff/log/search/text family (ARCH-5), imported at the top of this module.
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
@@ -1394,9 +1145,7 @@ mod tests {
 
     // ─── Lossy-path tests ───────────────────────────────────────────────────
 
-    /// Build a single-file diff with N hunks. Each hunk has 2 context lines,
-    /// 1 deletion, 1 addition, 2 context lines. Hunk headers use distinct
-    /// start lines so the in-order resort after middle-hunk selection works.
+    /// Build a single-file diff with N hunks. Hunk headers use distinct start lines so the in-order resort after middle-hunk selection works.
     fn build_n_hunk_diff(n: usize) -> String {
         let mut s = String::from("diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n");
         for i in 0..n {
@@ -1463,9 +1212,8 @@ mod tests {
 
     #[test]
     fn file_mode_normalization_is_recorded_for_executable_bit() {
-        // Construct a long-enough diff that introduces an executable file.
-        // Mode 100755 != 100644, so emit will silently normalize and stats
-        // must capture the original.
+        // Construct a long-enough diff that introduces an executable file. Mode 100755 !=
+        // 100644, so emit will silently normalize and stats must capture the original.
         let mut input = String::from(
             "diff --git a/script.sh b/script.sh\n\
              new file mode 100755\n\
@@ -1489,24 +1237,8 @@ mod tests {
 
     #[test]
     fn bugfix_chmod_only_loss_survives_below_ccr_ratio_gate() {
-        // A pure permission change (`chmod +x`, or a regular file <-> symlink
-        // conversion via mode 120000) emits ONLY `old mode`/`new mode` lines
-        // — no `---`/`+++`, no hunks — matching real `git diff` output for a
-        // mode-only change (verified against actual `git diff` output).
-        // Before the fix, parse_diff recognized neither "old mode" nor
-        // "new mode" as anything (they don't match `new file mode`/
-        // `deleted file mode`, aren't a hunk header, and no hunk is open
-        // yet to swallow them as content), so they silently vanished.
-        //
-        // Critically, this test keeps every OTHER file's hunk exactly at
-        // its `max_context_lines` boundary (2 leading + 2 trailing, verified
-        // against `reduce_context`) so nothing else in the diff compresses.
-        // The only shrinkage is the 2 dropped mode lines out of 54, which
-        // stays well above the 0.8 `min_compression_ratio_for_ccr` gate —
-        // so no CCR marker is emitted and `cache_key` is `None`. This is
-        // the true "unrecoverable" case: unlike the ordinary CCR-recoverable
-        // compression path (where the full original is persisted under the
-        // marker's hash), there is nothing here for a caller to retrieve.
+        // Mode-only diffs contain `old mode`/`new mode` without hunks. This test keeps every other hunk
+        // uncompressed so dropping those lines cannot hide behind CCR recovery and must fail visibly.
         let mut input = String::new();
         for i in 0..5 {
             input.push_str(&format!(
@@ -1544,13 +1276,7 @@ mod tests {
 
     #[test]
     fn bugfix_mode_change_survives_alongside_content_hunks() {
-        // Sibling shape: a mode change combined with a real content edit in
-        // the same commit (`chmod +x` plus an edit), verified against real
-        // `git diff` output — `old mode`/`new mode` precede `--- `/`+++ `/
-        // the hunk, all in the same file section. The hunk itself must
-        // still compress normally (max_hunks_per_file / context trim), and
-        // the mode pair must survive regardless of which recovery path
-        // (visible output vs CCR marker) this particular file ends up on.
+        // Sibling shape
         let mut input = String::from(
             "diff --git a/script.sh b/script.sh\n\
              old mode 100644\n\
@@ -1603,11 +1329,8 @@ mod tests {
 
     #[test]
     fn fixed_in_cor27_bare_binary_marker_survives_recompression() {
-        // The emitter's own output form (`Binary files differ`, no
-        // filenames) failed the old `^Binary files .+ differ$` regex
-        // (which required ≥1 char between "files " and " differ"), so
-        // recompressing compressor output silently dropped the marker
-        // line and the `!= "Binary files differ"` stats guard was dead.
+        // The emitter's own output form (`Binary files differ`, no filenames) failed the old
+        // `^Binary files .+ differ$` regex (which required ≥1 char between "files " and " differ").
         let input = "diff --git a/img.png b/img.png\n\
                      Binary files a/img.png and b/img.png differ\n";
         let cfg = DiffCompressorConfig {
@@ -1626,9 +1349,8 @@ mod tests {
 
     #[test]
     fn fixed_in_cor27_crlf_binary_marker_detected() {
-        // CRLF input leaves a trailing `\r` on each line after the
-        // `.split('\n')` pass; the old `differ$` anchor rejected it and
-        // the binary marker was lost entirely on emit.
+        // CRLF input leaves a trailing `\r` on each line after the `.split('\n')` pass; the
+        // old `differ$` anchor rejected it and the binary marker was lost entirely on emit.
         let input = "diff --git a/img.png b/img.png\r\n\
                      Binary files a/img.png and b/img.png differ\r\n";
         let cfg = DiffCompressorConfig {
@@ -1668,11 +1390,8 @@ mod tests {
 
     #[test]
     fn compress_with_store_persists_original_under_cache_key() {
-        // Regression: pre-fix, `DiffCompressor` minted a `cache_key` and
-        // embedded `[... hash=abc123]` in the output marker but never
-        // wrote the original anywhere — leaving Python ContentRouter
-        // with a dangling marker that 404'd on retrieval. Now any caller
-        // can pass a store and the marker resolves.
+        // Regression: pre-fix, `DiffCompressor` minted a `cache_key` and embedded `[... hash=abc123]` in the output marker
+        // but never wrote the original anywhere — leaving Python ContentRouter with a dangling marker that 404'd on retrieval.
         use crate::ccr::InMemoryCcrStore;
         let store = InMemoryCcrStore::new();
         let input = build_synthetic_diff(8);
@@ -1687,9 +1406,8 @@ mod tests {
 
     #[test]
     fn compress_with_store_none_matches_compress_with_stats_behavior() {
-        // Passing `None` must be byte-identical to the legacy API:
-        // emits cache_key, leaves persistence to the caller. This pins
-        // the parity-preserving-default contract.
+        // Passing `None` must be byte-identical to the legacy API: emits cache_key, leaves
+        // persistence to the caller. This pins the parity-preserving-default contract.
         let input = build_synthetic_diff(8);
         let (legacy_result, _) = DiffCompressor::default().compress_with_stats(&input, "");
         let (new_result, _) = DiffCompressor::default().compress_with_store(&input, "", None);
@@ -1719,9 +1437,6 @@ mod tests {
     #[test]
     fn score_constants_match_inline_values() {
         // Pin the constants so a future tuning PR has to update both.
-        // (If you're updating these, also update the docs in the parity
-        // contract — the scorer only fires when max_hunks_per_file caps,
-        // so the impact is limited but observable.)
         assert_eq!(SCORE_CHANGE_DENSITY_WEIGHT, 0.03);
         assert_eq!(SCORE_CHANGE_DENSITY_CAP, 0.3);
         assert_eq!(SCORE_CONTEXT_WORD_WEIGHT, 0.2);
@@ -1732,11 +1447,7 @@ mod tests {
 
     // ─── Bug-fix tests (rename/combined-diff/no-newline/pre-diff) ──────────
 
-    /// Bug-fix test: rename markers (`rename from`, `rename to`,
-    /// `similarity index`) must survive into the compressed output. Before
-    /// the fix the parser captured them as `is_renamed=true` and the
-    /// emitter dropped them entirely — output looked like a plain
-    /// modification of the old path.
+    /// Bug-fix test: rename markers (`rename from`, `rename to`, `similarity index`) must survive into the compressed output.
     #[test]
     fn bugfix_rename_markers_are_preserved_in_output() {
         let input = "diff --git a/old.py b/new.py\n\
@@ -1774,10 +1485,7 @@ mod tests {
         );
     }
 
-    /// Bug-fix test: combined-diff (`@@@`) hunk content must NOT be
-    /// silently dropped. Before the fix the hunk-header regex only
-    /// matched `@@`, so 3-way merge hunks had `current_hunk` never set
-    /// and all their content fell through to the no-op branch.
+    /// Bug-fix test: combined-diff (`@@@`) hunk content must NOT be silently dropped.
     #[test]
     fn bugfix_combined_diff_3way_content_is_parsed_and_emitted() {
         let input = "diff --git a/merge.py b/merge.py\n\
@@ -1811,11 +1519,7 @@ mod tests {
         );
     }
 
-    /// Bug-fix test: `\ No newline at end of file` markers must survive
-    /// the context trim regardless of distance from a `+`/`-` line. Before
-    /// the fix, `_reduce_context` only kept lines within max_context_lines
-    /// of a change; trailing `\` markers got cut whenever they were too
-    /// far away.
+    /// Bug-fix test: `\ No newline at end of file` markers must survive the context trim regardless of distance from a `+`/`-` line.
     #[test]
     fn bugfix_no_newline_marker_preserved_despite_distance() {
         // Place the `+/-` change far from the trailing `\` marker so the
@@ -1845,10 +1549,7 @@ mod tests {
         );
     }
 
-    /// Routing-gap test: `diff --combined <path>` (merge-commit header)
-    /// must start a new file section. Before the fix, only `diff --git`
-    /// was recognized — merge diffs from `git log -p` got treated as one
-    /// big pre-diff blob and passed through unchanged.
+    /// Routing-gap test: `diff --combined <path>` (merge-commit header) must start a new file section.
     #[test]
     fn gap_diff_combined_header_starts_a_file() {
         let input = "diff --combined merge.py\n\
@@ -1896,11 +1597,8 @@ mod tests {
         assert!(r.compressed.contains("++merge_added"));
     }
 
-    /// Bug-fix test: pre-diff content (commit headers, email-style
-    /// metadata) is preserved verbatim before the diff sections. Before
-    /// the fix, anything before the first `diff --git` was silently
-    /// dropped — `git log -p` output lost commit messages, Author, Date,
-    /// etc.
+    /// Bug-fix test: pre-diff content (commit headers, email-style metadata) is preserved verbatim before
+    /// the diff sections. Before the fix, anything before the first `diff --git` was silently dropped
     #[test]
     fn bugfix_pre_diff_content_is_preserved() {
         let input = "commit abc1234567890\n\
@@ -1996,8 +1694,7 @@ mod tests {
             ..Default::default()
         };
         let r = DiffCompressor::new(cfg).compress(&build_noise_diff(), "");
-        // Both Cargo.lock hunks elided → one per-file summary line with
-        // summed +3/-2 (hunk1: +2/-1, hunk2: +1/-1).
+        // Both lockfile hunks elided → one per-file summary with summed +3/-2 counts.
         assert!(
             r.compressed
                 .contains("[noise hunk elided: Cargo.lock (+3/-2)]"),

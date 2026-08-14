@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Environment setup for Claude Code web sessions on furl-ctx.
-# Two-phase design for the cloud sandbox, where this may run BEFORE the
-# checkout exists and from an arbitrary cwd:
-#   Phase A, always: make the global toolchain ready, rust plus uv.
-#   Phase B, only when the checkout is found: venv, native build, sanity.
-# When no checkout exists yet this exits 0 on purpose. The session prompt
-# re-runs this script from inside the repo on first use, and then Phase B
-# fires because cwd itself matches. Idempotent throughout.
+# Environment setup for Claude Code web sessions on furl-ctx. Phase B, only when the checkout is found: venv, native build, sanity.
 
 log() { printf '[setup] %s\n' "$*"; }
 

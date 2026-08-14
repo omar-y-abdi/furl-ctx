@@ -70,10 +70,8 @@ async def test_file_path_small_round_trips(server, tmp_path: Path) -> None:
 
 
 async def test_file_path_large_trace_crosses_fast_path_and_offloads(server, tmp_path: Path) -> None:
-    # THE end-to-end test the finding is about: a file large enough to cross the
-    # 8 MiB huge-content fast-path switch is ingested from disk, offloaded to CCR
-    # (marker + _ccr_summary present), and recovered byte-exact — the path a
-    # 33 MB Chrome trace takes, exercised rather than assumed.
+    # THE end-to-end test the finding is about: a file large enough to cross the 8 MiB huge-content fast-path
+    # switch is ingested from disk, offloaded to CCR (marker + _ccr_summary present), and recovered byte-exact.
     rows = [{"row": i, "ph": "X", "name": "RunTask", "dur": i % 997} for i in range(150_000)]
     body = json.dumps(rows)
     assert len(body) > 8 * 1024 * 1024, f"fixture only {len(body)} bytes, must exceed 8 MiB"
@@ -175,9 +173,8 @@ async def test_file_path_hardlink_rejected(server, tmp_path: Path) -> None:
 
 
 async def test_file_path_fifo_does_not_block_and_is_rejected(server, tmp_path: Path) -> None:
-    # A FIFO inside the jail must NOT wedge the open (O_NONBLOCK on the final
-    # open) and is rejected as non-regular. wait_for turns a regression (a
-    # blocking open) into a clean failure instead of an infinite hang.
+    # A FIFO inside the jail must NOT wedge the open (O_NONBLOCK on the final open) and is rejected as
+    # non-regular. wait_for turns a regression (a blocking open) into a clean failure instead of an infinite hang.
     fifo = tmp_path / "pipe.fifo"
     os.mkfifo(fifo)
     env = _envelope(
@@ -192,9 +189,8 @@ async def test_file_path_fifo_does_not_block_and_is_rejected(server, tmp_path: P
 async def test_file_path_oversized_rejected_with_clear_message(
     server, tmp_path: Path, monkeypatch
 ) -> None:
-    # A file past the ingest ceiling is rejected by stat() BEFORE the body is
-    # read (never allocated), and the message names the size, the limit, and the
-    # env var that raises it.
+    # A file past the ingest ceiling is rejected by stat() BEFORE the body is read (never
+    # allocated), and the message names the size, the limit, and the env var that raises it.
     monkeypatch.setenv("FURL_MCP_MAX_FILE_BYTES", "16")
     big = tmp_path / "big.json"
     big.write_text("x" * 64)

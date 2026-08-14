@@ -72,9 +72,8 @@ _FAKE_BODY = "MIIEowIBAAKCAQEAvR7fakeKEYmaterial0123456789abcdefghijklmnopqrs"
 _PEM_BLOCK = "-----BEGIN RSA " + _ARMOR_TAIL + "\n" + _FAKE_BODY + "\n-----END RSA " + _ARMOR_TAIL
 _PEM_TRUNCATED = "-----BEGIN OPENSSH " + _ARMOR_TAIL + "\nAAAAB3NzaC1yc2EAAAAD"
 
-# One specimen per built-in pattern name. The mapping is checked for
-# EXHAUSTIVENESS below, so a newly added built-in fails loudly here instead of
-# quietly escaping the idempotence proof.
+# One specimen per built-in pattern name. The mapping is checked for EXHAUSTIVENESS below, so
+# a newly added built-in fails loudly here instead of quietly escaping the idempotence proof.
 _SPECIMENS: dict[str, str] = {
     "private-key": _PEM_BLOCK,
     "aws-access-key": "A" + "KIA" + "FAKEKEY012345678",
@@ -126,10 +125,8 @@ def test_builtin_redaction_is_idempotent(name: str) -> None:
     specimen = _SPECIMENS[name]
     once = redactor(specimen)
 
-    # ANTI-VACUITY. The cheapest input satisfying "R(R(x)) == R(x)" is content
-    # that matches NOTHING: then R is the identity and idempotence is trivially
-    # true while proving nothing about redaction. Require the specimen to have
-    # actually fired before the real assertion is allowed to mean anything.
+    # ANTI-VACUITY. The cheapest input satisfying "R(R(x)) == R(x)" is content that matches NOTHING: then R is the identity and idempotence is trivially
+    # true while proving nothing about redaction. Require the specimen to have actually fired before the real assertion is allowed to mean anything.
     assert once != specimen, (
         f"specimen for {name!r} was not redacted at all, so the idempotence "
         f"assertion below would hold trivially for the identity function. The "
@@ -221,12 +218,8 @@ def test_no_builtin_pattern_matches_any_builtin_marker() -> None:
     )
 
 
-# ─── half 2: operator patterns are NOT idempotent, by design ─────────────────
-#
-# These are CHARACTERISATION tests. They pin measured current behaviour so it
-# cannot change unnoticed; they do not assert that the behaviour is desirable.
-# If one goes red because the divergence is gone, that is a real change and the
-# module docstring above needs rewriting — see each test's failure message.
+# ─── half 2: operator patterns are NOT idempotent, by design ───────────────── These are CHARACTERISATION tests. If one goes red
+# because the divergence is gone, that is a real change and the module docstring above needs rewriting — see each test's failure message.
 
 
 def _operator(spec: str) -> Callable[[str], str]:

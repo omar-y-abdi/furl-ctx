@@ -107,25 +107,14 @@ _CREATE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS ccr_entries_created_at_idx ON ccr_entries (created_at)"
 )
 
-# Expression index on the expiry cutoff so ``_PURGE_EXPIRED_SQL`` (WHERE
-# ``created_at + ttl < ?``) is an indexed range scan, not a full-table scan
-# (audit #6). The bare ``created_at`` index above cannot serve a predicate on
-# the SUM, so every purge — startup and every Nth put — full-scanned the shared
-# file. Append-only (IF NOT EXISTS): safe to add to an existing database; SQLite
-# materialises the expression into the index and the planner matches the
-# identical ``created_at + ttl`` expression in the DELETE.
+# Expression index on the expiry cutoff so ``_PURGE_EXPIRED_SQL`` (WHERE ``created_at + ttl <
+# ?``) is an indexed range scan, not a full-table scan (audit #6). Append-only (IF NOT EXISTS)
 _CREATE_EXPIRES_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS ccr_entries_expires_at_idx ON ccr_entries (created_at + ttl)"
 )
 
-# Named observability counters (hook_invocations_seen, hook_compressions_applied,
-# pipe_*, hook_noop:<reason>, ...). A tiny separate table in the SAME per-project
-# file as ``ccr_entries`` so the short-lived hook subprocess and the long-lived
-# MCP server (furl_stats) share ONE cumulative, cross-process tally. Append-only
-# (IF NOT EXISTS): safe to add to an existing database. Counters are monotonic —
-# they survive entry eviction/expiry (unlike ``ccr_entries``), so "invocations
-# rising while your context still shows raw output" stays a durable signal that
-# the harness is dropping replacement output (anthropics/claude-code#68951).
+# Named observability counters (hook_invocations_seen, hook_compressions_applied, pipe_*,
+# hook_noop:<reason>, ...). Append-only (IF NOT EXISTS): safe to add to an existing database.
 _CREATE_COUNTERS_TABLE_SQL = (
     "CREATE TABLE IF NOT EXISTS ccr_counters "
     "(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)"
@@ -147,25 +136,8 @@ _SELECT_SQL = f"SELECT {_COLUMNS} FROM ccr_entries WHERE hash_key = ?"
 
 _PURGE_EXPIRED_SQL = "DELETE FROM ccr_entries WHERE created_at + ttl < ?"
 
-# File-cap eviction (physical backstop). Sheds the oldest rows with NO TTL check
-# and no logical-cap awareness — intentionally: it is a retention GC for the
-# shared file's size (DEFAULT_MAX_ROWS = 10 000), an order of magnitude above the
-# store's 1000-entry logical cap AT THE DEFAULTS. Because a columnar row-drop
-# stores ONE whole-blob entry — per-row chunks are NOT mirrored into the store
-# (see smart_crusher `_mirror_typed_refs`) — physical rows track logical
-# entries, so at the default caps the store's own TTL-and-eviction-ordered
-# logical cap binds first and this file cap does not fire under normal load.
-# Both caps are configurable (max_entries; FURL_CCR_SQLITE_MAX_ROWS): a max_rows
-# set below max_entries inverts the ordering, and CompressionStore.__init__ logs
-# a warning when it detects that. Making it TTL-aware would not
-# help the only case it can fire (>10 000 rows ALL within TTL — a TTL filter
-# changes nothing there); the correct response to a genuinely full file is to
-# shed the oldest. Pinned by
-# tests/test_ccr_row_drop_one_slot.py::test_sqlite_physical_rows_track_logical_entries.
-#
-# Subquery form: DELETE ... ORDER BY ... LIMIT needs a non-default SQLite
-# compile flag, the IN-subquery works on every build. Tie-broken on hash_key
-# for determinism when two rows share a created_at.
+# Physical SQLite row-cap GC deletes oldest rows without TTL logic; the higher default physical cap should trail the store's
+# logical cap. Ties use `hash_key` for deterministic eviction, and the portable subquery avoids SQLite compile-option dependencies.
 _EVICT_OLDEST_SQL = (
     "DELETE FROM ccr_entries WHERE hash_key IN ("
     "SELECT hash_key FROM ccr_entries ORDER BY created_at ASC, hash_key ASC LIMIT ?)"
@@ -277,10 +249,8 @@ class SqliteBackend:
         self._state_lock = threading.Lock()
         self._all_connections: list[sqlite3.Connection] = []
         self._put_count = 0
-        # Maintained row count for the cap check, replacing a per-put COUNT(*)
-        # full-scan (audit #6). Seeded from the file in _initialize (after the
-        # startup purge) and resynced on the purge cadence; 0 until then so a
-        # degrade-during-init leaves it consistent.
+        # Seeded from the file in _initialize (after the startup purge) and resynced on
+        # the purge cadence; 0 until then so a degrade-during-init leaves it consistent.
         self._row_count = 0
         self._degraded = False
         self._degradation_logged = False
@@ -296,10 +266,8 @@ class SqliteBackend:
         try:
             self._run("init", self._initialize)
         except _SqliteOpFailed as exc:
-            # Corruption already degraded inside _run; init-time lock
-            # exhaustion also degrades — without the schema no later
-            # operation can succeed, so limping on SQLite would only turn
-            # every op into a fresh failure.
+            # Corruption already degraded inside _run; init-time lock exhaustion also degrades — without the schema
+            # no later operation can succeed, so limping on SQLite would only turn every op into a fresh failure.
             if not self._degraded:
                 self._degrade(exc.__cause__ or exc)
 
@@ -344,10 +312,8 @@ class SqliteBackend:
         try:
             self._run("set", lambda conn: self._sqlite_set(conn, hash_key, entry))
         except _SqliteOpFailed:
-            # Per-op fail-open: retain the entry in-process so same-process
-            # retrieval still round-trips, but report the durability MISS so the
-            # marker-decision caller can veto. Other processes miss it loudly —
-            # the pre-durability status quo.
+            # Per-op fail-open: retain the entry in-process so same-process retrieval still
+            # round-trips, but report the durability MISS so the marker-decision caller can veto.
             self._memory.set(hash_key, entry)
             return False
         # Durable write landed: drop any stale fallback shadow from an earlier
@@ -574,9 +540,8 @@ class SqliteBackend:
                 lambda conn: self._sqlite_increment_counter(conn, name, amount),
             )
         except _SqliteOpFailed:
-            # Per-op fail-open: keep the tally moving in the volatile fallback,
-            # but report the non-durable miss so a first-run gate cannot treat a
-            # lock-lost write as the durable "first invocation".
+            # Per-op fail-open: keep the tally moving in the volatile fallback, but report the non-durable
+            # miss so a first-run gate cannot treat a lock-lost write as the durable "first invocation".
             self._memory.increment_counter(name, amount)
             return None
 
@@ -684,9 +649,8 @@ class SqliteBackend:
 
     def _sqlite_set(self, conn: sqlite3.Connection, hash_key: str, entry: CompressionEntry) -> None:
         with conn:
-            # Insert-vs-replace via a PK point-lookup (O(log n)) so the
-            # maintained counter stays exact within this process — far cheaper
-            # than the per-put COUNT(*) full-scan it replaces (audit #6).
+            # Insert-vs-replace via a PK point-lookup (O(log n)) so the maintained counter stays exact
+            # within this process — far cheaper than the per-put COUNT(*) full-scan it replaces (audit #6).
             existed = (
                 conn.execute(
                     "SELECT 1 FROM ccr_entries WHERE hash_key = ?", (_encode_text(hash_key),)
@@ -694,17 +658,14 @@ class SqliteBackend:
                 is not None
             )
             conn.execute(_UPSERT_SQL, _entry_to_row(hash_key, entry))
-            # Count the put only once the write is in flight inside the
-            # transaction, so lock-contention retries of the same logical put
-            # do not inflate the purge cadence.
+            # Count the put only once the write is in flight inside the transaction, so
+            # lock-contention retries of the same logical put do not inflate the purge cadence.
             with self._state_lock:
                 self._put_count += 1
                 purge_now = self._put_count % self._purge_every_n_puts == 0
             if purge_now:
-                # Indexed opportunistic purge, then resync the counter from the
-                # shared file: corrects any drift from another process's writes
-                # this counter never saw, at 1/purge_every_n_puts the cost of the
-                # old per-put COUNT(*).
+                # Indexed opportunistic purge, then resync the counter from the shared file: corrects any drift from another
+                # process's writes this counter never saw, at 1/purge_every_n_puts the cost of the old per-put COUNT(*).
                 conn.execute(_PURGE_EXPIRED_SQL, (time.time(),))
                 resynced = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
                 with self._state_lock:
@@ -785,10 +746,8 @@ class SqliteBackend:
         if self._db_path.exists():
             os.chmod(self._db_path, 0o600)
             return
-        # O_NOFOLLOW (SEC-3, defense-in-depth): refuse to create-through a
-        # pre-planted symlink at the db path, so a symlink in the workspace can't
-        # redirect the open to an attacker-chosen target. getattr keeps this
-        # portable to platforms lacking the flag (it degrades to 0 = no-op).
+        # O_NOFOLLOW (SEC-3, defense-in-depth): refuse to create-through a pre-planted symlink at the db path, so a symlink in the workspace can't
+        # redirect the open to an attacker-chosen target. getattr keeps this portable to platforms lacking the flag (it degrades to 0 = no-op).
         create_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(self._db_path, create_flags, 0o600)
         os.close(fd)
@@ -858,9 +817,8 @@ def _entry_to_row(hash_key: str, entry: CompressionEntry) -> tuple[Any, ...]:
 
 
 def _row_to_entry(row: tuple[Any, ...]) -> CompressionEntry:
-    # Deferred import: compression_store lazily imports this package, and the
-    # backends must stay importable without pulling the store at module load
-    # (mirrors the InMemoryBackend TYPE_CHECKING pattern).
+    # Deferred import: compression_store lazily imports this package, and the backends must stay importable
+    # without pulling the store at module load (mirrors the InMemoryBackend TYPE_CHECKING pattern).
     from ..compression_store import CompressionEntry
 
     return CompressionEntry(

@@ -1,42 +1,5 @@
-//! Adaptive compression sizing via information saturation detection.
-//!
-//! This Rust implementation is canonical (the pure-Python
-//! `adaptive_sizer.py` original is retired — no cross-language pin
-//! remains). Used by `smart_crusher`'s array crushers and the log/search
-//! compressors to decide *how many* items to keep — statistically, by
-//! detecting the "knee point" of an information saturation curve.
-//!
-//! # Algorithm overview
-//!
-//! Three-tier decision:
-//! 1. **Fast path**: trivial cases (`n <= 8` → keep all) and near-total
-//!    redundancy (≤3 unique-by-simhash → keep that count).
-//! 2. **Standard**: Kneedle on cumulative unique-bigram coverage curve.
-//!    Coverage stops growing → that's the knee → return that count.
-//! 3. **Validation**: zlib-ratio sanity check. If keeping `k` items
-//!    produces a much-more-redundant subset than the full set, bump
-//!    `k` by 20%.
-//!
-//! # Implementation notes
-//!
-//! - `simhash` hashes character 4-grams (codepoint windows) with
-//!   [`FxHasher`] and aggregates bits via weighted voting. The original
-//!   used one full **MD5 digest per window** — a 10k-line log paid
-//!   ~770k MD5 calls inside `compute_optimal_k` (PERF-6). A similarity
-//!   fingerprint needs a fast, deterministic, well-mixed 64-bit hash,
-//!   not a cryptographic one. Fingerprint VALUES differ from the MD5
-//!   era; the clustering semantics (Hamming-distance grouping) are
-//!   unchanged and the outputs are pinned by the characterization
-//!   tests below + the benchmark ratio floor.
-//! - `compute_unique_bigram_curve` operates on whitespace-split words,
-//!   deduped as `(u64, u64)` word-hash pairs (PERF-6 — the old
-//!   `(String, String)` set allocated two Strings per bigram).
-//!   Single-word items emit `(word, "")`; empty items emit `("", "")`.
-//! - `find_knee` requires `> 0.05` deviation from the diagonal in
-//!   normalized space; threshold is strict (`<` returns None).
-//! - `validate_with_zlib` mirrors `zlib.compress(..., level=1)` via
-//!   `flate2` (miniz_oxide backend); the 15% ratio-diff threshold
-//!   absorbs per-byte encoder drift.
+//! Chooses how many items to keep from information saturation: trivial/redundant fast paths, Kneedle over
+//! unique-bigram coverage, then a zlib-ratio sanity check. SimHash uses deterministic non-cryptographic 4-gram hashing.
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
@@ -44,17 +7,8 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use std::hash::Hasher;
 use std::io::Write;
 
-/// Compute the optimal number of items to keep via information saturation.
-///
-/// Direct port of `compute_optimal_k` (Python `adaptive_sizer.py:27-106`).
-///
-/// # Arguments
-///
-/// - `items`: string representations of items in importance order.
-/// - `bias`: multiplier on the knee point (>1 = keep more, <1 = compress
-///   harder).
-/// - `min_k`: lower bound on the return value.
-/// - `max_k`: upper bound; `None` means "no cap" (i.e. up to `items.len()`).
+/// Compute the optimal number of items to keep via information saturation. `items`: string representations of items in importance order. - `bias`:
+/// multiplier on the knee point (>1 = keep more, <1 = compress harder). - `min_k`: lower bound on the return value. - `max_k`: upper bound.
 pub fn compute_optimal_k(items: &[&str], bias: f64, min_k: usize, max_k: Option<usize>) -> usize {
     let n = items.len();
     let effective_max = max_k.unwrap_or(n);
@@ -108,10 +62,6 @@ pub fn compute_optimal_k(items: &[&str], bias: f64, min_k: usize, max_k: Option<
 }
 
 /// Find the knee in a monotonically-increasing curve (Kneedle).
-///
-/// Direct port of `find_knee` (Python `adaptive_sizer.py:109-154`).
-/// Returns the 1-indexed count `knee_idx + 1` so the caller can use it
-/// directly as a "keep this many" value.
 pub fn find_knee(curve: &[usize]) -> Option<usize> {
     let n = curve.len();
     if n < 3 {
@@ -152,17 +102,8 @@ pub fn find_knee(curve: &[usize]) -> Option<usize> {
     knee_idx.map(|i| i + 1)
 }
 
-/// Cumulative unique-bigram coverage curve.
-///
-/// Each item contributes its word-level bigrams; single-word items
-/// contribute `(word, "")`, empty items `("", "")`. The curve at index
-/// `k` is the running count of unique bigrams after seeing
-/// `items[0..=k]`.
-///
-/// Bigrams dedupe as `(u64, u64)` FxHash word pairs (PERF-6): the old
-/// `HashSet<(String, String)>` allocated two owned Strings per bigram.
-/// Set cardinality is identical up to 64-bit hash collisions —
-/// negligible against the knee detector's coarse geometry.
+/// Cumulative unique-bigram coverage curve. The curve at index `k` is the running count of unique bigrams after seeing
+/// `items[0..=k]`. Set cardinality is identical up to 64-bit hash collisions — negligible against the knee detector's coarse geometry.
 pub fn compute_unique_bigram_curve(items: &[&str]) -> Vec<usize> {
     let mut seen: FxHashSet<(u64, u64)> = FxHashSet::default();
     let mut curve: Vec<usize> = Vec::with_capacity(items.len());
@@ -197,20 +138,8 @@ pub fn compute_unique_bigram_curve(items: &[&str]) -> Vec<usize> {
     curve
 }
 
-/// 64-bit SimHash fingerprint of a text string.
-///
-/// Algorithm:
-/// 1. Iterate character 4-grams (sliding codepoint window). For input
-///    shorter than 4 chars, the loop runs once with the entire string
-///    as the only "gram". Empty input still iterates once with `""`.
-/// 2. Hash each gram to a `u64` with [`FxHasher`] over its UTF-8 bytes
-///    (PERF-6 — the MD5-per-window original was Python-parity ballast;
-///    a similarity fingerprint needs speed + determinism + bit mixing,
-///    not collision resistance). No per-window String is allocated:
-///    the window encodes into a 16-byte stack buffer.
-/// 3. For each bit position 0..64, increment a vote counter when the
-///    bit is set, decrement when clear.
-/// 4. Final fingerprint: bit `j` is set iff `votes[j] > 0` (strict).
+/// 64-bit SimHash fingerprint of a text string. Hash each gram to a `u64` with [`FxHasher`] over its UTF-8
+/// bytes (PERF-6 a similarity fingerprint needs speed + determinism + bit mixing, not collision resistance).
 pub fn simhash(text: &str) -> u64 {
     let lower = text.to_lowercase();
     let chars: Vec<char> = lower.chars().collect();
@@ -268,11 +197,8 @@ pub fn hamming_distance(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()
 }
 
-/// Count items with distinct content via SimHash + greedy clustering.
-///
-/// Direct port of `count_unique_simhash` (Python `adaptive_sizer.py:222-252`).
-/// Two items cluster together when their fingerprints are within
-/// `threshold` Hamming distance.
+/// Count items with distinct content via SimHash + greedy clustering. Direct port of `count_unique_simhash` (Python
+/// `adaptive_sizer.py:222-252`). Two items cluster together when their fingerprints are within `threshold` Hamming distance.
 pub fn count_unique_simhash(items: &[&str], threshold: u32) -> usize {
     if items.is_empty() {
         return 0;
@@ -280,24 +206,8 @@ pub fn count_unique_simhash(items: &[&str], threshold: u32) -> usize {
 
     let fingerprints: Vec<u64> = items.iter().map(|s| simhash(s)).collect();
 
-    // Greedy first-match clustering: a fingerprint joins the first existing
-    // cluster within `threshold` Hamming distance, else becomes a new cluster
-    // representative. The result (`clusters.len()`) depends only on *whether*
-    // any existing rep matches — not which one — so any structure that
-    // preserves this existence query yields the identical count.
-    //
-    // Naive: scan every rep per fingerprint → O(n * C) with C ~= n/2 on
-    // diverse data → O(n^2). Instead, index reps by 16-bit blocks: two
-    // fingerprints within Hamming distance `t` must share at least one of
-    // `t + 1` equal blocks (pigeonhole). With `t <= 3` a u64 splits into
-    // BLOCKS = 4 disjoint 16-bit blocks, so a fingerprint's match candidates
-    // are the union of reps in its 4 block buckets — a tiny set on diverse
-    // data. Each candidate is still confirmed with the real Hamming distance,
-    // so there are no false matches and the count is byte-identical.
-    //
-    // For `threshold >= BLOCKS` the pigeonhole bound needs more than BLOCKS
-    // blocks, so fall back to the exact linear scan (only the tests exercise
-    // this; the production call uses threshold = 3).
+    // Cluster fingerprints by Hamming distance using four 16-bit buckets; candidates still receive the exact
+    // distance check. For thresholds ≥4, fall back to linear scan because the pigeonhole bound no longer applies.
     const BLOCKS: u32 = 4;
     if threshold >= BLOCKS {
         count_unique_linear(&fingerprints, threshold)
@@ -321,12 +231,6 @@ fn count_unique_linear(fingerprints: &[u64], threshold: u32) -> usize {
 }
 
 /// Exact greedy clustering via 16-bit block index (pigeonhole pruning).
-///
-/// Requires `threshold < 4` so that a u64 split into four 16-bit blocks
-/// guarantees any two fingerprints within `threshold` share an equal block.
-/// Yields the identical cluster count as [`count_unique_linear`]: the block
-/// index only narrows the candidate reps; every candidate is confirmed with
-/// the real Hamming distance, and reps are still admitted in input order.
 fn count_unique_indexed(fingerprints: &[u64], threshold: u32) -> usize {
     // buckets[b]: value of block `b` -> representative fingerprints whose
     // block `b` equals that value.
@@ -365,13 +269,6 @@ fn count_unique_indexed(fingerprints: &[u64], threshold: u32) -> usize {
 }
 
 /// zlib-based compression-ratio validation of the chosen `k`.
-///
-/// Direct port of `_validate_with_zlib` (Python `adaptive_sizer.py:255-308`).
-/// If the subset `items[..k]` compresses *much* better than the full
-/// set, the subset is missing diversity → bump `k` by 20%.
-///
-/// `tolerance` is the maximum allowed ratio difference (Python default
-/// 0.15 = 15%).
 pub fn validate_with_zlib(items: &[&str], k: usize, max_k: usize, tolerance: f64) -> usize {
     if k >= items.len() || k >= max_k {
         return k;
@@ -410,13 +307,8 @@ pub fn validate_with_zlib(items: &[&str], k: usize, max_k: usize, tolerance: f64
     k
 }
 
-/// Compress `bytes` with zlib level=1 and return the output length.
-///
-/// Wraps `flate2::ZlibEncoder` at `Compression::fast()` (level 1).
-/// Mirrors Python's `len(zlib.compress(data, level=1))`. miniz_oxide
-/// (default flate2 backend) produces DEFLATE streams of similar length
-/// to CPython's libz at level 1 — small per-byte drift is absorbed by
-/// the 15% ratio-diff tolerance in `validate_with_zlib`.
+/// Compress `bytes` with zlib level=1 and return the output length. Mirrors Python's `len(zlib.compress(data, level=1))`. miniz_oxide (default flate2 backend)
+/// produces DEFLATE streams of similar length to CPython's libz at level 1 — small per-byte drift is absorbed by the 15% ratio-diff tolerance in `validate_with_zlib`.
 fn zlib_compressed_len(bytes: &[u8]) -> usize {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
     // Writes are infallible for an in-memory Vec.
@@ -429,15 +321,8 @@ fn zlib_compressed_len(bytes: &[u8]) -> usize {
 mod tests {
     use super::*;
 
-    // ---------- simhash (characterization of the FxHash fingerprint) ----------
-    //
-    // PERF-6: the fingerprints below were regenerated when the per-gram
-    // hash moved MD5 → FxHash (the MD5 choice was Python-parity; the
-    // Python original is retired). The constants pin THIS
-    // implementation's determinism — cross-platform, cross-release —
-    // not an external reference. Clustering semantics are covered by
-    // the count_unique_simhash / compute_optimal_k tests, and end-to-end
-    // quality by the benchmark ratio floor (non-regression gated).
+    // simhash (characterization of the FxHash fingerprint) ---------- PERF-6: the fingerprints below were regenerated when the per-gram hash moved MD5 → FxHash (the MD5 choice
+    // was Python-parity; the Python original is retired). The constants pin THIS implementation's determinism — cross-platform, cross-release — not an external reference.
 
     #[test]
     fn simhash_empty_string() {
@@ -542,17 +427,8 @@ mod tests {
 
     #[test]
     fn indexed_matches_linear_on_mixed_fingerprints() {
-        // The block-index fast path (`count_unique_indexed`) must yield the
-        // exact same greedy-cluster count as the reference linear scan
-        // (`count_unique_linear`) for every threshold it serves (0..=3).
-        //
-        // Construct fingerprints exercising the tricky cases:
-        //  - exact duplicates (Hamming 0),
-        //  - near-dupes at Hamming 1/2/3 (straddle the block boundaries so
-        //    the shared-block pigeonhole invariant is genuinely tested),
-        //  - reps sharing a block value but Hamming-far (false candidates
-        //    that must be rejected by the real-distance confirm),
-        //  - a long tail of pseudo-random uniques (the diverse-data regime).
+        // The block-index fast path (`count_unique_indexed`) must yield the exact same greedy-cluster
+        // count as the reference linear scan (`count_unique_linear`) for every threshold it serves (0..=3).
         let mut fps: Vec<u64> = vec![
             0x0000_0000_0000_0000,
             0x0000_0000_0000_0000, // exact dup of previous
@@ -601,10 +477,7 @@ mod tests {
 
     #[test]
     fn bigram_curve_empty_string_contributes_one() {
-        // ["", "a", "a b"] → [1, 2, 3]
-        // "" → ("", "")
-        // "a" → ("a", "")
-        // "a b" → ("a", "b")
+        // ["", "a", "a b"] → [1, 2, 3] "" → ("", "") "a" → ("a", "") "a b" → ("a", "b")
         let items = ["", "a", "a b"];
         assert_eq!(compute_unique_bigram_curve(&items), vec![1, 2, 3]);
     }
@@ -661,11 +534,8 @@ mod tests {
 
     #[test]
     fn validate_zlib_bumps_k_when_subset_undercompresses() {
-        // Counterintuitive: 20 identical lines and 5 identical lines have
-        // the same content redundancy, but zlib at level=1 compresses
-        // longer redundant text more efficiently per byte. The validator
-        // sees a ratio_diff > 0.15 between full and subset → bumps k by
-        // 20%. Verified against Python: returns 6 for k=5.
+        // Counterintuitive: 20 identical lines and 5 identical lines have the same content
+        // redundancy, but zlib at level=1 compresses longer redundant text more efficiently per byte.
         let items: [&str; 20] = ["the quick brown fox jumps over the lazy dog"; 20];
         let result = validate_with_zlib(&items, 5, 100, 0.15);
         assert_eq!(result, 6, "expected 1.2× bump from 5 to 6");
@@ -685,9 +555,8 @@ mod tests {
             .collect();
         let items: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
         let result = validate_with_zlib(&items, 10, 100, 0.15);
-        // With 10 of 20 diverse items, ratio_diff should stay under 0.15.
-        // Pin to the equality observed; if zlib backend changes shift it,
-        // we'll see a clean signal here.
+        // With 10 of 20 diverse items, ratio_diff should stay under 0.15. Pin to the equality
+        // observed; if zlib backend changes shift it, we'll see a clean signal here.
         assert_eq!(result, 10, "expected passthrough for representative subset");
     }
 

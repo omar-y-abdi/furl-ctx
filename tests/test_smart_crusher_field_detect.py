@@ -36,17 +36,14 @@ import json
 
 from furl_ctx.transforms.smart_crusher import SmartCrusher, SmartCrusherConfig
 
-# 30 rows: clears min_items_to_analyze (5) and forces real row selection
-# against max_items_after_crush (15). ``msg`` varies so the fixture has
-# content beyond the probed column; the probed column is the only numeric.
+# 30 rows: clears min_items_to_analyze and forces real row selection against max_items_after_crush .
+# ``msg`` varies so the fixture has content beyond the probed column; the probed column is the only numeric.
 _N_ITEMS = 30
 
 
 def _crusher() -> SmartCrusher:
-    # min_tokens_to_crush=1: the fixtures are deliberately small; the token
-    # gate is not what these tests probe. with_compaction=False: keep
-    # strategy_info on the pure lossy path (no ``lossless:``/``+compact:``
-    # variants) so the strategy assertion stays crisp.
+    # min_tokens_to_crush=1: the fixtures are deliberately small; the token gate is not what these tests probe. with_compaction=False:
+    # keep strategy_info on the pure lossy path (no ``lossless:``/``+compact:`` variants) so the strategy assertion stays crisp.
     return SmartCrusher(
         config=SmartCrusherConfig(min_tokens_to_crush=1),
         with_compaction=False,
@@ -66,9 +63,8 @@ def _constant_float_items() -> str:
 
 
 def _descending_score_items() -> str:
-    # Genuinely ranked data: distinct [0,1] floats, descending in array
-    # order, non-sequential steps (0.03 — outside the [0.5, 2.0]
-    # sequential-diff band the ID detector looks for).
+    # Genuinely ranked data: distinct [0,1] floats, descending in array order, non-sequential
+    # steps (0.03 — outside the [0.5, 2.0] sequential-diff band the ID detector looks for).
     return json.dumps(
         [
             {"score": round(0.95 - 0.03 * i, 4), "msg": f"result {i} for the query"}

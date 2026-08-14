@@ -1,48 +1,14 @@
-//! Shared CCR key + persist+mark helpers (ARCH-5).
-//!
-//! One implementation of the hash/persist/marker tail the compressor
-//! family used to carry as byte-identical private copies:
-//!
-//! * [`md5_hex_24`] — the diff/log/search/text CCR cache key
-//!   (previously duplicated in all four compressor modules);
-//! * [`sha256_recovery_key`] — the SHA-256 hex prefix (24 hex / 96 bits,
-//!   [`CCR_KEY_HEX_WIDTH`]) behind the crusher's `hash_canonical` (row-drop
-//!   recovery keys) and the compaction layer's `hash_opaque` / opaque-marker
-//!   hashing (previously duplicated across `crusher.rs`, `compactor.rs`, and
-//!   `walker.rs`);
-//! * [`persist_and_mark`] / [`retrieve_more_marker_line`] — the
-//!   key→put→marker tail of the log/search (and, marker-only, text)
-//!   compressors.
-//!
-//! Three-plus copies is how the next hash or threshold change misses
-//! one; consolidating here means a key algorithm can only change in one
-//! place — and the existing round-trip / parity pins
-//! (`md5_24_matches_python` below, `hash_canonical_pinned_vectors`,
-//! `hash_opaque_stable_and_short`) fail loudly if it does.
-//!
-//! Marker GRAMMAR still lives exclusively in [`super::markers`]; this
-//! module owns the *key algorithms* and the persist choreography. The
-//! leading `\n` that separates a `Retrieve more:` marker line from the
-//! compressed body is composed HERE (not in the grammar module), so the
-//! grammar stays newline-free and composable.
+//! Shared CCR key and persistence helpers. MD5-24 keys back diff/log/search/text; SHA-256
+//! prefixes back row and opaque recovery. Marker grammar remains centralized separately.
 
-// NOTE: md-5 and sha2 both ride digest 0.11 in this tree, so both re-export
-// the *same* `digest::Digest` trait. One anonymous import brings its methods
-// (`new`/`update`/`finalize`) into scope for both `Md5` and `Sha256`; a second
-// `Digest` import would be a redundant-import warning.
+// NOTE: md-5 and sha2 both ride digest 0.11 in this tree, so both re-export the *same* `digest::Digest` trait.
 use md5::{Digest as _, Md5};
 use sha2::Sha256;
 
 use super::markers::{marker_for_retrieve_more, RetrieveUnit};
 use super::CcrStore;
 
-/// MD5 of `s`'s UTF-8 bytes, hex-encoded, truncated to 24 chars. Matches
-/// `hashlib.md5(s.encode()).hexdigest()[:24]` from
-/// `furl_ctx.cache.compression_store.CompressionStore.store` — the CCR
-/// cache key the diff/log/search/text compressors embed in their
-/// retrieval markers. The Python shims persist the original under this
-/// exact key (`explicit_hash=`), so the marker's hash resolves in the
-/// production store.
+/// Return the first 24 hex chars of MD5(UTF-8), matching Python CCR keys. Python persists originals under this exact hash so emitted markers resolve.
 pub(crate) fn md5_hex_24(s: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(s.as_bytes());
@@ -55,24 +21,11 @@ pub(crate) fn md5_hex_24(s: &str) -> String {
     hex
 }
 
-/// Number of hex characters in a CCR recovery key: 24 hex = 96 bits.
-///
-/// A 48-bit (12-hex) key collided by the birthday bound after ~2^24 distinct
-/// payloads, which let one dropped row silently recover as another row's
-/// content (T3). 96 bits pushes a 50% collision past ~2^48 payloads — far
-/// beyond this store's bounded, request-window-scoped population — and matches
-/// the width every OTHER CCR producer already emits (`md5_hex_24`, the Python
-/// store's own default `sha256(...)[:24]`, `cross_message_dedup`,
-/// `read_lifecycle`). Because `marker_grammar.HASH_WIDTHS` already accepts 24,
-/// widening needs NO grammar change; 12-hex keys stay accepted for backward
-/// compatibility with markers already in live transcripts (retrieval reads
-/// both widths).
+/// Number of hex characters in a CCR recovery key: 24 hex = 96 bits. A 48-bit (12-hex) key collided by the birthday
+/// bound after ~2^24 distinct payloads, which let one dropped row silently recover as another row's content (T3).
 pub(crate) const CCR_KEY_HEX_WIDTH: usize = 24;
 
-/// `SHA-256(bytes)` truncated to [`CCR_KEY_HEX_WIDTH`] hex chars (the leading
-/// `CCR_KEY_HEX_WIDTH / 2` digest bytes). The single implementation behind the
-/// crusher's `hash_canonical` (row-drop recovery keys over canonical JSON) and
-/// the compaction layer's opaque-blob hashing.
+/// `SHA-256(bytes)` truncated to [`CCR_KEY_HEX_WIDTH`] hex chars (the leading `CCR_KEY_HEX_WIDTH / 2` digest bytes).
 pub(crate) fn sha256_recovery_key(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
@@ -83,10 +36,7 @@ pub(crate) fn sha256_recovery_key(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The newline-prefixed `Retrieve more:` marker line appended after a
-/// compressed body. The leading `\n` lives here — NOT in the grammar
-/// (`ccr::markers` stays newline-free) and NOT at each call site (where
-/// it was previously duplicated).
+/// The newline-prefixed `Retrieve more:` marker line appended after a compressed body.
 pub(crate) fn retrieve_more_marker_line(
     original_units: usize,
     kept_units: usize,
@@ -99,40 +49,22 @@ pub(crate) fn retrieve_more_marker_line(
     )
 }
 
-/// How a compressor backs the `Retrieve more:` marker it emits (PERF-8).
-///
-/// The FFI bridges used to synthesize a throwaway 1000-cap
-/// `InMemoryCcrStore` per call purely to make the core emit a
-/// `cache_key` — the core then wrote the FULL original into a store
-/// that was dropped on return. `KeyOnly` makes that contract explicit:
-/// key + marker are computed identically (byte-equal `cache_key`,
-/// byte-equal output), and persistence is the CALLER's job.
+/// How a compressor backs the `Retrieve more:` marker it emits (PERF-8). `KeyOnly` makes that contract explicit: key
+/// + marker are computed identically (byte-equal `cache_key`, byte-equal output), and persistence is the CALLER's job.
 #[derive(Clone, Copy)]
 pub(crate) enum MarkerBacking<'a> {
     /// Compute the key AND persist the full original into this store.
     Store(&'a dyn CcrStore),
-    /// Compute key + marker only — no store write. Used by the PyO3
-    /// bridges: the Python shim re-persists the original into the
-    /// production `CompressionStore` under the same key (and VETOES the
-    /// compression if that write fails), so the marker never dangles.
-    /// `tests/test_ccr_persist_failure_vetoes.py` pins both halves.
+    /// Compute key + marker only — no store write. Used by the PyO3 bridges: the Python shim re-persists the original into the
+    /// production `CompressionStore` under the same key (and VETOES the compression if that write fails), so the marker never dangles.
     KeyOnly,
     /// No CCR backing: no key, no marker
     /// (`ccr_skip_reason = "no store provided"`).
     Disabled,
 }
 
-/// The shared persist+mark tail (log/search): compute the MD5[:24] key
-/// over the FULL original, persist the original under it, and return
-/// `(key, marker_line)` for the caller to append/record. The store
-/// write happens unconditionally here — callers run their ratio/size
-/// vetoes BEFORE calling (a veto means no key, no write, no marker).
-///
-/// `text_crusher` deliberately does NOT use this helper: its ratio veto
-/// is computed over the FINAL output (body + marker), so it must build
-/// the marker first and only persist after the gate — otherwise a
-/// passthrough could leave an orphan store entry. It shares
-/// [`md5_hex_24`] and [`retrieve_more_marker_line`] instead.
+/// The shared persist+mark tail (log/search) The store write happens unconditionally here
+/// callers run their ratio/size vetoes BEFORE calling (a veto means no key, no write, no marker).
 pub(crate) fn persist_and_mark(
     store: &dyn CcrStore,
     content: &str,
@@ -145,9 +77,8 @@ pub(crate) fn persist_and_mark(
     (key, marker)
 }
 
-/// Key-only sibling of [`persist_and_mark`] (PERF-8): identical
-/// `(key, marker_line)` bytes, NO store write. The caller owns
-/// persistence — see [`MarkerBacking::KeyOnly`].
+/// Key-only sibling of [`persist_and_mark`] (PERF-8): identical `(key, marker_line)`
+/// bytes, NO store write. The caller owns persistence — see [`MarkerBacking::KeyOnly`].
 pub(crate) fn key_and_mark(
     content: &str,
     original_units: usize,
@@ -166,10 +97,8 @@ mod tests {
 
     #[test]
     fn md5_24_matches_python() {
-        // Verified against Python: hashlib.md5(b"hello").hexdigest()[:24].
-        // Moved verbatim from diff_compressor.rs when the four per-module
-        // copies were consolidated (ARCH-5) — this pins the ONE shared
-        // implementation every marker key now rides.
+        // Verified against Python: hashlib.md5(b"hello").hexdigest()[:24]. Moved verbatim from the Rust module when the four
+        // per-module copies were consolidated (ARCH-5) — this pins the ONE shared implementation every marker key now rides.
         assert_eq!(md5_hex_24("hello"), "5d41402abc4b2a76b9719d91");
         assert_eq!(md5_hex_24(""), "d41d8cd98f00b204e9800998");
     }
@@ -177,9 +106,6 @@ mod tests {
     #[test]
     fn sha256_recovery_key_matches_python() {
         // Verified against Python: hashlib.sha256(b"...").hexdigest()[:24].
-        // 24 hex = 96 bits (CCR_KEY_HEX_WIDTH). The first 12 hex chars are
-        // unchanged from the historical 48-bit key, so a truncating reader of
-        // a legacy 12-hex marker still resolves the same prefix.
         assert_eq!(sha256_recovery_key(b""), "e3b0c44298fc1c149afbf4c8");
         assert_eq!(
             sha256_recovery_key(b"hello world"),

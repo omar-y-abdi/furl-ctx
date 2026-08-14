@@ -48,9 +48,7 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any
 
-# Opaque cache key contract: the cache never inspects key structure — equality
-# and hash are all it needs. Callers own key construction (and therefore own
-# how much identity — content, length, options — a key encodes).
+# Opaque cache key contract: the cache never inspects key structure — equality and hash are all it needs.
 CacheKey = Hashable
 
 
@@ -80,27 +78,15 @@ class Recompute:
     the batched parallel pass on the string path."""
 
 
-# A two-tier cache lookup resolves to exactly one of three dispositions. The two
-# empty variants carry no data, so they are shared module singletons: the hot
-# path resolves one per message and must not allocate for the common
-# serve-original / recompute cases. ``ServeCached`` holds per-entry payload and
-# stays fresh. (The ADT lives HERE — the cache's disposition language — so the
-# block walker can match on it without importing ``content_router``, which
-# re-exports every name for back-compat.)
+# A two-tier cache lookup resolves to exactly one of three dispositions.
 CacheDisposition = ServeOriginal | ServeCached | Recompute
 _SERVE_ORIGINAL = ServeOriginal()
 _RECOMPUTE = Recompute()
 
 # Sweep both tiers for expired entries once per this many insertions.
-# Amortized cost per insertion is O(max_entries / interval) timestamp
-# comparisons — noise next to the compression each insertion fronts — while
-# dead entries linger at most one interval past their TTL.
 _SWEEP_EVERY_N_INSERTIONS = 256
 
-# Hard per-tier entry cap (FIFO): the backstop for a burst of unique content
-# inside one TTL window, which the periodic sweep alone cannot bound. Sized
-# for a modest worst case: 4096 result entries at ~10 KB of compressed text
-# each is ~40 MB; skip entries (key + float) are negligible.
+# Hard per-tier entry cap (FIFO): the backstop for a burst of unique content inside one TTL window, which the periodic sweep alone cannot bound.
 DEFAULT_MAX_ENTRIES_PER_TIER = 4096
 
 
@@ -128,9 +114,7 @@ class CompressionCache:
         ttl_seconds: int = 1800,
         max_entries: int = DEFAULT_MAX_ENTRIES_PER_TIER,
     ):
-        # Guards both tiers, the sweep counter, and the metric counters. The
-        # pipeline singleton is shared across executor threads (see module
-        # docstring), so lock-free access here was a live crash (COR-21).
+        # Guards both tiers, the sweep counter, and the metric counters.
         self._lock = threading.Lock()
         # Tier 2: compressed results {key: (text, ratio, strategy, monotonic ts)}
         self._results: dict[CacheKey, tuple[str, float, str, float]] = {}
@@ -163,9 +147,7 @@ class CompressionCache:
                     self._total_lookup_ns += time.perf_counter_ns() - t0
                     self._lookup_count += 1
                     return (compressed, ratio, strategy)
-                # Expired. Atomic pop, never `del`: belt-and-braces for the
-                # COR-21 crash shape — a key that vanished since the read
-                # above is a no-op, not a KeyError.
+                # Expired. Atomic pop, never `del`: belt-and-braces for the COR-21 crash shape — a key that vanished since the read above is a no-op, not a KeyError.
                 self._results.pop(key, None)
                 self._evictions += 1
             self._misses += 1

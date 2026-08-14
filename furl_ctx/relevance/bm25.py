@@ -112,11 +112,7 @@ class BM25Scorer(RelevanceScorer):
         discriminative and earns a higher IDF; a term that occurs in nearly
         every document earns an IDF approaching ``log(1) = 0``.
         """
-        # Defensive guard for direct callers of this helper: a term in zero
-        # documents is not discriminative and must not earn a positive weight.
-        # ``score_batch``, the only in-module caller, never reaches this because
-        # its ``idf_map`` comprehension includes only terms already present in
-        # ``doc_freq_across``, so ``doc_freq`` is always >= 1 on that path.
+        # Defensive guard for direct callers of this helper: a term in zero documents is not discriminative and must not earn a positive weight.
         if doc_freq <= 0:
             return 0.0
 
@@ -149,9 +145,7 @@ class BM25Scorer(RelevanceScorer):
             return 0.0, []
 
         doc_len = len(doc_tokens)
-        # doc_tokens is non-empty past the guard above, so doc_len >= 1; the
-        # only fallback needed is for the batch's avg_doc_len being 0.0 (every
-        # item empty). Guards divide-by-zero without a dead ``or 1`` tail.
+        # doc_tokens is non-empty past the guard above, so doc_len >= 1; the only fallback needed is for the batch's avg_doc_len being 0.0 (every item empty).
         avgdl = avg_doc_len or doc_len
 
         doc_freq = Counter(doc_tokens)
@@ -167,9 +161,8 @@ class BM25Scorer(RelevanceScorer):
             f = doc_freq[term]
             matched_terms.append(term)
 
-            # BM25 term score weighted by the corpus IDF. idf_map covers every
-            # matched term: score_batch builds it from the same document
-            # frequencies that decide whether a term can match at all.
+            # BM25 term score weighted by the corpus IDF. idf_map covers every matched term: score_batch
+            # builds it from the same document frequencies that decide whether a term can match at all.
             idf = idf_map[term]
             numerator = f * (self.k1 + 1)
             denominator = f + self.k1 * (1 - self.b + self.b * doc_len / avgdl)
@@ -202,11 +195,7 @@ class BM25Scorer(RelevanceScorer):
         all_tokens = [self._tokenize(item) for item in items]
         avg_len = sum(len(t) for t in all_tokens) / max(len(items), 1)
 
-        # Compute corpus IDF per query term. Unlike single-item scoring,
-        # a batch is a real corpus, so document frequency is meaningful:
-        # terms that appear in many items are down-weighted while rare,
-        # discriminative terms (IDs, UUIDs) are boosted. This is what makes
-        # the ranking BM25 rather than plain term-frequency weighting.
+        # Compute corpus IDF per query term.
         n_docs = len(all_tokens)
         doc_freq_across: Counter[str] = Counter()
         for tokens in all_tokens:

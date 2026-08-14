@@ -1,30 +1,11 @@
-//! BM25 relevance scorer with a single-/multi-term match boost.
-//!
-//! Direct port of the BM25-fallback path of the RETIRED Python hybrid
-//! scorer (`furl_ctx/relevance/hybrid.py`, deleted with the Python-twin
-//! excise — `furl_ctx/relevance/` now ships only `base.py` + `bm25.py`).
-//! The optional ONNX embedding-fusion path was feature-gated (`embeddings`),
-//! never shipped in the default wheel, and never CI-tested; it has been
-//! removed. `HybridScorer` now always scores BM25-only with the boost below.
-//!
-//! # BM25 match boost
-//!
-//! BM25 alone is weak on single-term matches (BM25 of "Alice" against
-//! `{"name": "Alice"}` is ~0.07 raw, well below typical relevance
-//! thresholds), so the scorer applies a boost:
-//!
-//! - Items with any matched term get `score >= 0.3`.
-//! - Items with two or more matched terms get `+0.2`, capped at 1.0.
-//!
-//! Pinned to the retired Python twin's `score`/`score_batch` boost rules
-//! (recorded here as this module's own contract; the Python file is gone).
+//! BM25-only relevance scorer with a match boost: any matched term floors score at 0.3; two or more add 0.2,
+//! capped at 1.0. The former optional embedding-fusion path was never shipped by default and is removed.
 
 use super::base::{RelevanceScore, RelevanceScorer};
 use super::bm25::BM25Scorer;
 
-/// BM25 relevance scorer with a match boost. Historically a BM25 +
-/// embedding hybrid; the embedding-fusion path was removed with the
-/// never-shipped `embeddings` feature, so this now scores BM25-only.
+/// BM25 relevance scorer with a match boost. Historically a BM25 + embedding hybrid; the embedding-fusion
+/// path was removed with the never-shipped `embeddings` feature, so this now scores BM25-only.
 #[derive(Default)]
 pub struct HybridScorer {
     pub bm25: BM25Scorer,

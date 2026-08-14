@@ -38,9 +38,8 @@ from furl_ctx.transforms.cross_message_dedup import (
 
 _DUP_RE = re.compile(r"<<ccr:([0-9a-f]{24}) (\d+)_bytes_duplicate>>")
 
-# A realistic repeated tool output: large enough for dedup (>= MIN_DEDUP_CHARS)
-# but under the router's min-token gate so the surrounding pipeline leaves it
-# alone and the assertions isolate the dedup behaviour.
+# A realistic repeated tool output: large enough for dedup (>= MIN_DEDUP_CHARS) but under the router's
+# min-token gate so the surrounding pipeline leaves it alone and the assertions isolate the dedup behaviour.
 PAYLOAD = "\n".join(
     f"PASS test_module_{i:02d}::test_case_{i % 7} ({(i * 37) % 900}ms)" for i in range(12)
 )
@@ -60,9 +59,8 @@ def _msg_bytes(message: dict[str, Any]) -> str:
 
 
 def _conversation() -> list[dict[str, Any]]:
-    # The duplicate sits at index 3; the trailing turns keep it OUTSIDE the
-    # default ``protect_recent`` window (4), so the public compress() path is
-    # allowed to elide it (dedup never replaces inside that window).
+    # The duplicate sits at index 3; the trailing turns keep it OUTSIDE the default ``protect_recent`` window
+    # , so the public compress() path is allowed to elide it (dedup never replaces inside that window).
     return [
         {"role": "user", "content": "Run the test suite."},
         {"role": "tool", "content": PAYLOAD, "tool_call_id": "t1"},
@@ -96,9 +94,8 @@ def test_public_compress_preserves_count_order_and_index0() -> None:
     result = compress(messages, model="gpt-4o")
     out = result.messages
 
-    # Count and order: same number of messages, same role sequence, same
-    # tool_call_ids in the same positions. The message list is never
-    # dropped from, reordered, or appended to.
+    # Count and order: same number of messages, same role sequence, same tool_call_ids in
+    # the same positions. The message list is never dropped from, reordered, or appended to.
     assert len(out) == len(messages)
     assert [m.get("role") for m in out] == [m.get("role") for m in messages]
     assert [m.get("tool_call_id") for m in out] == [m.get("tool_call_id") for m in messages]
@@ -136,17 +133,14 @@ def test_public_compress_cache_control_blocks_byte_faithful() -> None:
 
     result = compress(messages, model="gpt-4o")
 
-    # Both cache_control-bearing blocks pass through byte-faithful — even
-    # the LATER duplicate, because the client pinned it as a cache
-    # breakpoint.
+    # Both cache_control-bearing blocks pass through byte-faithful — even the LATER duplicate, because the client pinned it as a cache breakpoint.
     assert _msg_bytes(result.messages[0]) == before_first
     assert _msg_bytes(result.messages[2]) == before_later
 
 
 def test_index0_duplicate_blocks_never_rewritten() -> None:
     # Two identical tool_result blocks INSIDE message 0: index-0 is never a
-    # replacement target, so both stay verbatim; a copy in a later message
-    # IS replaced.
+    # replacement target, so both stay verbatim; a copy in a later message IS replaced.
     block = {"type": "tool_result", "tool_use_id": "a", "content": PAYLOAD}
     messages = [
         {"role": "user", "content": [dict(block), dict(block, tool_use_id="b")]},
@@ -292,9 +286,8 @@ _NEAR_RE = re.compile(r"<<ccr:([0-9a-f]{24}) (\d+)_bytes_near_duplicate>>")
 def _status_rows(
     n: int, *, generation: int, drift_every: int = 10, prefix: str = "svc"
 ) -> list[dict[str, Any]]:
-    # Service-status-style rows: most are stable across polls, a few drift.
-    # `prefix` distinguishes unrelated row sets from each other/from the
-    # default "svc-*" rows so they never accidentally share a row signature.
+    # Service-status-style rows: most are stable across polls, a few drift. `prefix` distinguishes unrelated
+    # row sets from each other/from the default "svc-*" rows so they never accidentally share a row signature.
     return [
         {
             "service": f"{prefix}-{i:02d}",
@@ -372,11 +365,8 @@ def test_near_duplicate_low_overlap_untouched() -> None:
 
 
 def test_near_duplicate_counterfactual_gate_refuses_moderate_overlap() -> None:
-    # 6/9 rows shared passes the overlap gates but the rewrite (3 raw JSON
-    # rows + sentinel) would cost MORE than the per-message lossless table
-    # of all 9 rows — the counterfactual gate must refuse. This is the
-    # measured real case: the drifted `df -k` pair regressed 347 -> ~430
-    # tokens before this gate existed.
+    # 6/9 rows shared passes the overlap gates but the rewrite (3 raw JSON rows + sentinel) would cost
+    # MORE than the per-message lossless table of all 9 rows — the counterfactual gate must refuse.
     rows_a = _status_rows(9, generation=0, drift_every=4)
     rows_b = _status_rows(9, generation=1, drift_every=4)  # rows 0,4,8 drift
     messages = [
@@ -393,9 +383,8 @@ def test_near_duplicate_counterfactual_gate_refuses_moderate_overlap() -> None:
 
 
 def test_near_duplicate_source_must_be_kept_verbatim() -> None:
-    # b is an exact duplicate of a (elided); c near-duplicates both. The
-    # pointer must name message 1 (kept verbatim), never message 2 (a
-    # sentinel after replacement).
+    # b is an exact duplicate of a (elided); c near-duplicates both. The pointer must
+    # name message 1 (kept verbatim), never message 2 (a sentinel after replacement).
     rows_a = _status_rows(20, generation=0)
     rows_c = _status_rows(20, generation=1)
     content_a = json.dumps(rows_a, ensure_ascii=False)
@@ -417,13 +406,8 @@ def test_near_duplicate_source_must_be_kept_verbatim() -> None:
 
 
 def test_near_duplicate_array_sources_bounded_to_recent_window() -> None:
-    # PERF-2: `array_sources` is capped at `NEAR_DUP_MAX_ARRAY_SOURCES` so a
-    # long conversation cannot grow near-dup matching cost (or memory) with
-    # the square of the number of array-shaped tool outputs seen. Pushing
-    # exactly `NEAR_DUP_MAX_ARRAY_SOURCES` distinct filler arrays after an
-    # earlier source evicts that source from the matching window — a later
-    # near-duplicate of it must therefore NOT be matched — while a
-    # near-duplicate of the most recent (in-window) source still is.
+    # PERF-2: `array_sources` is capped at `NEAR_DUP_MAX_ARRAY_SOURCES` so a long conversation cannot grow
+    # near-dup matching cost (or memory) with the square of the number of array-shaped tool outputs seen.
     content_old = json.dumps(_status_rows(20, generation=0), ensure_ascii=False)
     near_dup_of_old = json.dumps(_status_rows(20, generation=1), ensure_ascii=False)
 
@@ -466,9 +450,7 @@ def test_near_duplicate_array_sources_bounded_to_recent_window() -> None:
 
 
 def test_protect_recent_window_never_replaced() -> None:
-    # The newest tool output is the costliest place to force a retrieval
-    # round-trip: inside the window nothing is replaced, so the pass is a
-    # no-op here.
+    # The newest tool output is the costliest place to force a retrieval round-trip: inside the window nothing is replaced, so the pass is a no-op here.
     messages = [
         {"role": "user", "content": "Run the tests."},
         {"role": "tool", "content": PAYLOAD, "tool_call_id": "t1"},
@@ -508,11 +490,7 @@ def test_duplicate_outside_protect_recent_window_still_replaced() -> None:
 
 
 def test_lone_surrogate_duplicate_never_crashes() -> None:
-    # json.loads legally yields lone surrogates from \ud8xx escapes (and
-    # surrogateescape decoding yields them from any non-UTF-8 byte). One
-    # weird byte may cost one skipped unit — never an exception (which would
-    # fail this and EVERY subsequent request while the message stays in
-    # history).
+    # json.loads legally yields lone surrogates from \ud8xx escapes (and surrogateescape decoding yields them from any non-UTF-8 byte).
     payload = PAYLOAD + "\udcef"
     messages = [
         {"role": "user", "content": "Read the log."},

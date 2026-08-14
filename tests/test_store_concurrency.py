@@ -73,9 +73,8 @@ class _FlakyDurableBackend:
         return self.durable_calls > self._fail_times
 
     def __getattr__(self, name: str) -> Any:
-        # Delegate every Protocol method (get/set/delete/exists/count/keys/items/
-        # purge_expired/created_at_index/get_stats/close/...) to the wrapped
-        # in-memory backend. Guard _mem so a pre-__init__ access can't recurse.
+        # Delegate every Protocol method (get/set/delete/exists/count/keys/items/ purge_expired/created_at_index/get_stats/close/...)
+        # to the wrapped in-memory backend. Guard _mem so a pre-__init__ access can't recurse.
         if name == "_mem":
             raise AttributeError(name)
         return getattr(self._mem, name)

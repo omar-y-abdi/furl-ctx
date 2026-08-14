@@ -1,17 +1,5 @@
-//! BM25 keyword relevance scorer.
-//!
-//! Direct port of `furl_ctx/relevance/bm25.py`. Zero ML dependencies —
-//! pure-Rust regex tokenization + integer arithmetic. Excellent for
-//! exact-match cases (UUIDs, numeric IDs, tool-call argument values
-//! that appear verbatim in the response).
-//!
-//! # Score post-processing
-//!
-//! The raw BM25 score is normalized to `[0, 1]` by dividing by
-//! `max_score` (default 10.0). Items with at least one matched token
-//! of length 8 or more get a `+0.3` long-token bonus (UUIDs, long IDs are
-//! high-signal matches). Final score is clamped to `[0, 1]` via
-//! `RelevanceScore::new`.
+//! BM25 keyword relevance scorer. Zero ML dependencies — pure-Rust regex tokenization + integer arithmetic. Items with at
+//! least one matched token of length 8 or more get a `+0.3` long-token bonus (UUIDs, long IDs are high-signal matches).
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -20,14 +8,7 @@ use regex::Regex;
 
 use super::base::{RelevanceScore, RelevanceScorer};
 
-/// Tokenization regex. Order matters — UUID first so that hex-string
-/// IDs aren't broken into pieces by the alphanumeric arm:
-/// 1. UUID — 8-4-4-4-12 hex with dashes.
-/// 2. Numeric ID — 4+ digits with word boundaries.
-/// 3. Alphanumeric (incl. underscore) — fallback.
-///
-/// Note: Python's `\b\d{4,}\b` uses word boundaries. The Rust `regex`
-/// crate supports `\b`, so the pattern translates literally.
+/// Tokenization regex. Order matters
 static TOKEN_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Single-line alternation. Order matters: UUID first so hex IDs
     // aren't broken into 8/4/4/4/12 alphanumeric pieces.
@@ -69,12 +50,7 @@ impl BM25Scorer {
             .collect()
     }
 
-    /// BM25 score for a single (doc, query) pair. Returns
-    /// `(raw_score, matched_terms)` matching Python's `_bm25_score`.
-    ///
-    /// The `idf = ln(2)` constant mirrors Python's simplified
-    /// single-document IDF — same formula whether scoring one item
-    /// or batch-scoring many.
+    /// BM25 score for a single (doc, query) pair.
     fn bm25_score(
         &self,
         doc_tokens: &[String],
@@ -104,11 +80,8 @@ impl BM25Scorer {
         let mut matched: Vec<String> = Vec::new();
         let idf = 2.0_f64.ln();
 
-        // Iterate query_freq in HashMap order — Python iterates dict
-        // order (insertion order in 3.7+). For matched_terms we only
-        // care about MEMBERSHIP not ordering downstream, but we sort
-        // tokens alphabetically here for deterministic test output
-        // when multiple terms match.
+        // Iterate query_freq in HashMap order Python iterates dict order (insertion order in 3.7+). For matched_terms we only care about
+        // MEMBERSHIP not ordering downstream, but we sort tokens alphabetically here for deterministic test output when multiple terms match.
         let mut keys: Vec<&String> = query_freq.keys().collect();
         keys.sort();
 
@@ -254,9 +227,7 @@ mod tests {
     #[test]
     fn tokenize_numeric_id_when_4_plus_digits() {
         let toks = scorer().tokenize("user 12345 logged in 99 times");
-        // 12345 = 5 digits (>=4) → kept as numeric ID via second arm.
-        // 99 = 2 digits → falls to alphanumeric arm and matches.
-        // Both end up as tokens.
+        // 12345 = 5 digits (>=4) → kept as numeric ID via second arm. 99 = 2 digits → falls to alphanumeric arm and matches. Both end up as tokens.
         assert!(toks.contains(&"12345".to_string()));
         assert!(toks.contains(&"99".to_string()));
     }

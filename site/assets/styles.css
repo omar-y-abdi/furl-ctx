@@ -1,12 +1,6 @@
-/* ============================================================================
-   furl showcase, single-theme dark, warm near-blacks, one amber signal.
-   Display: Bricolage Grotesque. Payloads + UI data: JetBrains Mono.
-   ========================================================================== */
+/* Dark showcase theme with amber accents; Bricolage Grotesque for display and JetBrains Mono for payload/UI data. */
 
-/* Fonts (JetBrains Mono, Bricolage Grotesque) are embedded as base64 data URIs
-   in assets/fonts.css, loaded before this file. Data URIs load under file://
-   as well as http, arrive at CSS parse time (no swap, no layout shift), and add
-   no extra request. The woff2 source files live in assets/fonts/. */
+/* Fonts are embedded as data URIs so file:// and HTTP render without extra requests or font-swap layout shift. */
 
 /* ---- Tokens ------------------------------------------------------------- */
 :root {

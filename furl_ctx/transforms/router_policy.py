@@ -28,9 +28,8 @@ from typing import TYPE_CHECKING
 from .content_detector import ContentType, DetectionResult
 
 if TYPE_CHECKING:
-    # Annotation-only (no runtime cycle — ``content_router`` imports THIS
-    # module for ``CompressionStrategy``): the concrete config the pure policy
-    # functions read.
+    # Annotation-only (no runtime cycle — ``content_router`` imports THIS module for
+    # ``CompressionStrategy``): the concrete config the pure policy functions read.
     from .content_router import ContentRouterConfig
 
 
@@ -131,23 +130,8 @@ def adaptive_min_ratio(config: ContentRouterConfig, context_pressure: float) -> 
     return max(relaxed, min(aggressive, min_ratio))
 
 
-# Route-count lanes that can coexist with an all-passthrough router result,
-# paired with the machine-readable reason each contributes. Dominance is
-# computed over ALL of these lanes — the highest count wins; ties fall to this
-# declaration order, which is two-tiered on purpose: GRANULAR lanes first (each
-# names the specific gate that stopped content), then the SHAPE/PINNING lanes
-# the content-block walk books without a transform (``content_blocks`` /
-# ``nested_blocks`` per container walked, ``cache_control_protected`` per
-# pinned block). The latter fold into the umbrella ``no_eligible_content`` —
-# true of any no-op by definition — so a specific explanation always beats the
-# umbrella on equal counts. Counts are heuristic weights, not a partition:
-# string-path lanes book per message, block-path lanes per block, and one
-# message may book several lanes. Protection lanes (excluded_tool / user_msg /
-# recent_code / analysis_ctx / error_protected / feedback_skip) are absent by
-# construction — each books a ``router:protected:*``-style transform, so a
-# protected message or block is never part of a bare no-op. Cache bookkeeping
-# (cache_hit / cache_miss) is absent too: it records HOW a lane resolved, not
-# WHY nothing shipped.
+# Choose no-op reasons from weighted counters: specific granular gates win ties before umbrella shape/pinning reasons.
+# Protection transforms and cache hit/miss counters are excluded because they do not describe a bare passthrough reason.
 _NOOP_REASON_BY_COUNTER: tuple[tuple[str, str], ...] = (
     ("ratio_too_high", "no_savings"),
     ("small", "below_min_tokens"),
@@ -176,9 +160,7 @@ def noop_transform(route_counts: Mapping[str, int]) -> str:
     input) falls through to ``router:noop:no_eligible_content`` — the same
     umbrella reason the transform-less shape/pinning lanes map to.
     """
-    # ``max`` keeps the FIRST maximum, matching the strict ``>`` update. The
-    # explicit ``> 0`` re-check is load-bearing: with every count zero the old
-    # scan never fired, so the umbrella reason must win over the first row.
+    # ``max`` keeps the FIRST maximum, matching the strict ``>`` update.
     counter, reason = max(_NOOP_REASON_BY_COUNTER, key=lambda pair: route_counts.get(pair[0], 0))
     dominant = reason if route_counts.get(counter, 0) > 0 else "no_eligible_content"
     return f"router:noop:{dominant}"

@@ -1,35 +1,5 @@
-//! `SmartAnalyzer` — statistical brain that decides whether and how to crush
-//! a JSON array.
-//!
-//! Direct port of the Python `SmartAnalyzer` class at `smart_crusher.py:960-1489`.
-//! All eight methods are mirrored faithfully here:
-//!
-//! - `analyze_array` — top-level entry: builds field stats, detects pattern,
-//!   runs crushability, picks strategy.
-//! - `analyze_field` — per-field statistics (counts, uniqueness, type-specific).
-//! - `detect_change_points` — sliding-window mean shift detector for numeric
-//!   fields.
-//! - `detect_pattern` — classifies the array as `time_series`, `logs`,
-//!   `search_results`, or `generic`.
-//! - `detect_temporal_field` — structural date/timestamp detection (no
-//!   field-name heuristics).
-//! - `analyze_crushability` — the main "is it SAFE to crush?" decision.
-//! - `select_strategy` — picks `CompressionStrategy` from pattern + crushability.
-//! - `estimate_reduction` — coarse compression-ratio estimate for telemetry.
-//!
-//! # Field iteration order — known parity nuance
-//!
-//! Python's `_analyze_field` is called once per key in `set(item.keys())`
-//! union, then results are stored in a dict. **Set iteration order is
-//! non-deterministic in CPython** (depends on hash and insertion). Several
-//! downstream paths short-circuit on first match (`_select_strategy` for
-//! "message"-like field, `_detect_pattern` for first score field), so a
-//! field-order divergence between Python and Rust would silently change
-//! parity output.
-//!
-//! Rust uses `BTreeMap<String, FieldStats>` here, which iterates in
-//! ASCII-sorted key order. To match, the Python implementation needs a
-//! `sorted(all_keys)` call before building `field_stats`.
+//! Analyzes JSON arrays to compute field statistics, detect patterns/change points, decide crushability, and select
+//! a strategy. Rust uses deterministic sorted field order so first-match decisions do not vary with map iteration.
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,10 +12,8 @@ use super::types::{
 };
 use crate::transforms::anchor_selector::DataPattern;
 
-/// Statistical analyzer for compression decisions.
-///
-/// Stateless aside from `config`. Construct once per request and call
-/// `analyze_array` per array — same API as Python.
+/// Statistical analyzer for compression decisions. Stateless aside from `config`.
+/// Construct once per request and call `analyze_array` per array — same API as Python.
 pub struct SmartAnalyzer {
     pub config: SmartCrusherConfig,
 }
@@ -55,17 +23,13 @@ impl SmartAnalyzer {
         SmartAnalyzer { config }
     }
 
-    /// Top-level analysis. Mirrors `analyze_array` at
-    /// `smart_crusher.py:966-1014`.
+    /// Top-level analysis; keep behavior aligned with Python `analyze_array`.
     pub fn analyze_array(&self, items: &[Value]) -> ArrayAnalysis {
         self.analyze_array_with_strings(items, None)
     }
 
-    /// [`analyze_array`](Self::analyze_array) with the caller's
-    /// pre-computed JSON serializations threaded through (PERF-3), so
-    /// the crushability error-keyword scan never re-serializes an array
-    /// the caller already serialized. Detection is byte-identical with
-    /// or without them.
+    /// [`analyze_array`](Self::analyze_array) with the caller's pre-computed JSON serializations threaded through
+    /// (PERF-3), so the crushability error-keyword scan never re-serializes an array the caller already serialized.
     pub fn analyze_array_with_strings(
         &self,
         items: &[Value],
@@ -85,10 +49,7 @@ impl SmartAnalyzer {
             };
         }
 
-        // Union of all keys across dict items. BTreeSet → sorted iteration,
-        // matching the BTreeMap we'll build below. Python also unions keys
-        // but iterates a set; sorted order is the deterministic choice for
-        // both languages.
+        // Union of all keys across dict items. Python also unions keys but iterates a set; sorted order is the deterministic choice for both languages.
         let mut all_keys: BTreeSet<String> = BTreeSet::new();
         for item in items {
             if let Some(obj) = item.as_object() {
@@ -126,14 +87,9 @@ impl SmartAnalyzer {
         }
     }
 
-    /// Per-field statistics. Mirrors `_analyze_field` at
-    /// `smart_crusher.py:1016-1093`.
+    /// Per-field statistics; keep behavior aligned with Python `_analyze_field`.
     pub fn analyze_field(&self, key: &str, items: &[Value]) -> FieldStats {
-        // Collect raw values across dict items. `item.get(key)` in Python
-        // returns None for missing keys; serde_json returns Value::Null
-        // for explicit nulls but no entry for missing. Mirror both as
-        // Value::Null in our local `values` vec — Python's downstream
-        // `non_null_values` filter unifies both forms anyway.
+        // Collect raw values across dict items.
         let values: Vec<Value> = items
             .iter()
             .filter_map(|i| i.as_object())
@@ -161,9 +117,8 @@ impl SmartAnalyzer {
         }
 
         let first = non_null[0];
-        // Python `isinstance(first, bool)` precedes `int|float` — bool is
-        // a subclass of int in Python. We model JSON's bool/number split
-        // directly: serde_json::Value::Bool vs Value::Number.
+        // Python `isinstance(first, bool)` precedes `int|float` — bool is a subclass of int in Python.
+        // We model JSON's bool/number split directly: serde_json::Value::Bool vs Value::Number.
         let field_type = match first {
             Value::Bool(_) => FieldType::Boolean,
             Value::Number(_) => FieldType::Numeric,
@@ -173,10 +128,8 @@ impl SmartAnalyzer {
             _ => FieldType::Unknown,
         };
 
-        // Uniqueness: stringify ALL values (including nulls), dedupe, count.
-        // Python: `str(v)` for any v (None → "None"). Match exactly to keep
-        // unique-count parity with fixtures. python_repr handles None as
-        // "None", bool as "True"/"False", etc.
+        // Uniqueness: stringify ALL values (including nulls), dedupe, count. Match exactly to keep
+        // unique-count parity with fixtures. python_repr handles None as "None", bool as "True"/"False", etc.
         let str_values: Vec<String> = values.iter().map(python_repr).collect();
         let unique_set: BTreeSet<&String> = str_values.iter().collect();
         let unique_count = unique_set.len();
@@ -212,9 +165,7 @@ impl SmartAnalyzer {
 
         match field_type {
             FieldType::Numeric => {
-                // Filter to finite f64 only — Python rejects NaN/Inf via
-                // `math.isfinite`. We mirror exactly so the same set of
-                // values feeds mean/variance/change-points.
+                // Filter to finite f64 only — Python rejects NaN/Inf via `math.isfinite`. We mirror exactly so the same set of values feeds mean/variance/change-points.
                 let nums: Vec<f64> = non_null
                     .iter()
                     .filter_map(|v| v.as_f64().filter(|f| f.is_finite()))
@@ -229,13 +180,7 @@ impl SmartAnalyzer {
                     } else {
                         Some(0.0)
                     };
-                    // Python wraps the numeric-stats block in
-                    // `try/except (OverflowError, ValueError)` and resets
-                    // ALL fields to None on failure. Mirror that
-                    // all-or-nothing reset: if any computed stat is non-
-                    // finite (or computation returned None), drop the
-                    // entire numeric stats block and leave change_points
-                    // empty.
+                    // Python wraps the numeric-stats block in `try/except (OverflowError, ValueError)` and resets ALL fields to None on failure.
                     let all_finite = mean_val.map(f64::is_finite).unwrap_or(false)
                         && variance.map(f64::is_finite).unwrap_or(false)
                         && min_val.map(f64::is_finite).unwrap_or(false)
@@ -247,12 +192,7 @@ impl SmartAnalyzer {
                         stats.variance = variance;
                         stats.change_points = self.detect_change_points(&nums, 5);
                     } else {
-                        // Python parity: the except block sets `variance = 0`
-                        // (int literal) but min/max/mean to None. Downstream
-                        // truthiness checks (`if stats.variance:` and
-                        // `(variance or 0) > 0`) treat 0 the same as None,
-                        // but the FieldStats serialization shape matters
-                        // for parity fixtures. Pin variance to Some(0.0).
+                        // Python parity: the except block sets `variance = 0` (int literal) but min/max/mean to None.
                         stats.min_val = None;
                         stats.max_val = None;
                         stats.mean_val = None;
@@ -275,8 +215,7 @@ impl SmartAnalyzer {
         stats
     }
 
-    /// Sliding-window change-point detector. Mirrors `_detect_change_points`
-    /// at `smart_crusher.py:1095-1125`.
+    /// Sliding-window change-point detector; keep behavior aligned with Python `_detect_change_points`.
     pub fn detect_change_points(&self, values: &[f64], window: usize) -> Vec<usize> {
         if values.len() < window * 2 {
             return Vec::new();
@@ -316,9 +255,8 @@ impl SmartAnalyzer {
         deduped
     }
 
-    /// Pattern classifier. Mirrors `_detect_pattern` at
-    /// `smart_crusher.py:1127-1171`. Returns the typed [`DataPattern`]
-    /// (TYPE-1); the historical string forms are `as_str()`.
+    /// Pattern classifier aligned with Python `_detect_pattern`. Returns
+    /// the typed [`DataPattern`] (TYPE-1); the historical string forms are `as_str()`.
     pub fn detect_pattern(
         &self,
         field_stats: &BTreeMap<String, FieldStats>,
@@ -365,10 +303,8 @@ impl SmartAnalyzer {
         DataPattern::Generic
     }
 
-    /// Temporal-field detector. (Ported from Python's
-    /// `_detect_temporal_field`, since retired in the excision — this is
-    /// the only implementation; the numeric branch is tightened vs the
-    /// port, see COR-34 below.)
+    /// Temporal-field detector. (Ported from Python's `_detect_temporal_field`, since retired in the excision
+    /// — this is the only implementation; the numeric branch is tightened vs the port, see COR-34 below.)
     pub fn detect_temporal_field(
         &self,
         field_stats: &BTreeMap<String, FieldStats>,
@@ -398,14 +334,8 @@ impl SmartAnalyzer {
                 }
                 FieldType::Numeric => {
                     if let (Some(mn), Some(mx)) = (stats.min_val, stats.max_val) {
-                        // Unix epoch range check — BOTH ends must sit in
-                        // the same plausible window (seconds or millis).
-                        // Checking only the min let a field spanning
-                        // min=1.5e9..max=9e17 classify as temporal and
-                        // flip the strategy to TIME_SERIES (COR-34). The
-                        // retired Python twin checked only the min; with
-                        // no parity constraint left, both ends are
-                        // checked here.
+                        // Unix epoch range check BOTH ends must sit in the same plausible window (seconds or millis). Checking only the
+                        // min let a field spanning min=1.5e9..max=9e17 classify as temporal and flip the strategy to TIME_SERIES (COR-34).
                         let secs = 1_000_000_000.0..=2_000_000_000.0;
                         let millis = 1_000_000_000_000.0..=2_000_000_000_000.0;
                         let unix_seconds = secs.contains(&mn) && secs.contains(&mx);
@@ -421,16 +351,7 @@ impl SmartAnalyzer {
         false
     }
 
-    /// Crushability decision — the main "is it SAFE?" check. Mirrors
-    /// `analyze_crushability` at `smart_crusher.py:1211-1430`.
-    ///
-    /// Returns a `CrushabilityAnalysis` with the verdict, confidence, and
-    /// the signals that drove the decision. Callers consult `crushable`
-    /// before invoking any actual compression.
-    ///
-    /// `item_strings` — the caller's pre-computed JSON serializations,
-    /// reused by the error-keyword scan (PERF-3); `None` serializes on
-    /// the fly (byte-identical detection either way).
+    /// Crushability decision — the main "is it SAFE?" check.
     pub fn analyze_crushability(
         &self,
         items: &[Value],
@@ -439,21 +360,8 @@ impl SmartAnalyzer {
     ) -> CrushabilityAnalysis {
         use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
 
-        // 1. ID field detection — keep best (highest confidence) match.
-        //
-        // PERF: `detect_id_field_statistically` hard-gates `unique_ratio
-        // < 0.9` (returns without reading `values`), and beyond that gate
-        // only its String branch (first-20 sample) and Numeric branch
-        // (full list, sequential scan) read `values` at all — Object /
-        // Array / Boolean / Null fields decide on `unique_ratio` alone.
-        // The old unconditional full clone of every field's values
-        // deep-copied heavy `Object` columns (e.g. a Chrome trace's `args`
-        // dict, up to ~1 MB per row) × N rows for a call that never looks
-        // at them. Collect EXACTLY what each branch consumes; the value
-        // list fed to `detect_id_field_statistically` is identical to the
-        // slice the old code passed (same order, same missing→Null fill,
-        // same `filter_map(as_object)` skip of non-dict items), so the
-        // detection result is byte-identical.
+        // 1. PERF: `detect_id_field_statistically` hard-gates `unique_ratio < 0.9` (returns without reading `values`), and beyond
+        // that gate only its String branch (first-20 sample) and Numeric branch (full list, sequential scan) read `values` at all
         let mut id_field_name: Option<String> = None;
         let mut id_uniqueness: f64 = 0.0;
         let mut id_confidence: f64 = 0.0;
@@ -597,9 +505,7 @@ impl SmartAnalyzer {
                 confidence,
                 reason,
                 has_any_signal,
-                // Memoized for the over-budget prioritizer (PERF-3) —
-                // both detections already ran above to derive the
-                // counts; carrying the indices avoids a re-scan.
+                // Memoized for the over-budget prioritizer (PERF-3) — both detections already ran above to derive the counts; carrying the indices avoids a re-scan.
                 structural_outlier_indices: outlier_indices.clone(),
                 error_keyword_indices: error_keyword_indices.clone(),
             }
@@ -661,8 +567,7 @@ impl SmartAnalyzer {
         )
     }
 
-    /// Strategy selector. Mirrors `_select_strategy` at
-    /// `smart_crusher.py:1432-1466`.
+    /// Strategy selector aligned with Python `_select_strategy`.
     pub fn select_strategy(
         &self,
         field_stats: &BTreeMap<String, FieldStats>,
@@ -691,9 +596,8 @@ impl SmartAnalyzer {
         }
 
         if pattern == DataPattern::Logs {
-            // Python: `next((v for k, v in field_stats.items() if "message" in k.lower()), None)`
-            // We mirror — first BTreeMap iteration order match wins. With
-            // sorted iteration, this is deterministic.
+            // Python: `next((v for k, v in field_stats.items() if "message" in k.lower()), None)` We mirror
+            // — first BTreeMap iteration order match wins. With sorted iteration, this is deterministic.
             let message_field = field_stats
                 .iter()
                 .find(|(k, _)| k.to_lowercase().contains("message"))
@@ -712,8 +616,7 @@ impl SmartAnalyzer {
         CompressionStrategy::SmartSample
     }
 
-    /// Reduction estimator. Mirrors `_estimate_reduction` at
-    /// `smart_crusher.py:1468-1489`. Returns ∈ [0, 0.95].
+    /// Reduction estimator aligned with Python `_estimate_reduction`; returns a value in `[0, 0.95]`.
     pub fn estimate_reduction(
         &self,
         field_stats: &BTreeMap<String, FieldStats>,
@@ -724,10 +627,8 @@ impl SmartAnalyzer {
             return 0.0;
         }
 
-        // Python divides by `len(field_stats)` unconditionally. With an
-        // empty stats map this raises ZeroDivisionError. We mirror by
-        // returning 0.0 — analyze_array's empty-input guard prevents this
-        // path from ever being reached in practice.
+        // Python divides by `len(field_stats)` unconditionally. We mirror by returning 0.0
+        // — analyze_array's empty-input guard prevents this path from ever being reached .
         if field_stats.is_empty() {
             return 0.0;
         }
@@ -749,18 +650,8 @@ impl SmartAnalyzer {
 
 // ---------- helpers ----------
 
-/// Python-equivalent `str(v)` for `serde_json::Value`. Used by
-/// `_analyze_field`'s uniqueness count where Python does `[str(v) for v in
-/// values]`. Python conventions:
-/// - `None` → `"None"`
-/// - `True`/`False` → `"True"`/`"False"`
-/// - numbers → str-form of the number (no quotes, JSON-style is fine
-///   because Python's `str(3.14)` matches `serde_json`'s for finite vals)
-/// - strings → unquoted body
-/// - dict/list → repr-form (matches Python's `str(dict)` since dicts use
-///   `repr` for str). We approximate via JSON for parity-locked counts;
-///   the only case this can drift is if a field carries nested dicts
-///   with mixed types in its values, which is rare for crushable arrays.
+/// Python-equivalent `str(v)` for `serde_json::Value`. We approximate via JSON for parity-locked counts; the only case
+/// this can drift is if a field carries nested dicts with mixed types in its values, which is rare for crushable arrays.
 fn python_repr(v: &Value) -> String {
     match v {
         Value::Null => "None".to_string(),
@@ -774,10 +665,8 @@ fn python_repr(v: &Value) -> String {
     }
 }
 
-/// Counter.most_common(n) equivalent. Returns up to `n` (value, count)
-/// pairs sorted by count descending; ties broken by FIRST OCCURRENCE
-/// order (mirrors Python's `Counter.most_common` via dict insertion
-/// order + `heapq.nlargest`).
+/// Counter.most_common(n) equivalent. Returns up to `n` (value, count) pairs sorted by count descending; ties broken
+/// by FIRST OCCURRENCE order (mirrors Python's `Counter.most_common` via dict insertion order + `heapq.nlargest`).
 fn top_n_by_count(strs: &[&str], n: usize) -> Vec<(String, usize)> {
     use std::collections::HashMap;
 
@@ -801,13 +690,8 @@ fn top_n_by_count(strs: &[&str], n: usize) -> Vec<(String, usize)> {
         .collect()
 }
 
-// ISO 8601 patterns — pinned to Python's compiled regexes at
-// `smart_crusher.py:96-97`:
-//   `^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}`
-//   `^\d{4}-\d{2}-\d{2}$`
-// Implemented as direct char-position checks rather than full regex to
-// avoid pulling in a regex compilation for every call site. Same
-// behavior on the prefixes Python checks.
+// Match the Python ISO-8601 prefixes for full timestamps and dates using direct
+// character checks instead of per-call regex compilation; behavior must stay equivalent.
 pub(crate) fn is_iso_datetime(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() < 19 {
@@ -863,14 +747,8 @@ mod tests {
 
     #[test]
     fn is_iso_datetime_rejects_every_corrupted_position() {
-        // `is_iso_datetime` is a positional structural check
-        // (`DDDD-DD-DD` + `T`|` ` + `DD:DD:DD`). cargo-mutants flagged EVERY
-        // `&&` junction (lines 800-817) as a surviving `&&`→`||` mutant, plus
-        // `is_digit`→`true` (:839), because no test fed a string that is valid
-        // everywhere EXCEPT one position. Corrupting each position with `X`
-        // (a non-digit that is also none of `-`/`:`/`T`/` `) makes exactly one
-        // side of one junction false; a `&&`→`||` there would wrongly accept,
-        // and `is_digit`→`true` would wrongly accept the digit positions.
+        // `is_iso_datetime` is a positional structural check (`DDDD-DD-DD` + `T`|` ` + `DD:DD:DD`). cargo-mutants flagged EVERY `&&` junction (lines 800-817)
+        // as a surviving `&&`→`||` mutant, plus `is_digit`→`true` (:839), because no test fed a string that is valid everywhere EXCEPT one position.
         let base = "2024-01-15T12:30:45";
         assert!(is_iso_datetime(base), "valid ISO datetime must pass");
         assert!(
@@ -977,11 +855,8 @@ mod tests {
 
     #[test]
     fn analyze_field_numeric_overflow_resets_all_stats_to_none() {
-        // Python parity: when stats computation overflows, the
-        // `try/except (OverflowError, ValueError)` block resets ALL
-        // numeric fields to None. We mirror by checking finiteness across
-        // the bundle and dropping the whole numeric stats group on
-        // failure.
+        // Python parity: when stats computation overflows, the `try/except (OverflowError, ValueError)` block resets ALL numeric
+        // fields to None. We mirror by checking finiteness across the bundle and dropping the whole numeric stats group on failure.
         let huge = 1e200;
         // Two extreme opposite values: variance overflows.
         let items = vec![json!({"n": huge}), json!({"n": -huge})];
@@ -1001,10 +876,8 @@ mod tests {
 
     #[test]
     fn analyze_field_numeric_filters_nan_and_inf() {
-        // Tricky: serde_json doesn't allow NaN/Inf in JSON, so we build a
-        // Number directly. Use `json!` with regular ints/floats only —
-        // we just verify the finite-only path doesn't crash on a single
-        // value (variance=0 then).
+        // Tricky: serde_json doesn't allow NaN/Inf in JSON, so we build a Number directly. Use `json!` with regular
+        // ints/floats only — we just verify the finite-only path doesn't crash on a single value (variance=0 then).
         let items: Vec<Value> = vec![json!({"n": 42.0}), json!({"n": 42.0})];
         let s = analyzer().analyze_field("n", &items);
         assert_eq!(s.variance, Some(0.0));
@@ -1054,10 +927,7 @@ mod tests {
 
     #[test]
     fn change_points_step_function_detected() {
-        // Three-segment: 30×0, 30×100, 30×0. Two transitions at i=30 and i=60.
-        // For a pure two-segment step, diff = |b-a| ≈ 2σ exactly, so the
-        // strict `> threshold` check would miss. Three segments let stdev
-        // shrink relative to the step diff, so the boundary jumps clear it.
+        // Three-segment: 30×0, 30×100, 30×0. For a pure two-segment step, diff = |b-a| ≈ 2σ exactly, so the strict `> threshold` check would miss.
         let mut v: Vec<f64> = Vec::with_capacity(90);
         v.extend(vec![0.0; 30]);
         v.extend(vec![100.0; 30]);
@@ -1157,10 +1027,8 @@ mod tests {
 
     #[test]
     fn temporal_absurd_max_not_detected() {
-        // COR-34: a min alone inside the plausible epoch-seconds window
-        // must not classify the field as temporal when the max is absurd
-        // — a numeric field spanning 1.5e9..9e17 is not a timestamp
-        // column, and flipping it to TIME_SERIES misplans the array.
+        // COR-34: a min alone inside the plausible epoch-seconds window must not classify the field as temporal when the max is
+        // absurd — a numeric field spanning 1.5e9..9e17 is not a timestamp column, and flipping it to TIME_SERIES misplans the array.
         let mut items: Vec<Value> = (0..9)
             .map(|i| json!({"ts": 1_500_000_000_i64 + i}))
             .collect();

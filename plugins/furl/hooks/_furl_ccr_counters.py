@@ -25,32 +25,21 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-# PostToolUse compression hook (compress_tool_output.py) — the #68951 diagnostic.
+# PostToolUse compression hook diagnostic for host-output compatibility.
 HOOK_INVOCATIONS = "hook_invocations_seen"
 HOOK_COMPRESSIONS = "hook_compressions_applied"
 HOOK_NOOP_PREFIX = "hook_noop:"
-# A distinct, TRUTHFUL label (not a hook_noop: bucket, because it DOES produce
-# output) recorded when the PostToolUse hook reroutes an over-threshold tool
-# output straight to the engine's fast reversible CCR offload instead of the
-# full crush pipeline (F2). It rides ALONGSIDE HOOK_COMPRESSIONS (the reroute is
-# still a real, marker-emitting compression) so the invocations == compressions +
-# noop invariant holds; this counter is the extra breadcrumb proving a huge blob
-# was seen and handled, so the pre-fix "external 30 s kill leaves zero trace"
-# silence can never recur for an input the hook actually processed.
+# A distinct, TRUTHFUL label (not a hook_noop It rides ALONGSIDE HOOK_COMPRESSIONS (the reroute is
+# still a real, marker-emitting compression) so the invocations == compressions + noop invariant holds.
 HOOK_SIZE_REROUTE = "hook_size_reroute"
 
-# Opt-in PreToolUse pipe compressor (pipe_compress.py) — its own tally, kept
-# separate so it never muddies the PostToolUse #68951 signal above.
+# Opt-in PreToolUse pipe compressor (the module) — its own tally, kept separate so it never muddies the PostToolUse #68951 signal above.
 PIPE_INVOCATIONS = "pipe_invocations_seen"
 PIPE_COMPRESSIONS = "pipe_compressions_applied"
 PIPE_NOOP_PREFIX = "pipe_noop:"
 
-# One-line heads-up written to stderr (user-visible; never reaches the model) on
-# the FIRST durably-recorded PostToolUse invocation per project store. Gated so
-# it fires once, not on every tool call — see ``emit_first_run_note_if_first``.
-# Printed when the running Claude Code MEETS the compression floor, or when its
-# version could not be determined (unknown is never treated as "assume
-# broken" — see furl_ctx.host_version's module docstring).
+# One-line heads-up written to stderr (user-visible; never reaches the model) on the FIRST durably-recorded PostToolUse invocation per project store. Printed when the running
+# Claude Code MEETS the compression floor, or when its version could not be determined (unknown is never treated as "assume broken" — see furl_ctx.host_version's module docstring).
 FIRST_RUN_NOTE = (
     "furl: PostToolUse output compression is active and mirrors each tool's "
     "output shape, so Claude Code 2.1.163 and newer honor the replacement for "

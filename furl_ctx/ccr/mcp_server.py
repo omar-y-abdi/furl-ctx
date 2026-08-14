@@ -92,15 +92,12 @@ PURGE_TOOL_NAME = "furl_purge"
 SEARCH_TOOL_NAME = "furl_search"
 LIST_TOOL_NAME = "furl_list"
 
-# Model this server compresses with — and therefore counts tokens with:
-# _handle_read's original_tokens must come from the same tokenizer
-# compress() uses (COR-36: a whitespace word count fed as a token count
-# understates content by roughly the words-per-token factor).
+# Model this server compresses with — and therefore counts tokens with: _handle_read's original_tokens must come from the same tokenizer
+# compress() uses (COR-36: a whitespace word count fed as a token count understates content by roughly the words-per-token factor).
 _MCP_TOKEN_MODEL = "claude-sonnet-4-5-20250929"
 
-# content_kind label for entries the MCP furl_compress tool stores, so
-# furl_list / furl_retrieve show where an entry came from (distinct from the
-# hook's tool names like "Bash" and furl_read's "furl_read").
+# content_kind label for entries the MCP furl_compress tool stores, so furl_list / furl_retrieve show
+# where an entry came from (distinct from the hook's tool names like "Bash" and furl_read's "furl_read").
 _MCP_COMPRESS_TOOL_NAME = "mcp:furl_compress"
 
 logger = logging.getLogger("furl_ctx.ccr.mcp")
@@ -120,28 +117,12 @@ def _safe_decode_for_logging(raw: bytes) -> str:
     return decoder.decode(bytes(raw), final=True)
 
 
-# Maximum bytes/chars a single tool call will read or ingest. Caps the
-# furl_read file read and the furl_compress content input so a single
-# oversized payload cannot exhaust memory (OOM DoS). 10 MiB is far above any
-# realistic source file or tool output while bounding worst-case allocation.
+# Maximum bytes/chars a single tool call will read or ingest. 10 MiB is far above
+# any realistic source file or tool output while bounding worst-case allocation.
 _MAX_READ_BYTES = 10 * 1024 * 1024
 
-# Maximum bytes furl_compress ingests from a caller-named ``file_path`` — the
-# on-disk source the model points the server at, distinct from the ``content``
-# string passed inline. File ingest is the entry point for the large artifacts
-# furl exists to compress: a 33 MB Chrome trace overflows the context window
-# precisely because it cannot be pasted inline, so this ceiling is deliberately
-# larger than the 10 MiB ``_MAX_READ_BYTES`` inline/read cap. It stays a REAL
-# ceiling, never "unlimited": the model chooses the path and the server reads it
-# with the user's privileges, so an unbounded read is a memory-exhaustion (OOM
-# DoS) surface — AND, because the compression cost grows super-linearly with
-# size, an unbounded read is also a wall-clock DoS that would exceed the MCP
-# client's tool-call budget and hang. 40 MiB is measurement-driven: it clears
-# the 33.8 MB / ~33 MiB target trace with headroom, and a file AT the ceiling
-# ingests in ~30 s on a dev machine (vs ~20 s at 34 MiB, ~158 s at 64 MiB — the
-# curve steepens fast), comfortably inside the tool-call timeout. Above it the
-# tool refuses FAST and clearly rather than accepting a file that would hang.
-# Override with ``FURL_MCP_MAX_FILE_BYTES`` to trade latency for a larger file.
+# File-path compression has a 40 MiB default ceiling: large enough for target traces but bounded
+# against memory and wall-clock DoS. `FURL_MCP_MAX_FILE_BYTES` may override it with a positive integer.
 _MAX_COMPRESS_FILE_BYTES_DEFAULT = 40 * 1024 * 1024
 _MAX_COMPRESS_FILE_BYTES_ENV = "FURL_MCP_MAX_FILE_BYTES"
 
@@ -271,13 +252,8 @@ _DIR_FD_WALK_SUPPORTED = (
     os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
 )
 
-# O_NONBLOCK on the final file open makes a FIFO (named pipe) inside the jail
-# return a descriptor IMMEDIATELY instead of blocking the open until a writer
-# appears — O_NOFOLLOW stops symlinks but NOT FIFOs, so without this a caller
-# could name an in-jail FIFO and hang the read/ingest forever (a DoS, since the
-# model chooses the path). The fd is still rejected by the S_ISREG gate; for a
-# regular file O_NONBLOCK is a no-op (POSIX ignores it for regular-file reads),
-# so this only defuses the pathological non-regular case. 0 where unsupported.
+# O_NONBLOCK on the final file open makes a FIFO (named pipe) inside the jail return a descriptor IMMEDIATELY instead of blocking the
+# open until a writer appears The fd is still rejected by the S_ISREG gate; so this only defuses the pathological non-regular case.
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
@@ -360,12 +336,8 @@ def _read_jailed_file(
     """
     path = Path(file_path).expanduser().resolve()
 
-    # Path jail: confine access to the workspace root (resolve() above already
-    # canonicalized symlinks, so a symlink pointing outside the root resolves
-    # outside it and is rejected here). The check runs BEFORE any exists/stat
-    # probe so an out-of-jail path cannot be used as a file-existence oracle.
-    # Log the attempted path server-side; return a generic message to the
-    # model channel (never echo the rejected path back).
+    # Resolve paths and reject anything outside the workspace before existence or stat checks,
+    # preventing escaped-path probing. Log attempted paths server-side; return only a generic error.
     root = _workspace_root()
     if not path.is_relative_to(root):
         logger.warning(
@@ -375,14 +347,8 @@ def _read_jailed_file(
         )
         return _err("path outside workspace")
 
-    # Open ONCE and pin the file descriptor, then stat + read from that SAME
-    # fd (TOCTOU defense): re-opening the path by name for the size stat and
-    # again for the body read would let a swap between checks serve a different
-    # inode than the one validated. ``_open_jailed`` walks every component from
-    # the workspace root with dir_fd + O_NOFOLLOW (SEC-5) and O_NONBLOCK on the
-    # final open (a FIFO cannot wedge the open). ``fstat`` on the fd drives the
-    # regular-file, hardlink, and size checks so they describe exactly the inode
-    # we will read — no second lookup.
+    # Open ONCE and pin the file descriptor, then stat + read from that SAME fd (TOCTOU defense). ``fstat`` on the fd drives
+    # the regular-file, hardlink, and size checks so they describe exactly the inode we will read — no second lookup.
     try:
         fd = _open_jailed(path, root)
     except FileNotFoundError:
@@ -390,11 +356,7 @@ def _read_jailed_file(
         # and open). Mirror the prior exists()-check message + path echo.
         return _err(f"File not found: {file_path}")
     except OSError as e:
-        # Non-missing open failure: O_NOFOLLOW on a symlink raises ELOOP,
-        # permission-denied raises EACCES, etc. Reserve "File not found" for a
-        # genuine FileNotFoundError above; route everything else to the generic
-        # read-error message (never confirm existence, never echo errno detail
-        # to the model). Detail is logged server-side only.
+        # Non-missing open failure: O_NOFOLLOW on a symlink raises ELOOP, permission-denied raises EACCES, etc.
         logger.warning(
             "event=mcp_jailed_open_failed errno=%s root=%s",
             getattr(e, "errno", None),
@@ -402,27 +364,18 @@ def _read_jailed_file(
         )
         return _err("Cannot read file")
 
-    # fstat the BARE fd first and run the type/link/size gates before any read
-    # wrapper: os.fdopen(fd, "rb") raises IsADirectoryError on a directory fd,
-    # so the S_ISREG gate has to happen on the raw fstat. The fd is closed on
-    # every path — by os.fdopen's context manager once we reach the read, by the
-    # explicit os.close otherwise.
+    # fstat the BARE fd first and run the type/link/size gates before any read wrapper: os.fdopen(fd,
+    # "rb") raises IsADirectoryError on a directory fd, so the S_ISREG gate has to happen on the raw fstat.
     adopted_for_read = False
     try:
         st = os.fstat(fd)
 
-        # os.open succeeds on a directory (and a FIFO/device/socket opened
-        # O_NONBLOCK); S_ISREG is then False. Surface all non-regular inodes as
-        # "Not a file" — this is also the FIFO defense's second half (the first
-        # is O_NONBLOCK, which kept the open itself from blocking).
+        # os.open succeeds on a directory (and a FIFO/device/socket opened O_NONBLOCK); S_ISREG is then False.
         if not stat.S_ISREG(st.st_mode):
             return _err(f"Not a file: {file_path}")
 
-        # Reject a multiply-linked inode: an in-jail hardlink can point at an
-        # out-of-jail inode and resolve() cannot see through a hardlink (unlike a
-        # symlink), so is_relative_to alone would pass it. The error string is
-        # honest about WHY (SEC-5): a legitimately hardlinked in-jail file is
-        # rejected too, and telling its owner "path outside workspace" was false.
+        # Reject a multiply-linked inode: an in-jail hardlink can point at an out-of-jail inode and
+        # resolve() cannot see through a hardlink (unlike a symlink), so is_relative_to alone would pass it.
         if st.st_nlink > 1:
             logger.warning(
                 "event=mcp_jailed_read_rejected reason=multiply_linked_inode nlink=%d root=%s",
@@ -439,9 +392,8 @@ def _read_jailed_file(
                 f"(limit {max_bytes} bytes){oversize_hint}"
             )
 
-        # Read from the pinned fd, bounded by the cap so an append after fstat
-        # cannot blow the budget on the same descriptor. os.fdopen adopts the
-        # fd; its `with` block closes it, so skip the finally-close path.
+        # Read from the pinned fd, bounded by the cap so an append after fstat cannot blow the budget on the
+        # same descriptor. os.fdopen adopts the fd; its `with` block closes it, so skip the finally-close path.
         adopted_for_read = True
         with os.fdopen(fd, "rb") as fh:
             raw = fh.read(max_bytes + 1)
@@ -461,10 +413,8 @@ def _read_jailed_file(
             f"File too large to {what}: >{max_bytes} bytes (limit {max_bytes} bytes){oversize_hint}"
         )
 
-    # Decode the bytes read from the pinned fd. Avoid lossy decode kwargs in
-    # furl_ctx/ccr/ — use the centralized safe-log decoder (this path is for tool
-    # output display, not the SSE/wire path, so a replacement char on invalid
-    # bytes is acceptable). Redaction is left to the caller.
+    # Decode pinned-fd bytes with the centralized safe-log decoder;
+    # replacement characters are acceptable for tool display, and the caller handles redaction.
     return path, _safe_decode_for_logging(raw)
 
 
@@ -478,33 +428,10 @@ _READ_ENABLED = os.environ.get("FURL_MCP_READ", "off").lower().strip() in (
     "enabled",
 )
 
-# ─── Server-level instructions: CSV decode legend (engine P1-10) ───────────
-#
-# The compacted-table decode legend ships ONCE per conversation via the MCP
-# SDK's server-level ``instructions=`` parameter (surfaced to the host in
-# the initialize response) instead of per-table in-band bytes: zero
-# wire-byte change to any table render — the grammar characterization
-# suites stay untouched — at an amortized conversation-scope cost of ~250
-# o200k tokens. This is owner-approved alternative (b) of
-# QUESTIONS-FOR-USER.md item 15.
-#
-# Agent-first ordering (a fresh agent must decode this cold): a 3-part
-# plain-English summary (what the table format IS, what a ``<<ccr:HASH>>``
-# marker means, the retrieve-before-reasoning rule) → ONE worked micro-example
-# (input line → compact row → read-back) → THEN the compact grammar reference.
-#
-# Every decode claim below is grammar-verified against the reference
-# decoder ``furl_ctx/transforms/csv_schema_decoder.py`` (the documented
-# consumer contract for the Rust ``formatter.rs`` output); the executable
-# pins live in ``tests/test_mcp_server_instructions.py``. The highest
-# comprehension risk is ``%k``: a cell ``53`` under ``time_ms:float%3``
-# decodes to 0.053, NOT 53 — the worked example leads with exactly that.
+# Send the compact-table decode legend once via MCP server instructions, not in every table. It
+# explains table grammar, CCR retrieval, and `%k` scaling without changing rendered table bytes.
 CSV_DECODE_LEGEND = (
-    # 1) Plain-English summary: which INPUT produces the table, what a marker
-    #    means, and the retrieve-before-reasoning rule. The columnar table is
-    #    for STRUCTURED JSON ARRAYS; line-oriented text (the common case) ships
-    #    head+tail with a marker, NOT tabled — so an agent reasoning from this
-    #    grammar never assumes a log was tabled when it was actually offloaded.
+    # 1) Plain-English summary: which INPUT produces the table, what a marker means, and the retrieve-before-reasoning rule.
     "Furl tables a structured JSON array of objects — read one before you reason. "
     "Header `[N]{col:type,...}` = N rows (`[kept/total]` when rows dropped: total=original count); "
     "later lines give each row's non-constant columns as CSV. "
@@ -543,13 +470,8 @@ def _legend_enabled() -> bool:
     )
 
 
-# Session-scoped TTL fallback: content persists for the session (1 hour),
-# outlasting the library's own 30-minute default. The MCP server process
-# lives as long as the coding session. Fallback ONLY — an operator-set
-# FURL_CCR_TTL_SECONDS overrides it (see _mcp_session_ttl below): the plugin
-# ships FURL_CCR_TTL_SECONDS=86400 via .mcp.json, and before the env was
-# honored here, MCP-tool-stored entries silently expired at 1 h while
-# hook-compressed entries in the very same per-project store lived 24 h.
+# Session-scoped TTL fallback: content persists for the session (1 hour), outlasting the library's own 30-minute
+# default. Fallback ONLY — an operator-set FURL_CCR_TTL_SECONDS overrides it (see _mcp_session_ttl below).
 MCP_SESSION_TTL = 3600
 
 
@@ -628,17 +550,8 @@ def _default_store_backend() -> CompressionStoreBackend | None:
         return None
 
 
-# Shared stats file: all MCP instances (main + sub-agents) append here.
-# furl_stats aggregates across all instances within the session window.
-# Respects FURL_WORKSPACE_DIR.
-#
-# Functions, not import-frozen constants (SEC-7): paths.py's contract is
-# explicit — "No caching. Every call re-reads the environment" — and the
-# furl_read jail already re-reads FURL_WORKSPACE_DIR per call. Freezing these
-# two at import let the stats file and the jail disagree about the workspace
-# when the env changes after import (tests, host re-configuration). Each use
-# site calls these; within one operation the value is read once and kept in a
-# local so a single append/read never straddles two workspaces.
+# Shared stats file: all MCP instances (main + sub-agents) append here. furl_stats aggregates across all instances within the session window. Freezing
+# these two at import let the stats file and the jail disagree about the workspace when the env changes after import (tests, host re-configuration).
 SESSION_WINDOW_SECONDS = 7200  # 2 hours — events older than this are pruned
 
 
@@ -663,9 +576,8 @@ def _append_shared_event(event: dict[str, Any]) -> None:
             if _HAS_FCNTL:
                 fcntl.flock(f, fcntl.LOCK_EX)
             f.write(line)
-            # Flush BEFORE releasing the lock: an append still sitting in the
-            # userspace buffer when the lock drops can interleave with the
-            # prune-rewrite in _read_shared_events (SEC-6 protocol soundness).
+            # Flush BEFORE releasing the lock: an append still sitting in the userspace buffer when the lock
+            # drops can interleave with the prune-rewrite in _read_shared_events (SEC-6 protocol soundness).
             f.flush()
             if _HAS_FCNTL:
                 fcntl.flock(f, fcntl.LOCK_UN)
@@ -712,9 +624,7 @@ def _read_shared_events(window_seconds: int = SESSION_WINDOW_SECONDS) -> list[di
                         f.seek(0)
                         f.truncate()
                         f.writelines(keep_lines)
-                        # Land the rewrite before the lock releases (an
-                        # unflushed rewrite could interleave with the next
-                        # locked appender).
+                        # Land the rewrite before the lock releases (an unflushed rewrite could interleave with the next locked appender).
                         f.flush()
                     except Exception:
                         logger.debug("Shared-stats prune failed (non-fatal)", exc_info=True)
@@ -834,10 +744,8 @@ class SessionStats:
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "total_tokens_saved": self.total_tokens_saved,
-            # Crit-2: this is VISIBLE-TOKEN reduction (context hidden from the
-            # model), which INCLUDES CCR-offloaded content — retrievable by hash,
-            # not lossless byte compression. Labeled explicitly so a high number
-            # on high-entropy input is not read as lossless shrinkage.
+            # Crit-2: this is VISIBLE-TOKEN reduction (context hidden from the model), which
+            # INCLUDES CCR-offloaded content — retrievable by hash, not lossless byte compression.
             "visible_token_reduction_percent": savings_pct,
             # Deprecated alias kept for compatibility — same value.
             "savings_percent": savings_pct,
@@ -853,29 +761,18 @@ class SessionStats:
         }
 
 
-# ─── furl_search / furl_list: shared paging + preview helpers ───────────────
-#
-# Both discovery tools bound their output (invariant D): a positive-int limit
-# capped at ``_SEARCH_LIST_LIMIT_CAP``, previews trimmed to a fixed char budget,
-# and previews redacted with the SAME rules the cross-store search uses so a
-# match sitting next to a credential never surfaces it.
+# ─── furl_search / furl_list: shared paging + preview helpers ─────────────── Both discovery tools bound their output (invariant D): a positive-int limit capped at ``_SEARCH_LIST_LIMIT_CAP``,
+# previews trimmed to a fixed char budget, and previews redacted with the SAME rules the cross-store search uses so a match sitting next to a credential never surfaces it.
 _SEARCH_LIST_LIMIT_DEFAULT = 20
 _SEARCH_LIST_LIMIT_CAP = 100
-# F8 headroom: furl_stats.store.cap_accounting emits a warning once the LOGICAL
-# entry count crosses this fraction of the cap, so a caller sees eviction
-# pressure before the oldest within-TTL <<ccr:…>> markers start loud-missing.
+# F8 headroom: furl_stats.store.cap_accounting emits a warning once the LOGICAL entry count crosses this fraction
+# of the cap, so a caller sees eviction pressure before the oldest within-TTL <<ccr:…>> markers start loud-missing.
 _CAP_WARN_RATIO = 0.9
 _MATCH_PREVIEW_RADIUS = 60  # chars of context each side of a furl_search match
 _MATCH_PREVIEW_MAX = 240  # hard char cap on a single furl_search preview
 _LIST_PREVIEW_CHARS = 120  # leading chars of a furl_list entry preview
-# ReDoS guard: the credential regexes are O(N^2) on long base64url/hex runs, so
-# these previews redact only the kept window PLUS this margin (never the whole
-# multi-MB original). The margin lets a secret straddling the preview cap be
-# masked whole before truncation — GUARANTEED only for secrets <= this margin;
-# a longer one (a ~1700-char PEM private key, a long JWT) whose anchor falls
-# outside the widened window can still leak an unanchored tail fragment.
-# (Mirrors compression_store's window guard; kept local to preserve
-# mcp_server's lazy compression_store import boundary.)
+# ReDoS guard: the credential regexes are O(N^2) on long base64url/hex runs, so these previews redact only the kept window PLUS this
+# margin (never the whole multi-MB original). The margin lets a secret straddling the preview cap be masked whole before truncation
 _PREVIEW_REDACT_MARGIN = 256
 
 
@@ -1063,14 +960,8 @@ class FurlMCPServer:
     def __init__(self) -> None:
         self._stats = SessionStats()
         self._local_store: CompressionStore | None = None  # Lazy-initialized
-        # F11: lifetime-counter snapshot taken the first time _hook_activity_block
-        # reads the store, so furl_stats can report a delta (lifetime minus this
-        # start snapshot) alongside the lifetime totals. Because the counters are
-        # cross-process the delta is not strictly this run, so it is labeled as
-        # "since this server first read the counters", not "this session". None
-        # until the first read; a wipe under us by furl_purge(all) drops the
-        # whole snapshot so the delta counts from the reset (see
-        # _rebaselined_counters).
+        # F11: lifetime-counter snapshot taken the first time _hook_activity_block reads the store, so
+        # furl_stats can report a delta (lifetime minus this start snapshot) alongside the lifetime totals.
         self._hook_counters_at_start: dict[str, int] | None = None
         self._compressor_initialized = False
         # File read cache: path → (content_hash, ccr_hash, line_count, token_count)
@@ -1079,15 +970,8 @@ class FurlMCPServer:
         if not MCP_AVAILABLE or Server is None:
             raise ImportError("MCP SDK not installed. Install with: pip install mcp")
 
-        # Server-level instructions carry the CSV decode legend once per
-        # conversation (FURL_MCP_LEGEND, default ON). ``None`` when gated
-        # off — the SDK then omits the field from the initialize response.
-        # ``version=`` is load-bearing: the SDK's create_initialization_options
-        # falls back to ``importlib.metadata.version("mcp")`` when the Server has
-        # no version, so serverInfo would otherwise advertise the MCP SDK's own
-        # version as if it were Furl's. Report the furl-ctx distribution version
-        # instead (``get_version`` is total — "unknown" when the package is not
-        # installed, never raises).
+        # Server-level instructions carry the CSV decode legend once per conversation (FURL_MCP_LEGEND, default ON). ``None`` when gated off — the SDK then omits the field from
+        # the initialize response. Report the furl-ctx distribution version instead (``get_version`` is total — "unknown" when the package is not installed, never raises).
         self.server: Server = Server(
             "furl",
             version=get_version(),
@@ -1095,16 +979,8 @@ class FurlMCPServer:
         )
         self._setup_handlers()
 
-        # F-alpha2 (superseded by T11): the shipped MCP config runs agent-supplied
-        # regex filters (the furl_retrieve pattern and the furl_compress
-        # include/exclude patterns) on the RE2 linear-time engine when RE2 is
-        # importable. Without RE2, the T11 guard (_refuse_regex_filters, below in
-        # _handle_compress/_handle_retrieve) refuses those filters outright with a
-        # caller-visible error instead of ever matching them, so the state is
-        # UNAVAILABLE, not degraded-but-working -- no match runs, so there is no
-        # freeze risk on this path. Warn ONCE at server init so the unavailable
-        # state is visible up front instead of only discovered on the first
-        # filtered call; a per-request log would spam.
+        # the shipped MCP config runs agent-supplied regex filters (the furl_retrieve pattern and the furl_compress include/exclude patterns) on the RE2 linear-time
+        # engine when RE2 is importable. Warn ONCE at server init so the unavailable state is visible up front instead of only discovered on the first filtered call;
         if not re2_available():
             logger.warning(
                 "RE2 is not importable, so agent-supplied regex filters in "
@@ -1152,15 +1028,7 @@ class FurlMCPServer:
             resolve_ccr_namespace_store,
         )
 
-        # Per-project isolation (audit #4): when a namespace is active — the
-        # plugin exports FURL_CCR_PROJECT_DIR from the project root, or a user
-        # set FURL_CCR_NAMESPACE — search / list / retrieve / evict MUST target
-        # the SAME isolated store the compress path writes to. Without this the
-        # read tools would serve the process-global singleton while the hook
-        # wrote to the per-project store, so every retrieve would loud-miss.
-        # resolve_* returns None when no namespace is active, leaving the
-        # singleton path (its session TTL + durable backend) exactly as
-        # before — so in-process tests that set no namespace are unaffected.
+        # when a namespace is active search / list / retrieve / evict MUST target the SAME isolated store the compress path writes to.
         namespace_store = resolve_ccr_namespace_store()
         if namespace_store is not None:
             return namespace_store
@@ -1203,46 +1071,22 @@ class FurlMCPServer:
         from furl_ctx.compress import compress
         from furl_ctx.redaction import build_store_redactor
 
-        # Pre-store redaction: scrub secrets from the content BEFORE it is
-        # compressed, previewed, OR stored. compress() redacts its own message
-        # copy, but this tool stores ``original=content`` verbatim (and
-        # _compress_filtered stores runs of it), so the redaction MUST also happen
-        # here or the raw secret would persist in the CCR store — the exact leak
-        # the plugin-reachable redaction closes. The ON-by-default built-in
-        # credential patterns (audit Crit-4 / B3) plus ``FURL_REDACT_PATTERNS``
-        # both apply; shares the builder with the hook and library so one config
-        # governs all three. None (built-ins opted out AND no env patterns) =>
-        # content unchanged (byte-identical).
+        # Pre-store redaction: scrub secrets from the content BEFORE it is compressed, previewed, OR stored. compress() redacts its own message copy.
         _redactor = build_store_redactor()
         if _redactor is not None:
             content = _redactor(content)
 
-        # Acquire (and thereby configure) the store singleton BEFORE running
-        # the pipeline: compress() persists marker-hash dropped rows through
-        # its own no-arg get_compression_store() call, and the singleton's
-        # default TTL is fixed on first init. Initializing here first
-        # guarantees those embedded-marker entries carry the session TTL
-        # (env-aware ``_mcp_session_ttl``) rather than the 1800 s pipeline
-        # default, which would silently expire granular retrieval 30 minutes
-        # into a session-long window. Under an active NAMESPACE store the
-        # default is env-derived at construction instead (see
-        # compression_store._build_namespace_store) — with
-        # FURL_CCR_TTL_SECONDS set AND valid, the plugin's shipped
-        # configuration, both surfaces carry the same env TTL there too.
-        # Unset or INVALID env splits them on the namespace path (each
-        # resolver falls back separately: 3600 s here, 1800 s in the
-        # library) — pre-existing corner, see _get_local_store.
+        # Acquire (and thereby configure) the store singleton BEFORE running the pipeline compress() persists marker-hash dropped
+        # rows through its own no-arg get_compression_store() call, and the singleton's default TTL is fixed on first init.
         store = self._get_local_store()
 
-        # Section filtering (non-empty patterns) → run-by-run path. Delegated
-        # so the common (unfiltered) path below stays the original single-unit
-        # body, byte-identical to before this feature when mode is NORMAL.
+        # Section filtering (non-empty patterns) → run-by-run path. Delegated so the common (unfiltered) path
+        # below stays the original single-unit body, byte-identical to before this feature when mode is NORMAL.
         if patterns is not None and not patterns.is_empty:
             return self._compress_filtered(content, mode, patterns)
 
-        # NORMAL mode builds no pipeline (uses the process default singleton),
-        # keeping a default call byte-identical; other modes select a
-        # configured pipeline via existing ContentRouterConfig knobs.
+        # NORMAL mode builds no pipeline (uses the process default singleton), keeping a default call
+        # byte-identical; other modes select a configured pipeline via existing ContentRouterConfig knobs.
         pipeline = build_mode_pipeline(mode)
 
         # Wrap content as a tool message (most common compression target)
@@ -1256,13 +1100,8 @@ class FurlMCPServer:
         )
 
         if result.error:
-            # COR-36: compress() failed open — result.messages are the
-            # ORIGINAL messages and tokens_after is 0. Storing that would
-            # persist the original as "compressed" under a marker, and
-            # recording it would book a fictional savings_percent=100 into
-            # the session totals. Skip both and return an error-shaped
-            # payload so the host sees the failure loudly (compress()
-            # already logged the full traceback at ERROR).
+            # COR-36: compress() failed open — result.messages are the ORIGINAL messages and tokens_after is 0. Skip both and return
+            # an error-shaped payload so the host sees the failure loudly (compress() already logged the full traceback at ERROR).
             logger.error("event=mcp_compress_failed error=%s", result.error)
             return {
                 "error": f"compression failed: {result.error}",
@@ -1273,14 +1112,7 @@ class FurlMCPServer:
         input_tokens = result.tokens_before
         output_tokens = result.tokens_after
 
-        # F9: skip storing a router NO-OP unless the caller opted in. The router
-        # tags a no-op decision (below_min_tokens / no_savings /
-        # no_eligible_content) as ``router:noop:<reason>`` in transforms_applied
-        # and returns the ORIGINAL content unchanged; storing that consumes a cap
-        # slot for a copy identical to what the caller already holds (finding 9).
-        # A no-op emits no <<ccr:...>> markers, so nothing needs a backing entry.
-        # The compression attempt is still recorded in session stats (a 0-saving
-        # attempt did happen) — only the pointless store is skipped.
+        # F9: skip storing a router NO-OP unless the caller opted in. A no-op emits no <<ccr:...>> markers, so nothing needs a backing entry.
         is_noop = any(t.startswith("router:noop:") for t in result.transforms_applied)
         if is_noop and not persist:
             noop_strategy = (
@@ -1302,13 +1134,7 @@ class FurlMCPServer:
                 ),
             }
 
-        # Store original in local store for later retrieval. require_durable:
-        # the MCP server's default backend is the durable sqlite store; a write
-        # that fell open to volatile in-process memory (degraded backend, or a
-        # lost lock race) must not be advertised as retrievable-later — a
-        # sub-agent process or a restart would miss, silently breaking the
-        # exact cross-process durability the sqlite backend exists to provide
-        # (review F2). Lazy import, matching this module's convention.
+        # Store original in local store for later retrieval. require_durable: the MCP server's default backend is the durable sqlite store.
         from furl_ctx.cache.compression_store import DurableWriteError
 
         hash_key: str | None
@@ -1327,12 +1153,7 @@ class FurlMCPServer:
                 require_durable=True,
             )
         except DurableWriteError as exc:
-            # The durable write did not land. A cheap read-back distinguishes the
-            # two causes so the response stays honest (Bug-6):
-            #   (a) it fell open to THIS process's volatile tier — still
-            #       retrievable now under exc.hash_key; carry it forward.
-            #   (b) the binding was DROPPED entirely (a true hash collision) —
-            #       nothing is retrievable; revert to the original, claim nothing.
+            # The durable write did not land.
             volatile_hash = exc.hash_key if store.exists(exc.hash_key) else None
             logger.warning(
                 "event=mcp_compress_durable_veto hash=%s retrievable=%s error=%s",
@@ -1352,10 +1173,8 @@ class FurlMCPServer:
         savings_pct = round(tokens_saved / input_tokens * 100, 1) if input_tokens > 0 else 0
 
         if hash_key is None and volatile_hash is None:
-            # Collision-drop veto (Bug-6): a true hash collision made the binding
-            # ambiguous, so it was dropped to avoid serving foreign content and
-            # NOTHING is retrievable. Return the ORIGINAL uncompressed content and
-            # say so plainly — no hash, no false "retrievable" claim.
+            # Collision-drop veto (Bug-6): a true hash collision made the binding ambiguous,
+            # so it was dropped to avoid serving foreign content and NOTHING is retrievable.
             return {
                 "compressed": content,
                 "hash": None,
@@ -1375,11 +1194,8 @@ class FurlMCPServer:
             }
 
         if hash_key is None:
-            # Durability veto: the write fell open to THIS process's volatile
-            # tier after the retry budget. It IS retrievable now (return the hash
-            # so the caller can), but not after a restart and not from other
-            # processes — say exactly that, and name the likely cause. The caller
-            # still holds the original it sent; nothing is lost.
+            # Durability veto: the write fell open to THIS process's volatile tier after the retry budget. It IS retrievable now (return the
+            # hash so the caller can), but not after a restart and not from other processes — say exactly that, and name the likely cause.
             return {
                 "compressed": compressed_content,
                 "hash": volatile_hash,
@@ -1407,20 +1223,12 @@ class FurlMCPServer:
             f"Use mcp__furl__{CCR_TOOL_NAME} to get full content later."
         )
         if tokens_saved == 0:
-            # A bare "0%" reads as a malfunction. Name the engine's own
-            # reason(s): the raw transforms_applied strings (e.g. a router
-            # noop tag), rendered generically — their taxonomy belongs to
-            # the router, not to this handler. Gated on tokens_saved, not
-            # the ROUNDED savings_pct: a real sub-0.05% saving displays as
-            # 0.0 but "No token savings" would be false for it.
+            # A bare "0%" reads as a malfunction. Gated on tokens_saved, not the ROUNDED savings_pct:
+            # a real sub-0.05% saving displays as 0.0 but "No token savings" would be false for it.
             note += f" No token savings on this content — engine transforms: {strategy}."
 
-        # A structured compression can embed granular ``<<ccr:…>>`` markers in
-        # the compressed view (one per offloaded fragment / row-select), each
-        # carrying its OWN hash distinct from this whole-content ``hash``.
-        # Surfacing two different-looking hashes for one compression with no
-        # explanation reads as a bug; name the relationship so the caller knows
-        # both resolve and how they differ (review F6).
+        # A structured compression can embed granular ``<<ccr:…>>`` markers in the compressed view (one per
+        # offloaded fragment / row-select), each carrying its OWN hash distinct from this whole-content ``hash``.
         from furl_ctx.ccr.marker_grammar import hashes_in_text
 
         preview_text = (
@@ -1435,10 +1243,8 @@ class FurlMCPServer:
             more = "…" if count > 3 else ""
             marker_word = "marker" if count == 1 else "markers"
             hash_word = "hash" if count == 1 else "hashes"
-            # Plain user-facing copy (review F6): no em-dashes, en-dashes, or
-            # parentheses; and fragment markers stored under their own keys
-            # resolve against the same underlying source document, not one shared
-            # stored original.
+            # Plain user-facing copy (review F6): no em-dashes, en-dashes, or parentheses; and fragment markers stored
+            # under their own keys resolve against the same underlying source document, not one shared stored original.
             note += (
                 f" The compressed view also embeds {count} granular <<ccr:…>> "
                 f"{marker_word}, each with its own {hash_word}: {shown}{more}. Each "
@@ -1448,12 +1254,8 @@ class FurlMCPServer:
                 f"the same way."
             )
 
-        # T9: whole-blob opaque offloads are surfaced as a structured field the
-        # caller reads, plus one honest line of copy. The marker's raw savings
-        # are mostly opaque offload, and retrieving the content back is a
-        # net-negative round trip, so a bare high savings_percent overstates the
-        # win. Not logged per-call: the hook spawns a fresh subprocess per tool
-        # call, so per-call stderr would spam.
+        # T9: whole-blob opaque offloads are surfaced as a structured field the caller reads, plus one honest line of copy. The marker's raw savings
+        # are mostly opaque offload, and retrieving the content back is a net-negative round trip, so a bare high savings_percent overstates the win.
         opaque_offloads = [
             {
                 "hash": o.hash,
@@ -1487,10 +1289,8 @@ class FurlMCPServer:
             "transforms": result.transforms_applied,
             "note": note,
         }
-        # Add the structured signal ONLY when there is an opaque offload to
-        # report, so the default response envelope stays byte-stable (the
-        # envelope-keys pin) and the field is present exactly when it means
-        # something.
+        # Add the structured signal ONLY when there is an opaque offload to report, so the default response envelope
+        # stays byte-stable (the envelope-keys pin) and the field is present exactly when it means something.
         if opaque_offloads:
             response["opaque_offloads"] = opaque_offloads
         return response
@@ -1521,17 +1321,12 @@ class FurlMCPServer:
 
         for run in runs:
             if not run.eligible or not run.text.strip():
-                # Protected run, or an eligible-but-blank run (nothing to
-                # compress) — ship verbatim. Blank runs count as zero-token
-                # passthrough, matching how a whitespace-only compress no-ops.
+                # Protected run, or an eligible-but-blank run (nothing to compress) — ship verbatim. Blank
+                # runs count as zero-token passthrough, matching how a whitespace-only compress no-ops.
                 rendered_parts.append(run.text)
                 continue
-            # F9: the filtered path's contract is that EVERY eligible run is
-            # stored and retrievable by its run hash — a caller who filtered
-            # explicitly asked for these runs. So force persist=True: a run that
-            # the router no-ops must still be stored here, or its run hash would
-            # come back None and its retrieval would loud-miss. The no-op skip
-            # applies only to the direct furl_compress whole-content path.
+            # F9 the filtered path's contract is that EVERY eligible run is stored and retrievable by its run hash a run that the
+            # router no-ops must still be stored here, or its run hash would come back None and its retrieval would loud-miss.
             part = self._compress_content(run.text, mode, persist=True)
             if "error" in part:
                 # A run-level fail-open: surface loudly rather than silently
@@ -1542,9 +1337,8 @@ class FurlMCPServer:
                 if isinstance(part["compressed"], str)
                 else json.dumps(part["compressed"])
             )
-            # A vetoed run now returns its VOLATILE hash (durably_stored False)
-            # rather than omitting "hash" — so this stays crash-free under
-            # contention and the aggregate can flag the volatile runs honestly.
+            # A vetoed run now returns its VOLATILE hash (durably_stored False) rather than omitting "hash" —
+            # so this stays crash-free under contention and the aggregate can flag the volatile runs honestly.
             hashes.append(part["hash"])
             if part.get("durably_stored") is False:
                 volatile_hashes.append(part["hash"])
@@ -1562,10 +1356,7 @@ class FurlMCPServer:
             f"mcp__furl__{CCR_TOOL_NAME} with its hash."
         )
         if tokens_saved == 0:
-            # Same zero-savings honesty as the single-unit path: name the
-            # engine's raw per-run transform strings rather than shipping an
-            # unexplained 0%. Gated on tokens_saved, not the rounded
-            # savings_pct (see the single-unit path).
+            # Same zero-savings honesty as the single-unit path: name the engine's raw per-run transform strings rather than shipping an unexplained 0%.
             strategy = ", ".join(transforms) if transforms else "passthrough"
             note += f" No token savings on this content — engine transforms: {strategy}."
 
@@ -1594,10 +1385,7 @@ class FurlMCPServer:
             "note": note,
         }
         if volatile_hashes:
-            # Some runs are volatile-only: flag it so the caller does not treat
-            # every hash as durably retrievable. Absent when all runs are durable,
-            # keeping the healthy-path shape byte-identical (as the single-unit
-            # path only adds durably_stored on a veto).
+            # Some runs are volatile-only: flag it so the caller does not treat every hash as durably retrievable.
             result["durably_stored"] = False
             result["volatile_hashes"] = volatile_hashes
         return result
@@ -1613,9 +1401,7 @@ class FurlMCPServer:
         have masked. Pure read — no retrieval is booked (the caller retrieves
         by hash next), so no ``record_retrieval`` here.
         """
-        # PERF-16: search_all is synchronous BM25 scoring over SQLite-backed
-        # rows; run it in a worker thread so the event loop is never blocked
-        # (the documented sqlite-backend invariant — backends/sqlite.py).
+        # Run synchronous SQLite-backed BM25 scoring in a worker thread so it never blocks the event loop.
         return await asyncio.to_thread(self._search_all_content_sync, query)
 
     def _search_all_content_sync(self, query: str) -> dict[str, Any]:
@@ -1667,10 +1453,8 @@ class FurlMCPServer:
         are mutually exclusive with ``query`` at the handler boundary, so a
         non-empty ``filters`` is only ever passed on the no-query path.
         """
-        # PERF-16: every store op below (search / exists / retrieve /
-        # get_entry_status) and the retrieval-stat file append are synchronous
-        # SQLite/file I/O; run the whole body in a worker thread so the event
-        # loop stays free (the documented sqlite-backend invariant).
+        # PERF-16: every store op below (search / exists / retrieve / get_entry_status) and the retrieval-stat file append are synchronous
+        # SQLite/file I/O; run the whole body in a worker thread so the event loop stays free (the documented sqlite-backend invariant).
         return await asyncio.to_thread(self._retrieve_content_sync, hash_key, query, filters)
 
     def _retrieve_content_sync(
@@ -1692,14 +1476,8 @@ class FurlMCPServer:
                     "results": results,
                     "count": len(results),
                 }
-            # Search returned nothing. That does NOT mean the entry was
-            # evicted — a LIVE entry with no query match must report "no match",
-            # not a false "no longer retrievable" eviction error. Only fall
-            # through to the cause-honest miss path when the entry is genuinely
-            # gone from the store. Use the side-effect-free ``exists`` check
-            # (not ``retrieve``, which logs a retrieval event + bumps access
-            # stats) so a no-match query does not inflate retrieval metrics —
-            # nothing was actually retrieved.
+            # Search returned nothing. That does NOT mean the entry was evicted — a LIVE entry with no query match must report "no match", not a false
+            # "no longer retrievable" eviction error. Only fall through to the cause-honest miss path when the entry is genuinely gone from the store.
             if store.exists(hash_key):
                 return {
                     "hash": hash_key,
@@ -1722,9 +1500,8 @@ class FurlMCPServer:
                 return {
                     "hash": hash_key,
                     "source": "local",
-                    # Originating tool (content_kind) — surfaced here too, not
-                    # just in furl_list, so a retrieve caller can see where the
-                    # content came from ("Bash", "mcp:furl_compress", ...).
+                    # Originating tool (content_kind) — surfaced here too, not just in furl_list, so a
+                    # retrieve caller can see where the content came from ("Bash", "mcp:furl_compress", ...).
                     "content_kind": entry.tool_name,
                     "original_content": entry.original_content,
                     "original_item_count": entry.original_item_count,
@@ -1732,11 +1509,8 @@ class FurlMCPServer:
                     "retrieval_count": entry.retrieval_count,
                 }
 
-        # Loud, cause-honest miss: the local store came up empty.
-        # Mirror response_handler so every model-facing retrieve surface reports
-        # a miss the same way (explicit error, never a silent empty result) and
-        # attributes it to its real cause (eviction/capacity/expiry) rather than
-        # vaguely to the TTL.
+        # Loud, cause-honest miss: the local store came up empty. Mirror response_handler so every model-facing retrieve surface reports a miss the same
+        # way (explicit error, never a silent empty result) and attributes it to its real cause (eviction/capacity/expiry) rather than vaguely to the TTL.
         from furl_ctx.cache.compression_store import format_retrieval_miss_detail
 
         get_status = getattr(store, "get_entry_status", None)
@@ -1785,18 +1559,13 @@ class FurlMCPServer:
             "compressed_item_count": entry.compressed_item_count,
             "retrieval_count": entry.retrieval_count,
         }
-        # F-alpha1: surface the regex line-cap skip signal so an agent sees a
-        # signalled gap, not a bare matched_count of 0, when a non-literal pattern
-        # could not search one or more over-length lines.
+        # F-alpha1: surface the regex line-cap skip signal so an agent sees a signalled gap, not a bare
+        # matched_count of 0, when a non-literal pattern could not search one or more over-length lines.
         if outcome.lines_skipped_over_cap > 0:
             result["lines_skipped_over_cap"] = outcome.lines_skipped_over_cap
             result["note"] = outcome.note
-        # F7: the sibling signal for a row-select. When select_field is absent
-        # from EVERY row the empty result is a misnamed field, not a value that
-        # matched nothing — surface the field and the known field names so the two
-        # are distinguishable. Present ONLY when triggered: a select on a real
-        # field (even one that matched no row) adds none of these keys, so the
-        # default response stays byte-identical.
+        # F7: the sibling signal for a row-select. When select_field is absent from EVERY row the empty result is a misnamed
+        # field, not a value that matched nothing — surface the field and the known field names so the two are distinguishable.
         if outcome.select_field_absent is not None:
             absent = outcome.select_field_absent
             result["select_field_absent"] = absent.field
@@ -1894,9 +1663,8 @@ class FurlMCPServer:
                                 ),
                             },
                         },
-                        # Neither is schema-required: exactly one of content /
-                        # file_path is enforced in the handler (JSON Schema cannot
-                        # express "exactly one of" portably across MCP clients).
+                        # Neither is schema-required: exactly one of content / file_path is enforced in the
+                        # handler (JSON Schema cannot express "exactly one of" portably across MCP clients).
                         "required": [],
                     },
                 ),
@@ -2215,10 +1983,6 @@ class FurlMCPServer:
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             started = time.perf_counter()
             # INFO: operationally-useful identity only (which tool was invoked).
-            # The arguments carry sensitive payloads (file contents, queries,
-            # paths) and must NOT be logged verbatim at any level — even a
-            # truncated dump leaks the leading bytes. The per-call DEBUG line
-            # below records only the argument SHAPE (keys + value lengths).
             logger.info("event=mcp_tool_call_received tool=%s", name)
             logger.debug(
                 "event=mcp_tool_call_received_detail tool=%s arguments_shape=%s",
@@ -2242,10 +2006,7 @@ class FurlMCPServer:
                     result = await self._handle_read(arguments)
                 else:
                     result = _err(f"Unknown tool: {name}")
-                # INFO: outcome envelope — tool, latency, and result SIZE. The
-                # result body can carry retrieved original content or whole file
-                # bodies, so it is never logged verbatim; a char count conveys
-                # the outcome magnitude without the payload.
+                # INFO: outcome envelope — tool, latency, and result SIZE.
                 logger.info(
                     "event=mcp_tool_call_completed tool=%s duration_ms=%.2f result_chars=%d",
                     name,
@@ -2254,39 +2015,20 @@ class FurlMCPServer:
                 )
                 return result
             except Exception as e:
-                # Full exception detail (message + traceback) is logged server-side
-                # at ERROR; the model channel gets only a generic message so internal
-                # detail (paths, stack frames, dependency internals) never leaks.
-                #
-                # RE-RAISE (sanitized) instead of returning a success-shaped
-                # ``{"error": ...}`` TextContent: the MCP SDK converts a raised
-                # exception into a CallToolResult with ``isError=True``, which is
-                # the only machine-readable failure signal hosts/retriers/
-                # evaluators have (API-15). Parameter mistakes (missing/mistyped
-                # arguments, bad hashes, unknown tools) stay model-visible JSON
-                # envelopes — those are the model's to fix, not server failures.
+                # Full exception detail (message + traceback) is logged server-side at ERROR; the model channel gets only a generic message so internal detail
+                # (paths, stack frames, dependency internals) never leaks. RE-RAISE (sanitized) instead of returning a success-shaped ``{"error": ...}`` TextContent
                 logger.error(f"Tool {name} failed: {e}", exc_info=True)
                 raise RuntimeError(f"Internal error handling tool: {name}") from e
 
-        # TEST-22: expose the routing handler as a named attribute so tests
-        # (and any embedder) can call the tool-dispatch logic directly. The
-        # SDK registration above wraps `call_tool` in its own private
-        # `handler` closure under `request_handlers[CallToolRequest]`;
-        # without this attribute the only way to reach the routing branches
-        # was closure-cell introspection of that wrapper — which breaks on
-        # any `mcp` SDK bump.
+        # The SDK registration above wraps `call_tool` in its own private `handler` closure under `request_handlers[CallToolRequest]`; without this
+        # attribute the only way to reach the routing branches was closure-cell introspection of that wrapper — which breaks on any `mcp` SDK bump.
         self.route_call_tool = call_tool
 
     async def _handle_compress(self, arguments: dict[str, Any]) -> list[TextContent]:
         content = arguments.get("content")
         file_path = arguments.get("file_path")
 
-        # Exactly one input source. ``content`` is inline text the caller already
-        # holds; ``file_path`` is a file the SERVER reads from disk so the large
-        # artifact this tool exists to compress — e.g. a 33 MB Chrome trace that
-        # overflows context precisely because it cannot be pasted inline — never
-        # has to be materialized in the conversation first. They are mutually
-        # exclusive: two sources for one output is a caller mistake, not a merge.
+        # Exactly one input source. ``content`` is inline text the caller already holds.
         if file_path is not None and content is not None:
             return _err("provide either 'content' or 'file_path', not both")
 
@@ -2297,12 +2039,8 @@ class FurlMCPServer:
                 return _err(f"file_path parameter must be a string, got {type(file_path).__name__}")
             if not file_path:
                 return _err("file_path parameter must not be empty")
-            # Read + jail off the event loop (blocking file I/O), through the SAME
-            # hardened ingress as furl_read — never a second path-validation
-            # surface. The file-ingest ceiling (_max_compress_file_bytes,
-            # override FURL_MCP_MAX_FILE_BYTES) is deliberately larger than the
-            # 10 MiB inline cap because ingesting the oversized file IS the point.
-            # Redaction runs later in _compress_content, so pass the raw decode.
+            # Read + jail off the event loop (blocking file I/O), through the SAME hardened ingress as furl_read —
+            # never a second path-validation surface. Redaction runs later in _compress_content, so pass the raw decode.
             jailed = await asyncio.to_thread(
                 _read_jailed_file,
                 file_path,
@@ -2324,13 +2062,8 @@ class FurlMCPServer:
             if not isinstance(content, str):
                 return _err(f"content parameter must be a string, got {type(content).__name__}")
 
-            # Reject oversized input before compressing it (OOM DoS guard). The
-            # cap is a BYTE ceiling (matching furl_read's byte-measured limit),
-            # so measure the encoded byte length, not the character count (Bug-8)
-            # — on multibyte content a char count is up to ~4x short and lets an
-            # over-ceiling payload through. Cheap bounds avoid encoding the common
-            # small case: chars are a lower bound on UTF-8 bytes and 4*chars an
-            # upper bound.
+            # Reject oversized input before compressing it (OOM DoS guard). The cap is a BYTE ceiling (matching furl_read's byte-measured limit), so measure the
+            # encoded byte length, not the character count (Bug-8) — on multibyte content a char count is up to ~4x short and lets an over-ceiling payload through.
             _char_len = len(content)
             _too_large = _char_len > _MAX_READ_BYTES or (
                 _char_len * 4 > _MAX_READ_BYTES
@@ -2359,10 +2092,8 @@ class FurlMCPServer:
         if not isinstance(persist, bool):
             return _err(f"persist parameter must be a boolean, got {type(persist).__name__}")
 
-        # T11: an include/exclude pattern is matched inside run_in_executor
-        # below, off the event loop, where RE2 is the only engine that can
-        # bound a crafted pattern (see _refuse_regex_filters). Refuse before
-        # dispatch instead of letting it reach the unbounded fallback.
+        # T11: an include/exclude pattern is matched inside run_in_executor below, off the event loop, where RE2 is the only engine that can
+        # bound a crafted pattern (see _refuse_regex_filters). Refuse before dispatch instead of letting it reach the unbounded fallback.
         if not patterns.is_empty and not re2_available():
             return _refuse_regex_filters()
 
@@ -2376,25 +2107,17 @@ class FurlMCPServer:
 
     async def _handle_retrieve(self, arguments: dict[str, Any]) -> list[TextContent]:
         query = arguments.get("query")
-        # Parameter-error treatment for a non-string query — the caller's
-        # mistake, not an internal failure (API-15). Checked BEFORE the hash so
-        # the no-hash cross-store-search route (feature a) sees a valid query.
+        # Parameter-error treatment for a non-string query — the caller's mistake, not an internal failure
+        # (API-15). Checked BEFORE the hash so the no-hash cross-store-search route (feature a) sees a valid query.
         if query is not None and not isinstance(query, str):
             return _err(f"query parameter must be a string, got {type(query).__name__}")
 
         hash_key = arguments.get("hash")
         if not hash_key:
-            # Cross-store search (NR2-2 feature a): no hash + a query → rank all
-            # stored entries. No hash AND no query stays the original loud
-            # parameter error (a bare retrieve needs a target).
+            # Cross-store search (NR2-2 feature a): no hash + a query → rank all stored entries.
             if query:
-                # Schema honesty (symmetry with the with-hash path): filters
-                # project a SINGLE stored entry, so they require a hash. The
-                # with-hash path rejects query+filters loudly; silently ignoring
-                # the same keys here let {query, select_field} run a plain
-                # cross-store search as if the filter had been applied. Parse
-                # with the same smart constructor so a malformed filter gets its
-                # own structured error and a valid one gets the missing-hash one.
+                # Schema honesty (symmetry with the with-hash path): filters project a SINGLE stored entry, so they require a hash. The with-hash path rejects
+                # query+filters loudly; silently ignoring the same keys here let {query, select_field} run a plain cross-store search as if the filter had been applied.
                 filters = RetrieveFilters.parse(arguments)
                 if isinstance(filters, FilterError):
                     return _err(filters.reason)
@@ -2415,36 +2138,26 @@ class FurlMCPServer:
                     len(response_text),
                 )
                 return [TextContent(type="text", text=response_text)]
-            # No hash and no query: a bare
-            # retrieve needs a target. Kept byte-identical (the cross-store
-            # search route is discoverable via the tool schema, not this error).
+            # No hash and no query: a bare retrieve needs a target. Kept byte-identical (the
+            # cross-store search route is discoverable via the tool schema, not this error).
             return _err("hash parameter is required")
 
-        # Same width+charset spoofing guard the tool-call parse path applies
-        # (marker_grammar.is_valid_ccr_hash) — keep both ccr-hash ingress points
-        # consistent. A malformed key is a loud 400 here, never reaches the store.
+        # Same width+charset spoofing guard the tool-call parse path applies (marker_grammar.is_valid_ccr_hash) —
+        # keep both ccr-hash ingress points consistent. A malformed key is a loud 400 here, never reaches the store.
         if not is_valid_ccr_hash(hash_key):
             return _err("invalid hash format (expected 12 or 24 lowercase-hex chars)")
 
-        # Store keys are always lowercase (SHA-256 hexdigest output; store()
-        # lowercases explicit hashes) while the format guard above is
-        # case-insensitive — normalize at ingress so an upper/title-cased echo
-        # of a marker hash HITS instead of missing with a confusing
-        # "evicted/never stored" error.
+        # Store keys are always lowercase (SHA-256 hexdigest output; store() lowercases explicit hashes) while the format guard above is case-insensitive
+        # — normalize at ingress so an upper/title-cased echo of a marker hash HITS instead of missing with a confusing "evicted/never stored" error.
         hash_key = hash_key.lower()
 
-        # Parse per-hash filters (NR2-2 feature b). Filters narrow the no-query
-        # full retrieve and are mutually exclusive with a query — a query
-        # already selects items within the entry, and the two describe
-        # incompatible views. Validation lives in the smart constructor, so any
-        # bad regex / range / field list is a structured error here, never a
-        # crash downstream.
+        # Parse per-hash filters (NR2-2 feature b). Validation lives in the smart constructor, so
+        # any bad regex / range / field list is a structured error here, never a crash downstream.
         filters = RetrieveFilters.parse(arguments)
         if isinstance(filters, FilterError):
             return _err(filters.reason)
-        # T11: same worker-thread hazard as furl_compress above -- a `pattern`
-        # here is matched inside asyncio.to_thread (_retrieve_content), off
-        # the event loop. Refuse before it ever reaches that path.
+        # T11: same worker-thread hazard as furl_compress above -- a `pattern` here is matched inside
+        # asyncio.to_thread (_retrieve_content), off the event loop. Refuse before it ever reaches that path.
         if filters.pattern is not None and not re2_available():
             return _refuse_regex_filters()
         if query is not None and not filters.is_empty:
@@ -2454,10 +2167,8 @@ class FurlMCPServer:
                 "filters to project the full original"
             )
 
-        # INFO: the hash is a content-address (validated 12/24-hex above), safe
-        # to log; the query is a user-supplied search string and the result can
-        # carry the retrieved ORIGINAL content — neither is logged verbatim. The
-        # DEBUG line records whether a query was present and its length only.
+        # INFO: the hash is a content-address (validated 12/24-hex above), safe to log; the query is a user-supplied
+        # search string and the result can carry the retrieved ORIGINAL content — neither is logged verbatim.
         has_query = query is not None
         logger.info(
             "event=mcp_retrieve_started hash=%s has_query=%s has_filters=%s",
@@ -2474,18 +2185,11 @@ class FurlMCPServer:
         try:
             response_text = json.dumps(result, indent=2, allow_nan=False)
         except ValueError:
-            # The query path re-serializes parsed items, and a stored numeric
-            # that materialized as float inf/nan (e.g. 1e400) would be emitted
-            # as bare Infinity — RFC-invalid JSON a strict host rejects. The
-            # store's numeric-fidelity fallback (text chunks for lossy
-            # canonicals) makes this unreachable in normal operation; as a
-            # backstop, return the byte-exact no-query response — the original
-            # ships verbatim inside a JSON string — instead of corrupt numbers.
+            # The query path re-serializes parsed items, and a stored numeric that materialized as float inf/nan (e.g. RFC-invalid JSON a strict
+            # host rejects. The store's numeric-fidelity fallback (text chunks for lossy canonicals) makes this unreachable in normal operation;
             result = await self._retrieve_content(hash_key, None)
             response_text = json.dumps(result, indent=2, allow_nan=False)
         # INFO: outcome — hash, whether the entry resolved, and the result size.
-        # ``original_content`` (when present) must never reach the log; report a
-        # boolean hit/miss and a char count instead of the payload.
         resolved = "error" not in result
         result_chars = len(json.dumps(result, ensure_ascii=False, default=str))
         logger.info(
@@ -2506,9 +2210,8 @@ class FurlMCPServer:
     def _compute_stats(self) -> dict[str, Any]:
         """Blocking stats aggregation (store + shared-file reads), off the loop."""
         stats = self._stats.to_dict()
-        # One up-front contrast so the two scopes below are never conflated: the
-        # flat top-level counters are THIS process only; the ``store`` block
-        # (entries + hook_activity counters) is the shared cross-process picture.
+        # One up-front contrast so the two scopes below are never conflated: the flat top-level counters are THIS
+        # process only; the ``store`` block (entries + hook_activity counters) is the shared cross-process picture.
         stats["scopes"] = (
             "SCOPE LEGEND (F11) — read each block by its scope, they do not mix: "
             "top-level counters = THIS server process, this session; "
@@ -2519,10 +2222,8 @@ class FurlMCPServer:
             "'sub_agents' and 'combined' = a rolling "
             f"{SESSION_WINDOW_SECONDS}s window across processes."
         )
-        # Label the flat counters above as THIS-server-process scope so they are
-        # never read as a session-wide total (Finding B): they count only what
-        # this MCP server process itself compressed/retrieved. The live,
-        # cross-process picture is the ``store`` block below.
+        # Label the flat counters above as THIS-server-process scope so they are never read as a session-wide
+        # total (Finding B): they count only what this MCP server process itself compressed/retrieved.
         stats["process_scope"] = (
             "counters above (compressions, retrievals, total_*_tokens, "
             "savings_percent, estimated_cost_saved_usd) reflect ONLY what THIS "
@@ -2530,9 +2231,8 @@ class FurlMCPServer:
             "sub-agents. See 'store' for the shared, cross-process picture."
         )
 
-        # Store-derived, cross-process section. Route through _get_local_store()
-        # (the accessor every other handler uses) so per-project isolation — the
-        # deployed default — reports the ACTIVE namespace store.
+        # Store-derived, cross-process section. Route through _get_local_store() (the accessor every other
+        # handler uses) so per-project isolation — the deployed default — reports the ACTIVE namespace store.
         stats["store"] = self._store_derived_stats()
 
         # Aggregate cross-process stats (main session + sub-agents)
@@ -2600,10 +2300,8 @@ class FurlMCPServer:
             "entries": len(live),
             "live_entries": len(live),
             "max_entries": max_entries,
-            # F8 effective retrieval headroom: one compression is one logical
-            # entry (a columnar row-drop stores ONE whole-blob parent, not
-            # 1 + N per-row chunks), so this is the real count of retrievable
-            # slots left before FIFO eviction starts within-TTL loud-misses.
+            # F8 effective retrieval headroom: one compression is one logical entry (a columnar row-drop stores ONE whole-blob parent, not
+            # 1 + N per-row chunks), so this is the real count of retrievable slots left before FIFO eviction starts within-TTL loud-misses.
             "cap_accounting": self._cap_accounting_block(len(live), max_entries),
             "total_original_bytes": total_original_bytes,
             "total_compressed_bytes": total_compressed_bytes,
@@ -2612,10 +2310,8 @@ class FurlMCPServer:
             "estimated_tokens_saved": tokens_saved,
             # Cross-process hook/pipe activity counters (persisted in this store).
             "hook_activity": self._hook_activity_block(store),
-            # T7: whether THIS host can even receive a PostToolUse replacement,
-            # independent of and more thorough than hook_activity's cheap,
-            # per-invocation check (this call can afford a subprocess; the
-            # per-tool-call hook path cannot) — see _post_tool_use_compression_block.
+            # T7: whether THIS host can even receive a PostToolUse replacement, independent of and more thorough than hook_activity's cheap,
+            # per-invocation check (this call can afford a subprocess; the per-tool-call hook path cannot) — see _post_tool_use_compression_block.
             "post_tool_use_compression": self._post_tool_use_compression_block(),
         }
         if live:
@@ -2692,13 +2388,7 @@ class FurlMCPServer:
         if not isinstance(counters, dict):
             counters = {}
 
-        # F11: snapshot the lifetime counters the first time this server reads
-        # them, so ``this_session`` = lifetime - start. Captured lazily (the
-        # store is lazy). ANY counter below its snapshot means the store was
-        # reset under us (furl_purge all=true) — the counters only move by
-        # upsert-add between global wipes — so the WHOLE baseline is dropped and
-        # persisted, see _rebaselined_counters. Every delta below is then
-        # non-negative by construction, with no clamp hiding a reset.
+        # F11
         if self._hook_counters_at_start is None:
             self._hook_counters_at_start = dict(counters)
         base = _rebaselined_counters(self._hook_counters_at_start, counters)
@@ -2724,10 +2414,8 @@ class FurlMCPServer:
             ),
             "hook_invocations_seen": counters.get("hook_invocations_seen", 0),
             "hook_compressions_applied": counters.get("hook_compressions_applied", 0),
-            # Addition (a): the size-reroute breadcrumb (rides ALONGSIDE
-            # hook_compressions_applied — it is still a real, marker-emitting
-            # compression, not a no-op), surfaced by name so a processed huge
-            # blob is visible in furl_stats.
+            # Addition (a): the size-reroute breadcrumb (rides ALONGSIDE hook_compressions_applied — it is still a real,
+            # marker-emitting compression, not a no-op), surfaced by name so a processed huge blob is visible in furl_stats.
             "hook_size_reroute": counters.get("hook_size_reroute", 0),
             "hook_noop_reasons": _bucketed(counters, "hook_noop:"),
         }
@@ -2753,16 +2441,7 @@ class FurlMCPServer:
             block["pipe_invocations_seen"] = pipe_seen
             block["pipe_compressions_applied"] = pipe_applied
             block["pipe_noop_reasons"] = pipe_noop
-            # Additions (b)+(c): the pipe_noop buckets are DYNAMIC per-command
-            # reasons only. The two STATIC gating reasons — a Bash permission-rule
-            # set being present, or FURL_PRETOOL_PIPE disabled — are deliberately
-            # NOT counted per command (they would fire on nearly every Bash call
-            # and tax the hot path), so their absence here is not "zero
-            # occurrences". The SessionStart banner reads the same Bash rules and
-            # is the authoritative live signal for whether the pipe is gated off;
-            # furl_stats does not duplicate that scan because it lives in the
-            # plugin hook layer outside this package and duplicating it here would
-            # risk drift.
+            # Additions (b)+(c): the pipe_noop buckets are DYNAMIC per-command reasons only.
             block["pipe_noop_scope"] = (
                 "DYNAMIC per-command reasons only: settings-doubt, already-wrapped, "
                 "not-bash, emit-error, and the malformed-input buckets. The STATIC "
@@ -2878,11 +2557,7 @@ class FurlMCPServer:
         )
         deleted_total = (1 if deleted_one else 0) + nested_count
         if survivors:
-            # Read-back verification failed (A1/RG6): something the cascade decided
-            # to delete is STILL retrievable. Report it loudly, naming every
-            # survivor, rather than claim success — a purge that does not purge is
-            # the top data-safety bug in the audits, and an incomplete cascade is
-            # invisible if only the top hash is re-checked.
+            # Read-back verification failed (A1/RG6): something the cascade decided to delete is STILL retrievable.
             return _err(
                 f"purge verification FAILED: {len(survivors)} entr"
                 f"{'y is' if len(survivors) == 1 else 'ies are'} still retrievable "
@@ -2903,11 +2578,8 @@ class FurlMCPServer:
                 "never stored); nothing to delete."
             )
         if kept_shared:
-            # B2: a blob deliberately RETAINED because another live entry still
-            # references it must be disclosed. Without this the agent reads
-            # "verified no longer retrievable" while the content is still there,
-            # which is exactly the false-erase claim the read-back exists to
-            # prevent. The retention is correct (RG3); hiding it is not.
+            # B2: a blob deliberately RETAINED because another live entry still references it must be disclosed. Without this the agent reads "verified
+            # no longer retrievable" while the content is still there, which is exactly the false-erase claim the read-back exists to prevent.
             note += (
                 f" {len(kept_shared)} nested blob{'s' if len(kept_shared) != 1 else ''} "
                 f"kept because another live entry still references "
@@ -2963,10 +2635,7 @@ class FurlMCPServer:
         """
         store = self._get_local_store()
         outcome = store.delete_cascade_detailed(hash_key)
-        # The named hash is always verified (even when it was already absent, so a
-        # delete that silently no-ops on a live entry is still caught); the nested
-        # hashes verified are the ones the cascade actually removed. dict.fromkeys
-        # dedupes while keeping order -- the top hash appears in both sources.
+        # The named hash is always verified (even when it was already absent, so a delete that silently no-ops on a live entry is still caught).
         expected_gone = dict.fromkeys((hash_key, *outcome.deleted_hashes(hash_key)))
         survivors = tuple(h for h in expected_gone if store.exists_any_tier(h))
         return (
@@ -3077,10 +2746,7 @@ class FurlMCPServer:
             {
                 "hash": hash_key,
                 "created_at": entry.created_at,
-                # age + ttl alongside expires_in: "58m left" alone is
-                # ambiguous — a fresh 1 h entry and a 23 h-old 24 h entry
-                # read identically. (_humanize_ttl_remaining is a plain
-                # whole-seconds humanizer, reused for all three.)
+                # age + ttl alongside expires_in: "58m left" alone is ambiguous — a fresh 1 h entry and a 23 h-old 24 h entry read identically.
                 "age": _humanize_ttl_remaining(now - entry.created_at),
                 "ttl": _humanize_ttl_remaining(entry.ttl),
                 "expires_in": _humanize_ttl_remaining(entry.ttl - (now - entry.created_at)),
@@ -3141,9 +2807,8 @@ class FurlMCPServer:
         if not isinstance(file_path, str):
             return _err(f"file_path parameter must be a string, got {type(file_path).__name__}")
 
-        # PERF-16: the jail walk (resolve/openat), fstat, body read, fcntl-locked
-        # stats append and store.store are all synchronous file I/O — run the
-        # whole read off the event loop (the documented sqlite-backend invariant).
+        # PERF-16: the jail walk (resolve/openat), fstat, body read, fcntl-locked stats append and store.store are
+        # all synchronous file I/O — run the whole read off the event loop (the documented sqlite-backend invariant).
         return await asyncio.to_thread(self._read_file_sync, file_path, fresh)
 
     def _read_file_sync(self, file_path: str, fresh: bool) -> list[TextContent]:
@@ -3152,23 +2817,14 @@ class FurlMCPServer:
 
         from furl_ctx.redaction import build_store_redactor
 
-        # Jail + pinned-fd read + decode via the shared ingress (also used by
-        # furl_compress's file_path). ``_MAX_READ_BYTES`` is read live at the
-        # call so the cap stays monkeypatchable in tests; the "read" wording keeps
-        # furl_read's too-large message byte-identical.
+        # Jail + pinned-fd read + decode via the shared ingress (also used by furl_compress's file_path).
         jailed = _read_jailed_file(file_path, _MAX_READ_BYTES, what="read")
         if isinstance(jailed, list):
             return jailed
         path, content = jailed
 
-        # Credential redaction (built-in patterns ON by default + FURL_REDACT_PATTERNS),
-        # applied AFTER decode and BEFORE the hash / cache / store / served output —
-        # furl_read stored and served the raw file verbatim, bypassing the redaction
-        # the other store paths got (review F1). Redacting before the content_hash keeps
-        # the file cache coherent: same file + same patterns hash identically
-        # (cache hit), while a pattern change hashes differently and forces a
-        # fresh (re-redacted) read. The served numbered output is scrubbed too,
-        # consistent with the hook. Unset patterns => None => byte-identical.
+        # Credential redaction (built-in patterns ON by default + FURL_REDACT_PATTERNS), applied AFTER decode and BEFORE the hash / cache / store
+        # / served output — furl_read stored and served the raw file verbatim, bypassing the redaction the other store paths got (review F1).
         _read_redactor = build_store_redactor()
         if _read_redactor is not None:
             content = _read_redactor(content)
@@ -3184,9 +2840,8 @@ class FurlMCPServer:
                 # File unchanged — but is the CCR entry still alive?
                 store = self._get_local_store()
                 if store.exists(ccr_hash):
-                    # CCR alive — return cache marker. A hit AVOIDS tokens,
-                    # it does not compress: record it under the dedicated
-                    # cache counters (COR-36), never the compression totals.
+                    # CCR alive — return cache marker. A hit AVOIDS tokens, it does not compress: record
+                    # it under the dedicated cache counters (COR-36), never the compression totals.
                     self._stats.record_cache_hit(cached_tokens - 5)
                     return [
                         TextContent(
@@ -3213,19 +2868,13 @@ class FurlMCPServer:
                 del self._file_cache[str_path]
             # File changed — fall through to fresh read
 
-        # Fresh read: store in CCR and cache the hash. Count tokens with the
-        # same tokenizer the compress path uses (COR-36: a whitespace word
-        # count is not a token count and understated every furl_read entry).
+        # Fresh read: store in CCR and cache the hash.
         from furl_ctx.tokenizers import get_tokenizer
 
         token_estimate = get_tokenizer(_MCP_TOKEN_MODEL).count_text(content)
 
         store = self._get_local_store()
-        # require_durable (review F3, symmetry with furl_compress): the full
-        # content is served below regardless — nothing is lost on a fresh read —
-        # but a write that only reached volatile process memory must not seed
-        # ``_file_cache``, or a later unchanged-read response would advertise
-        # ``furl_retrieve(hash=...)`` backed by nothing durable.
+        # require_durable (review F3, symmetry with furl_compress): the full content is served below regardless.
         from furl_ctx.cache.compression_store import DurableWriteError
 
         try:
@@ -3287,13 +2936,7 @@ async def main(argv: list[str] | None = None) -> None:
     else:
         logging.basicConfig(level=logging.WARNING)
 
-    # Per-project CCR isolation (audit #4): scope this server's durable store to
-    # the project it serves, so one machine-global ~/.furl DB cannot surface
-    # project A's originals in project B or evict across projects. CLAUDE_PROJECT_DIR
-    # (Claude Code's project root — stable across the main agent, its sub-agents,
-    # and the compress hook) is preferred; cwd is the fallback. ``setdefault``
-    # leaves a user free to force a shared store (FURL_CCR_NAMESPACE) or the
-    # legacy global one (FURL_CCR_PROJECT_DIR="") without being overridden here.
+    # scope this server's durable store to the project it serves
     os.environ.setdefault(
         "FURL_CCR_PROJECT_DIR",
         os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd(),

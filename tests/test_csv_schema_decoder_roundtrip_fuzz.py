@@ -72,14 +72,11 @@ from furl_ctx.transforms.csv_schema_decoder import (
     split_unquoted,
 )
 
-# CCR recovery helper — resolves drop sentinels in the compressed output via
-# both the Rust store and the Python compression_store.  Imported from the
-# CCR recovery invariant suite; do NOT modify that function here.
+# CCR recovery helper — resolves drop sentinels in the compressed output via both the Rust store and the Python compression_store.
 from tests.test_ccr_recovery_invariant import _recover_from_output as _ccr_recover_from_output
 from verify.independent_recheck import _unflatten_dotted  # reference dotted-key canonicalization
 
-# Force lossless-first so the targeted regression uses the lossless path.
-# Mirrors the approach used in tests/test_lossless_column_encodings.py.
+# Force lossless-first so this regression exercises the lossless encoder/decoder path directly.
 _LOSSLESS_FIRST = ContentRouterConfig(smart_crusher_routing_policy="lossless-first")
 
 # MinTokens policy (default): rows are either lossless-kept or
@@ -185,9 +182,8 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
         "中文",
         "한국어",
     ]
-    # All-rows-identical multiline value: ``stamp_constant_columns`` folds it
-    # and ``const_decl_value`` CSV-quotes it INTO the ``[N]{...}`` declaration,
-    # so the header logical line carries an embedded newline (COR-1 shape).
+    # All-rows-identical multiline value: ``stamp_constant_columns`` folds it and ``const_decl_value`` CSV-quotes
+    # it INTO the ``[N]{...}`` declaration, so the header logical line carries an embedded newline (COR-1 shape).
     BANNER = "fuzz banner line one\nfuzz banner line two"
     # Low-cardinality path roots for the head-dict column (COR-2 shape).
     HEAD_ROOTS = ["svc/api", "svc/worker", "lib/core"]
@@ -260,13 +256,8 @@ def _make_adversarial_rows(rng: random.Random, n_rows: int) -> list[dict]:
                 ),
                 "tag": f"tag-{i % 5}",
             }
-        # The two decoder-regression shapes ride along on EVERY row (see the
-        # focused COR-1 / COR-2 tests above the fuzz section):
-        #   - ``banner``: identical multiline text in all rows — the header
-        #     declaration itself carries a CSV-quoted newline.
-        #   - ``path``: head-dict column (few ``<root>/`` heads, unique tails)
-        #     whose tails carry a comma AND a double-quote, so every encoded
-        #     ``<idx><delim><tail>`` row cell ships CSV-quoted.
+        # The two decoder-regression shapes ride along on EVERY row (see the focused COR-1 /
+        # COR-2 tests above the fuzz section): - ``banner``: identical multiline text in all rows.
         rows.append(
             {
                 **row,
@@ -333,9 +324,8 @@ def test_embedded_newline_in_cell_round_trips_lossless() -> None:
     After the fix, ``_split_logical_lines`` tracks quote-open state and
     only breaks on unquoted newlines, reconstructing the logical row exactly.
     """
-    # Use 60 rows — enough to exceed the min-token threshold that triggers
-    # the lossless CSV-schema path; the actual newline-containing rows are
-    # interleaved with plain rows to exercise the state machine.
+    # Use 60 rows — enough to exceed the min-token threshold that triggers the lossless CSV-schema path;
+    # the actual newline-containing rows are interleaved with plain rows to exercise the state machine.
     items = []
     for i in range(60):
         if i % 4 == 0:
@@ -613,9 +603,8 @@ def test_grammar_breaking_column_key_declines_compaction() -> None:
     """
     values = [f"srv-{i:03d}.internal.example.com" for i in range(8)]
 
-    # Control: the SAME shape under a safe key takes the lossless CSV path
-    # and round-trips exactly — proving the declines below are key-driven,
-    # not shape-driven.
+    # Control: the SAME shape under a safe key takes the lossless CSV path and
+    # round-trips exactly — proving the declines below are key-driven, not shape-driven.
     control = [{"id": i, "meta_region": v, "status": "ok"} for i, v in enumerate(values)]
     control_rows = decode_csv_schema_rows(_compress_csv(control))
     assert control_rows == control, "control shape must round-trip via the CSV path"
@@ -635,16 +624,8 @@ def test_grammar_breaking_column_key_declines_compaction() -> None:
         )
 
 
-# ────────────── Test #1e — COR-13 decoder-coverage honesty ────────────────────
-#
-# The engine's lossless claim is "exact reconstruction through
-# ``decode_csv_schema_rows``" (module docstring of csv_schema_decoder).
-# Today that decoder proves flat-scalar TABLES only: ``Compaction::Buckets``
-# renders (``__buckets:``) decode to ``None`` and ``CellValue::Nested``
-# cells (CSV-quoted IR JSON) decode to plain strings.  COR-13's contract:
-# every shape either decodes byte-exact OR is DECLINED from the lossless
-# tier (falling back to verbatim passthrough or the CCR-recoverable lossy
-# path) — never shipped as "lossless" while being unverifiable.
+# Test #1e COR-13 decoder-coverage honesty ──────────────────── The engine's lossless claim is "exact reconstruction through ``decode_csv_schema_rows``" (module docstring of csv_schema_decoder). every
+# shape either decodes byte-exact OR is DECLINED from the lossless tier (falling back to verbatim passthrough or the CCR-recoverable lossy path) never shipped as "lossless" while being unverifiable.
 
 
 def _assert_decoded_exact_or_declined(items: list) -> str:
@@ -672,9 +653,7 @@ def _assert_decoded_exact_or_declined(items: list) -> str:
             f"Rendered (first 300):\n{text[:300]}"
         )
         return "lossless"
-    # Declined from the lossless tier: rows kept inline (passthrough /
-    # lossy survivors) + rows recoverable from the CCR store must cover
-    # the whole corpus.
+    # Declined from the lossless tier: rows kept inline (passthrough / lossy survivors) + rows recoverable from the CCR store must cover the whole corpus.
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, ValueError):
@@ -792,9 +771,8 @@ def test_json_tagged_object_and_array_cells_round_trip_byte_exact() -> None:
     items = _make_json_mixed_rows(60)
     text = _compress_csv(items)
 
-    # The trigger shape must actually be on the wire: object/array cells ship as
-    # `\x1f`-envelopes carrying UNDOUBLED quotes (raw JSON `{"`), never the old
-    # CSV-quoted, quote-doubled `"{""..."` form.
+    # The trigger shape must actually be on the wire: object/array cells ship as `\x1f`-envelopes
+    # carrying UNDOUBLED quotes (raw JSON `{"`), never the old CSV-quoted, quote-doubled `"{""..."` form.
     assert "\x1f" in text, f"expected JSON-container envelope cells; got:\n{text[:300]}"
     assert '{"retries"' in text, f"expected raw (undoubled) JSON object payload; got:\n{text[:300]}"
     assert '{""' not in text, (
@@ -837,9 +815,8 @@ def test_heterogeneous_buckets_shape_never_ships_unverifiable_lossless() -> None
         "the reference decoder cannot decode the __buckets: grammar "
         f"(COR-13).\nRendered (first 200):\n{text[:200]}"
     )
-    # Today's expected route.  When full Buckets decoder coverage lands,
-    # this pin flips to "lossless" — deliberate, so the coverage change
-    # is made consciously.
+    # Today's expected route. When full Buckets decoder coverage lands, this pin
+    # flips to "lossless" — deliberate, so the coverage change is made consciously.
     assert route == "declined", f"unexpected route {route!r}"
 
 
@@ -982,9 +959,8 @@ def test_fuzz_adversarial_cases_min_tokens_policy_zero_silent_loss() -> None:
                 f"Decoder produced {len(invented)} row(s) after stripping engine fields "
                 f"that were not in the input: {sorted(invented)[:2]}"
             )
-        # Whether or not rows decoded from the CSV, some rows may be in the
-        # CCR store (referenced by <<ccr:HASH>> sentinels embedded in the
-        # string output).  Use the full recovery machinery to check zero loss.
+        # Whether or not rows decoded from the CSV, some rows may be in the CCR store (referenced by <<ccr:HASH>>
+        # sentinels embedded in the string output). Use the full recovery machinery to check zero loss.
         recovered = _ccr_recover_from_output(items, ccr_enabled=True, ccr_inject_marker=True)
         missing = expected_reprs - recovered
         assert not missing, (
@@ -1087,25 +1063,8 @@ def test_fuzz_embedded_newline_rows_never_split() -> None:
     )
 
 
-# ══════════ Test #3 — lossless-fidelity fuzz families (T1 / T2 / T12) ══════════
-#
-# Three generator families for the lossless-fidelity audit defects, driven
-# through the SAME "decode byte-exact OR decline" contract helper as the
-# COR-13 shapes above (``_assert_decoded_exact_or_declined``):
-#
-#   * mixed-type columns (T1): a column mixing bare scalar-looking strings
-#     ("200"/"true"/"null"/"1.5") with real int/bool/null/float scalars. The
-#     unfixed engine renders every such string bare, so the decoder's
-#     ``json.loads`` coerces "200"->200, "true"->True, "null"->None. The fix
-#     quotes them; the column stays lossless AND exact.
-#   * container-strings (T2): values that ORIGINATED as strings but parse as
-#     JSON containers. A uniform column of them stays a lossless string
-#     column; one mixed with a real scalar becomes a ``json`` column that
-#     cannot disambiguate a quoted container-string from a real container, so
-#     it DECLINES to the recoverable tier (fail-closed).
-#   * literal dotted keys (T12): a literal top-level ``"m.k"`` column beside a
-#     nested ``{"m": {"k": ...}}`` object. The flatten must not synthesize a
-#     second ``m.k`` column; both distinct values must survive.
+# Fuzz mixed scalar types, container-shaped strings, and dotted-key collisions through the same contract: decode
+# byte-exactly or decline lossless compaction. Never coerce string values or merge distinct dotted/nested fields.
 
 _SVC_CONST = "auth-service-primary-eu-central-1.internal.example.com"
 
@@ -1147,14 +1106,8 @@ def _make_container_string_rows(rng: random.Random, n_rows: int, *, mix: bool) -
     return rows
 
 
-# Container-shaped strings where Python ``json.loads`` and ``serde_json``
-# DIVERGE: json.loads accepts NaN / Infinity / -Infinity and deep nesting;
-# serde_json rejects NaN / Infinity and caps nesting at 128. A serde-based
-# decline predicate mispredicts the decoder and ships these quoted on the
-# lossless tier, where the reference decoder json.loads them into a CONTAINER
-# (silent, markerless loss). The structural decline gate keys on cell SHAPE,
-# not a re-parse, so it declines them regardless. The leading-whitespace
-# variants exercise the JSON-whitespace trim in that gate.
+# Container-shaped strings where Python ``json.loads`` and ``serde_json`` DIVERGE json.loads accepts NaN / Infinity / -Infinity and deep nesting; A serde-based decline
+# predicate mispredicts the decoder and ships these quoted on the lossless tier where the reference decoder json.loads them into a CONTAINER (silent, markerless loss).
 _JSON_LOADS_DIVERGENCE = [
     "[NaN]",
     "[Infinity]",
@@ -1251,23 +1204,8 @@ def test_fuzz_literal_dotted_keys_preserve_both_values() -> None:
         )
 
 
-# ──────────────── COR-14: flatten-ambiguity guard (dotted inner keys) ─────────
-#
-# The nested-uniform flatten synthesizes `parent.key` column names that the
-# wire grammar never records.  When the synthesized dotted name is ambiguous
-# about the original nesting, the decoded rows bind values to the WRONG paths
-# under the documented dotted-key equivalence — silently, with no CCR sentinel
-# (`{"a": {"b.c": 900}}` beside a literal `a.b` decoded as `a.b.c: 900`
-# beside a nested `a.b`, swapping which value owns `a.b.c`).  The encoder
-# must decline the flatten for exactly those shapes.  The un-flattened
-# column then stays a nested-object cell, and the array takes whichever
-# route its size/shape earns — nested-cell lossless table (decode
-# byte-exact) or fail-closed decline to verbatim/recoverable — both fully
-# asserted by `_assert_decoded_exact_or_declined`.  Against the pre-guard
-# encoder these shapes shipped a "lossless" CSV table whose decode was NOT
-# byte-exact, which is exactly what the helper's lossless-path assertion
-# rejects, so these tests are red without the guard with no route pin
-# needed.
+# Ambiguous dotted-key flattening must decline rather than ship a falsely lossless table. The fallback
+# may remain nested or use recoverable routing, but decoded ownership of values must never change.
 
 
 def test_dotted_inner_with_prefix_sibling_never_silently_corrupts() -> None:
@@ -1336,16 +1274,8 @@ def test_benign_dotted_inner_keys_still_flatten_value_exact() -> None:
         )
 
 
-# ═══════ Test #4 — F5 nested-object envelope + F4 header total / numeric stats ═
-#
-# F5: a `json`-tagged column whose cells are Objects/Arrays ships each cell as a
-# length-prefixed envelope (`\x1f<codepoint_len><raw_compact_json>`) instead of
-# CSV-quoted compact JSON, so the column is never inflated by quote-doubling.
-# F4: when rows are dropped the header carries `[kept/total]` and a trailing
-# `__stats:` line summarises every NON-CONSTANT numeric column over ALL original
-# rows (a constant column already declares `=V` in the header, so its aggregates
-# are derivable and it is omitted). Both must round-trip losslessly (value-exact
-# under the documented dotted unflatten).
+# ═══════ Test #4 F5 nested-object envelope + F4 header total / numeric stats ═ F5 a `json`-tagged column whose cells are Objects/Arrays ships each cell as a length-prefixed
+# envelope (`\x1f<codepoint_len><raw_compact_json>`) instead of CSV-quoted compact JSON Both must round-trip losslessly (value-exact under the documented dotted unflatten).
 
 
 def _csv_quote(s: str) -> str:
@@ -1494,9 +1424,8 @@ def test_f4_survivor_header_carries_total_and_numeric_stats() -> None:
     assert stats_lines, "expected a __stats: summary line after row-drop"
     stats = decode_stats_line(stats_lines[0])
     assert stats is not None
-    # `pid` is CONSTANT (454 in every row) -> declared `pid:int=454` in the
-    # header, so its min/max/sum/count are derivable and the stats line omits it
-    # (dead-weight trim). The varying numeric columns still carry whole-array stats.
+    # `pid` is CONSTANT (454 in every row) -> declared `pid:int=454` in the header, so
+    # its min/max/sum/count are derivable and the stats line omits it (dead-weight trim).
     for col in ("ts", "dur", "tid"):
         vals = [it[col] for it in items]
         assert stats[col] == {

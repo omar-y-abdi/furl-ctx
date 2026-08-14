@@ -52,48 +52,16 @@ from typing import Any
 
 from .regex_budget import Boundability, classify_boundability, matches_within_budget
 
-# ── ReDoS guards (SEC-1, A12, RG1) ──────────────────────────────────────────
-# The include/exclude patterns are caller-supplied and run over caller-supplied
-# content, line by line. A catastrophically-backtracking pattern (e.g.
-# ``(a+)+$``) over a long line can wedge the MCP process. Three layers defend it:
-#
-# * ``_MAX_PATTERN_CHARS`` / the nested-quantifier heuristic reject pathological
-#   *patterns* at parse time (see ``_validate_pattern``);
-# * ``_MAX_REGEX_LINE_CHARS`` bounds the *input* any single match ever sees;
-# * the per-match wall-clock budget in ``regex_budget`` bounds the match itself.
-#
-# The budget is what actually makes this safe. The first two layers are
-# SYNTACTIC, and syntax cannot bound backtracking: ``(a|b|ab)+Z`` has no nested
-# quantifier, no optional chain, and is 10 characters long, yet it backtracks for
-# minutes against an 80-character line -- well inside the input cap.
-#
-# All three bounds sit far past realistic filter usage, so normal patterns and
-# normal content are matched byte-identically to before.
+# ReDoS guards (SEC-1, A12, RG1) ────────────────────────────────────────── The include/exclude patterns are caller-supplied and run over caller-supplied content, line by line. * ``_MAX_PATTERN_CHARS``
+# / the nested-quantifier heuristic reject pathological *patterns* at parse time (see ``_validate_pattern``); * the per-match wall-clock budget in ``regex_budget`` bounds the match itself.
 _MAX_REGEX_LINE_CHARS = 10_000
 _MAX_PATTERN_CHARS = 200
 
-# Detects nested unbounded quantifiers — a quantified group whose body itself
-# ends in an unbounded quantifier — e.g. ``(a+)+``, ``(a*)*``, ``(a+)*``,
-# ``(.*)+``. This is the classic exponential-backtracking shape. Heuristic, not
-# a proof: it catches the common single-nesting forms, not every pathological
-# construction. The input cap above is the real backstop; this just fails the
-# obvious cases loudly at parse time instead of at match time.
+# Detects nested unbounded quantifiers — a quantified group whose body itself ends in an unbounded quantifier — e.g.
 _NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
 
-# Bound on the number of variable-length quantifiers a single pattern may apply
-# (review A12). An "optional chain" such as ``.?``
-# repeated dozens of times carries NO nested quantifier and stays under
-# ``_MAX_PATTERN_CHARS``, yet backtracks exponentially on any line WITHIN the
-# input cap — the cap bounds input length, not backtracking width, so a short
-# adversarial line (``.?`` x22 measured ~7 s, worse beyond) still wedges the
-# match. The nested-quantifier screen above misses this shape entirely. Real
-# retrieve/compress filters carry at most a handful of quantifiers (the shipped
-# test corpus tops out at 4), so a bound of 12 rejects the exponential chains
-# with wide margin while passing every realistic pattern untouched.
-#
-# This screen is DEFENSE-IN-DEPTH, not the guarantee: it is syntactic, and no
-# syntactic screen can bound backtracking (``(a|b|ab)+Z`` scores 1 and still
-# hangs). The per-match budget in ``regex_budget`` is the actual bound (RG1).
+# Bound on the number of variable-length quantifiers a single pattern may apply (review A12). so a bound of 12 rejects the exponential chains
+# with wide margin while passing every realistic pattern untouched. The per-match budget in ``regex_budget`` is the actual bound (RG1).
 _MAX_VARIABLE_QUANTIFIERS = 12
 
 
@@ -183,14 +151,7 @@ class CompressionMode(Enum):
         return f"unknown mode {value!r}; valid modes: {valid}"
 
 
-# Aggressive-mode knob values. All are EXISTING ``ContentRouterConfig`` fields;
-# these are just turned-up settings, not new behavior.
-#
-# * cap kept items low so a crush keeps fewer rows (verified to shrink a
-#   JSON-array tool output below the ``normal`` result on a concrete payload);
-# * raise both acceptance thresholds toward 1.0 so the router accepts marginal
-#   compressions it rejects at the default 0.85/0.95 (a compression is accepted
-#   when ``ratio < min_ratio``; higher accepts more).
+# Aggressive-mode knob values.
 _AGGRESSIVE_MAX_ITEMS_AFTER_CRUSH = 5
 _AGGRESSIVE_MIN_RATIO_RELAXED = 0.98
 _AGGRESSIVE_MIN_RATIO_AGGRESSIVE = 0.99

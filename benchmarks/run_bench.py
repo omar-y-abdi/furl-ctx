@@ -382,12 +382,8 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     refresh = "--refresh" in args
 
-    # A2: fail CLOSED on a broken engine. Running `python -m benchmarks.run_bench`
-    # from the repo root puts the extension-less source tree ahead of the built
-    # wheel on sys.path, so every compress() fail-opens ("No module named
-    # 'furl_ctx._core'") and the harness would otherwise write a plausible-looking
-    # all-zero baseline (0% reduction, "lossless", 100% recall). Verify the native
-    # core imports up front and abort BEFORE measuring or writing anything.
+    # A2: fail CLOSED on a broken engine. Running `python -m benchmarks.run_bench` from the repo root puts the extension-less source
+    # tree ahead of the built wheel on sys.path. Verify the native core imports up front and abort BEFORE measuring or writing anything.
     try:
         import furl_ctx._core  # noqa: F401  (native extension presence check)
     except Exception as exc:  # noqa: BLE001 - any import failure is fatal here

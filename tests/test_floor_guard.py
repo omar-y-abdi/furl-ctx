@@ -282,11 +282,7 @@ def test_a_standalone_re_floor_may_raise_the_floor() -> None:
     assert report.baseline_only_pr
 
 
-# --------------------------------------------------------------------------- #
-# Entries present on only one side — the shapes someone would reach for to walk
-# past a per-entry comparison. Both answers are deliberate, not accidents of the
-# arithmetic, and both coverage sets get the same ruling.
-# --------------------------------------------------------------------------- #
+# # Entries present on only one side — the shapes someone would reach for to walk past a per-entry comparison.
 
 
 def test_retiring_a_dataset_is_treated_as_an_upward_move() -> None:
@@ -348,10 +344,8 @@ def test_a_new_entry_is_silent_for_direction_but_still_covered_by_drift() -> Non
     assert inflated.findings[0].subject == "new@50"
 
 
-# --------------------------------------------------------------------------- #
-# Recall regimes: same two checks, inverted arithmetic. Bigger recall is BETTER,
-# so the loosening direction is DOWN and DRIFT is a floor BELOW reality.
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Recall regimes: same two checks, inverted arithmetic. Bigger recall is
+# BETTER, so the loosening direction is DOWN and DRIFT is a floor BELOW reality. --------------------------------------------------------------------------- #
 
 
 def test_lowering_a_recall_floor_inside_a_feature_pr_fails() -> None:
@@ -459,17 +453,13 @@ def test_every_check_is_reported_together() -> None:
         "logs@90",  # raised tokens AND lowered retention, same dataset
         "naming/logs/visible_only",
     }
-    # FOUR findings on logs@90, not three: its token floor was both raised
-    # (DIRECTION) and left above what the run measures (DRIFT), and its
-    # retention floor was both lowered (DIRECTION) and left below what the run
-    # measures (DRIFT). Two quantities x two checks. Each names a different
-    # thing wrong with the same dataset, so collapsing them would lose one.
+    # FOUR findings on logs@90, not three: its token floor was both raised (DIRECTION) and left above what the run
+    # measures (DRIFT), and its retention floor was both lowered (DIRECTION) and left below what the run measures (DRIFT).
     assert sum(1 for f in report.findings if f.subject == "logs@90") == 4
 
 
-# --------------------------------------------------------------------------- #
-# Artifact handling. A broken input must never read as a clean run.
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Artifact handling. A broken input
+# must never read as a clean run. --------------------------------------------------------------------------- #
 
 
 def _write_results(
@@ -563,9 +553,8 @@ def test_cli_exit_codes(tmp_path: Path) -> None:
     assert main([*argv, "--candidate", str(clean)]) == 0
     assert main([*argv, "--candidate", str(drifted)]) == 1
     assert main([*argv, "--candidate", str(tmp_path / "missing.json")]) == 2
-    # A recall floor above what the run measures is a REGRESSION, which is
-    # compare_baseline's job, not this guard's: it must stay quiet rather than
-    # double-report. Only the drift direction (floor below reality) is ours.
+    # A recall floor above what the run measures is a REGRESSION, which is compare_baseline's
+    # job, not this guard's: it must stay quiet rather than double-report.
     assert main([*argv, "--floor-pr", str(regime_drift), "--candidate", str(clean)]) == 1
     assert (
         main(

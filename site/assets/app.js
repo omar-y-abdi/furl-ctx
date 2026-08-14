@@ -1,5 +1,4 @@
-/* furl showcase, vanilla classic script. Works from the file scheme and http.
-   Reads window.__FURL_DATA__ produced by site/data/generate.py. */
+/* Vanilla showcase client for file:// and HTTP; reads preloaded page data from window.__FURL_DATA__. */
 (function () {
   "use strict";
 
@@ -348,10 +347,7 @@
     return shell;
   }
 
-  /* ---- boot ------------------------------------------------------------
-     The data is inlined, so mount the real panel synchronously. This end-of-
-     body script runs before first paint, so the skeleton never swaps and the
-     layout never shifts. The skeleton is the pre-script and no-JS fallback. */
+  /* Mount synchronously before first paint; the skeleton remains the no-JS fallback and avoids layout shift. */
   bindNumbers();
   setupReveal();
   var mount = document.getElementById("demo-mount");

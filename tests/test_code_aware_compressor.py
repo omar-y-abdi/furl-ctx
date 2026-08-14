@@ -324,17 +324,8 @@ class TestCcrBacking:
         assert working_store.get_stats()["entry_count"] == 0
 
 
-# ─── 4. Missing-dep fail-open — REAL import block (runs WITH tree-sitter) ─────
-#
-# Both tests prove the no-tree-sitter fail-open by blocking the import at the
-# module-finder level (see `_force_missing_tree_sitter`), so the production
-# `_check_tree_sitter_available` takes its actual `except ImportError` branch —
-# the same branch a machine without the [code] extra takes. They therefore run
-# and assert identically whether or not tree-sitter is installed and carry NO
-# `@requires_tree_sitter` guard. The router case was previously gated on
-# `@requires_tree_sitter` (so it never ran where the fallback actually matters)
-# AND faked absence by monkeypatching `_check_tree_sitter_available` itself
-# (never exercising the real import/except/cache) — both are fixed here.
+# ─── 4. Missing-dep fail-open The router case was gated on `@requires_tree_sitter` (so it never ran where the fallback actually matters) AND
+# faked absence by monkeypatching `_check_tree_sitter_available` itself (never exercising the real import/except/cache) — both are fixed here.
 
 
 class TestMissingDepFailOpen:
@@ -481,10 +472,8 @@ class TestProtectionPrecedence:
         assert entry.original_content == code
 
 
-# ─── 7. compress() total-function edges + result property ────────────────────
-#
-# These pin public-API edges that hold regardless of the [code] extra: content
-# with no detectable language passes through, and lines_saved is a pure floor.
+# ─── 7. compress() total-function edges + result property ──────────────────── These pin public-API edges that hold
+# regardless of the [code] extra: content with no detectable language passes through, and lines_saved is a pure floor.
 
 
 class TestCompressPassthroughAndResult:

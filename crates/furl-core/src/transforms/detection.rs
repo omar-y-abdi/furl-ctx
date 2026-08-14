@@ -1,41 +1,11 @@
-//! ContentRouter detection chain.
-//!
-//! Wires the per-tier detectors into the single function the
-//! ContentRouter calls. The locked design from
-//! `project_rust_content_detection_arch.md`:
-//!
-//! ```text
-//! Tier 1: unidiff::is_diff()    → if true, return GitDiff
-//! Tier 2: PlainText (fallthrough)
-//! ```
-//!
-//! # Why no regex tier
-//!
-//! User-locked decision (2026-04-25): the Rust side does not run a
-//! regex-based content detector in production detection. (The
-//! byte-parity Rust port of Python's regex `content_detector` was
-//! removed after Chunk 2 confirmed the production chain never
-//! consumed it; the Python regex detector remains the Stage-2
-//! backstop in `furl_ctx/transforms/content_router.py`.) The dispatch
-//! is the unidiff parser + fallthrough only.
-//!
-//! # Search / build output
-//!
-//! The retired regex detector recognized grep-style search output
-//! (`file:line:`) and CMake/log output as their own content types. The
-//! deterministic chain has no equivalent labels, so these now route to
-//! [`ContentType::PlainText`] — we prefer passthrough to misroute. If a
-//! benchmark later shows real compression loss on grep/build outputs,
-//! we add a focused detector for those specifically; not preemptively.
+//! Production detection is intentionally two-tier: parsed unified diff → `GitDiff`, otherwise
+//! `PlainText`. Grep/build output stays plain text until a focused deterministic detector is justified.
 
 use serde_json::{Map, Value};
 
 use crate::transforms::unidiff_detector::is_diff;
 
-/// Content types the detection chain can produce. String tags match
-/// Python's `ContentType` enum values (`furl_ctx/transforms/
-/// content_detector.py`); the PyO3 boundary ships the tag and the
-/// Python wrapper rebuilds its enum from it.
+/// Content-type string tags must match the Python enum; PyO3 sends the tag and Python reconstructs its enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentType {
     GitDiff,
@@ -52,11 +22,8 @@ impl ContentType {
     }
 }
 
-/// Detection result shipped across the PyO3 boundary. Mirrors the field
-/// surface of Python's `DetectionResult` dataclass (`content_type`,
-/// `confidence`, `metadata`) so the Python `ContentRouter` can consume
-/// it unchanged. `metadata` uses `serde_json::Map` so PyO3 can convert
-/// it to a Python dict on the boundary without losing type fidelity.
+/// Detection result shipped across the PyO3 boundary. `metadata` uses `serde_json::Map`
+/// so PyO3 can convert it to a Python dict on the boundary without losing type fidelity.
 #[derive(Debug, Clone)]
 pub struct DetectionResult {
     pub content_type: ContentType,
@@ -64,11 +31,8 @@ pub struct DetectionResult {
     pub metadata: Map<String, Value>,
 }
 
-/// Run the detection chain on `content` and return the chosen
-/// [`ContentType`].
-///
-/// Empty input shortcuts to [`ContentType::PlainText`] without
-/// touching either tier.
+/// Run the detection chain on `content` and return the chosen [`ContentType`].
+/// Empty input shortcuts to [`ContentType::PlainText`] without touching either tier.
 pub fn detect(content: &str) -> ContentType {
     if content.is_empty() {
         return ContentType::PlainText;
@@ -120,10 +84,7 @@ mod tests {
 
     #[test]
     fn set_x_trace_with_orphaned_plus_lines_routes_to_plain_text() {
-        // Regression (P0-1): `+++ cmd` lines from `set -x` nested
-        // expansion panic unidiff 0.4.0 (orphaned target header →
-        // unwrap on None). The contained detector must treat the trace
-        // as PlainText — not crash the detection chain.
+        // Regression (P0-1): `+++ cmd` lines from `set -x` nested expansion panic unidiff 0.4.0 (orphaned target header → unwrap on None).
         let trace = "+ make build\n\
                      ++ nproc\n\
                      +++ getconf _NPROCESSORS_ONLN\n\
@@ -140,12 +101,7 @@ mod tests {
 
     #[test]
     fn grep_search_results_route_to_plain_text_per_locked_design() {
-        // Locked design (2026-04-25): no regex tier on Rust side, so
-        // grep-style `file:line:content` output now goes through
-        // PlainText. This is a deliberate behavior change vs. the
-        // retired regex detector. If benchmarks later show
-        // real compression loss on grep output, we add a focused
-        // detector then — not preemptively.
+        // Locked design (2026-04-25): no regex tier on Rust side, so grep-style `file:line:content` output now goes through PlainText.
         let grep = "src/foo.py:42:def process():\n\
                     src/bar.py:10:    return True\n\
                     src/baz.py:7:class Worker:\n";
@@ -156,10 +112,8 @@ mod tests {
 
     #[test]
     fn build_log_output_routes_to_plain_text() {
-        // Build/test log output has no explicit detector on the Rust
-        // side and is not a diff, so the deterministic chain routes it
-        // to the safe-default PlainText passthrough rather than the
-        // degenerate GitDiff.
+        // Build/test log output has no explicit detector on the Rust side and is not a diff, so the deterministic
+        // chain routes it to the safe-default PlainText passthrough rather than the degenerate GitDiff.
         let log = "[INFO] Building target foo\n\
                    [WARN] Deprecated API usage in foo.cpp:45\n\
                    [ERROR] Compilation failed: undefined reference\n";

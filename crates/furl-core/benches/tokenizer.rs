@@ -1,8 +1,5 @@
-//! Throughput benchmark for `furl_core::tokenizer`.
-//!
-//! Measures the tiktoken-rs–backed counter on a small / medium / large input.
-//! Used as a baseline; future stages can compare against this to catch
-//! regressions when we change tokenizer backends or add caching layers.
+//! Throughput benchmark for `furl_core::tokenizer`. Used as a baseline; future stages can compare
+//! against this to catch regressions when we change tokenizer backends or add caching layers.
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use furl_core::tokenizer::{TiktokenCounter, Tokenizer};

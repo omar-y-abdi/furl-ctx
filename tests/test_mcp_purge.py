@@ -119,10 +119,7 @@ async def test_purge_absent_hash_is_clean_not_error(server) -> None:
 
 
 async def test_purge_hash_cascades_to_nested_offloaded_blobs(server) -> None:
-    # An offloaded original (outer) whose compressed view references a nested
-    # dropped-rows blob under another hash. Purging the outer must ALSO erase the
-    # nested blob — else a "purged" secret survives under the nested hash (B3 /
-    # audit non-cascading-purge; A1).
+    # An offloaded original (outer) whose compressed view references a nested dropped-rows blob under another hash.
     nested = "d" * 24
     store = server._get_local_store()
     store.store(original=f"the dropped {_API_KEY} rows", compressed="x", explicit_hash=nested)

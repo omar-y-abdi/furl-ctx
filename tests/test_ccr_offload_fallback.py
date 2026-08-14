@@ -147,16 +147,14 @@ def test_offload_text_branch_sentinel_is_final_line():
     assert result.strategy_used == CompressionStrategy.CCR_OFFLOAD
 
     lines = result.compressed.split("\n")
-    # Anti-vacuity: a single-line output — or one where the sentinel is the ONLY
-    # content — cannot express a position error at all, so the assertions below
-    # would be decoration. Fail loudly if the fixture ever degrades to that.
+    # Anti-vacuity: a single-line output — or one where the sentinel is the ONLY content —
+    # cannot express a position error at all, so the assertions below would be decoration.
     assert len(lines) > 1, (
         f"preview collapsed to {len(lines)} line(s): this position pin is vacuous "
         f"unless the output carries preview lines AND the sentinel"
     )
-    # Locate the sentinel by PREDICATE before parsing, so any relocation —
-    # head, mid-body, or duplicated — reports its actual index instead of
-    # blowing up on json.loads of a preview line that is not JSON.
+    # Locate the sentinel by PREDICATE before parsing, so any relocation — head, mid-body, or duplicated
+    # — reports its actual index instead of blowing up on json.loads of a preview line that is not JSON.
     sentinel_at = [i for i, line in enumerate(lines) if _is_sentinel_line(line)]
     assert len(sentinel_at) == 1, (
         f"expected exactly one sentinel line, found {len(sentinel_at)} at {sentinel_at}"
@@ -199,9 +197,8 @@ def test_offload_object_with_dominant_array_previews_inner_array():
     rows = json.loads(result.compressed)
     summary = rows[0]["_ccr_summary"]
 
-    # The summary names the dominant array and keeps the object's OTHER
-    # top-level fields WITH their values (review F2) — here "metadata" and its
-    # tiny scalar leaves, not just the bare key name.
+    # The summary names the dominant array and keeps the object's OTHER top-level fields WITH their
+    # values (review F2) — here "metadata" and its tiny scalar leaves, not just the bare key name.
     assert summary["array"] == "traceEvents"
     assert summary["other_fields"] == {
         "metadata": {
@@ -213,17 +210,13 @@ def test_offload_object_with_dominant_array_previews_inner_array():
     }
     assert summary["count"] == 200
 
-    # The summary is built from the ACTUAL events, not the metadata header: the
-    # event fields appear (in schema/value_counts/examples) and the metadata
-    # boilerplate does not. (`name` here is all-unique per the synthetic
-    # payload, so `cat`/`ph` carry the categorical histogram.)
+    # The summary is built from the ACTUAL events, not the metadata header: the event fields
+    # appear (in schema/value_counts/examples) and the metadata boilerplate does not.
     assert {"cat", "ph", "pid", "ts"} <= set(summary["schema"])
     assert "cat" in summary["value_counts"]
     example_rows = list(summary["examples"]["by_value"].values())
     assert example_rows and {"name", "cat", "ph", "ts"} <= set(example_rows[0])
-    # Metadata is NOT summarized as if it were events — it never leaks into the
-    # event schema. It IS kept (review F2) as the sibling field values, confined
-    # to `other_fields`, so the header's scalars stay readable inline.
+    # Metadata is NOT summarized as if it were events — it never leaks into the event schema.
     assert "enhancedTraceVersion" not in summary["schema"]
     assert summary["other_fields"]["metadata"]["enhancedTraceVersion"] == 1
 
@@ -335,21 +328,16 @@ class TestRetrieveHintChannelSpoofingGuard:
         ids=["w11", "w13", "w16", "w23", "w25", "w32"],
     )
     def test_retrieve_hint_rejects_wrong_width_hash(self, width: int) -> None:
-        # A wrong-width hex run is not a real engine emission — producers
-        # emit exactly 12 (sha256[:6]) or 24 (md5[:24]) hex. The
-        # {12}(?:...{12})? alternation + (?![0-9a-fA-F]) lookahead must
-        # reject it. Catches a {12,24}-style broadening the existing tests
-        # cannot (w16 is the canary: rejected now, matched under {12,24}).
+        # Reject hex hashes of any width except 12 or 24. The explicit alternation prevents
+        # accidental broadening such as `{12,24}` from accepting unsupported widths.
         bad = "a" * width
         text = f"[N items compressed to M. Retrieve more: hash={bad}]"
         assert not _looks_like_ccr_output(text), f"width {width} must not pin as already-compressed"
 
     @pytest.mark.parametrize("width", [12, 24], ids=["w12", "w24"])
     def test_retrieve_hint_accepts_strict_widths(self, width: int) -> None:
-        # The other half of the width guard: 12 and 24 lowercase-hex are
-        # accepted (12 is the legacy crusher width, 24 the current width for
-        # every diff/log/search producer). Paired with the rejection pin so a
-        # tightening that drops a legitimate width is also visible.
+        # The other half of the width guard: 12 and 24 lowercase-hex are accepted (12 is the legacy crusher width, 24 the current width
+        # for every diff/log/search producer). Paired with the rejection pin so a tightening that drops a legitimate width is also visible.
         good = "a" * width
         text = f"[N items compressed to M. Retrieve more: hash={good}]"
         assert _looks_like_ccr_output(text), f"width {width} is a real engine emission and must pin"
@@ -357,26 +345,19 @@ class TestRetrieveHintChannelSpoofingGuard:
     @pytest.mark.parametrize(
         ("phrase", "why"),
         [
-            # Shape G's `Retrieve full diff: hash=` phrase is deliberately NOT
-            # in the alternation (the diff idempotency gap is an open product
-            # candidate in IMPROVEMENT-LEDGER.md) — pinning its rejection here
-            # keeps an accidental `(?:more|original|full diff)` broadening
-            # visible without taking a product position on whether it SHOULD
-            # match.
+            # `Retrieve full diff: hash=` is intentionally outside this alternation; the generic fallback handles that marker shape.
             ("Retrieve full diff: hash=", "shape G — deliberately not matched"),
             ("Retrieve all: hash=", "non-enumerated spelling"),
             ("Retrieve: hash=", "no keyword before the colon"),
-            # The pattern is case-sensitive on `Retrieve` (no IGNORECASE flag):
-            # prose writing `retrieve more:` must not pin. An accidental
-            # re.IGNORECASE broadening would over-match prose.
+            # The pattern is case-sensitive on `Retrieve` (no IGNORECASE flag): prose writing `retrieve
+            # more:` must not pin. An accidental re.IGNORECASE broadening would over-match prose.
             ("retrieve more: hash=", "lowercase 'r' — case-sensitive 'Retrieve'"),
         ],
         ids=["full_diff", "all", "no_keyword", "lowercase_retrieve"],
     )
     def test_retrieve_hint_rejects_non_enumerated_spelling(self, phrase: str, why: str) -> None:
-        # Only `more`/`original` are real engine emissions. A broadening to
-        # `(?:more|original|full diff|all)` or to `re.IGNORECASE` would
-        # over-match prose — this pin fails on both.
+        # Only `more`/`original` are real engine emissions. A broadening to `(?:more|original|full
+        # diff|all)` or to `re.IGNORECASE` would over-match prose — this pin fails on both.
         text = phrase + "a" * 24
         assert not _looks_like_ccr_output(text), f"spelling {phrase!r} must not pin ({why})"
 

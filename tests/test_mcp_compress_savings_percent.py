@@ -28,9 +28,8 @@ import types
 from furl_ctx.ccr.mcp_server import FurlMCPServer
 from furl_ctx.compress import CompressResult
 
-# furl_ctx/__init__.py re-exports the `compress` function, shadowing the
-# submodule attribute, so `import furl_ctx.compress` binds the function.
-# Resolve the actual module object to monkeypatch the name on it.
+# the module re-exports the `compress` function, shadowing the submodule attribute, so `import
+# furl_ctx.compress` binds the function. Resolve the actual module object to monkeypatch the name on it.
 compress_mod = importlib.import_module("furl_ctx.compress")
 
 
@@ -77,9 +76,7 @@ def _patch_compress(
 
 
 def test_savings_percent_agrees_with_tokens_saved(monkeypatch) -> None:
-    # 1000 -> 43 tokens = 957 saved = 95.7% reduction. The buggy formula
-    # (1 - 0.957) * 100 = 4.3 would report the COMPLEMENT; this asserts the
-    # true value, so the reverted formula fails this test.
+    # 1000 -> 43 tokens = 957 saved = 95.7% reduction.
     _patch_compress(monkeypatch, tokens_before=1000, tokens_after=43)
     out = FurlMCPServer._compress_content(_stub_server(), "irrelevant payload")
 
@@ -200,10 +197,7 @@ def test_note_explains_distinct_embedded_marker_hash_review_f6() -> None:
         assert "whole-content hash=" in note
         assert embedded[0] in note  # the actual differing hash is named
 
-        # review F6 (round 2): the granular-marker note is plain user-facing
-        # copy. Fragment markers stored under their own keys resolve against the
-        # same underlying source document (not one shared "stored original"), and
-        # the copy carries no em-dashes, en-dashes, or parentheses.
+        # review F6 (round 2): the granular-marker note is plain user-facing copy.
         assert "underlying source document" in note
         assert "same stored original" not in note
         granular = note[note.index("The compressed view also embeds") :]

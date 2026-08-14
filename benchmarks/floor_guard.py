@@ -391,10 +391,7 @@ def _higher_is_better(
     for key in sorted(floor_pr):
         was = floor_main.get(key)
         if was is None:
-            # Mirror of the new-dataset case: no floor on main means no previous
-            # floor to have moved DOWN from, so DIRECTION is silent BY
-            # CONSTRUCTION rather than by accident. DRIFT above still holds it
-            # to what it actually measures.
+            #
             continue
         now = floor_pr[key]
         if now < was - _EPS and not baseline_only:
@@ -472,10 +469,7 @@ def evaluate(
     for name in sorted(floor_pr.tokens):
         was = floor_main.tokens.get(name)
         if was is None:
-            # No floor on main means no previous floor to have moved UP from,
-            # so DIRECTION is silent by construction rather than by accident.
-            # Not unguarded: DRIFT above still compares the new floor against
-            # what the dataset actually measures.
+            #
             continue
         now = floor_pr.tokens[name]
         if now > was and not baseline_only:
@@ -496,10 +490,7 @@ def evaluate(
                 )
             )
 
-    # ---- The two quantities where bigger is BETTER, so a loosening moves the
-    # floor DOWN. Same two checks, arithmetic inverted, and no slack to spend:
-    # compare_baseline forgives both only to within _EPS, so ANY gap between
-    # floor and reality is headroom somebody could regress into.
+    # The two quantities where bigger is BETTER, so a loosening moves the floor DOWN.
     findings += _higher_is_better(
         scope="regime",
         quantity="recall",
@@ -514,11 +505,8 @@ def evaluate(
                 _retirement_finding("regime", key, f"recall {floor_main.regimes[key]:.4f}")
             )
 
-    # information_retention is the THIRD thing compare_baseline gates, and it
-    # was the third blind spot: lowering a retention floor from 1.00 to 0.60 in
-    # both the floor and the candidate exits 0 on both tools. It needs no
-    # retirement loop of its own — it is keyed by dataset name, so a dropped
-    # dataset is already caught by the token retirement check above.
+    # Gate `information_retention` independently so lowering both candidate and floor cannot
+    # pass. Token-floor retirement already catches datasets removed from the baseline.
     findings += _higher_is_better(
         scope="dataset",
         quantity="information_retention",

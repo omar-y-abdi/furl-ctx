@@ -48,10 +48,8 @@ def test_compress_returns_original_messages_when_pipeline_fails(monkeypatch) -> 
     # On pipeline failure the original messages pass through untouched
     # (fail-open: a compression bug must never break the host's request).
     assert result.messages == messages
-    # The failure is LOUD and HONEST, not silently masked as a no-op:
-    # tokens_before reflects the REAL input so a caller cannot mistake a
-    # swallowed failure for "nothing to compress", and `error` carries the
-    # underlying exception text.
+    # The failure is LOUD and HONEST, not silently masked as a no-op: tokens_before reflects the REAL input so a caller
+    # cannot mistake a swallowed failure for "nothing to compress", and `error` carries the underlying exception text.
     from furl_ctx.tokenizers import get_tokenizer
 
     expected_tokens_before = get_tokenizer("gpt-4o").count_messages(messages)

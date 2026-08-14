@@ -37,10 +37,7 @@ _JSON_BLOCK_START = re.compile(r"^\s*[\[{]", re.MULTILINE)
 _SEARCH_RESULT_PATTERN = re.compile(r"^\S+:\d+:", re.MULTILINE)
 _PROSE_PATTERN = re.compile(r"[A-Z][a-z]+\s+\w+\s+\w+")
 
-# A markdown task-list checkbox: "[ ] todo", "[x] done", "[X] done", optionally
-# bulleted ("- [ ] …"). It starts with "[" but is NOT JSON (Bug-10) — the JSON
-# block detector only balances brackets, it never parses, so an unguarded "[x]
-# done" was extracted as a JSON_ARRAY section and handed to the JSON compressor.
+# A markdown task-list checkbox: "[ ] todo", "[x] done", "[X] done", optionally bulleted ("- [ ] …").
 _CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s+)?\[[ xX]\]")
 
 
@@ -98,15 +95,8 @@ def is_mixed_content(content: str) -> bool:
     Returns:
         True if content appears to be mixed (multiple types).
     """
-    # Structural short-circuit (F2): one whole JSON ARRAY is never "mixed".
-    # A single-line ``jq -c`` array whose string VALUES contain prose (event
-    # names, sentences, URLs) tripped the unanchored ``_PROSE_PATTERN`` scanning
-    # INSIDE those values (``has_prose``) plus ``has_json_blocks`` — 2 indicators
-    # = MIXED — so a pure array took the slow char-by-char ``_extract_json_block``
-    # splitter instead of routing straight to SmartCrusher. The cheap structural
-    # check comes first so the prose heuristic never looks inside a pure JSON
-    # array's strings. ARRAYS ONLY (F-1): a top-level object must keep its MIXED
-    # route, its only path to compression — see ``_is_single_json_array``.
+    # Structural short-circuit (F2): one whole JSON ARRAY is never "mixed". ARRAYS ONLY (F-1): a top-level
+    # object must keep its MIXED route, its only path to compression — see ``_is_single_json_array``.
     if _is_single_json_array(content):
         return False
 
@@ -139,9 +129,7 @@ def split_into_sections(content: str) -> list[ContentSection]:
 
         # Code fence: ```language
         if match := _CODE_FENCE_PATTERN.match(line):
-            # A bare ``` fence has no language tag in the source; recording
-            # it as the empty string (rather than a fabricated "unknown")
-            # lets reassembly reproduce the original bare fence exactly.
+            # Record a bare ``` fence with an empty language tag so reassembly reproduces the original fence exactly.
             language = match.group(1)
             code_lines = []
             start_line = i
@@ -249,10 +237,8 @@ def _extract_json_block(lines: list[str], start: int) -> tuple[str | None, int]:
         line = lines[i]
         json_lines.append(line)
 
-        # Count brackets/braces, but ignore any that appear inside a JSON
-        # string literal — a naive line.count() treats e.g. the "]" in
-        # {"path": "a]b"} as a closing bracket and terminates the block
-        # early, splitting one array across multiple sections.
+        # Count brackets/braces, but ignore any that appear inside a JSON string literal — a naive line.count() treats e.g. the
+        # "]" in {"path": "a]b"} as a closing bracket and terminates the block early, splitting one array across multiple sections.
         for ch in line:
             if escaped:
                 escaped = False

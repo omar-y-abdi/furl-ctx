@@ -1,29 +1,11 @@
-//! Compaction IR — recursive tree representation for lossless / row-lossy
-//! compaction of JSON arrays.
-//!
-//! The IR is the boundary between [`TabularCompactor`] (which produces it)
-//! and [`Formatter`] implementations (which consume it). Renderer-agnostic.
-//!
-//! # Recursive structure
-//!
-//! A `Compaction::Table` has rows of [`CellValue`]s, and a `CellValue` may
-//! itself hold a nested `Compaction`. This enables multi-level compression:
-//! an array whose rows hold stringified-JSON gets recursively compacted
-//! into a sub-table; an opaque blob gets CCR-substituted; a heterogeneous
-//! array gets bucketed by discriminator.
-//!
-//! [`TabularCompactor`]: super::compactor::TabularCompactor
-//! [`Formatter`]: super::formatter::Formatter
+//! Compaction IR — recursive tree representation for lossless / row-lossy compaction of JSON arrays. The IR is the
+//! boundary between [`TabularCompactor`] (which produces it) and [`Formatter`] implementations (which consume it).
 
 use serde_json::Value;
 
 use crate::transforms::smart_crusher::types::DroppedRef;
 
 /// What kind of opaque payload was substituted by CCR.
-///
-/// Carried for telemetry and so formatters can render a one-line hint
-/// next to the CCR pointer (e.g. `<<ccr:abc123 base64,2.1KB>>`) without
-/// re-parsing the original bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpaqueKind {
     /// Looks base64-encoded — long, restricted alphabet.
@@ -32,17 +14,12 @@ pub enum OpaqueKind {
     LongString,
     /// HTML/XML chunk (detected by `<` density).
     HtmlChunk,
-    /// Detected format the classifier knows about by name (e.g. "diff",
-    /// "code"). Routing of these into the right transform is deferred
-    /// to a later PR; for now they're treated as `LongString`.
+    /// Detected format the classifier knows about by name (e.g. "diff", "code").
     Other(String),
 }
 
 impl OpaqueKind {
     /// The KIND token written into the `<<ccr:HASH,KIND,SIZE>>` marker.
-    /// Defined once here so every opaque producer (walker live
-    /// substitution + CSV/KV formatters) maps the enum to the same wire
-    /// string — no per-site `match` to drift out of sync.
     pub fn wire_str(&self) -> &str {
         match self {
             OpaqueKind::Base64Blob => "base64",
@@ -53,66 +30,26 @@ impl OpaqueKind {
     }
 }
 
-/// Reversible per-column encoding, stamped by the compactor when (and
-/// only when) the encoded rendering is strictly smaller AND decodes
-/// back to the exact original values.
-///
-/// Like [`FieldSpec::const_value`], encodings are advisory: the IR rows
-/// keep their full original cells, and only formatters that understand
-/// an encoding exploit it (today: the CSV-schema formatter). Formatters
-/// that ignore this field (JSON, Markdown-KV) render byte-identical
-/// output to the pre-encoding engine.
+/// Reversible per-column encoding, stamped by the compactor when (and only when) the
+/// encoded rendering is strictly smaller AND decodes back to the exact original values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnEncoding {
-    /// The column is an exact arithmetic progression: row `i` holds
-    /// `base + step * i` (every cell a scalar i64, constant non-zero
-    /// step). The CSV-schema formatter declares `name:int=BASE+STEP`
-    /// once and omits the column from rows; the decoder regenerates
-    /// the exact values from the row index. Pure integer math — exact
-    /// reconstruction by construction.
+    /// The column is an exact arithmetic progression: row `i` holds `base + step * i` (every cell a scalar i64, constant non-zero step).
     ArithInt { base: i64, step: i64 },
-    /// Every value is a strict-shape ISO-8601 timestamp
-    /// (`YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)`). The CSV-schema formatter
-    /// marks the declaration `name:string~`, renders the first value
-    /// verbatim and each subsequent cell as `{±delta_seconds}[/tz]`
-    /// (tz spelling only when it changes). Stamped only after the
-    /// compactor PROVES the exact round-trip at stamp time
-    /// (encode → decode → compare against every original string).
+    /// Stamp ISO delta encoding only after every strict ISO-8601 value round-trips exactly.
+    /// Emit the first timestamp verbatim, then delta seconds and changed timezone spelling.
     IsoDeltaSeconds,
-    /// Low-cardinality string column. `values` holds every distinct
-    /// value in first-appearance order, each verbatim exactly once; the
-    /// CSV-schema formatter emits a `__dict:name=v0,v1,...` line after
-    /// the declaration and renders each cell as its dictionary index.
-    /// Stamped only when 2 ≤ |values| < rows, no value contains a
-    /// newline (line-grammar integrity), and the dictionary line plus
-    /// index cells are strictly smaller than the plain cells.
+    /// Dictionary-encode low-cardinality strings in first-seen order only when values contain
+    /// no newlines and the preamble plus indices is strictly smaller than plain cells.
     DictString { values: Vec<String> },
-    /// Float column whose every value renders as a plain decimal with
-    /// ≤ `scale` fractional digits. The CSV-schema formatter declares
-    /// `name:float%scale` and renders each cell as the integer value ×
-    /// 10^scale (`0.053` → `53` at scale 3). Encode/decode are pure
-    /// string manipulation (no float arithmetic); the compactor proves
-    /// the round-trip at stamp time by re-parsing and re-rendering
-    /// every decoded value against the original rendering.
+    /// Float column whose every value renders as a plain decimal with ≤ `scale` fractional digits. Encode/decode are pure string manipulation (no float
+    /// arithmetic); the compactor proves the round-trip at stamp time by re-parsing and re-rendering every decoded value against the original rendering.
     DecimalScaled { scale: usize },
-    /// Cross-row affix fold. Every value in the column shares the byte
-    /// `prefix` and `suffix` (either may be empty, never both). The
-    /// CSV-schema formatter marks the declaration `name:string^`, emits
-    /// a `__affix:name=PREFIX,SUFFIX` preamble line (both CSV-escaped),
-    /// and renders each cell as only its unique middle; the decoder
-    /// rebuilds `prefix + middle + suffix`. Pure byte concatenation —
-    /// exact reconstruction by construction. Stamped only after the
-    /// compactor PROVES the round-trip at stamp time AND the affix line
-    /// plus stripped cells render strictly smaller than the plain cells.
+    /// Cross-row affix fold. The CSV-schema formatter marks the declaration `name:string^`, emits a `__affix:name=PREFIX,SUFFIX` preamble
+    /// line (both CSV-escaped), and renders each cell as only its unique middle; the decoder rebuilds `prefix + middle + suffix`.
     Affix { prefix: String, suffix: String },
-    /// Head-dictionary fold. Values split at the last `delim` into a
-    /// low-cardinality HEAD (declared once, verbatim, first-appearance
-    /// order, each including its trailing delimiter) and a unique TAIL.
-    /// The CSV-schema formatter marks the declaration `name:string@`,
-    /// emits a `__head:name=<DELIM><h0>,<h1>,...` preamble line, and
-    /// renders each cell as `<head_index><delim><tail>`; the decoder
-    /// rebuilds `head[index] + tail`. Stamped only after a stamp-time
-    /// round-trip proof AND a strict byte-saving gate.
+    /// Head-dictionary fold. Values split at the last `delim` into a low-cardinality HEAD (declared once, verbatim, first-appearance order, each
+    /// including its trailing delimiter) and a unique TAIL. Stamped only after a stamp-time round-trip proof AND a strict byte-saving gate.
     HeadDict { delim: char, heads: Vec<String> },
 }
 
@@ -122,29 +59,15 @@ pub struct FieldSpec {
     /// Column name. May be dotted for flattened nested fields,
     /// e.g. `"meta.region"`.
     pub name: String,
-    /// Inferred type tag. One of: `"int"`, `"float"`, `"string"`,
-    /// `"bool"`, `"null"`, `"json"` (cells render as JSON literals —
-    /// last-resort), `"ccr"` (cells are CCR pointers).
+    /// Inferred type tag. One of: `"int"`, `"float"`, `"string"`, `"bool"`, `"null"`, `"json"`
+    /// (cells render as JSON literals — last-resort), `"ccr"` (cells are CCR pointers).
     pub type_tag: String,
     /// True if at least one row had this field absent or `null`.
     pub nullable: bool,
-    /// `Some(v)` when EVERY row holds the identical scalar `v` in this
-    /// column (constant-column fold). The value lives here once instead
-    /// of repeating per row; formatters MAY exploit it (the CSV-schema
-    /// formatter declares `name:type=value` and omits the column from
-    /// rows). Rows in the IR still carry the full cells, so formatters
-    /// that ignore this field (JSON, Markdown-KV) render byte-identical
-    /// output to the pre-fold engine. Lossless by construction: the
-    /// constant is verbatim in the declaration and every row is
-    /// reconstructible from header + row cells alone.
+    /// `Some(v)` when EVERY row holds the identical scalar `v` in this column (constant-column fold).
     pub const_value: Option<Value>,
-    /// `Some(enc)` when the column's values are exactly reproducible
-    /// through a reversible encoding (see [`ColumnEncoding`]). Stamped
-    /// only after a stamp-time decode-and-compare proves exact
-    /// round-trip AND the encoded rendering is strictly smaller.
-    /// Mutually exclusive with `const_value`. Rows in the IR still
-    /// carry the full cells, so encoding-unaware formatters are
-    /// byte-identical to the pre-encoding engine.
+    /// `Some(enc)` when the column's values are exactly reproducible through a reversible encoding (see [`ColumnEncoding`]).
+    /// Stamped only after a stamp-time decode-and-compare proves exact round-trip AND the encoded rendering is strictly smaller.
     pub encoding: Option<ColumnEncoding>,
 }
 
@@ -171,17 +94,10 @@ pub enum CellValue {
         byte_size: usize,
         kind: OpaqueKind,
     },
-    /// Field is absent in this row. Distinct from `Scalar(Value::Null)`
-    /// — `Missing` means the original object had no such key, while
-    /// `Scalar(Value::Null)` means the key existed and was null.
+    /// Field is absent in this row.
     Missing,
-    /// An array-of-objects cell whose inner compaction DECLINED
-    /// (`compact` returned [`Compaction::Untouched`]). Carries the
-    /// ORIGINAL value so formatters render it verbatim as compact JSON —
-    /// byte-identical to the pre-PERF-5 `Nested(Untouched(value))`
-    /// shape — while, like [`CellValue::Nested`], keeping the containing
-    /// table OUT of the decoder-verifiable lossless tier (a CSV-quoted
-    /// JSON cell decodes to a plain string, not the array — COR-13).
+    /// An array-of-objects cell whose inner compaction DECLINED (`compact` returned
+    /// [`Compaction::Untouched`]). Carries the ORIGINAL value so formatters render it verbatim as compact JSON.
     DeclinedJson(Value),
 }
 
@@ -212,13 +128,8 @@ pub struct Bucket {
     pub rows: Vec<Row>,
 }
 
-/// Top-level compaction result. Tree-shaped via `Nested` cells.
-///
-/// [`Compaction::Table`] is the common case. [`Compaction::Buckets`]
-/// only fires for heterogeneous arrays where a discriminator field
-/// cleanly partitions rows. [`Compaction::Untouched`] is the
-/// fall-through when the compactor declines to operate (e.g. mixed
-/// scalars, or fewer than 2 rows).
+/// Top-level compaction result. Tree-shaped via `Nested` cells. [`Compaction::Table`] is the common case. [`Compaction::Buckets`] only fires for heterogeneous arrays where a
+/// discriminator field cleanly partitions rows. [`Compaction::Untouched`] is the fall-through when the compactor declines to operate (e.g. mixed scalars, or fewer than 2 rows).
 #[derive(Debug, Clone)]
 pub enum Compaction {
     /// Homogeneous tabular form: N rows × C columns.
@@ -243,14 +154,7 @@ pub enum Compaction {
         byte_size: usize,
         kind: OpaqueKind,
     },
-    /// Compactor declined to compact; the input passes through
-    /// unchanged. Payload-free (PERF-5): every consumer of a declined
-    /// compaction gates on [`Compaction::was_compacted`] /
-    /// [`Compaction::is_decoder_verifiable`] and re-uses its own borrow
-    /// of the input — the old `Untouched(Value)` deep-cloned the entire
-    /// array just to be discarded. A declined NESTED sub-array (the one
-    /// place the declined payload was rendered) is carried by
-    /// [`CellValue::DeclinedJson`] instead.
+    /// Compactor declined to compact; the input passes through unchanged.
     Untouched,
 }
 
@@ -262,56 +166,17 @@ impl Compaction {
         )
     }
 
-    /// True when this compaction is a shape the reference decoder
-    /// (`furl_ctx/transforms/csv_schema_decoder.py`) can prove lossless:
-    /// a flat [`Compaction::Table`] with no [`CellValue::Nested`]
-    /// sub-compactions.
-    ///
-    /// "Lossless" in this engine means *exact reconstruction through
-    /// that decoder*, and today it covers neither [`Compaction::Buckets`]
-    /// renders (the `__buckets:` grammar decodes to `None`) nor `Nested`
-    /// cells (CSV-quoted IR JSON decodes to a plain string) — so the
-    /// crusher's lossless-accept gates DECLINE those shapes (COR-13,
-    /// fail-closed like every stamp gate) until the decoder covers them.
-    /// Declined shapes fall back to the lossy-recoverable or untouched
-    /// path instead of shipping unverifiable bytes under the lossless
-    /// claim. Opaque-substitution policy stays with each call site (see
-    /// [`Self::contains_opaque_ref`]) — this predicate is about decoder
-    /// coverage only.
+    /// Return true only for shapes the reference decoder can prove lossless; otherwise use recoverable-lossy or untouched output.
     pub fn is_decoder_verifiable(&self) -> bool {
         fn row_has_nested(row: &Row) -> bool {
-            // `DeclinedJson` counts as nested here: like `Nested`, its
-            // CSV-quoted JSON render decodes to a plain string, so a
-            // table carrying one must stay OUT of the lossless tier
-            // (COR-13 fail-closed — identical to the pre-PERF-5
-            // `Nested(Untouched)` verdict).
+            // `DeclinedJson` counts as nested here: like `Nested`, its CSV-quoted JSON render decodes to a plain string, so a table carrying
+            // one must stay OUT of the lossless tier (COR-13 fail-closed — identical to the pre-PERF-5 `Nested(Untouched)` verdict).
             row.0
                 .iter()
                 .any(|c| matches!(c, CellValue::Nested(_) | CellValue::DeclinedJson(_)))
         }
-        // True if any `json`-tagged column holds a `Scalar(String)` whose
-        // content is CONTAINER-SHAPED: after skipping leading JSON whitespace
-        // it starts with `{` or `[`. Such a cell cannot ship on the lossless
-        // tier: the reference decoder feeds a quoted `json`-column cell to
-        // Python `json.loads`, which reads any container-shaped payload back as
-        // the CONTAINER, not the original string — indistinguishable from a
-        // genuine container cell. The table is declined (fail-closed, T1/T2)
-        // and routed to the recoverable tier where the exact bytes survive.
-        //
-        // The test is STRUCTURAL, not a re-parse: `serde_json::from_str` and
-        // Python `json.loads` DIVERGE — serde rejects `NaN` / `Infinity` and
-        // caps nesting at 128, Python accepts both — so predicting the parser
-        // with serde let `"[NaN]"` / deep-nested strings ship quoted and decode
-        // as containers (silent loss). Keying on shape closes that gap and is
-        // fail-closed: it also declines container-shaped strings that fail to
-        // parse, which the decoder would keep as strings anyway, so the only
-        // cost is compression on those, never fidelity. Leading JSON whitespace
-        // (space, tab, newline, carriage-return) is trimmed first, matching
-        // `json.loads`, so a whitespace-prefixed container string is caught too.
-        // Genuine container VALUES are `Scalar(Object)` / `Scalar(Array)`, not
-        // `Scalar(String)`, so real container compression is preserved; and
-        // scalar-looking strings (`"200"`, `"true"`) never start with a brace
-        // or bracket, so they stay lossless via the formatter's CSV-quoting.
+        // Reject lossless tables when a `json` column contains a string beginning with `{` or `[`: the decoder
+        // would parse it as a container and change its type. Route these shapes to recoverable output instead.
         fn table_has_unquotable_json_string(schema: &Schema, rows: &[Row]) -> bool {
             for (col, field) in schema.fields.iter().enumerate() {
                 if field.type_tag != "json" {
@@ -338,22 +203,8 @@ impl Compaction {
         }
     }
 
-    /// Append one typed [`DroppedRef::Opaque`] to `sink` for every
-    /// opaque substitution in this tree — [`CellValue::OpaqueRef`] cells
-    /// (including inside [`CellValue::Nested`] sub-compactions and
-    /// [`Compaction::Buckets`]) and the top-level
-    /// [`Compaction::OpaqueRef`] — in render order (row-major, cell
-    /// order; buckets in bucket order).
-    ///
-    /// Pure IR walk (§4.2 R2): the values are exactly those
-    /// `cell_from_value` computed when it minted the marker and wrote
-    /// the store, so collecting them is side-output only — callers run
-    /// this on [`CompactionStage::run`]'s existing return value and the
-    /// rendered bytes are untouched. `kind` is the wire token
-    /// ([`OpaqueKind::wire_str`]) — byte-identical to the KIND field of
-    /// the rendered `<<ccr:HASH,KIND,SIZE>>` marker.
-    ///
-    /// [`CompactionStage::run`]: super::CompactionStage::run
+    /// Append one typed [`DroppedRef::Opaque`] to `sink` for every opaque substitution in this tree in render order
+    /// (row-major, cell order; byte-identical to the KIND field of the rendered `<<ccr:HASH,KIND,SIZE>>` marker.
     pub fn collect_opaque_refs(&self, sink: &mut Vec<DroppedRef>) {
         fn collect_cell(cell: &CellValue, sink: &mut Vec<DroppedRef>) {
             match cell {
@@ -400,11 +251,8 @@ impl Compaction {
         }
     }
 
-    /// True if ANY cell in the tree is an [`CellValue::OpaqueRef`]
-    /// substitution (or the tree itself is a top-level
-    /// [`Compaction::OpaqueRef`]). Used by callers that only want a
-    /// compaction when every original value stays verbatim in the
-    /// rendered output (pure rearrangement, no substitution).
+    /// True if ANY cell in the tree is an [`CellValue::OpaqueRef`] substitution (or the tree itself is a top-level [`Compaction::OpaqueRef`]). Used
+    /// by callers that only want a compaction when every original value stays verbatim in the rendered output (pure rearrangement, no substitution).
     pub fn contains_opaque_ref(&self) -> bool {
         fn row_has_opaque(row: &Row) -> bool {
             row.0.iter().any(|c| match c {

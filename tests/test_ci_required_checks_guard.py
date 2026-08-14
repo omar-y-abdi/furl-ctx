@@ -31,9 +31,7 @@ from pathlib import Path
 try:
     import yaml
 except ModuleNotFoundError as exc:
-    # Hard-fail (not skip) so the guard can never pass vacuously for want of a
-    # parser. PyYAML is declared in the project's [dev] optional-dependencies as
-    # `pyyaml>=6`; install with `pip install -e .[dev]`.
+    # Hard-fail (not skip) so the guard can never pass vacuously for want of a parser.
     raise ModuleNotFoundError(
         "tests/test_ci_required_checks_guard.py requires PyYAML to parse ci.yml "
         "(declared as `pyyaml>=6` in the [dev] optional-dependencies). Install it "
@@ -43,34 +41,19 @@ except ModuleNotFoundError as exc:
 _ROOT = Path(__file__).resolve().parents[1]
 _CI_YML = _ROOT / ".github" / "workflows" / "ci.yml"
 
-# The jobs GitHub ruleset 18484290 marks as REQUIRED status checks. THIS is the
-# obvious edit point if the ruleset's required set ever changes: keep it in lockstep
-# with the ruleset. Every job named here must ALWAYS run (no job-level `if:`) and
-# short-circuit its expensive steps at the step level — see the module docstring.
+# The jobs GitHub ruleset 18484290 marks as REQUIRED status checks.
 _REQUIRED_JOBS = ("lint", "build-wheel", "test")
 
-# The paths-filter job whose `outputs.code` every required job reads to short-circuit
-# its heavy steps (`if: needs.changes.outputs.code == 'true'`). The step-level gate is
-# only possible because this output exists and each required job depends on this job.
+# The paths-filter job whose `outputs.code` every required job reads to short-circuit its heavy steps (`if: needs.changes.outputs.code
+# == 'true'`). The step-level gate is only possible because this output exists and each required job depends on this job.
 _CHANGES_JOB = "changes"
 _CHANGES_OUTPUT = "code"
 
-# The `test` job's `strategy.matrix.shard` list. GitHub Actions names each matrix
-# job's status check `<job-name> (<matrix-value>)`, so this exact list of four
-# values is what produces the four contexts ruleset 18484290 requires: test (1),
-# test (2), test (3), test (4). Shrinking, growing, reordering with gaps, or
-# converting this to an `include:`/`name:` form changes which contexts GitHub
-# produces — any of the four that stops being produced leaves every PR BLOCKED
-# forever, waiting on a context that will never exist. Keep this constant, ci.yml's
-# matrix, and the ruleset's required-context list in lockstep.
+# The test shard matrix produces the four required contexts. Keep this expected set aligned with CI and the repository ruleset.
 _REQUIRED_TEST_SHARDS = [1, 2, 3, 4]
 
-# Keys forbidden on the `pull_request` trigger. Either one makes the ENTIRE
-# workflow not run at all for a PR outside the filter — not just skip a job, but
-# never even start — so none of the required contexts (lint, build-wheel,
-# test (1)..test (4)) are ever produced for that PR, which is then BLOCKED
-# forever. This is the #15/#32/#56 deadlock one level up: instead of a required
-# job skipping internally, the whole workflow run never happens.
+# Keys forbidden on the `pull_request` trigger. Either one makes the ENTIRE workflow not run at all for a PR outside the filter. This
+# is the #15/#32/#56 deadlock one level up: instead of a required job skipping internally, the whole workflow run never happens.
 _FORBIDDEN_TRIGGER_FILTER_KEYS = ("paths", "paths-ignore")
 
 
@@ -174,16 +157,13 @@ def _transitive_needs(jobs: dict[str, object], start: str) -> set[str]:
     return ancestors
 
 
-# Assertion 1 — "the required jobs are present under their expected names" — is
-# enforced by ``_required_job()`` itself, which hard-asserts presence and is called
-# for every name in _REQUIRED_JOBS by the tests below. A rename therefore still
-# fails loudly; a standalone existence test only duplicated that assert.
+# Assertion 1 — "the required jobs are present under their expected names" — is enforced by ``_required_job()``
+# itself, which hard-asserts presence and is called for every name in _REQUIRED_JOBS by the tests below.
 
 
 def test_required_jobs_have_no_job_level_if() -> None:
-    # Assertion 2 — THE deadlock guard. A required check that SKIPS does not satisfy
-    # ruleset 18484290, so a job-level `if:` on any required job re-blocks every
-    # docs/config/workflow-only PR. Gate the expensive STEPS at the step level instead.
+    # Assertion 2 A required check that SKIPS does not satisfy ruleset 18484290, so a
+    # job-level `if:` on any required job re-blocks every docs/config/workflow-only PR.
     jobs = _jobs(_load_ci_workflow())
     gated = sorted(name for name in _REQUIRED_JOBS if "if" in _required_job(jobs, name))
     assert not gated, (
@@ -207,11 +187,8 @@ def test_changes_job_declares_code_output() -> None:
         f"seconds on docs/config-only PRs. Present jobs: {sorted(jobs)}."
     )
     changes = _required_job(jobs, _CHANGES_JOB)
-    # The gate itself must ALWAYS run: a job-level `if:` on `changes` that skips
-    # (on a non-PR event, or under any condition false on a PR) cascade-skips every
-    # required job that lists `needs: changes` without `if: always()`, so the required
-    # contexts never conclude — the same #15/#32/#56 deadlock, one level up. Condition
-    # at the step level, never on this job.
+    # The gate itself must ALWAYS run a job-level `if:` on `changes` that skips (on a non-PR event, or under any
+    # condition false on a PR) cascade-skips every required job that lists `needs so the required contexts never conclude.
     assert "if" not in changes, (
         f"the {_CHANGES_JOB!r} gate job has a job-level `if:` key. If it skips, every "
         f"required job that depends on it cascade-skips and its required status check "
@@ -231,9 +208,8 @@ def test_changes_job_declares_code_output() -> None:
 
 
 def test_required_jobs_depend_on_changes() -> None:
-    # Assertion 4: each required job lists `changes` in `needs:`, so the step-level
-    # short-circuit dependency stays wired (`test` needs `changes` and `build-wheel`;
-    # we only require `changes` here). `needs:` may be a string or a list.
+    # Assertion 4: each required job lists `changes` in `needs:`, so the step-level short-circuit
+    # dependency stays wired (`test` needs `changes` and `build-wheel`; we only require `changes` here).
     jobs = _jobs(_load_ci_workflow())
     missing_dep = sorted(
         name
@@ -249,15 +225,8 @@ def test_required_jobs_depend_on_changes() -> None:
 
 
 def test_test_job_matrix_shard_is_pinned() -> None:
-    # Assertion 5: the `test` job's matrix produces EXACTLY the four required
-    # contexts test (1)..test (4) (ruleset 18484290) — never more, fewer, or a
-    # different shape. GitHub Actions names each matrix job's status check
-    # `<job-name> (<matrix-value>)`; changing `shard` — e.g. to `[1, 2, 3]` — or
-    # converting the matrix to an `include:`/`name:` form changes which contexts are
-    # produced. Any of the four required contexts that stops being produced leaves
-    # every PR BLOCKED forever, waiting on a context that will never exist — the
-    # same shape of deadlock as incidents #15/#32/#56, triggered by a matrix edit
-    # instead of a job-level `if:`.
+    # Assertion 5: the `test` job's matrix produces EXACTLY the four required contexts
+    # test ..test (ruleset 18484290) — never more, fewer, or a different shape.
     jobs = _jobs(_load_ci_workflow())
     test_job = _required_job(jobs, "test")
     strategy = test_job.get("strategy")
@@ -286,12 +255,7 @@ def test_test_job_matrix_shard_is_pinned() -> None:
 
 
 def test_pull_request_trigger_has_no_path_filters() -> None:
-    # Assertion 6: the `on.pull_request` trigger carries neither `paths:` nor
-    # `paths-ignore:`. PyYAML's SafeLoader implements YAML 1.1, under which the bare
-    # `on:` key parses as the boolean `True` (the classic YAML "Norway problem"),
-    # not the string "on" — so the trigger mapping actually lives at
-    # `workflow[True]`, not `workflow["on"]`. Handle both in case a future PyYAML
-    # release changes this.
+    # Assertion 6: the `on.pull_request` trigger carries neither `paths:` nor `paths-ignore:`.
     workflow = _load_ci_workflow()
     trigger_block = workflow.get("on", workflow.get(True))
     assert isinstance(trigger_block, dict), (
@@ -327,16 +291,8 @@ def test_pull_request_trigger_has_no_path_filters() -> None:
 
 
 def test_required_job_transitive_dependencies_have_no_job_level_if() -> None:
-    # Assertion 7: no job anywhere in a required job's TRANSITIVE `needs:` closure —
-    # not just its direct dependencies — has a job-level `if:`. Inserting a new
-    # upstream job between a required job and its existing dependencies (e.g.
-    # changing `build-wheel`'s `needs:` from `[changes]` to `[changes, precheck]`
-    # where `precheck` has `if: false`) cascade-skips the required job exactly like
-    # a job-level `if:` placed directly on it would (assertion 2) — just one or
-    # more hops further away, where a name-based check over `_REQUIRED_JOBS` alone
-    # cannot see it. `changes` itself is already asserted if-free by
-    # test_changes_job_declares_code_output (assertion 3); this test closes the gap
-    # for every OTHER job that could be inserted upstream of a required job.
+    # Assertion 7: no job anywhere in a required job's TRANSITIVE `needs:` closure — not just its direct dependencies — has a job-level `if:`. Inserting a new upstream
+    # job between a required job and its existing dependencies (e.g. changing `build-wheel`'s `needs:` from `[changes]` to `[changes, precheck]` where `precheck` has `if.
     jobs = _jobs(_load_ci_workflow())
     offenders: dict[str, list[str]] = {}
     for required_name in _REQUIRED_JOBS:
@@ -360,41 +316,13 @@ def test_required_job_transitive_dependencies_have_no_job_level_if() -> None:
     )
 
 
-# ─── The `code` filter's COVERAGE (distinct from the deadlock invariant above) ──
-#
-# The assertions above keep every required job CONCLUDING. These keep the filter
-# that decides whether those jobs do any real WORK from silently under-covering.
-#
-# `changes.outputs.code` gates the heavy steps. When it is false, the test shards
-# do not run at all — so any path that can change what the suite tests, yet is
-# absent from the filter, is a hole: that PR merges with the tests that would
-# have caught it never executed. `verify/**` and `benchmarks/**` were exactly
-# that hole (the suite imports both as Python packages), and `conftest.py` — the
-# root config every test loads — was a third.
-#
-# Derived, not hand-listed: the coverage test below walks the suite's REAL AST
-# imports. A grep would not do; `tests/test_effective_savings_offload_cost.py`
-# mentions "verify/measure.py" in prose several times AND imports it, while
-# other files only mention it, so only an import graph distinguishes a genuine
-# dependency from a docstring. Add a test that imports a new top-level package
-# and forget the filter, and this goes red naming the package.
-#
-# Deliberately NOT asserted here, each verified rather than assumed:
-#   * `llms.txt` — uncovered on purpose. The `lint` job runs its anchor guard
-#     UNCONDITIONALLY (no `needs.changes.outputs.code` gate) precisely because
-#     llms.txt is not `.md` and would never trip the filter; ci.yml says so.
-#   * `docs/`, `site/` — no test reads them; the apparent hits are incidental
-#     (`tmp_path / "site"` builds a temp directory, not a repo path).
-#   * `rust-toolchain.toml` — ci.yml pins `toolchain: 1.95.0` inline and never
-#     reads the file, so editing it alone cannot change what CI builds.
+# Derive CI code-filter coverage from the test suite's real AST imports so required test work cannot silently
+# skip affected packages/config. Keep intentionally unconditional or untested paths out of this filter contract.
 
 _ROOT_CONFTEST = "conftest.py"
 
-# Pattern shapes `_path_matches_filter` understands. dorny/paths-filter uses
-# picomatch; this is a deliberate SUBSET covering every shape ci.yml's `code`
-# filter actually uses. An unrecognized shape is a hard failure rather than a
-# silent non-match, so a future pattern this matcher cannot reason about can
-# never make the coverage test pass vacuously.
+# Test only picomatch shapes currently used by CI’s `code` filter. Unknown
+# pattern syntax is a hard failure so unsupported coverage cannot silently pass.
 _SUFFIX_GLOB_PREFIX = "**/"
 _RECURSIVE_DIR_SUFFIX = "/**"
 
@@ -489,10 +417,7 @@ def _top_level_packages_imported_by_tests() -> dict[str, str]:
 
 
 def test_code_filter_covers_every_top_level_package_the_tests_import() -> None:
-    # Assertion 8: every top-level repo package the suite actually imports is
-    # covered by the `code` filter. Derived from the import graph, so a new
-    # dependency that nobody adds to the filter fails here instead of silently
-    # skipping the heavy steps on the PR that introduces it.
+    # Assertion 8: every top-level repo package the suite actually imports is covered by the `code` filter.
     patterns = _code_filter_patterns()
     imported = _top_level_packages_imported_by_tests()
     assert imported, (
@@ -516,11 +441,8 @@ def test_code_filter_covers_every_top_level_package_the_tests_import() -> None:
 
 
 def test_code_filter_covers_the_root_conftest() -> None:
-    # Assertion 9: the root conftest.py is covered. It is not a package and so is
-    # invisible to the import scan above, but pytest loads it for EVERY test in the
-    # repo — it holds the unbuilt-extension guard and shared fixtures. A PR editing
-    # only conftest.py could otherwise break or silently disarm collection for the
-    # entire suite while the suite never ran to notice.
+    # Assertion 9: root test configuration is covered; edits there must trigger the required code checks.
+    # otherwise break or silently disarm collection for the entire suite while the suite never ran to notice.
     patterns = _code_filter_patterns()
     assert _path_matches_filter(_ROOT_CONFTEST, patterns), (
         f"{_ROOT_CONFTEST!r} is not covered by ci.yml's `{_CHANGES_OUTPUT}` path filter. "
@@ -532,12 +454,8 @@ def test_code_filter_covers_the_root_conftest() -> None:
 
 
 def test_verify_and_benchmarks_only_pr_shapes_trigger_the_heavy_steps() -> None:
-    # Assertion 10: the concrete PR shapes this guard exists for. Each of these
-    # diffs touches ONLY a path that the suite imports, and each must set
-    # `code` true so the shards run. Before these paths were filtered, every
-    # shape below yielded false and the heavy steps short-circuited — the
-    # `verify.run` contract (degradations/hash_failures/silent_loss/
-    # cache_prefix_violations) could be edited by a PR whose tests never ran.
+    # Each listed imported path must independently set CI’s `code` filter true so test
+    # shards run. This pins the concrete dependency shapes the coverage guard protects.
     patterns = _code_filter_patterns()
     shapes = {
         "verify/measure.py": "imported by tests/test_effective_savings_offload_cost.py",

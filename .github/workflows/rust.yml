@@ -1,10 +1,8 @@
 name: rust
 
 on:
-  # Quota guard: no push trigger — main only receives squash-merged PRs
-  # whose tree the PR run already tested (ruleset-required checks), so
-  # the post-merge re-run was pure double-billing. Weekly cron guards
-  # against toolchain/dependency drift on an untouched tree.
+  # Quota guard: no push trigger — main only receives squash-merged PRs whose tree the PR run
+  # already tested (ruleset-required checks), so the post-merge re-run was pure double-billing.
   pull_request:
     paths:
       - 'crates/**'
@@ -22,9 +20,6 @@ concurrency:
   cancel-in-progress: true
 
 # Default permissions: read-only. Individual jobs override only what they need.
-# Mitigates CodeQL/CWE-275 (missing-workflow-permissions): the GITHUB_TOKEN
-# defaults to whatever the repo policy is, which can be read-write. Pinning
-# this here means even if the repo default changes, this workflow stays safe.
 permissions:
   contents: read
 
@@ -36,11 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install stable toolchain
-        # Pin action code to @stable (latest fixes), toolchain version
-        # via input. The @1.95.0 ref shipped action code that errors on
-        # ubuntu-latest with `detected conflict: 'bin/cargo-clippy'`
-        # because the pre-installed runner Rust collides with the
-        # clippy-preview component install.
+        # Pin action code to @stable (latest fixes), toolchain version via input. The @1.95.0 ref shipped action code that errors on ubuntu-latest
+        # with `detected conflict: 'bin/cargo-clippy'` because the pre-installed runner Rust collides with the clippy-preview component install.
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.95.0
@@ -56,11 +48,8 @@ jobs:
 
   wheels:
     name: wheels (${{ matrix.target }})
-    # Quota guard: NOT on PRs. This job's macOS leg bills 10x (private
-    # repo) on every crates-touching PR, and PR-time Linux buildability
-    # is already covered by CI's required `build-wheel` check; the full
-    # cross-platform wheel gate runs in release.yml's dry-run/release
-    # matrix. Weekly cron + manual dispatch keep the drift signal.
+    # Quota guard: NOT on PRs. This job's macOS leg bills 10x (private repo) on every crates-touching PR, and PR-time Linux buildability is
+    # already covered by the required `build-wheel` check; the release matrix provides the full cross-platform wheel gate.
     if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -74,15 +63,8 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             maturin-target: aarch64-apple-darwin
-        # macOS x86_64 (Intel) is intentionally NOT in this matrix — but the
-        # historical blocker is gone: the ML-backend excision removed
-        # `fastembed` → `ort` → `ort-sys` (and its missing prebuilt ONNX
-        # Runtime for `x86_64-apple-darwin`) from the dependency graph, so
-        # Intel macOS wheels are now built AND smoke-tested in release.yml's
-        # release/dispatch matrix. This weekly drift job deliberately covers
-        # only the two primary targets (Linux x86_64 + Apple Silicon) to
-        # bound recurring cron cost; the full cross-platform wheel gate lives
-        # in release.yml.
+        # This weekly drift job deliberately covers only the two primary targets (Linux x86_64 + Apple
+        # Silicon) to bound recurring cron cost; the full cross-platform wheel gate lives in release.yml.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -90,10 +72,7 @@ jobs:
           python-version: '3.11'
       - name: "Build wheel (single-wheel architecture builds furl-ctx)"
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        # Maturin reads `[tool.maturin]` from the root `pyproject.toml`
-        # which points at `crates/furl-py/Cargo.toml` for the cdylib.
-        # Output is `furl_ctx-<ver>-<py>-<py>-<platform>.whl` containing
-        # both Python source and the compiled `furl_ctx/_core.so`.
+        # Maturin reads the root project configuration, which points at the Rust extension manifest for the cdylib.
         with:
           command: build
           args: --release --out dist
@@ -118,13 +97,8 @@ jobs:
         uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
         with:
           tool: cargo-audit,cargo-deny
-      # SEC-8: both steps used to run `continue-on-error: true`, so a critical
-      # RUSTSEC advisory in the statically-linked graph (which vendors onig_sys
-      # C/C++ and ring) could never turn CI red. They hard-fail now — each as
-      # its own named step so a red run points at the exact gate. The audit
-      # soft-fail arrived unexplained with the inherited initial commit; no
-      # flakiness was ever recorded for it, and an audit failure on a freshly
-      # published advisory is the signal working as designed, not flake.
+      # SEC-8: both steps used to run `continue-on-error: true`, so a critical RUSTSEC advisory in the statically-linked graph (which vendors
+      # onig_sys C/C++ and ring) could never turn CI red. They hard-fail now — each as its own named step so a red run points at the exact gate.
       - name: cargo audit
         run: cargo audit
       - name: cargo deny check licenses

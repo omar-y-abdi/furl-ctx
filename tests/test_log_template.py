@@ -50,9 +50,8 @@ def multi_template_log(lines_per_template: int = 20) -> str:
     for i in range(lines_per_template):
         lines.append(f"INFO user login accepted user=u{i:03d} session=sess-{i * 7:05d}")
         lines.append(f"WARN cache miss for key blob:{i * 13:06x} shard {i % 8}")
-        # Variable fields sit BEYOND the Drain prefix depth (4 leading
-        # tokens) — a varying token inside the prefix fragments the tree
-        # into per-line buckets and no template can reach min support.
+        # Variable fields sit BEYOND the Drain prefix depth (4 leading tokens) — a varying token inside
+        # the prefix fragments the tree into per-line buckets and no template can reach min support.
         lines.append(f"DEBUG request done for id=req-{i:04d} bytes={i * 991} elapsed_us={i * 37}")
         if i % 7 == 0:
             lines.append(f"totally unstructured noise #{i} !!")
@@ -106,9 +105,8 @@ class TestMiningAndHeader:
         ],
     )
     def test_min_support_boundary(self, line_count: int, should_encode: bool) -> None:
-        # Straddles `count >= MIN_TEMPLATE_SUPPORT`: a `>` mutation would stop the
-        # exactly-at-threshold corpus from encoding. Lines share a fixed skeleton
-        # with two variable positions (id, port) so a wildcard template can form.
+        # Straddles `count >= MIN_TEMPLATE_SUPPORT`: a `>` mutation would stop the exactly-at-threshold corpus from
+        # encoding. Lines share a fixed skeleton with two variable positions (id, port) so a wildcard template can form.
         text = (
             "\n".join(
                 f"INFO connection established from host alpha id={1000 + i} port {40000 + i}"
@@ -135,10 +133,7 @@ class TestMiningAndHeader:
             assert f"{fmt.ESCAPE_CHAR}p" in enc.wire  # escaped "|"
 
     def test_literal_wildcard_in_fixed_text_roundtrips(self) -> None:
-        # A literal "<*>" in otherwise-fixed template text must not be
-        # mistaken for a real slot (WILDCARD_SENTINEL protection).
-        # Long constant tail + enough rows so the encoding actually SHRINKS
-        # (short corpora decline on the growth gate — that's contract).
+        # A literal "<*>" in otherwise-fixed template text must not be mistaken for a real slot (WILDCARD_SENTINEL protection).
         rows = [
             f"NOTE marker <*> stays literal in this fixed template tail, seq={i}" for i in range(20)
         ]
@@ -221,11 +216,8 @@ class TestEncodeContract:
         assert encode(text) is None
 
     def test_no_shared_structure_declines(self) -> None:
-        # Every line's FIRST token differs (distinct hex ids), so each lands in
-        # its own prefix bucket, no cluster reaches MIN_TEMPLATE_SUPPORT, and the
-        # support gate declines. Deterministically None — pinning the branch (not
-        # `is None or smaller`) so a broken support gate that emitted an encoding
-        # would fail here.
+        # Every line's FIRST token differs (distinct hex ids), so each lands in its own prefix
+        # bucket, no cluster reaches MIN_TEMPLATE_SUPPORT, and the support gate declines.
         text = (
             "\n".join(
                 f"{i:08x} {i * 3:08x} {i * 5:08x} {i * 7:08x} {i * 11:08x}" for i in range(20)
@@ -235,11 +227,8 @@ class TestEncodeContract:
         assert encode(text) is None
 
     def test_size_gate_declines_when_wire_would_grow(self) -> None:
-        # A template DOES form here (3 lines share the 4-token prefix "A B C D",
-        # so support == MIN_TEMPLATE_SUPPORT), but the per-record framing overhead
-        # makes the wire larger than the tiny input. This reaches the SIZE gate
-        # (`len(wire) >= len(text)`) — distinct from the support-gate path above —
-        # which must decline rather than ship an inflated encoding.
+        # A template DOES form here (3 lines share the 4-token prefix "A B C D", so support ==
+        # MIN_TEMPLATE_SUPPORT), but the per-record framing overhead makes the wire larger than the tiny input.
         text = "\n".join(f"A B C D {i:02x} {(i * 2) & 0xFF:02x}" for i in range(3)) + "\n"
         assert encode(text) is None
 
@@ -282,9 +271,8 @@ _SPICE = ["|", "\t", "\\", "<*>", "🎉", "é", "  ", "\\p", "\\n", "LT1", "--RE
 
 
 def _template_shaped(rng: random.Random) -> str:
-    # Three constant words after the level keep every variable field BEYOND
-    # Drain's prefix depth (4) — variance inside the prefix fragments the
-    # tree into per-line buckets and nothing reaches min support.
+    # Three constant words after the level keep every variable field BEYOND Drain's prefix depth —
+    # variance inside the prefix fragments the tree into per-line buckets and nothing reaches min support.
     templates = [
         (
             f"{rng.choice(['INFO', 'WARN', 'DEBUG'])} "

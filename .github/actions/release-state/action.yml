@@ -210,9 +210,8 @@ runs:
         PY
         }
 
-        # Remote observation is tri-state: present, confirmed absent, or unknown.
-        # Never reinterpret transport/API/auth ambiguity as absence, because doing
-        # so authorizes a create mutation from an unproven state.
+        # Remote observation is tri-state: present, confirmed absent, or unknown. Never reinterpret transport/API/auth
+        # ambiguity as absence, because doing so authorizes a create mutation from an unproven state.
         query_release_state() {
           local n output rc err_file err
           err_file="${RUNNER_TEMP}/release-view-error"
@@ -284,10 +283,8 @@ runs:
           retry gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
           release_is_draft=false
         else
-          # Idempotent public-release recovery. Never overwrite an existing byte.
-          # If the release is mutable and merely missing assets, adding those exact
-          # names is monotonic and safe. Any collision/mismatch already failed in
-          # inspect_remote_assets; immutable releases must already be complete.
+          # Idempotent public-release recovery. Never overwrite an existing byte. Any collision/mismatch
+          # already failed in inspect_remote_assets; immutable releases must already be complete.
           published="${RUNNER_TEMP}/published-release-assets-preflight"
           missing_file="${RUNNER_TEMP}/published-missing-assets"
           inspect_remote_assets "$published" "$missing_file"
