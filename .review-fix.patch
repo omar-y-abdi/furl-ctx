@@ -1,0 +1,192 @@
+--- a/furl_ctx/cache/compression_store.py
++++ b/furl_ctx/cache/compression_store.py
+@@ -805,34 +805,50 @@
+             # never reaches this branch: _evict_if_needed() above already reaped
+             # it, so a dead binding cannot wedge its key.
+             existing = self._backend.get(hash_key)
+-            if existing is not None:
+-                if existing.original_content != original:
+-                    logger.error(
+-                        "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
+-                        "new_len=%d) — dropping the ambiguous binding; NEITHER content "
+-                        "is served (both markers now loud-miss) rather than resolving "
+-                        "to foreign content",
+-                        hash_key,
+-                        tool_name,
+-                        len(existing.original_content),
+-                        len(original),
+-                    )
+-                    # Drop the stored entry so retrieve() loud-misses instead of
+-                    # serving foreign bytes; its heap tuple is now stale. The
+-                    # binding reached NEITHER a durable nor a volatile tier, so a
+-                    # require_durable caller must veto below (Bug-6) rather than
+-                    # receive the hash as if the content were stored.
+-                    self._backend.delete(hash_key)
+-                    self._stale_heap_entries += 1
+-                    collision_dropped = True
+-                else:
+-                    # Same content being stored again - this is fine, just update
+-                    logger.debug(
+-                        "Duplicate store for hash=%s, updating entry",
+-                        hash_key,
+-                    )
+-                    # Mark old heap entry as stale since we're replacing
++            spilled = self._recover_from_spill(hash_key) if self._spill is not None else None
++            conflicting = next(
++                (
++                    candidate
++                    for candidate in (existing, spilled)
++                    if candidate is not None and candidate.original_content != original
++                ),
++                None,
++            )
++            if conflicting is not None:
++                logger.error(
++                    "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
++                    "new_len=%d) — dropping the ambiguous binding from every tier; "
++                    "NEITHER content is served (both markers now loud-miss) rather than "
++                    "resolving to foreign content",
++                    hash_key,
++                    tool_name,
++                    len(conflicting.original_content),
++                    len(original),
++                )
++                # A same-key spill row is part of the collision domain too. If a
++                # newer primary binding later expires, retrieve() falls back to
++                # spill; leaving an older DIFFERENT spill value there would
++                # silently resurrect foreign content. Drop both tiers before
++                # refusing the new binding so the key becomes a loud miss.
++                if self._backend.delete(hash_key):
+                     self._stale_heap_entries += 1
++                if self._spill is not None:
++                    try:
++                        self._spill.delete(hash_key)
++                    except Exception as exc:  # noqa: BLE001 — collision path stays fail-open
++                        logger.warning(
++                            "CCR spill delete during collision cleanup failed (non-fatal): %s",
++                            exc,
++                        )
++                collision_dropped = True
++            elif existing is not None:
++                # Same content being stored again - this is fine, just update
++                logger.debug(
++                    "Duplicate store for hash=%s, updating entry",
++                    hash_key,
++                )
++                # Mark old heap entry as stale since we're replacing
++                self._stale_heap_entries += 1
+ 
+             if not collision_dropped:
+                 durable = self._persist_and_report_durability(hash_key, entry)
+@@ -1913,12 +1929,14 @@
+             if self._spill is not None:
+                 try:
+                     spilled = self._spill.get(hash_key)
+-                except Exception as exc:  # noqa: BLE001 — named purge still proceeds
++                except Exception as exc:  # noqa: BLE001 — destructive discovery fails closed
+                     logger.warning(
+-                        "CCR spill read during delete_cascade failed; nested spill markers "
+-                        "may remain orphaned: %s",
++                        "CCR spill read during delete_cascade failed; aborting cascade for %s "
++                        "so unreadable nested markers cannot be orphaned: %s",
++                        hash_key,
+                         exc,
+                     )
++                    return CascadeOutcome(top_deleted=False)
+                 else:
+                     if spilled is not None:
+                         entries.append(spilled)
+--- /dev/null
++++ b/tests/test_compression_store_review_regressions.py
+@@ -0,0 +1,91 @@
++"""Regression pins for PR review findings in the CCR spill/cascade paths."""
++
++from __future__ import annotations
++
++from furl_ctx.cache.backends.memory import InMemoryBackend
++from furl_ctx.cache.compression_store import CompressionEntry, CompressionStore
++
++OLD_HASH = "a" * 24
++FILLER_HASH = "b" * 24
++CHILD_HASH = "c" * 24
++PARENT_HASH = "d" * 24
++
++
++class _DictSpill:
++    """Minimal spill backend for deterministic cross-tier collision tests."""
++
++    def __init__(self) -> None:
++        self.data: dict[str, CompressionEntry] = {}
++
++    def get(self, hash_key: str) -> CompressionEntry | None:
++        return self.data.get(hash_key)
++
++    def set(self, hash_key: str, entry: CompressionEntry) -> None:
++        self.data[hash_key] = entry
++
++    def delete(self, hash_key: str) -> bool:
++        return self.data.pop(hash_key, None) is not None
++
++
++class _UnreadableSpill:
++    """Spill whose parent row cannot be inspected but whose delete would succeed."""
++
++    def __init__(self, parent_hash: str) -> None:
++        self.parent_hash = parent_hash
++        self.delete_calls: list[str] = []
++
++    def get(self, hash_key: str) -> CompressionEntry | None:
++        if hash_key == self.parent_hash:
++            raise RuntimeError("transient spill read failure")
++        return None
++
++    def delete(self, hash_key: str) -> bool:
++        self.delete_calls.append(hash_key)
++        return True
++
++
++def test_store_rejects_different_live_binding_already_in_spill() -> None:
++    """A stale spill value must never reappear after a newer same-key binding."""
++    spill = _DictSpill()
++    store = CompressionStore(
++        max_entries=1,
++        backend=InMemoryBackend(),
++        spill=spill,  # type: ignore[arg-type]
++        enable_feedback=False,
++    )
++
++    store.store("old-A", "old view", explicit_hash=OLD_HASH)
++    store.store("filler", "filler view", explicit_hash=FILLER_HASH)
++    assert OLD_HASH in spill.data, "precondition: old binding was demoted to spill"
++
++    # Rebinding the same explicit key to different content is a collision even
++    # when the older binding lives only in spill. The collision contract drops
++    # the ambiguous key rather than serving either producer's foreign bytes.
++    store.store("new-B", "new view", explicit_hash=OLD_HASH)
++
++    assert store.retrieve(OLD_HASH) is None
++    assert OLD_HASH not in spill.data
++
++
++def test_delete_cascade_aborts_before_delete_when_spill_markers_are_unreadable() -> None:
++    """Unreadable spill marker discovery must fail closed before any purge."""
++    store = CompressionStore(enable_feedback=False)
++    store.store("child original", "child view", explicit_hash=CHILD_HASH)
++    store.store(
++        "parent original",
++        f"parent view <<ccr:{CHILD_HASH}>>",
++        explicit_hash=PARENT_HASH,
++    )
++
++    # Make the parent spill-only, then simulate a transient read failure. The
++    # spill advertises a successful delete to pin the old unsafe behavior: it
++    # would delete the parent after failing to discover CHILD_HASH.
++    assert store._backend.delete(PARENT_HASH) is True
++    spill = _UnreadableSpill(PARENT_HASH)
++    store._spill = spill  # type: ignore[assignment]
++
++    outcome = store.delete_cascade_detailed(PARENT_HASH)
++
++    assert outcome.top_deleted is False
++    assert store.exists(CHILD_HASH) is True
++    assert spill.delete_calls == [], "cascade must abort before deleting the unreadable parent"
