@@ -360,7 +360,9 @@ def _parse_select(arguments: dict[str, Any], *, fields_present: bool) -> _Select
 
     ``select_field`` is the row-select anchor: ``select_equals`` /
     ``select_min`` / ``select_max`` without it is a ``FilterError`` (a
-    range/equals with no field is meaningless). ``select_equals`` and a range
+    range/equals with no field is meaningless). A ``select_field`` without any
+    equality or range criterion is likewise rejected instead of implicitly
+    selecting null-valued rows. ``select_equals`` and a range
     (``select_min``/``select_max``) are mutually exclusive — equality OR range,
     never both. ``select_equals`` must be a JSON scalar; a container (list/dict)
     is rejected because comparing a cell to a container is not a row-select.
@@ -413,6 +415,12 @@ def _parse_select(arguments: dict[str, Any], *, fields_present: bool) -> _Select
         return FilterError(
             "select_equals and select_min/select_max are mutually exclusive: "
             "match a field by equality OR by numeric range, not both"
+        )
+
+    if not equals_present and not has_range:
+        return FilterError(
+            "select_field requires either select_equals (equality) or "
+            "select_min/select_max (numeric range) to specify matching criteria"
         )
 
     select_equals: Any | None = None

@@ -165,6 +165,8 @@ class BaseTokenizer(ABC):
                     content = part.get("content", "")
                     if isinstance(content, str):
                         total += self.count_text(content)
+                    elif isinstance(content, list):
+                        total += self._count_content_parts(content)
                     else:
                         total += self.count_text(json.dumps(content))
                 elif part_type == "tool_use":
