@@ -805,34 +805,50 @@ class CompressionStore:
             # never reaches this branch: _evict_if_needed() above already reaped
             # it, so a dead binding cannot wedge its key.
             existing = self._backend.get(hash_key)
-            if existing is not None:
-                if existing.original_content != original:
-                    logger.error(
-                        "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
-                        "new_len=%d) — dropping the ambiguous binding; NEITHER content "
-                        "is served (both markers now loud-miss) rather than resolving "
-                        "to foreign content",
-                        hash_key,
-                        tool_name,
-                        len(existing.original_content),
-                        len(original),
-                    )
-                    # Drop the stored entry so retrieve() loud-misses instead of
-                    # serving foreign bytes; its heap tuple is now stale. The
-                    # binding reached NEITHER a durable nor a volatile tier, so a
-                    # require_durable caller must veto below (Bug-6) rather than
-                    # receive the hash as if the content were stored.
-                    self._backend.delete(hash_key)
+            spilled = self._recover_from_spill(hash_key) if self._spill is not None else None
+            conflicting = next(
+                (
+                    candidate
+                    for candidate in (existing, spilled)
+                    if candidate is not None and candidate.original_content != original
+                ),
+                None,
+            )
+            if conflicting is not None:
+                logger.error(
+                    "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
+                    "new_len=%d) — dropping the ambiguous binding from every tier; "
+                    "NEITHER content is served (both markers now loud-miss) rather than "
+                    "resolving to foreign content",
+                    hash_key,
+                    tool_name,
+                    len(conflicting.original_content),
+                    len(original),
+                )
+                # A same-key spill row is part of the collision domain too. If a
+                # newer primary binding later expires, retrieve() falls back to
+                # spill; leaving an older DIFFERENT spill value there would
+                # silently resurrect foreign content. Drop both tiers before
+                # refusing the new binding so the key becomes a loud miss.
+                if self._backend.delete(hash_key):
                     self._stale_heap_entries += 1
-                    collision_dropped = True
-                else:
-                    # Same content being stored again - this is fine, just update
-                    logger.debug(
-                        "Duplicate store for hash=%s, updating entry",
-                        hash_key,
-                    )
-                    # Mark old heap entry as stale since we're replacing
-                    self._stale_heap_entries += 1
+                if self._spill is not None:
+                    try:
+                        self._spill.delete(hash_key)
+                    except Exception as exc:  # noqa: BLE001 — collision path stays fail-open
+                        logger.warning(
+                            "CCR spill delete during collision cleanup failed (non-fatal): %s",
+                            exc,
+                        )
+                collision_dropped = True
+            elif existing is not None:
+                # Same content being stored again - this is fine, just update
+                logger.debug(
+                    "Duplicate store for hash=%s, updating entry",
+                    hash_key,
+                )
+                # Mark old heap entry as stale since we're replacing
+                self._stale_heap_entries += 1
 
             if not collision_dropped:
                 durable = self._persist_and_report_durability(hash_key, entry)
@@ -1913,12 +1929,14 @@ class CompressionStore:
             if self._spill is not None:
                 try:
                     spilled = self._spill.get(hash_key)
-                except Exception as exc:  # noqa: BLE001 — named purge still proceeds
+                except Exception as exc:  # noqa: BLE001 — destructive discovery fails closed
                     logger.warning(
-                        "CCR spill read during delete_cascade failed; nested spill markers "
-                        "may remain orphaned: %s",
+                        "CCR spill read during delete_cascade failed; aborting cascade for %s "
+                        "so unreadable nested markers cannot be orphaned: %s",
+                        hash_key,
                         exc,
                     )
+                    return CascadeOutcome(top_deleted=False)
                 else:
                     if spilled is not None:
                         entries.append(spilled)
