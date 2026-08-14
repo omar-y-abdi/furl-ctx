@@ -1156,37 +1156,49 @@ class CompressionStore:
         now = self._now()
         with self._lock:
             snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
-            if self._spill is not None:
-                try:
-                    seen = set(snapshot_keys)
-                    snapshot_keys.extend(
-                        hash_key
-                        for _created_at, hash_key in self._spill.created_at_index()
-                        if hash_key not in seen
-                    )
-                except Exception as exc:  # noqa: BLE001 — search is fail-open
-                    logger.warning("CCR spill index read during search_all failed (non-fatal): %s", exc)
+            spill = self._spill
+
+        if spill is not None:
+            try:
+                seen = set(snapshot_keys)
+                snapshot_keys.extend(
+                    hash_key
+                    for _created_at, hash_key in spill.created_at_index()
+                    if hash_key not in seen
+                )
+            except Exception as exc:  # noqa: BLE001 — search is fail-open
+                logger.warning(
+                    "CCR spill index read during search_all failed (non-fatal): %s", exc
+                )
 
         live_entries: list[tuple[str, CompressionEntry]] = []
         for hash_key in snapshot_keys:
             with self._lock:
-                entry = self._backend.get(hash_key)
-                if entry is not None and entry.is_expired(now):
-                    entry = None
-                if entry is None and self._spill is not None:
-                    try:
-                        spilled = self._spill.get(hash_key)
-                    except Exception as exc:  # noqa: BLE001 — search is fail-open
-                        logger.warning(
-                            "CCR spill read during search_all failed for %s (non-fatal): %s",
-                            hash_key,
-                            exc,
-                        )
-                    else:
-                        if spilled is not None and not spilled.is_expired(now):
-                            entry = spilled
-            if entry is not None:
-                live_entries.append((hash_key, entry))
+                primary = self._backend.get(hash_key)
+
+            # Expiry checks can decode/filter entry metadata and must not hold
+            # the store lock; concurrent stores/retrieves should be able to
+            # interleave while a large search snapshot is evaluated.
+            if primary is not None and not primary.is_expired(now):
+                live_entries.append((hash_key, primary))
+                continue
+
+            if spill is None:
+                continue
+
+            try:
+                with self._lock:
+                    spilled = spill.get(hash_key)
+            except Exception as exc:  # noqa: BLE001 — search is fail-open
+                logger.warning(
+                    "CCR spill read during search_all failed for %s (non-fatal): %s",
+                    hash_key,
+                    exc,
+                )
+                continue
+
+            if spilled is not None and not spilled.is_expired(now):
+                live_entries.append((hash_key, spilled))
 
         if not live_entries:
             return []
@@ -1666,7 +1678,11 @@ class CompressionStore:
                 if primary is not None and primary.is_expired(now):
                     if self._backend.delete(hash_key):
                         self._stale_heap_entries += 1
-                if self._spill is not None and spill_entry is not None and spill_entry.is_expired(now):
+                if (
+                    self._spill is not None
+                    and spill_entry is not None
+                    and spill_entry.is_expired(now)
+                ):
                     try:
                         self._spill.delete(hash_key)
                     except Exception as exc:  # noqa: BLE001 — cleanup is fail-open

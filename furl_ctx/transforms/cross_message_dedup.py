@@ -611,9 +611,7 @@ class CrossMessageDeduper(Transform):
         if shared_bytes / total_bytes < NEAR_DUP_MIN_SHARED_FRACTION:
             return None
 
-        changed_rows = [
-            row for (row, _span), is_shared in zip(rows, shared_mask) if not is_shared
-        ]
+        changed_rows = [row for (row, _span), is_shared in zip(rows, shared_mask) if not is_shared]
         rendering = near_duplicate_rendering(
             changed_rows,
             ccr_hash=ccr_hash,

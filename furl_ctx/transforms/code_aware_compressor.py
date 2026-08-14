@@ -714,9 +714,7 @@ class CodeAwareCompressor:
                     if child.type in all_definition_types:
                         short_name = _get_definition_name(child)
                         if short_name:
-                            qualified = (
-                                f"{parent_name}.{short_name}" if parent_name else short_name
-                            )
+                            qualified = f"{parent_name}.{short_name}" if parent_name else short_name
                             definitions[qualified] = child
                             bare_names[qualified] = short_name
                             for grandchild in child.children:
@@ -757,16 +755,16 @@ class CodeAwareCompressor:
             func_short = bare_names[qname]
             calls: set[str] = set()
 
-            def walk(node: Any) -> None:
+            def walk(node: Any, current_short: str, current_calls: set[str]) -> None:
                 if node.type in ("identifier", "property_identifier"):
                     text = node.text
                     name = text.decode("utf-8") if isinstance(text, bytes) else str(text)
-                    if name in defined_short_names and name != func_short:
-                        calls.add(name)
+                    if name in defined_short_names and name != current_short:
+                        current_calls.add(name)
                 for child in node.children:
-                    walk(child)
+                    walk(child, current_short, current_calls)
 
-            walk(func_node)
+            walk(func_node, func_short, calls)
             function_calls[qname] = calls
 
         return function_calls
@@ -789,9 +787,7 @@ class CodeAwareCompressor:
             ref_counts[qname] = max(0, count - short_name_def_count.get(short, 1))
 
         context_lower = context.lower() if context else ""
-        context_words = (
-            set(re.split(r"[\s,;:.()\[\]{}\"']+", context_lower)) if context else set()
-        )
+        context_words = set(re.split(r"[\s,;:.()\[\]{}\"']+", context_lower)) if context else set()
         context_words.discard("")
 
         raw_signals: dict[str, float] = {}

@@ -444,22 +444,13 @@ class ReadLifecycleManager:
         if content_bytes < self.config.min_size_bytes:
             return False, content, None
 
-        # When no CCR store is explicitly provided, resolve the active
-        # compression store (honoring any request- or namespace-scoped store).
-        # If no CCR store is available or import fails, we cannot back a
-        # recovery pointer, so we skip the substitution entirely to ensure
-        # content remains recoverable from the output alone.
-        store = self.store
-        if store is None:
-            try:
-                from ..cache.compression_store import get_compression_store
-
-                store = get_compression_store()
-            except Exception as exc:
-                logger.debug("read_lifecycle: compression store unavailable (%s)", exc)
-                return False, content, None
-
-        if store is None:
+        # When no CCR store is available, we cannot back a recovery pointer.
+        # Emitting "Retrieve original: hash=<phantom_hash>" would point to
+        # nothing and make the original content permanently unrecoverable —
+        # a Contract #1 (CCR recovery invariant) violation on the DEFAULT path.
+        # The safest option is to skip the substitution entirely: leave the
+        # content verbatim so it remains recoverable from the output alone.
+        if self.store is None:
             return False, content, None
 
         # Store original in CCR and obtain the backed hash. require_durable:
@@ -476,7 +467,7 @@ class ReadLifecycleManager:
         from ..cache.compression_store import DurableWriteError
 
         try:
-            ccr_hash = store.store(
+            ccr_hash = self.store.store(
                 original=content,
                 compressed="",
                 tool_name="Read",
