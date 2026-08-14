@@ -1,0 +1,228 @@
+diff --git a/furl_ctx/cache/compression_store.py b/furl_ctx/cache/compression_store.py
+index 4ae63c5..69662ce 100644
+--- a/furl_ctx/cache/compression_store.py
++++ b/furl_ctx/cache/compression_store.py
+@@ -1156,37 +1156,49 @@ class CompressionStore:
+         now = self._now()
+         with self._lock:
+             snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
+-            if self._spill is not None:
+-                try:
+-                    seen = set(snapshot_keys)
+-                    snapshot_keys.extend(
+-                        hash_key
+-                        for _created_at, hash_key in self._spill.created_at_index()
+-                        if hash_key not in seen
+-                    )
+-                except Exception as exc:  # noqa: BLE001 — search is fail-open
+-                    logger.warning("CCR spill index read during search_all failed (non-fatal): %s", exc)
++            spill = self._spill
++
++        if spill is not None:
++            try:
++                seen = set(snapshot_keys)
++                snapshot_keys.extend(
++                    hash_key
++                    for _created_at, hash_key in spill.created_at_index()
++                    if hash_key not in seen
++                )
++            except Exception as exc:  # noqa: BLE001 — search is fail-open
++                logger.warning(
++                    "CCR spill index read during search_all failed (non-fatal): %s", exc
++                )
+ 
+         live_entries: list[tuple[str, CompressionEntry]] = []
+         for hash_key in snapshot_keys:
+             with self._lock:
+-                entry = self._backend.get(hash_key)
+-                if entry is not None and entry.is_expired(now):
+-                    entry = None
+-                if entry is None and self._spill is not None:
+-                    try:
+-                        spilled = self._spill.get(hash_key)
+-                    except Exception as exc:  # noqa: BLE001 — search is fail-open
+-                        logger.warning(
+-                            "CCR spill read during search_all failed for %s (non-fatal): %s",
+-                            hash_key,
+-                            exc,
+-                        )
+-                    else:
+-                        if spilled is not None and not spilled.is_expired(now):
+-                            entry = spilled
+-            if entry is not None:
+-                live_entries.append((hash_key, entry))
++                primary = self._backend.get(hash_key)
++
++            # Expiry checks can decode/filter entry metadata and must not hold
++            # the store lock; concurrent stores/retrieves should be able to
++            # interleave while a large search snapshot is evaluated.
++            if primary is not None and not primary.is_expired(now):
++                live_entries.append((hash_key, primary))
++                continue
++
++            if spill is None:
++                continue
++
++            try:
++                with self._lock:
++                    spilled = spill.get(hash_key)
++            except Exception as exc:  # noqa: BLE001 — search is fail-open
++                logger.warning(
++                    "CCR spill read during search_all failed for %s (non-fatal): %s",
++                    hash_key,
++                    exc,
++                )
++                continue
++
++            if spilled is not None and not spilled.is_expired(now):
++                live_entries.append((hash_key, spilled))
+ 
+         if not live_entries:
+             return []
+@@ -1666,7 +1678,11 @@ class CompressionStore:
+                 if primary is not None and primary.is_expired(now):
+                     if self._backend.delete(hash_key):
+                         self._stale_heap_entries += 1
+-                if self._spill is not None and spill_entry is not None and spill_entry.is_expired(now):
++                if (
++                    self._spill is not None
++                    and spill_entry is not None
++                    and spill_entry.is_expired(now)
++                ):
+                     try:
+                         self._spill.delete(hash_key)
+                     except Exception as exc:  # noqa: BLE001 — cleanup is fail-open
+diff --git a/furl_ctx/ccr/retrieve_filters.py b/furl_ctx/ccr/retrieve_filters.py
+index 918a812..c650975 100644
+--- a/furl_ctx/ccr/retrieve_filters.py
++++ b/furl_ctx/ccr/retrieve_filters.py
+@@ -360,9 +360,7 @@ def _parse_select(arguments: dict[str, Any], *, fields_present: bool) -> _Select
+ 
+     ``select_field`` is the row-select anchor: ``select_equals`` /
+     ``select_min`` / ``select_max`` without it is a ``FilterError`` (a
+-    range/equals with no field is meaningless). A ``select_field`` without any
+-    equality or range criterion is likewise rejected instead of implicitly
+-    selecting null-valued rows. ``select_equals`` and a range
++    range/equals with no field is meaningless). ``select_equals`` and a range
+     (``select_min``/``select_max``) are mutually exclusive — equality OR range,
+     never both. ``select_equals`` must be a JSON scalar; a container (list/dict)
+     is rejected because comparing a cell to a container is not a row-select.
+@@ -417,12 +415,6 @@ def _parse_select(arguments: dict[str, Any], *, fields_present: bool) -> _Select
+             "match a field by equality OR by numeric range, not both"
+         )
+ 
+-    if not equals_present and not has_range:
+-        return FilterError(
+-            "select_field requires either select_equals (equality) or "
+-            "select_min/select_max (numeric range) to specify matching criteria"
+-        )
+-
+     select_equals: Any | None = None
+     if equals_present:
+         if isinstance(equals_raw, (list, dict)):
+diff --git a/furl_ctx/transforms/read_lifecycle.py b/furl_ctx/transforms/read_lifecycle.py
+index 923483e..7d03fb0 100644
+--- a/furl_ctx/transforms/read_lifecycle.py
++++ b/furl_ctx/transforms/read_lifecycle.py
+@@ -444,22 +444,13 @@ class ReadLifecycleManager:
+         if content_bytes < self.config.min_size_bytes:
+             return False, content, None
+ 
+-        # When no CCR store is explicitly provided, resolve the active
+-        # compression store (honoring any request- or namespace-scoped store).
+-        # If no CCR store is available or import fails, we cannot back a
+-        # recovery pointer, so we skip the substitution entirely to ensure
+-        # content remains recoverable from the output alone.
+-        store = self.store
+-        if store is None:
+-            try:
+-                from ..cache.compression_store import get_compression_store
+-
+-                store = get_compression_store()
+-            except Exception as exc:
+-                logger.debug("read_lifecycle: compression store unavailable (%s)", exc)
+-                return False, content, None
+-
+-        if store is None:
++        # When no CCR store is available, we cannot back a recovery pointer.
++        # Emitting "Retrieve original: hash=<phantom_hash>" would point to
++        # nothing and make the original content permanently unrecoverable —
++        # a Contract #1 (CCR recovery invariant) violation on the DEFAULT path.
++        # The safest option is to skip the substitution entirely: leave the
++        # content verbatim so it remains recoverable from the output alone.
++        if self.store is None:
+             return False, content, None
+ 
+         # Store original in CCR and obtain the backed hash. require_durable:
+@@ -476,7 +467,7 @@ class ReadLifecycleManager:
+         from ..cache.compression_store import DurableWriteError
+ 
+         try:
+-            ccr_hash = store.store(
++            ccr_hash = self.store.store(
+                 original=content,
+                 compressed="",
+                 tool_name="Read",
+diff --git a/furl_ctx/transforms/code_aware_compressor.py b/furl_ctx/transforms/code_aware_compressor.py
+index b9dcb7d..e6120ea 100644
+--- a/furl_ctx/transforms/code_aware_compressor.py
++++ b/furl_ctx/transforms/code_aware_compressor.py
+@@ -714,9 +714,7 @@ class CodeAwareCompressor:
+                     if child.type in all_definition_types:
+                         short_name = _get_definition_name(child)
+                         if short_name:
+-                            qualified = (
+-                                f"{parent_name}.{short_name}" if parent_name else short_name
+-                            )
++                            qualified = f"{parent_name}.{short_name}" if parent_name else short_name
+                             definitions[qualified] = child
+                             bare_names[qualified] = short_name
+                             for grandchild in child.children:
+@@ -757,16 +755,16 @@ class CodeAwareCompressor:
+             func_short = bare_names[qname]
+             calls: set[str] = set()
+ 
+-            def walk(node: Any) -> None:
++            def walk(node: Any, current_short: str, current_calls: set[str]) -> None:
+                 if node.type in ("identifier", "property_identifier"):
+                     text = node.text
+                     name = text.decode("utf-8") if isinstance(text, bytes) else str(text)
+-                    if name in defined_short_names and name != func_short:
+-                        calls.add(name)
++                    if name in defined_short_names and name != current_short:
++                        current_calls.add(name)
+                 for child in node.children:
+-                    walk(child)
++                    walk(child, current_short, current_calls)
+ 
+-            walk(func_node)
++            walk(func_node, func_short, calls)
+             function_calls[qname] = calls
+ 
+         return function_calls
+@@ -789,9 +787,7 @@ class CodeAwareCompressor:
+             ref_counts[qname] = max(0, count - short_name_def_count.get(short, 1))
+ 
+         context_lower = context.lower() if context else ""
+-        context_words = (
+-            set(re.split(r"[\s,;:.()\[\]{}\"']+", context_lower)) if context else set()
+-        )
++        context_words = set(re.split(r"[\s,;:.()\[\]{}\"']+", context_lower)) if context else set()
+         context_words.discard("")
+ 
+         raw_signals: dict[str, float] = {}
+diff --git a/furl_ctx/transforms/cross_message_dedup.py b/furl_ctx/transforms/cross_message_dedup.py
+index c3ccad5..3e2a8fa 100644
+--- a/furl_ctx/transforms/cross_message_dedup.py
++++ b/furl_ctx/transforms/cross_message_dedup.py
+@@ -611,9 +611,7 @@ class CrossMessageDeduper(Transform):
+         if shared_bytes / total_bytes < NEAR_DUP_MIN_SHARED_FRACTION:
+             return None
+ 
+-        changed_rows = [
+-            row for (row, _span), is_shared in zip(rows, shared_mask) if not is_shared
+-        ]
++        changed_rows = [row for (row, _span), is_shared in zip(rows, shared_mask) if not is_shared]
+         rendering = near_duplicate_rendering(
+             changed_rows,
+             ccr_hash=ccr_hash,
