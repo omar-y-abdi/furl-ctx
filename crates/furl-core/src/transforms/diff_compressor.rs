@@ -116,7 +116,8 @@ pub struct DiffCompressorStats {
     /// Lines in the largest hunk we dropped (per-file cap). 0 if none dropped.
     pub largest_hunk_dropped_lines: usize,
 
-    ///
+    /// Why this matters: the emit path hardcodes `100644` regardless of what the input said. An input with executable bit `100755` becomes a non-executable `100644` on output — silent information loss.
+    /// Surfacing this lets prod monitoring catch real cases where it bites.
     pub file_mode_normalizations: Vec<(String, String)>,
 
     /// Binary file marker lines whose original detail (e.g.
