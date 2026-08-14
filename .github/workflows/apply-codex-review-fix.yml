@@ -1,0 +1,31 @@
+name: Apply Codex review fix
+
+on:
+  push:
+    branches:
+      - agent/integrate-context-safety-improvements
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'chore: apply codex review fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: agent/integrate-context-safety-improvements
+          fetch-depth: 1
+      - name: Validate and apply review patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check .codex-review-fix.patch
+          git apply .codex-review-fix.patch
+          git rm .codex-review-fix.patch .github/workflows/apply-codex-review-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add furl_ctx tests
+          git commit -m 'fix: address codex review blockers'
+          git push origin HEAD:agent/integrate-context-safety-improvements
