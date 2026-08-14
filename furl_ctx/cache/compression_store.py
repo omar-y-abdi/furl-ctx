@@ -1183,9 +1183,7 @@ class CompressionStore:
                     if hash_key not in seen
                 )
             except Exception as exc:  # noqa: BLE001 — search is fail-open
-                logger.warning(
-                    "CCR spill index read during search_all failed (non-fatal): %s", exc
-                )
+                logger.warning("CCR spill index read during search_all failed (non-fatal): %s", exc)
 
         live_entries: list[tuple[str, CompressionEntry]] = []
         for hash_key in snapshot_keys:
