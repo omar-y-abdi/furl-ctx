@@ -689,6 +689,148 @@ class CodeAwareCompressor:
 
     # ─── Symbol importance analysis ─────────────────────────────────────
 
+    @staticmethod
+    def _collect_symbol_definitions(
+        root: Any,
+        lang_config: LangConfig,
+        all_definition_types: frozenset[str],
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Collect definitions with qualified names and bare short names."""
+        definitions: dict[str, Any] = {}
+        bare_names: dict[str, str] = {}
+
+        def collect(node: Any, parent_name: str = "") -> None:
+            if node.type in all_definition_types:
+                short_name = _get_definition_name(node)
+                if short_name:
+                    qualified = f"{parent_name}.{short_name}" if parent_name else short_name
+                    definitions[qualified] = node
+                    bare_names[qualified] = short_name
+                    for child in node.children:
+                        collect(child, parent_name=qualified)
+                    return
+            if lang_config.decorator_node and node.type == lang_config.decorator_node:
+                for child in node.children:
+                    if child.type in all_definition_types:
+                        short_name = _get_definition_name(child)
+                        if short_name:
+                            qualified = f"{parent_name}.{short_name}" if parent_name else short_name
+                            definitions[qualified] = child
+                            bare_names[qualified] = short_name
+                            for grandchild in child.children:
+                                collect(grandchild, parent_name=qualified)
+                            return
+            for child in node.children:
+                collect(child, parent_name)
+
+        collect(root)
+        return definitions, bare_names
+
+    @staticmethod
+    def _collect_all_identifiers(root: Any) -> dict[str, int]:
+        """Collect and count all identifier occurrences across the AST."""
+        all_identifiers: dict[str, int] = {}
+
+        def collect(node: Any) -> None:
+            if node.type in ("identifier", "property_identifier", "type_identifier"):
+                text = node.text
+                name = text.decode("utf-8") if isinstance(text, bytes) else str(text)
+                all_identifiers[name] = all_identifiers.get(name, 0) + 1
+            for child in node.children:
+                collect(child)
+
+        collect(root)
+        return all_identifiers
+
+    @staticmethod
+    def _collect_call_graph(
+        definitions: dict[str, Any],
+        bare_names: dict[str, str],
+    ) -> dict[str, set[str]]:
+        """Build a call graph between defined symbols."""
+        function_calls: dict[str, set[str]] = {}
+        defined_short_names = set(bare_names.values())
+
+        for qname, func_node in definitions.items():
+            func_short = bare_names[qname]
+            calls: set[str] = set()
+
+            def walk(node: Any, current_short: str, current_calls: set[str]) -> None:
+                if node.type in ("identifier", "property_identifier"):
+                    text = node.text
+                    name = text.decode("utf-8") if isinstance(text, bytes) else str(text)
+                    if name in defined_short_names and name != current_short:
+                        current_calls.add(name)
+                for child in node.children:
+                    walk(child, current_short, current_calls)
+
+            walk(func_node, func_short, calls)
+            function_calls[qname] = calls
+
+        return function_calls
+
+    @staticmethod
+    def _compute_raw_signals(
+        definitions: dict[str, Any],
+        bare_names: dict[str, str],
+        all_identifiers: dict[str, int],
+        function_calls: dict[str, set[str]],
+        language: CodeLanguage,
+        context: str,
+    ) -> tuple[dict[str, float], dict[str, int]]:
+        """Compute un-normalized importance signals for each symbol."""
+        short_name_def_count = Counter(bare_names.values())
+        ref_counts: dict[str, int] = {}
+        for qname in definitions:
+            short = bare_names[qname]
+            count = all_identifiers.get(short, 0)
+            ref_counts[qname] = max(0, count - short_name_def_count.get(short, 1))
+
+        context_lower = context.lower() if context else ""
+        context_words = set(re.split(r"[\s,;:.()\[\]{}\"']+", context_lower)) if context else set()
+        context_words.discard("")
+
+        raw_signals: dict[str, float] = {}
+        for qname in definitions:
+            short = bare_names[qname]
+            refs = ref_counts.get(qname, 0)
+            fan_out = len(function_calls.get(qname, set()))
+            is_public = _is_public_symbol(short, language)
+
+            raw = float(refs)
+            raw += 1.0 if is_public else 0.0
+            raw += fan_out * 0.5
+
+            if language == CodeLanguage.PYTHON:
+                if short.startswith("__") and short.endswith("__"):
+                    raw += 2.0
+            elif language == CodeLanguage.GO:
+                if short and short[0].isupper():
+                    raw += 1.0
+
+            if context_words:
+                name_lower = short.lower()
+                if name_lower in context_words or (
+                    len(name_lower) > 3 and name_lower in context_lower
+                ):
+                    raw += 3.0
+
+            raw_signals[qname] = raw
+
+        return raw_signals, ref_counts
+
+    @staticmethod
+    def _normalize_signal_scores(raw_signals: dict[str, float]) -> dict[str, float]:
+        """Normalize raw symbol signal scores to [0.0, 1.0]."""
+        values = list(raw_signals.values())
+        min_val = min(values)
+        max_val = max(values)
+        range_val = max_val - min_val
+
+        if range_val > 0:
+            return {name: round((v - min_val) / range_val, 3) for name, v in raw_signals.items()}
+        return dict.fromkeys(raw_signals, 0.5)
+
     def _analyze_symbol_importance(
         self,
         root: Any,
@@ -711,132 +853,25 @@ class CodeAwareCompressor:
             return _SymbolAnalysis()
 
         all_definition_types = lang_config.function_nodes | lang_config.class_nodes
-
-        # Use qualified keys (ClassName.method) to avoid collisions
-        definitions: dict[str, Any] = {}  # qualified_name -> node
-        bare_names: dict[str, str] = {}  # qualified_name -> short_name
-        all_identifiers: dict[str, int] = {}  # short_name -> count
-        function_calls: dict[str, set[str]] = {}
-
-        def collect_definitions(node: Any, parent_name: str = "") -> None:
-            if node.type in all_definition_types:
-                short_name = _get_definition_name(node)
-                if short_name:
-                    qualified = f"{parent_name}.{short_name}" if parent_name else short_name
-                    definitions[qualified] = node
-                    bare_names[qualified] = short_name
-                    for child in node.children:
-                        collect_definitions(child, parent_name=qualified)
-                    return
-            # Also check for decorated definitions
-            if lang_config.decorator_node and node.type == lang_config.decorator_node:
-                for child in node.children:
-                    if child.type in all_definition_types:
-                        short_name = _get_definition_name(child)
-                        if short_name:
-                            qualified = f"{parent_name}.{short_name}" if parent_name else short_name
-                            definitions[qualified] = child
-                            bare_names[qualified] = short_name
-                            for grandchild in child.children:
-                                collect_definitions(grandchild, parent_name=qualified)
-                            return
-            for child in node.children:
-                collect_definitions(child, parent_name)
-
-        def collect_identifiers(node: Any) -> None:
-            if node.type in ("identifier", "property_identifier", "type_identifier"):
-                text = node.text
-                name = text.decode("utf-8") if isinstance(text, bytes) else str(text)
-                all_identifiers[name] = all_identifiers.get(name, 0) + 1
-            for child in node.children:
-                collect_identifiers(child)
-
-        def collect_calls_in_function(func_node: Any, func_qname: str) -> None:
-            func_short = bare_names[func_qname]
-            defined_short_names = set(bare_names.values())
-            calls: set[str] = set()
-
-            def walk(node: Any) -> None:
-                if node.type in ("identifier", "property_identifier"):
-                    text = node.text
-                    name = text.decode("utf-8") if isinstance(text, bytes) else str(text)
-                    if name in defined_short_names and name != func_short:
-                        calls.add(name)
-                for child in node.children:
-                    walk(child)
-
-            walk(func_node)
-            function_calls[func_qname] = calls
-
-        # Pass 1: Collect definitions with qualified names
-        collect_definitions(root)
+        definitions, bare_names = self._collect_symbol_definitions(
+            root, lang_config, all_definition_types
+        )
 
         if not definitions:
             return _SymbolAnalysis()
 
-        # Pass 2: Collect all identifiers
-        collect_identifiers(root)
+        all_identifiers = self._collect_all_identifiers(root)
+        function_calls = self._collect_call_graph(definitions, bare_names)
 
-        # Pass 3: Collect call relationships and body sizes
         body_line_counts: dict[str, int] = {}
         for qname, node in definitions.items():
-            collect_calls_in_function(node, qname)
             node_text = code[node.start_byte : node.end_byte]
             body_line_counts[qname] = max(1, len(node_text.split("\n")) - 2)
 
-        # Reference counts: subtract definition occurrences
-        short_name_def_count = Counter(bare_names.values())
-
-        ref_counts: dict[str, int] = {}
-        for qname in definitions:
-            short = bare_names[qname]
-            count = all_identifiers.get(short, 0)
-            ref_counts[qname] = max(0, count - short_name_def_count.get(short, 1))
-
-        # Raw importance signals per symbol
-        context_lower = context.lower() if context else ""
-        context_words = set(re.split(r"[\s,;:.()\[\]{}\"']+", context_lower)) if context else set()
-        context_words.discard("")
-
-        raw_signals: dict[str, float] = {}
-        for qname in definitions:
-            short = bare_names[qname]
-            refs = ref_counts.get(qname, 0)
-            fan_out = len(function_calls.get(qname, set()))
-            is_public = _is_public_symbol(short, language)
-
-            raw = float(refs)
-            raw += 1.0 if is_public else 0.0
-            raw += fan_out * 0.5
-
-            # Convention importance (language-specific)
-            if language == CodeLanguage.PYTHON:
-                if short.startswith("__") and short.endswith("__"):
-                    raw += 2.0
-            elif language == CodeLanguage.GO:
-                if short and short[0].isupper():
-                    raw += 1.0
-
-            # Context boost
-            if context_words:
-                name_lower = short.lower()
-                if name_lower in context_words or (
-                    len(name_lower) > 3 and name_lower in context_lower
-                ):
-                    raw += 3.0
-
-            raw_signals[qname] = raw
-
-        # Normalize to 0-1 using min-max scaling
-        values = list(raw_signals.values())
-        min_val = min(values)
-        max_val = max(values)
-        range_val = max_val - min_val
-
-        if range_val > 0:
-            scores = {name: round((v - min_val) / range_val, 3) for name, v in raw_signals.items()}
-        else:
-            scores = dict.fromkeys(raw_signals, 0.5)
+        raw_signals, ref_counts = self._compute_raw_signals(
+            definitions, bare_names, all_identifiers, function_calls, language, context
+        )
+        scores = self._normalize_signal_scores(raw_signals)
 
         return _SymbolAnalysis(
             scores=scores,
@@ -1057,47 +1092,19 @@ class CodeAwareCompressor:
 
     # ─── Function/class compression (data-driven) ───────────────────────
 
-    def _compress_function_ast(
-        self,
+    @staticmethod
+    def _partition_function_lines(
         node: Any,
-        code: str,
-        language: CodeLanguage,
+        body_node: Any,
+        node_lines: list[str],
         lang_config: LangConfig,
-        body_limits: dict[str, int],
-        analysis: _SymbolAnalysis,
-    ) -> str:
-        """Compress a function/method using AST body detection.
+    ) -> tuple[list[str], list[str], list[str], str | None, str | None]:
+        """Partition function lines into signature, body, and brace lines.
 
-        Uses the AST to find the body node directly instead of string-
-        scanning for '{' or ':'. Works for all languages via
-        ``lang_config.body_node_types``.
-
-        Key insight: tree-sitter byte offsets may not include leading
-        whitespace on the first line. LINE-based slicing from the original
-        code preserves indentation faithfully (critical for methods inside
-        classes).
+        Tree-sitter byte offsets can omit leading whitespace on a node's first
+        line. Partitioning from the original line slice preserves indentation,
+        which is load-bearing for methods nested inside classes.
         """
-        code_lines = code.split("\n")
-        start_row = node.start_point[0]
-        end_row = node.end_point[0]
-        node_lines = code_lines[start_row : end_row + 1]
-        node_text = "\n".join(node_lines)
-
-        func_name = _get_definition_name(node)
-        body_limit = _get_body_limit(func_name, body_limits, self.config.max_body_lines)
-
-        # Small enough to keep as-is
-        if len(node_lines) <= body_limit + 2:
-            return node_text
-
-        # Find the body node using AST (not string scanning)
-        body_node = next((c for c in node.children if c.type in lang_config.body_node_types), None)
-
-        if body_node is None:
-            return node_text
-
-        # Use line numbers to slice: this preserves original indentation.
-        # tree-sitter gives 0-based row numbers.
         node_start_line = node.start_point[0]
         body_start_line = body_node.start_point[0]
         body_end_line = body_node.end_point[0]
@@ -1109,12 +1116,9 @@ class CodeAwareCompressor:
         # Handle case where signature and body start on the SAME line
         # (common in brace languages: `function foo(arg) { ... }`)
         if sig_end == 0 and not lang_config.uses_colon_after_signature:
-            # Signature and body on same line: keep them together — the
-            # signature line includes the opening brace.
             first_line = node_lines[0]
             sig_with_brace = first_line.rstrip()
             signature_lines = [sig_with_brace]
-            # Body lines are everything between { and } (inner content only)
             body_lines = node_lines[1:body_end_rel]
             after_lines = node_lines[body_end_rel:]
             _brace_in_signature = True
@@ -1124,130 +1128,122 @@ class CodeAwareCompressor:
             after_lines = node_lines[body_end_rel:]
             _brace_in_signature = False
 
-        # For brace languages, detect opening/closing braces in the body lines.
-        opening_brace_line = None
-        closing_brace_line = None
+        opening_brace_line: str | None = None
+        closing_brace_line: str | None = None
         if not lang_config.uses_colon_after_signature:
-            if _brace_in_signature:
-                # Opening brace already in signature line — just find closing
-                pass
-            elif body_lines and body_lines[0].strip().startswith("{"):
+            if not _brace_in_signature and body_lines and body_lines[0].strip().startswith("{"):
                 opening_brace_line = body_lines[0]
                 body_lines = body_lines[1:]
             if body_lines and body_lines[-1].strip().endswith("}"):
                 closing_brace_line = body_lines[-1]
                 body_lines = body_lines[:-1]
 
-        # Handle Python docstrings via AST
-        docstring_text = ""
-        ds_skip_lines = 0
-        if language == CodeLanguage.PYTHON and body_node.child_count > 0:
-            first_child = body_node.children[0]
-            # tree-sitter Python may represent docstrings as:
-            # - bare `string` node directly in block, OR
-            # - `expression_statement` containing a `string` node
-            ds_node = None
-            if first_child.type == "string":
+        return signature_lines, body_lines, after_lines, opening_brace_line, closing_brace_line
+
+    @staticmethod
+    def _extract_python_docstring(
+        body_node: Any,
+        body_lines: list[str],
+        docstring_mode: DocstringMode,
+    ) -> tuple[str, int]:
+        """Extract and format Python docstrings according to `DocstringMode`.
+
+        Returns:
+            Tuple of (docstring_text, ds_skip_lines).
+        """
+        if body_node.child_count == 0:
+            return "", 0
+
+        first_child = body_node.children[0]
+        ds_node = None
+        if first_child.type == "string":
+            ds_node = first_child
+        elif first_child.type == "expression_statement" and first_child.child_count > 0:
+            if first_child.children[0].type == "string":
                 ds_node = first_child
-            elif first_child.type == "expression_statement" and first_child.child_count > 0:
-                if first_child.children[0].type == "string":
-                    ds_node = first_child
 
-            if ds_node is not None:
-                ds_lines_count = ds_node.end_point[0] - ds_node.start_point[0] + 1
-                ds_start_rel = ds_node.start_point[0] - body_node.start_point[0]
+        if ds_node is None:
+            return "", 0
 
-                if self.config.docstring_mode == DocstringMode.FULL:
-                    # Keep entire docstring as-is (preserve indentation)
-                    docstring_text = "\n".join(
-                        body_lines[ds_start_rel : ds_start_rel + ds_lines_count]
-                    )
-                elif self.config.docstring_mode == DocstringMode.FIRST_LINE:
-                    # Use source lines directly (safe — preserves original quoting)
-                    if ds_lines_count == 1:
-                        # Single-line docstring: keep as-is
-                        docstring_text = body_lines[ds_start_rel]
-                    else:
-                        # Multi-line docstring: keep first line, close it properly
-                        first_ds_line = body_lines[ds_start_rel]
-                        ds_indent = first_ds_line[
-                            : len(first_ds_line) - len(first_ds_line.lstrip())
-                        ]
-                        stripped = first_ds_line.strip()
+        ds_lines_count = ds_node.end_point[0] - ds_node.start_point[0] + 1
+        ds_start_rel = ds_node.start_point[0] - body_node.start_point[0]
+        ds_skip_lines = ds_start_rel + ds_lines_count
 
-                        # Detect quote style from source
-                        quote = '"""'
-                        for q in ('r"""', "r'''", '"""', "'''"):
-                            if stripped.startswith(q):
-                                quote = q[-3:]
-                                break
+        if docstring_mode == DocstringMode.REMOVE:
+            return "", ds_skip_lines
 
-                        # Find where content starts (after opening quotes + prefix)
-                        content_start = 0
-                        for opener in ('r"""', "r'''", '"""', "'''"):
-                            if stripped.startswith(opener):
-                                content_start = len(opener)
-                                break
-                        first_content = stripped[content_start:].strip()
+        if docstring_mode == DocstringMode.FULL:
+            docstring_text = "\n".join(body_lines[ds_start_rel : ds_start_rel + ds_lines_count])
+            return docstring_text, ds_skip_lines
 
-                        # Remove trailing closing quotes if the first line has them
-                        for q in ('"""', "'''"):
-                            if first_content.endswith(q):
-                                first_content = first_content[: -len(q)].strip()
+        # DocstringMode.FIRST_LINE
+        if ds_lines_count == 1:
+            return body_lines[ds_start_rel], ds_skip_lines
 
-                        if first_content:
-                            # """Some text here\n...\n"""  →  """Some text here"""
-                            prefix_part = stripped[:content_start]
-                            docstring_text = f"{ds_indent}{prefix_part}{first_content}{quote}"
-                        else:
-                            # Opening quote on its own line: """\n  text\n"""
-                            if ds_start_rel + 1 < len(body_lines):
-                                second_line = body_lines[ds_start_rel + 1].strip()
-                                for q in ('"""', "'''"):
-                                    if second_line.endswith(q):
-                                        second_line = second_line[: -len(q)].strip()
-                                if second_line:
-                                    docstring_text = f"{ds_indent}{quote}{second_line}{quote}"
-                                else:
-                                    docstring_text = first_ds_line
-                            else:
-                                docstring_text = first_ds_line
-                # elif REMOVE: docstring_text stays empty
-                ds_skip_lines = ds_start_rel + ds_lines_count
+        # Multi-line docstring: keep first line, close it properly
+        first_ds_line = body_lines[ds_start_rel]
+        ds_indent = first_ds_line[: len(first_ds_line) - len(first_ds_line.lstrip())]
+        stripped = first_ds_line.strip()
 
-        # --- Statement-based body truncation (never cuts mid-expression) ---
-        #
-        # Walk body_node.children (AST statements) instead of slicing lines.
-        # Each child is a complete, syntactically valid statement. We keep
-        # whole statements until the line budget is exhausted, so the output
-        # always parses correctly.
+        opener_match = re.match(
+            r"(?i)^(?:(?:br|rb|fr|rf|r|u|b|f))?(?P<quote>\"\"\"|\'\'\')",
+            stripped,
+        )
+        if opener_match is None:
+            # Unexpected tree-sitter string spelling: keep the source line
+            # instead of guessing at a replacement that could alter syntax.
+            return first_ds_line, ds_skip_lines
 
-        # Detect indentation from actual body code (preserves whatever the file uses)
-        indent = _detect_indent(body_lines) if body_lines else "    "
+        opener = opener_match.group(0)
+        quote = opener_match.group("quote")
+        content_start = opener_match.end()
+        first_content = stripped[content_start:].strip()
 
-        # Collect non-docstring body statements from the AST
-        body_stmts: list[tuple[int, int]] = []  # (start_row, end_row) absolute
+        for q in ('"""', "'''"):
+            if first_content.endswith(q):
+                first_content = first_content[: -len(q)].strip()
+
+        if first_content:
+            docstring_text = f"{ds_indent}{opener}{first_content}{quote}"
+        else:
+            if ds_start_rel + 1 < len(body_lines):
+                second_line = body_lines[ds_start_rel + 1].strip()
+                for q in ('"""', "'''"):
+                    if second_line.endswith(q):
+                        second_line = second_line[: -len(q)].strip()
+                if second_line:
+                    # Preserve the original literal prefix (for example ``r``
+                    # or ``rf``) when the opening quotes occupy their own line.
+                    docstring_text = f"{ds_indent}{opener}{second_line}{quote}"
+                else:
+                    docstring_text = first_ds_line
+            else:
+                docstring_text = first_ds_line
+
+        return docstring_text, ds_skip_lines
+
+    @staticmethod
+    def _select_kept_statements(
+        body_node: Any,
+        code_lines: list[str],
+        ds_skip_lines: int,
+        body_limit: int,
+    ) -> tuple[list[str], int]:
+        """Select whole AST statements within the allocated body line budget."""
+        body_stmts: list[tuple[int, int]] = []
         ds_end_row = -1
         if ds_skip_lines > 0 and body_node.child_count > 0:
-            # The docstring node occupies the first ds_skip_lines lines
             ds_end_row = body_node.start_point[0] + ds_skip_lines - 1
 
-        # Punctuation tokens to skip (brace-language body delimiters, semicolons)
-        _skip_types = frozenset({"{", "}", ";", ",", "comment", "line_comment", "block_comment"})
+        skip_types = frozenset({"{", "}", ";", ",", "comment", "line_comment", "block_comment"})
 
         for child in body_node.children:
-            # Skip docstring node (already handled separately)
             if child.start_point[0] <= ds_end_row:
                 continue
-            # Skip punctuation and comment nodes
-            if child.type in _skip_types:
-                continue
-            # Skip unnamed tokens (tree-sitter anonymous nodes like braces)
-            if not child.is_named:
+            if child.type in skip_types or not child.is_named:
                 continue
             body_stmts.append((child.start_point[0], child.end_point[0]))
 
-        # Calculate lines per statement and keep whole statements until budget
         kept_lines: list[str] = []
         kept_line_count = 0
         stmts_kept = 0
@@ -1257,8 +1253,6 @@ class CodeAwareCompressor:
             stmt_lines = code_lines[start_row_stmt : end_row_stmt + 1]
             stmt_line_count = len(stmt_lines)
 
-            # If adding this statement would exceed budget and we already have
-            # at least one statement, stop here
             if kept_line_count + stmt_line_count > body_limit and stmts_kept > 0:
                 break
 
@@ -1267,33 +1261,44 @@ class CodeAwareCompressor:
             stmts_kept += 1
 
         omitted_lines = total_body_lines_count - kept_line_count
+        return kept_lines, omitted_lines
 
-        # Build compressed output preserving original indentation
+    @staticmethod
+    def _assemble_function_lines(
+        *,
+        signature_lines: list[str],
+        node_sig_fallback: str,
+        opening_brace_line: str | None,
+        docstring_text: str,
+        docstring_mode: DocstringMode,
+        kept_lines: list[str],
+        omitted_lines: int,
+        omitted_comment: str | None,
+        uses_colon: bool,
+        indent: str,
+        closing_brace_line: str | None,
+        after_lines: list[str],
+    ) -> str:
+        """Assemble the components of a compressed function into source code."""
         result_parts: list[str] = []
 
-        # Signature lines (may be multi-line)
         if signature_lines:
             result_parts.extend(signature_lines)
         else:
-            sig_text = code[node.start_byte : body_node.start_byte].rstrip()
-            result_parts.append(sig_text)
+            result_parts.append(node_sig_fallback)
 
         if opening_brace_line is not None:
             result_parts.append(opening_brace_line)
 
-        if docstring_text and self.config.docstring_mode is not DocstringMode.REMOVE:
+        if docstring_text and docstring_mode is not DocstringMode.REMOVE:
             result_parts.append(docstring_text)
 
         if kept_lines:
             result_parts.extend(kept_lines)
 
-        if omitted_lines > 0:
-            result_parts.append(
-                _make_omitted_comment(
-                    func_name, omitted_lines, indent, lang_config.comment_prefix, analysis
-                )
-            )
-            if lang_config.uses_colon_after_signature:
+        if omitted_lines > 0 and omitted_comment is not None:
+            result_parts.append(omitted_comment)
+            if uses_colon:
                 result_parts.append(f"{indent}pass")
 
         if closing_brace_line is not None:
@@ -1302,6 +1307,122 @@ class CodeAwareCompressor:
             result_parts.extend(after_lines)
 
         return "\n".join(result_parts)
+
+    def _compress_function_ast(
+        self,
+        node: Any,
+        code: str,
+        language: CodeLanguage,
+        lang_config: LangConfig,
+        body_limits: dict[str, int],
+        analysis: _SymbolAnalysis,
+    ) -> str:
+        """Compress a function/method using AST body detection.
+
+        The AST chooses complete statements and body boundaries; source-line
+        slicing preserves the original indentation and brace layout.
+        """
+        code_lines = code.split("\n")
+        start_row = node.start_point[0]
+        end_row = node.end_point[0]
+        node_lines = code_lines[start_row : end_row + 1]
+
+        func_name = _get_definition_name(node)
+        body_limit = _get_body_limit(func_name, body_limits, self.config.max_body_lines)
+
+        # Small enough to keep as-is
+        if len(node_lines) <= body_limit + 2:
+            return "\n".join(node_lines)
+
+        # Find the body node using AST (not string scanning)
+        body_node = next((c for c in node.children if c.type in lang_config.body_node_types), None)
+        if body_node is None:
+            return "\n".join(node_lines)
+
+        (
+            signature_lines,
+            body_lines,
+            after_lines,
+            opening_brace_line,
+            closing_brace_line,
+        ) = self._partition_function_lines(node, body_node, node_lines, lang_config)
+
+        # Handle Python docstrings via AST
+        docstring_text = ""
+        ds_skip_lines = 0
+        if language == CodeLanguage.PYTHON and body_node.child_count > 0:
+            docstring_text, ds_skip_lines = self._extract_python_docstring(
+                body_node, body_lines, self.config.docstring_mode
+            )
+
+        indent = _detect_indent(body_lines) if body_lines else "    "
+        kept_lines, omitted_lines = self._select_kept_statements(
+            body_node, code_lines, ds_skip_lines, body_limit
+        )
+
+        omitted_comment = (
+            _make_omitted_comment(
+                func_name, omitted_lines, indent, lang_config.comment_prefix, analysis
+            )
+            if omitted_lines > 0
+            else None
+        )
+        node_sig_fallback = code[node.start_byte : body_node.start_byte].rstrip()
+
+        return self._assemble_function_lines(
+            signature_lines=signature_lines,
+            node_sig_fallback=node_sig_fallback,
+            opening_brace_line=opening_brace_line,
+            docstring_text=docstring_text,
+            docstring_mode=self.config.docstring_mode,
+            kept_lines=kept_lines,
+            omitted_lines=omitted_lines,
+            omitted_comment=omitted_comment,
+            uses_colon=lang_config.uses_colon_after_signature,
+            indent=indent,
+            closing_brace_line=closing_brace_line,
+            after_lines=after_lines,
+        )
+
+    def _compress_class_member(
+        self,
+        child: Any,
+        code: str,
+        code_lines: list[str],
+        language: CodeLanguage,
+        lang_config: LangConfig,
+        body_limits: dict[str, int],
+        analysis: _SymbolAnalysis,
+    ) -> str:
+        """Compress an individual class member node."""
+        if child.type in lang_config.function_nodes:
+            return self._compress_function_ast(
+                child, code, language, lang_config, body_limits, analysis
+            )
+        if lang_config.decorator_node and child.type == lang_config.decorator_node:
+            decorator_lines: list[str] = []
+            method_compressed: str | None = None
+            for deco_child in child.children:
+                if deco_child.type == "decorator":
+                    decorator_lines.append(_get_node_text(deco_child, code))
+                elif deco_child.type in lang_config.function_nodes:
+                    method_compressed = self._compress_function_ast(
+                        deco_child, code, language, lang_config, body_limits, analysis
+                    )
+            if decorator_lines and method_compressed:
+                return "\n".join(decorator_lines) + "\n" + method_compressed
+            if method_compressed:
+                return method_compressed
+            child_start = child.start_point[0]
+            child_end = child.end_point[0]
+            return "\n".join(code_lines[child_start : child_end + 1])
+        if child.type in lang_config.class_nodes:
+            return self._compress_class_ast(
+                child, code, language, lang_config, body_limits, analysis
+            )
+        child_start = child.start_point[0]
+        child_end = child.end_point[0]
+        return "\n".join(code_lines[child_start : child_end + 1])
 
     def _compress_class_ast(
         self,
@@ -1314,85 +1435,41 @@ class CodeAwareCompressor:
     ) -> str:
         """Compress a class by individually compressing each method.
 
-        Preserves class-level attributes, type annotations, and decorators
-        while compressing method bodies individually — each method's
-        omitted-body comment lands at the correct indentation.
+        Class-level attributes, annotations, decorators, and nested classes are
+        preserved while method bodies are delegated through the same AST path.
         """
-        # Use line-based extraction to preserve indentation
         code_lines = code.split("\n")
         start_row = node.start_point[0]
         end_row = node.end_point[0]
         node_lines = code_lines[start_row : end_row + 1]
-        node_text = "\n".join(node_lines)
 
-        # Find the body node
         body_node = next((c for c in node.children if c.type in lang_config.body_node_types), None)
-
         if body_node is None:
-            return node_text
+            return "\n".join(node_lines)
 
-        # Class header (signature) — everything before the body
         node_start_line = node.start_point[0]
         body_start_line = body_node.start_point[0]
         sig_end = body_start_line - node_start_line
         header_lines = node_lines[:sig_end] if sig_end > 0 else [node_lines[0]]
 
-        # Process each child of the class body individually
-        body_parts: list[str] = []
-
-        for child in body_node.children:
-            # Use line-based extraction for children too
-            child_start = child.start_point[0]
-            child_end = child.end_point[0]
-            child_text = "\n".join(code_lines[child_start : child_end + 1])
-
-            # Methods/functions inside the class — compress individually
-            if child.type in lang_config.function_nodes:
-                compressed = self._compress_function_ast(
-                    child, code, language, lang_config, body_limits, analysis
+        body_parts = [
+            compressed_member
+            for child in body_node.children
+            if (
+                compressed_member := self._compress_class_member(
+                    child, code, code_lines, language, lang_config, body_limits, analysis
                 )
-                body_parts.append(compressed)
-            # Decorated methods
-            elif lang_config.decorator_node and child.type == lang_config.decorator_node:
-                decorator_lines = []
-                method_compressed = None
-                for deco_child in child.children:
-                    if deco_child.type == "decorator":
-                        decorator_lines.append(_get_node_text(deco_child, code))
-                    elif deco_child.type in lang_config.function_nodes:
-                        method_compressed = self._compress_function_ast(
-                            deco_child, code, language, lang_config, body_limits, analysis
-                        )
-                if decorator_lines and method_compressed:
-                    body_parts.append("\n".join(decorator_lines) + "\n" + method_compressed)
-                elif method_compressed:
-                    body_parts.append(method_compressed)
-                else:
-                    body_parts.append(child_text)
-            # Nested classes — recurse
-            elif child.type in lang_config.class_nodes:
-                compressed = self._compress_class_ast(
-                    child, code, language, lang_config, body_limits, analysis
-                )
-                body_parts.append(compressed)
-            else:
-                # Class-level attributes, type annotations, docstrings, etc.
-                # Keep them as-is with original indentation
-                if child_text.strip():
-                    body_parts.append(child_text)
+            ).strip()
+        ]
 
-        # Reconstruct class with proper indentation
         result_parts = list(header_lines)
         result_parts.extend(body_parts)
 
-        # Handle closing brace for brace-delimited languages
-        body_end_line = body_node.end_point[0]
-        body_end_rel = body_end_line - node_start_line + 1
+        body_end_rel = body_node.end_point[0] - node_start_line + 1
         after_lines = node_lines[body_end_rel:]
         if after_lines:
             result_parts.extend(after_lines)
         elif not lang_config.uses_colon_after_signature:
-            # Ensure closing brace
             last_body_line = node_lines[-1] if node_lines else ""
             if last_body_line.strip() == "}":
                 result_parts.append(last_body_line)

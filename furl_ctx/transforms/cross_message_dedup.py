@@ -66,10 +66,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..ccr.retrieve_spans import array_element_spans
 from ..config import TransformResult
 from ..tokenizer import Tokenizer
 from .base import Transform
@@ -140,7 +141,7 @@ class _ArraySource:
     """
 
     message_index: int
-    row_signatures: frozenset[str]
+    row_signature_counts: Counter[str]
 
 
 @dataclass
@@ -176,13 +177,14 @@ def _utf8_len(text: str) -> int:
     return len(text.encode("utf-8", errors="surrogatepass"))
 
 
-def _row_signature(row: Any) -> str:
-    """Canonical signature for byte-identical-row matching across arrays."""
-    return json.dumps(row, sort_keys=True, ensure_ascii=False)
+def _parse_dict_array(content: str) -> list[tuple[dict[str, Any], str]] | None:
+    """Parse a JSON dict-array and retain each row's exact source span.
 
-
-def _parse_dict_array(content: str) -> list[dict[str, Any]] | None:
-    """Parse ``content`` as a JSON array of objects; ``None`` otherwise."""
+    Near-duplicate matching promises byte-identical rows, so parsed object values
+    are not sufficient: key order, escapes, and whitespace inside a row are part
+    of the source representation. ``array_element_spans`` preserves that row text
+    while ``json.loads`` below still validates the complete top-level document.
+    """
     if not content.lstrip().startswith("["):
         return None
     try:
@@ -193,7 +195,11 @@ def _parse_dict_array(content: str) -> list[dict[str, Any]] | None:
         return None
     if not all(isinstance(row, dict) for row in parsed):
         return None
-    return parsed
+
+    spans = array_element_spans(content)
+    if spans is None or len(spans) != len(parsed):
+        return None
+    return [(row, span) for row, (_span_value, span) in zip(parsed, spans)]
 
 
 def duplicate_sentinel(ccr_hash: str, n_bytes: int, first_message_index: int) -> str:
@@ -528,7 +534,7 @@ class CrossMessageDeduper(Transform):
             state.array_sources.append(
                 _ArraySource(
                     message_index=message_index,
-                    row_signatures=frozenset(_row_signature(r) for r in rows),
+                    row_signature_counts=Counter(span for _row, span in rows),
                 )
             )
         return None
@@ -558,7 +564,7 @@ class CrossMessageDeduper(Transform):
     def _replace_near_duplicate(
         self,
         content: str,
-        rows: list[dict[str, Any]],
+        rows: list[tuple[dict[str, Any], str]],
         *,
         ccr_hash: str,
         state: _DedupState,
@@ -571,11 +577,14 @@ class CrossMessageDeduper(Transform):
         bytes, shared fraction, real byte savings) — otherwise the unit is
         left untouched and becomes a reference source itself.
         """
-        signatures = [_row_signature(r) for r in rows]
+        signatures = [span for _row, span in rows]
+        signature_counts = Counter(signatures)
         best: _ArraySource | None = None
         best_shared = 0
         for source in state.array_sources:
-            shared = sum(1 for sig in signatures if sig in source.row_signatures)
+            # Multiset intersection is load-bearing: one source occurrence can
+            # justify eliding at most one later occurrence of the same exact row.
+            shared = sum((signature_counts & source.row_signature_counts).values())
             if shared > best_shared:
                 best_shared = shared
                 best = source
@@ -583,14 +592,26 @@ class CrossMessageDeduper(Transform):
         if best is None or best_shared < NEAR_DUP_MIN_SHARED_ROWS:
             return None
 
-        shared_bytes = sum(_utf8_len(sig) for sig in signatures if sig in best.row_signatures)
+        remaining = best.row_signature_counts.copy()
+        shared_mask: list[bool] = []
+        for signature in signatures:
+            is_shared = remaining[signature] > 0
+            shared_mask.append(is_shared)
+            if is_shared:
+                remaining[signature] -= 1
+
+        shared_bytes = sum(
+            _utf8_len(signature)
+            for signature, is_shared in zip(signatures, shared_mask)
+            if is_shared
+        )
         total_bytes = _utf8_len(content)
         if shared_bytes < NEAR_DUP_MIN_SHARED_BYTES:
             return None
         if shared_bytes / total_bytes < NEAR_DUP_MIN_SHARED_FRACTION:
             return None
 
-        changed_rows = [row for row, sig in zip(rows, signatures) if sig not in best.row_signatures]
+        changed_rows = [row for (row, _span), is_shared in zip(rows, shared_mask) if not is_shared]
         rendering = near_duplicate_rendering(
             changed_rows,
             ccr_hash=ccr_hash,

@@ -91,6 +91,16 @@ class DurableWriteError(RuntimeError):
         self.hash_key = hash_key
 
 
+class CollisionSafetyError(DurableWriteError):
+    """Veto an explicit-hash write when its spill collision domain is uncertain.
+
+    This subclasses :class:`DurableWriteError` so marker-producing callers that
+    already veto on durable-store failures also veto here. The attempted new
+    binding is never persisted: an unreadable or uncleanable same-key spill row
+    must not become foreign content for the new producer.
+    """
+
+
 # Cheap pre-check that skips the marker regex scan for the common raw original
 # that embeds no marker at all. Case-INSENSITIVE (RG5): the marker grammar's
 # ``GENERIC_BRACKET_PATTERN`` is itself ``re.IGNORECASE``, so an uppercase
@@ -124,13 +134,17 @@ class CascadeOutcome:
 
     ``nested_deleted`` is the DISTINCT nested hashes the cascade removed;
     ``nested_shared_skipped`` is those it deliberately left because another live
-    entry still references them (RG3). ``deleted_hashes`` is the full set a
-    read-back should find gone (RG6) — the top hash only when it truly went.
+    entry still references them (RG3). ``failed_hashes`` names hashes the cascade
+    attempted to remove but proved still reachable from at least one tier. Those
+    failures propagate to the purge read-back so partial mutation cannot be
+    reported as a clean erase. ``deleted_hashes`` is the full set a read-back
+    should find gone (RG6) — the top hash only when it truly went.
     """
 
     top_deleted: bool
     nested_deleted: tuple[str, ...] = ()
     nested_shared_skipped: tuple[str, ...] = ()
+    failed_hashes: tuple[str, ...] = ()
 
     def deleted_hashes(self, hash_key: str) -> tuple[str, ...]:
         """Every hash this cascade decided to delete, for read-back verification."""
@@ -300,6 +314,12 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
     """
     default_ttl = status.get("default_ttl_seconds", DEFAULT_CCR_TTL_SECONDS)
     ttl_seconds = status.get("ttl_seconds", default_ttl)
+
+    if status.get("status") == "available":
+        return (
+            "Entry is available in the CCR store, but this retrieval attempt returned "
+            "no content. Retry the retrieval."
+        )
 
     if status.get("status") == "expired":
         age_seconds = status.get("age_seconds")
@@ -805,34 +825,88 @@ class CompressionStore:
             # never reaches this branch: _evict_if_needed() above already reaped
             # it, so a dead binding cannot wedge its key.
             existing = self._backend.get(hash_key)
-            if existing is not None:
-                if existing.original_content != original:
-                    logger.error(
-                        "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
-                        "new_len=%d) — dropping the ambiguous binding; NEITHER content "
-                        "is served (both markers now loud-miss) rather than resolving "
-                        "to foreign content",
-                        hash_key,
-                        tool_name,
-                        len(existing.original_content),
-                        len(original),
-                    )
-                    # Drop the stored entry so retrieve() loud-misses instead of
-                    # serving foreign bytes; its heap tuple is now stale. The
-                    # binding reached NEITHER a durable nor a volatile tier, so a
-                    # require_durable caller must veto below (Bug-6) rather than
-                    # receive the hash as if the content were stored.
-                    self._backend.delete(hash_key)
-                    self._stale_heap_entries += 1
-                    collision_dropped = True
+            spilled: CompressionEntry | None = None
+            if self._spill is not None:
+                if explicit_hash is None:
+                    # Preserve the optional spill's general fail-open contract for
+                    # content-derived hashes. Explicit keys can intentionally alias
+                    # unrelated content, so their collision domain must be inspected
+                    # fail-closed instead.
+                    spilled = self._recover_from_spill(hash_key)
                 else:
-                    # Same content being stored again - this is fine, just update
-                    logger.debug(
-                        "Duplicate store for hash=%s, updating entry",
-                        hash_key,
-                    )
-                    # Mark old heap entry as stale since we're replacing
+                    try:
+                        spilled = self._spill.get(hash_key)
+                    except Exception as exc:
+                        logger.error(
+                            "CCR spill collision-domain read failed for explicit hash %s; "
+                            "refusing the new binding: %s",
+                            hash_key,
+                            exc,
+                        )
+                        raise CollisionSafetyError(
+                            f"Cannot safely bind explicit hash {hash_key}: the spill tier "
+                            "could not be inspected for an older same-key binding.",
+                            hash_key=hash_key,
+                        ) from exc
+                    if spilled is not None and spilled.is_expired(self._now()):
+                        spilled = None
+
+            conflicting = next(
+                (
+                    candidate
+                    for candidate in (existing, spilled)
+                    if candidate is not None and candidate.original_content != original
+                ),
+                None,
+            )
+            if conflicting is not None:
+                logger.error(
+                    "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
+                    "new_len=%d) — dropping the ambiguous binding from every tier; "
+                    "NEITHER content is served (both markers now loud-miss) rather than "
+                    "resolving to foreign content",
+                    hash_key,
+                    tool_name,
+                    len(conflicting.original_content),
+                    len(original),
+                )
+                # Collision cleanup is different from ordinary spill maintenance:
+                # uncertainty here would let the same hash resolve to foreign bytes.
+                # Verify the spill row is gone BEFORE dropping primary or accepting
+                # any future binding. A failure vetoes this store() call.
+                if self._spill is not None:
+                    try:
+                        self._spill.delete(hash_key)
+                        residual = self._spill.get(hash_key)
+                    except Exception as exc:
+                        logger.error(
+                            "CCR spill collision cleanup failed for hash %s; refusing the "
+                            "new binding: %s",
+                            hash_key,
+                            exc,
+                        )
+                        raise CollisionSafetyError(
+                            f"Cannot safely resolve collision for hash {hash_key}: spill "
+                            "cleanup could not be verified.",
+                            hash_key=hash_key,
+                        ) from exc
+                    if residual is not None and not residual.is_expired(self._now()):
+                        raise CollisionSafetyError(
+                            f"Cannot safely resolve collision for hash {hash_key}: a live "
+                            "same-key spill binding survived cleanup.",
+                            hash_key=hash_key,
+                        )
+                if self._backend.delete(hash_key):
                     self._stale_heap_entries += 1
+                collision_dropped = True
+            elif existing is not None:
+                # Same content being stored again - this is fine, just update
+                logger.debug(
+                    "Duplicate store for hash=%s, updating entry",
+                    hash_key,
+                )
+                # Mark old heap entry as stale since we're replacing
+                self._stale_heap_entries += 1
 
             if not collision_dropped:
                 durable = self._persist_and_report_durability(hash_key, entry)
@@ -984,7 +1058,10 @@ class CompressionStore:
                 self._backend.delete(hash_key)
                 # CRITICAL FIX: Track stale heap entry
                 self._stale_heap_entries += 1
-                return None
+                # A newer primary copy can expire while an older spill copy with
+                # the same content hash is still live. Treat that like a primary
+                # miss instead of shadowing the retrievable spill entry.
+                return self._recover_from_spill(hash_key)
 
             # Track access on the entry
             entry.record_access(query)
@@ -1031,26 +1108,22 @@ class CompressionStore:
         self,
         hash_key: str,
     ) -> dict[str, Any] | None:
-        """Get metadata about a stored entry without retrieving full content.
+        """Get metadata about a live entry from either storage tier.
 
-        Useful for context tracking to know what was compressed without
-        fetching the entire original content.
-
-        Args:
-            hash_key: Hash key returned by store().
-
-        Returns:
-            Dict with metadata if found and not expired, None otherwise.
+        Primary storage takes precedence. A primary miss or expired primary
+        falls through to the spill tier using the same no-promotion semantics
+        as :meth:`retrieve`.
         """
         with self._lock:
             entry = self._backend.get(hash_key)
-
             if entry is None:
-                return None
-
-            if entry.is_expired(self._now()):
+                entry = self._recover_from_spill(hash_key)
+            elif entry.is_expired(self._now()):
                 self._backend.delete(hash_key)
                 self._stale_heap_entries += 1
+                entry = self._recover_from_spill(hash_key)
+
+            if entry is None:
                 return None
 
             return {
@@ -1062,10 +1135,6 @@ class CompressionStore:
                 "compressed_content": entry.compressed_content,
                 "created_at": entry.created_at,
                 "ttl": entry.ttl,
-                # Strategy + token counts let a caller tell an opaque whole-blob
-                # offload (``ccr_offload``: retrieval returns the entire payload)
-                # apart from a granular per-row drop, and quantify the round-trip
-                # cost, without fetching the full original content.
                 "compression_strategy": entry.compression_strategy,
                 "original_tokens": entry.original_tokens,
                 "compressed_tokens": entry.compressed_tokens,
@@ -1147,80 +1216,69 @@ class CompressionStore:
         max_results: int = 10,
         score_threshold: float = 0.0,
     ) -> list[CrossStoreMatch]:
-        """Full-text search across ALL live entries, ranked by BM25.
+        """Full-text search across all live primary and spill entries.
 
-        Unlike :meth:`search` (which searches WITHIN one hash's original),
-        this ranks every live entry as a single document against ``query`` and
-        returns the top ``max_results`` as ``CrossStoreMatch`` records —
-        ``(hash, score, preview, tool_name)`` — so the caller can follow up
-        with a per-hash :meth:`retrieve`. With the durable SQLite backend this
-        spans cross-session / cross-process entries (they live in the shared
-        file), so a query can surface originals another agent stored.
-
-        Redaction: each ``preview`` is passed through the same credential
-        redaction the retrieval-log preview uses, so a cross-store search never
-        leaks a secret a per-hash retrieval's log path would have masked. The
-        BM25 SCORE is computed over the raw original (a float, not content — no
-        leak) so ranking quality is unaffected by redaction.
-
-        Expiry: TTL is the store's responsibility, and ``backend.items()``
-        returns expired-but-unreaped rows, so each candidate is filtered
-        through ``is_expired`` against the store clock — an evicted/expired
-        entry can never appear in results.
-
-        This is a pure read: it neither bumps ``retrieval_count`` nor logs a
-        retrieval event (nothing is actually retrieved — the caller retrieves
-        by hash next), mirroring the side-effect-free ``_get_entry_for_search``
-        rationale (COR-37).
-
-        Args:
-            query: Free-text search query.
-            max_results: Maximum number of ranked hits to return.
-            score_threshold: Minimum BM25 score to include (default 0.0 —
-                any positive-scoring match qualifies; a term must still match).
-
-        Returns:
-            Up to ``max_results`` ``CrossStoreMatch`` records, highest score
-            first. Empty when the query is blank, the store is empty, or no
-            entry scores above the threshold.
+        Each hash contributes at most one document. A live primary copy wins;
+        when the primary is absent or expired, a live spill copy is searched.
+        Spill reads are best-effort and logged on failure. This remains a pure
+        read: expired rows are filtered but not reaped and spill hits are not
+        promoted or access-bumped.
         """
         if not query or not query.strip():
             return []
 
         now = self._now()
-        # Snapshot only the KEYS under the lock, which is cheap and decodes no
-        # content, then decode and expiry-filter each entry under a brief per-key
-        # lock so a concurrent store op is never blocked for the whole decode.
-        # Holding the lock across ``items()`` used to freeze every writer for the
-        # full materialize-and-decode of up to the cap of large entries; the
-        # sibling eviction path was already narrowed off ``items()`` this way
-        # (audit #2, ``created_at_index``). ``created_at_index()`` and ``items()``
-        # iterate the backend in the same order and ``get`` reproduces each entry,
-        # so a stable store yields byte-identical results and ranking order.
         with self._lock:
             snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
+            spill = self._spill
+            if spill is not None:
+                try:
+                    seen = set(snapshot_keys)
+                    snapshot_keys.extend(
+                        hash_key
+                        for _created_at, hash_key in spill.created_at_index()
+                        if hash_key not in seen
+                    )
+                except Exception as exc:  # noqa: BLE001 — search is fail-open
+                    logger.warning(
+                        "CCR spill index read during search_all failed (non-fatal): %s", exc
+                    )
 
         live_entries: list[tuple[str, CompressionEntry]] = []
         for hash_key in snapshot_keys:
             with self._lock:
-                entry = self._backend.get(hash_key)
-            # A key evicted between the snapshot and its decode simply drops out,
-            # which is correct for a live search over the current window.
-            if entry is not None and not entry.is_expired(now):
-                live_entries.append((hash_key, entry))
+                primary = self._backend.get(hash_key)
+
+            # Expiry checks can decode/filter entry metadata and must not hold
+            # the store lock; concurrent stores/retrieves should be able to
+            # interleave while a large search snapshot is evaluated.
+            if primary is not None and not primary.is_expired(now):
+                live_entries.append((hash_key, primary))
+                continue
+
+            if spill is None:
+                continue
+
+            try:
+                with self._lock:
+                    spilled = spill.get(hash_key)
+            except Exception as exc:  # noqa: BLE001 — search is fail-open
+                logger.warning(
+                    "CCR spill read during search_all failed for %s (non-fatal): %s",
+                    hash_key,
+                    exc,
+                )
+                continue
+
+            if spilled is not None and not spilled.is_expired(now):
+                live_entries.append((hash_key, spilled))
 
         if not live_entries:
             return []
 
-        # Score every live entry as ONE document. Batch scoring builds a real
-        # corpus IDF map, so a discriminative term (a UUID/ID) outranks a term
-        # common to many entries — the property that makes this BM25 rather
-        # than raw term-frequency ranking.
         documents = [entry.original_content for _hash, entry in live_entries]
         scores = self._scorer.score_batch(documents, query)
 
-        # nlargest breaks ties toward the earlier element, exactly as the
-        # stable ``sorted(..., reverse=True)[:max_results]`` it replaces.
         ranked = heapq.nlargest(
             max_results,
             (
@@ -1230,7 +1288,6 @@ class CompressionStore:
             ),
             key=itemgetter(2),
         )
-
         return [
             CrossStoreMatch(
                 hash=hash_key,
@@ -1492,58 +1549,54 @@ class CompressionStore:
         self,
         hash_key: str,
     ) -> CompressionEntry | None:
-        """Get entry without logging retrieval or recording an access.
+        """Get a live entry from either tier without recording an access.
 
-        COR-37: this read is side-effect-free (beyond expiry reaping) — the
-        access bump happens in ``_record_search_access`` only after search
-        knows it returned results, so zero-result probes never count as
-        retrievals.
-
-        Args:
-            hash_key: Hash key returned by store().
-
-        Returns:
-            CompressionEntry copy if found and not expired, None otherwise.
+        COR-37: the access bump happens in :meth:`_record_search_access` only
+        after search returns results. Expired primary entries are reaped before
+        lookup falls through to spill storage.
         """
         with self._lock:
             entry = self._backend.get(hash_key)
+            if entry is None:
+                entry = self._recover_from_spill(hash_key)
+            elif entry.is_expired(self._now()):
+                self._backend.delete(hash_key)
+                self._stale_heap_entries += 1
+                entry = self._recover_from_spill(hash_key)
 
             if entry is None:
                 return None
-
-            if entry.is_expired(self._now()):
-                self._backend.delete(hash_key)
-                # CRITICAL FIX: Track stale heap entry
-                self._stale_heap_entries += 1
-                return None
-
-            # CRITICAL FIX #4: Return a copy to prevent race conditions
-            # The entry contains mutable fields (search_queries list) that could be
-            # modified by other threads after we release the lock
             return replace(entry, search_queries=list(entry.search_queries))
 
     def _record_search_access(self, hash_key: str, query: str | None) -> None:
-        """Record an access on an entry AFTER a search returned results.
-
-        Runs after scoring, so the entry may have expired or been evicted
-        between the search's read and this bump — in that case there is
-        nothing to record and the results (built from a pre-eviction copy)
-        still ship to the caller.
-
-        Engine P2-13: this bump is also the search-side retrieval-feedback
-        emission point. ``search()`` calls here only when results actually
-        shipped (COR-37), so the feedback loop inherits the same honesty —
-        zero-result probes never emit a signal.
-        """
+        """Record access after a search returned results, including spill hits."""
         signal_meta: tuple[str | None, str | None] | None = None
         with self._lock:
             entry = self._backend.get(hash_key)
-            if entry is None or entry.is_expired(self._now()):
+            in_spill = False
+
+            if entry is not None and entry.is_expired(self._now()):
+                self._backend.delete(hash_key)
+                self._stale_heap_entries += 1
+                entry = None
+
+            if entry is None:
+                entry = self._recover_from_spill(hash_key)
+                in_spill = entry is not None
+
+            if entry is None:
                 return
+
             entry.record_access(query)
-            self._backend.set(hash_key, entry)
+            if in_spill and self._spill is not None:
+                try:
+                    self._spill.set(hash_key, entry)
+                except Exception as exc:  # noqa: BLE001 — bookkeeping is advisory
+                    logger.warning("CCR spill access update failed (non-fatal): %s", exc)
+            else:
+                self._backend.set(hash_key, entry)
             signal_meta = (entry.tool_name, entry.compression_strategy)
-        # Emit outside the store lock (aggregator lock is a leaf — no nesting).
+
         if self._enable_feedback and signal_meta is not None:
             self._emit_retrieval_signal(*signal_meta)
 
@@ -1644,34 +1697,69 @@ class CompressionStore:
         *,
         clean_expired: bool = False,
     ) -> dict[str, Any]:
-        """Return availability and TTL metadata for a stored entry."""
+        """Return availability and TTL metadata across primary and spill tiers.
+
+        A live primary copy wins. If the primary is absent or expired, a live
+        spill copy is still available because :meth:`retrieve` can resolve it.
+        When no live copy exists but an expired copy does, ``expired`` is
+        reported. ``clean_expired`` removes expired copies from both tiers.
+        """
         now = self._now()
         with self._lock:
-            entry = self._backend.get(hash_key)
+            primary = self._backend.get(hash_key)
+            spill_entry: CompressionEntry | None = None
+            spill_read_failed = False
+            if self._spill is not None:
+                try:
+                    spill_entry = self._spill.get(hash_key)
+                except Exception as exc:  # noqa: BLE001 — diagnostic path, logged
+                    spill_read_failed = True
+                    logger.warning("CCR spill status read failed (non-fatal): %s", exc)
+
+            primary_live = primary is not None and not primary.is_expired(now)
+            spill_live = spill_entry is not None and not spill_entry.is_expired(now)
+            if primary_live:
+                entry = primary
+            elif spill_live:
+                entry = spill_entry
+            else:
+                entry = primary if primary is not None else spill_entry
+
             if entry is None:
-                return {
+                status: dict[str, Any] = {
                     "hash": hash_key,
                     "status": "missing",
                     "default_ttl_seconds": self._default_ttl,
                     "max_entries": self._max_entries,
                 }
+                if spill_read_failed:
+                    status["spill_read_failed"] = True
+                return status
 
-            age_seconds = now - entry.created_at
-            expires_at = entry.created_at + entry.ttl
-            expired = age_seconds > entry.ttl
+            expired = not (primary_live or spill_live)
             status = {
                 "hash": hash_key,
                 "status": "expired" if expired else "available",
                 "ttl_seconds": entry.ttl,
                 "default_ttl_seconds": self._default_ttl,
                 "created_at": entry.created_at,
-                "expires_at": expires_at,
-                "age_seconds": age_seconds,
+                "expires_at": entry.created_at + entry.ttl,
+                "age_seconds": now - entry.created_at,
             }
 
-            if expired and clean_expired:
-                self._backend.delete(hash_key)
-                self._stale_heap_entries += 1
+            if clean_expired:
+                if primary is not None and primary.is_expired(now):
+                    if self._backend.delete(hash_key):
+                        self._stale_heap_entries += 1
+                if (
+                    self._spill is not None
+                    and spill_entry is not None
+                    and spill_entry.is_expired(now)
+                ):
+                    try:
+                        self._spill.delete(hash_key)
+                    except Exception as exc:  # noqa: BLE001 — cleanup is fail-open
+                        logger.warning("CCR spill expired-row cleanup failed (non-fatal): %s", exc)
 
             return status
 
@@ -1833,27 +1921,34 @@ class CompressionStore:
         return [h for h in seen if h != exclude]
 
     def _is_co_referenced(self, nested_hash: str, *, ignoring: set[str]) -> bool:
-        """Whether a LIVE entry outside *ignoring* still references *nested_hash*.
+        """Whether a live entry outside *ignoring* still references *nested_hash*.
 
-        The store is content-addressed and deduped, so two compressions that drop
-        identical content share ONE nested entry. Deleting it because one parent
-        was purged would leave the OTHER parent's ``<<ccr:HASH>>`` marker pointing
-        at nothing — a loud miss for content the user never asked to purge (RG3).
-        *ignoring* carries this cascade's own hashes so an entry being torn down
-        does not count as a live referent.
-
-        Cost: one pass over live entries per nested candidate. Purge is a rare,
-        explicit operation and correctness outranks speed here; the cheap
-        marker pre-check skips the common marker-free original outright.
+        Both primary and spill representations are scanned. They are not
+        deduplicated by hash because the same content hash can exist in both
+        tiers with different compressed marker graphs. If the spill cannot be
+        enumerated, fail closed and preserve the child rather than risking a
+        dangling marker in an unreadable parent.
         """
+        now = self._now()
         with self._lock:
             items = list(self._backend.items())
+            if self._spill is not None:
+                try:
+                    items.extend(self._spill.items())
+                except Exception as exc:  # noqa: BLE001 — destructive check fails closed
+                    logger.warning(
+                        "CCR spill co-reference scan failed; preserving nested hash %s: %s",
+                        nested_hash,
+                        exc,
+                    )
+                    return True
+
         from furl_ctx.ccr.marker_grammar import hashes_in_text
 
         return any(
             nested_hash in hashes_in_text(text)
             for key, entry in items
-            if key != nested_hash and key not in ignoring
+            if key != nested_hash and key not in ignoring and not entry.is_expired(now)
             for text in (entry.compressed_content, entry.original_content)
             if isinstance(text, str) and _may_reference_marker(text)
         )
@@ -1867,80 +1962,123 @@ class CompressionStore:
         outcome = self.delete_cascade_detailed(hash_key)
         return (outcome.top_deleted, len(outcome.nested_deleted))
 
-    def delete_cascade_detailed(
-        self, hash_key: str, *, _visited: set[str] | None = None
-    ) -> CascadeOutcome:
-        """Delete *hash_key* AND every nested ``<<ccr:HASH>>`` blob it alone owns.
+    def _preflight_cascade_graph(
+        self,
+        hash_key: str,
+        *,
+        already_visited: set[str],
+    ) -> dict[str, tuple[str, ...]] | None:
+        """Discover the complete reachable marker graph before any deletion.
 
-        A compressed view offloads dropped rows to their OWN store entries under
-        markers embedded in the entry's ``compressed_content`` (and, for a
-        multi-level crush, in those blobs in turn). A plain :meth:`delete` removes
-        only the named entry, leaving those nested originals independently
-        retrievable — so a caller who purged sensitive data believes it gone while
-        a copy survives under another hash (the audit's non-cascading-purge
-        finding, B3). This reads the entry's stored text FIRST, collects the
-        markers it references (in the compressed view AND the original), deletes
-        the entry, then recurses into each nested hash. The ``_visited`` set makes
-        it cycle-safe and idempotent — a marker pointing back at an ancestor, or a
-        blob shared by two parents, is followed at most once.
-
-        SHARED-BLOB RULE (RG3): the NAMED top hash always deletes, but a NESTED
-        hash is skipped when another LIVE entry still references it. Dedup means
-        two compressions of identical dropped content share one nested entry;
-        cascading through it would silently break the other parent's retrieval.
-        A skipped hash is reported in ``nested_shared_skipped``, never counted as
-        deleted, and is NOT added to ``_visited`` — a later parent in the same
-        cascade may legitimately own it once its own referents are gone.
-
-        ``nested_deleted`` and ``nested_shared_skipped`` are DISJOINT: a diamond
-        can skip a hash under one branch and delete it under a later one, and the
-        deletion is the truth (see the dedupe at the end of this method).
-
-        Known, deliberately deferred (tracked, not dropped):
-
-        * #11 — two entries whose markers reference EACH OTHER protect one another
-          forever, so neither is cascade-deleted while both are live. Reaching it
-          needs a contrived mutual reference (content-derived hashes make a natural
-          cycle near-impossible), and each is still individually purgeable by name.
+        Every backend lookup is serialized by ``self._lock``. If any spill
+        representation cannot be inspected, the whole preflight fails so no
+        ancestor has already been erased when a deeper node becomes unreadable.
         """
-        visited = _visited if _visited is not None else set()
+        graph: dict[str, tuple[str, ...]] = {}
+        seen = set(already_visited)
+        pending = [hash_key]
+
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+
+            with self._lock:
+                entries: list[CompressionEntry] = []
+                primary = self._backend.get(current)
+                if primary is not None:
+                    entries.append(primary)
+                if self._spill is not None:
+                    try:
+                        spilled = self._spill.get(current)
+                    except Exception as exc:
+                        logger.warning(
+                            "CCR spill read during delete_cascade preflight failed for %s; "
+                            "aborting the entire cascade before mutation: %s",
+                            current,
+                            exc,
+                        )
+                        return None
+                    if spilled is not None:
+                        entries.append(spilled)
+
+            nested_seen: dict[str, None] = {}
+            for entry in entries:
+                for nested_hash in self._entry_marker_hashes(entry, exclude=current):
+                    nested_seen.setdefault(nested_hash, None)
+            nested = tuple(nested_seen)
+            graph[current] = nested
+            pending.extend(
+                nested_hash for nested_hash in reversed(nested) if nested_hash not in seen
+            )
+
+        return graph
+
+    def _delete_cascade_from_graph(
+        self,
+        hash_key: str,
+        *,
+        graph: dict[str, tuple[str, ...]],
+        visited: set[str],
+    ) -> CascadeOutcome:
+        """Apply a fully preflighted cascade without further marker discovery."""
         if hash_key in visited:
             return CascadeOutcome(top_deleted=False)
-        visited.add(hash_key)
-
-        # Read the entry's stored text BEFORE deleting so nested markers are
-        # recoverable.
-        with self._lock:
-            entry = self._backend.get(hash_key)
-        nested = [] if entry is None else self._entry_marker_hashes(entry, exclude=hash_key)
 
         top_deleted = self.delete(hash_key)
+        # ``delete`` intentionally fails open for spill I/O, so its boolean only
+        # means that at least one tier removed a copy. A cascade may ignore this
+        # parent during child co-reference checks ONLY after the hash is proven
+        # unreachable from every tier. ``exists_any_tier`` is fail-closed on an
+        # unreadable spill, which turns mutation-time uncertainty into a stopped
+        # cascade instead of a dangling parent marker.
+        if self.exists_any_tier(hash_key):
+            return CascadeOutcome(top_deleted=False, failed_hashes=(hash_key,))
+        visited.add(hash_key)
+
         deleted: list[str] = []
         skipped: list[str] = []
-        for nested_hash in nested:
+        failed: list[str] = []
+        for nested_hash in graph.get(hash_key, ()):
             if nested_hash in visited:
                 continue
             if self._is_co_referenced(nested_hash, ignoring=visited):
                 skipped.append(nested_hash)
                 continue
-            child = self.delete_cascade_detailed(nested_hash, _visited=visited)
+            child = self._delete_cascade_from_graph(nested_hash, graph=graph, visited=visited)
             if child.top_deleted:
                 deleted.append(nested_hash)
             deleted.extend(child.nested_deleted)
             skipped.extend(child.nested_shared_skipped)
-        # A hash can be skipped by one branch and then legitimately deleted by a
-        # later one (a skip deliberately does not enter ``visited``, so a diamond
-        # T->[A,B] with A->[C] and B->[C] skips C under A, then deletes it under
-        # B once A is gone). DELETED WINS: the erase is what actually happened,
-        # and reporting C as "kept because another entry references it" would be
-        # a false claim about live data -- the exact class of bug the read-back
-        # and the kept-shared disclosure exist to prevent.
+            failed.extend(child.failed_hashes)
+
         deleted_set = set(deleted)
         return CascadeOutcome(
             top_deleted=top_deleted,
             nested_deleted=tuple(deleted),
             nested_shared_skipped=tuple(h for h in skipped if h not in deleted_set),
+            failed_hashes=tuple(dict.fromkeys(failed)),
         )
+
+    def delete_cascade_detailed(
+        self, hash_key: str, *, _visited: set[str] | None = None
+    ) -> CascadeOutcome:
+        """Delete *hash_key* and nested blobs no other live entry references.
+
+        Marker discovery reads both primary and spill representations. Discovery
+        is a separate preflight phase: no hash is deleted until every reachable
+        node's spill representation has been inspected successfully.
+        """
+        visited = _visited if _visited is not None else set()
+        if hash_key in visited:
+            return CascadeOutcome(top_deleted=False)
+
+        graph = self._preflight_cascade_graph(hash_key, already_visited=visited)
+        if graph is None:
+            return CascadeOutcome(top_deleted=False)
+
+        return self._delete_cascade_from_graph(hash_key, graph=graph, visited=visited)
 
     def clear(self) -> int:
         """Clear all entries; return the count STILL reachable after the wipe.

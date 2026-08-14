@@ -195,8 +195,12 @@ class ReadLifecycleManager:
                 file_path = None
                 offset = None
                 limit = None
-                with suppress(json.JSONDecodeError, TypeError):
-                    args = json.loads(func.get("arguments", "{}"))
+                raw_args = func.get("arguments", "{}")
+                args = raw_args
+                if isinstance(raw_args, str):
+                    with suppress(json.JSONDecodeError):
+                        args = json.loads(raw_args)
+                if isinstance(args, dict):
                     file_path = args.get("file_path") or args.get("path")
                     offset = args.get("offset")
                     limit = args.get("limit")
@@ -222,6 +226,13 @@ class ReadLifecycleManager:
                     file_path = inp.get("file_path") or inp.get("path")
                     offset = inp.get("offset")
                     limit = inp.get("limit")
+                elif isinstance(inp, str):
+                    with suppress(json.JSONDecodeError):
+                        parsed_inp = json.loads(inp)
+                        if isinstance(parsed_inp, dict):
+                            file_path = parsed_inp.get("file_path") or parsed_inp.get("path")
+                            offset = parsed_inp.get("offset")
+                            limit = parsed_inp.get("limit")
                 metadata[tc_id] = _ToolCallMeta(name, file_path, offset, limit, msg_index)
 
         return metadata
@@ -468,6 +479,14 @@ class ReadLifecycleManager:
             logger.warning(
                 "read_lifecycle: durable CCR write failed for %s (%s); serving "
                 "content verbatim (no replacement without durable recoverability)",
+                classification.file_path,
+                exc,
+            )
+            return False, content, None
+        except Exception as exc:
+            logger.warning(
+                "read_lifecycle: CCR store write failed for %s (%s); serving "
+                "content verbatim (no replacement without recoverability)",
                 classification.file_path,
                 exc,
             )
