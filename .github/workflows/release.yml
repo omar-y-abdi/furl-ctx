@@ -136,7 +136,7 @@ jobs:
         with:
           toolchain: 1.95.0  # keep in sync with rust-toolchain.toml (TEST-30)
 
-      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
 
       - name: Install release security policy tools
         uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
