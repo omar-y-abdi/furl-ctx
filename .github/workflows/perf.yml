@@ -1,35 +1,7 @@
 name: perf
 
-# Performance + tool-regression gate. Runs the Rust checks that ci.yml's
-# required set does not (fmt/clippy/test), then a determinism gate:
-# verify.run's tool-regression counters plus two performance signals: PRs first
-# compare against the exact base commit measured on the same runner (eliminating
-# historical-host drift), then retain the committed floor as a long-term drift
-# alarm. Main pushes continue to use the committed floor directly.
-#
-# NEVER a required check, so paths-filtering is SAFE here: a PR that touches
-# none of these paths simply does not run this workflow, and nothing waits on
-# it. (In ci.yml the same filter would deadlock the required checks, which is
-# why ci.yml must never paths-filter — see tests/test_ci_required_checks_guard.py.)
-#
-# THIS FILE IS IN ITS OWN FILTER, and that is the point of the entry. Without it
-# a PR that changed ONLY this workflow — the `expected` counter dict below, or
-# the assertion logic that reads it — did not run perf-gate, so the one category
-# of change this gate cannot survive being wrong about was the one category it
-# never exercised. Measured when this was found: of the last 40 merged PRs,
-# ZERO had a workflow-only diff. Every PR that ever touched a workflow also
-# touched `verify/**` or `furl_ctx/**`, so the filter matched by accident every
-# single time and the gap never surfaced.
-#
-# WHY `perf.yml` AND NOT `.github/workflows/**`, which is what ci.yml uses:
-# ci.yml holds the REQUIRED checks, and a required check that never starts
-# deadlocks the PR, so ci.yml must run on anything that could alter it — the
-# wide filter there buys deadlock-safety. perf-gate is never required (see
-# above), so the wide filter buys nothing and costs a ~3.5-minute benchmark job
-# on every dependabot action bump and on every ci.yml or release.yml edit, none
-# of which can move the counters or the floor. The narrow entry covers the
-# defect exactly. Do not "fix" the inconsistency with ci.yml by widening this:
-# the two filters differ because the two workflows have different obligations.
+# Runs Rust fmt/clippy/test, deterministic regression counters, and performance checks. This workflow is
+# non-required, so path filtering is safe; include this file so edits to the gate always exercise it.
 on:
   pull_request:
     branches: [main]
@@ -68,9 +40,7 @@ env:
 
 jobs:
   rust-checks:
-    # The fmt/clippy/test gap in the REQUIRED PR path: rust.yml runs these but is
-    # not required, and ci.yml's required jobs never invoke cargo. Mirrors
-    # rust.yml's toolchain pins and cache.
+    # Run Rust fmt/clippy/test outside the required PR path; required jobs do not invoke Cargo. Use the same toolchain pins and cache policy.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -93,8 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history so the baseline-bump detection can diff
-          # origin/main...HEAD for benchmarks/baseline_results.json.
+          # Fetch full history so baseline-bump detection can compare the committed benchmark baseline with `origin/main`.
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -107,26 +76,20 @@ jobs:
           workspaces: ". -> target"
 
       - name: Build wheel (fast CI cargo profile)
-        # Same build as ci.yml's build-wheel: fast `ci` cargo profile, single
-        # interpreter, output to dist/.
+        # Use the same fast `ci` Cargo profile as wheel CI with one interpreter and `dist/` output.
         run: |
           python -m pip install --upgrade pip 'maturin>=1.9,<2.0'
           maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
 
       - name: Install wheel + measurement deps
-        # [dev] per the gate spec; google-re2 mirrors the environment the
-        # committed baseline and the pinned verify.run counters were captured in.
-        # RE2 is otherwise an optional, graceful-fallback dependency (absent, the
-        # engine falls back to stdlib re), so this is parity, not a hard runtime
-        # need. verify.run and benchmarks.run_bench import neither pytest nor the
-        # mcp SDK, so neither is installed.
+        # Install `[dev]` plus google-re2 to match the environment used for committed performance baselines.
+        # RE2 is optional at runtime; the benchmark tooling itself does not require pytest or MCP.
         run: |
           python -m pip install --upgrade pip
           WHEEL="$(ls dist/*.whl)"
           pip install "${WHEEL}[dev]" google-re2
-          # The in-tree furl_ctx/ source shadows the installed wheel when running
-          # from the repo root; copy the compiled extension in so imports resolve
-          # (no second cargo build), exactly as ci.yml's test job does.
+          # The in-tree furl_ctx/ source shadows the installed wheel when running from the repo root; copy the compiled
+          # Expose the built extension so imports resolve without a second Cargo build.
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
           cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
           python -c "from furl_ctx._core import DiffCompressor; print('furl_ctx._core OK')"
@@ -161,10 +124,7 @@ jobs:
           python -m verify.run | tee "${RUNNER_TEMP}/verify.out"
 
       - name: Assert verify.run counters
-        # Parse the summary line and assert the pinned counters EXACTLY. verify.run
-        # always exits 0, so the gate lives here, not in its return code. Parsing
-        # the identified summary line (not a loose grep) keeps a stray match in
-        # earlier output from satisfying the check.
+        # Parse the summary line and assert the pinned counters EXACTLY. verify.run always exits 0, so the gate lives here, not in its return code.
         shell: python
         env:
           VERIFY_OUT: ${{ runner.temp }}/verify.out
@@ -184,15 +144,8 @@ jobs:
               "hash_failures": 0,
               "silent_loss": 0,
               "cache_prefix_violations": 0,
-              # The whole-blob CCR offload path is reached by exactly one family
-              # (`opaque`) and only while the engine CANNOT compress its documents.
-              # Pin the POSITIVE count, not just the absence of misses: with a
-              # misses-only assertion, deleting the family from verify/run.py's
-              # FAMILIES leaves no cells to check, so misses is 0 and this passes
-              # while the path goes unmeasured again. `runs` and `taken` make
-              # "verified" and "vacant" distinguishable — 36/36 passes, 34/36
-              # fails, 0/0 fails. 36 = 2 sizes x 3 tiers x 6 fixed seeds; changing
-              # that matrix is a deliberate act that must update this pin.
+              # The whole-blob CCR offload path is reached by exactly one family (`opaque`) and only while the engine CANNOT compress
+              # its documents. A misses-only assertion would let deleting the family remove every cell being checked.
               "opaque_route_runs": 36,
               "opaque_route_taken": 36,
               "opaque_route_misses": 0,
@@ -209,9 +162,7 @@ jobs:
 
       - name: Detect baseline bump
         id: baseline
-        # A PR may intentionally re-baseline; detect whether it changed the
-        # committed baseline file relative to main. The comparison still runs
-        # against the committed file either way; this only flags the summary.
+        # A PR may intentionally re-baseline; detect whether it changed the committed baseline file relative to main.
         run: |
           if git diff --name-only origin/main...HEAD -- benchmarks/baseline_results.json | grep -q .; then
             echo "updated=true" >> "$GITHUB_OUTPUT"
@@ -244,17 +195,8 @@ jobs:
             --markdown-summary "$GITHUB_STEP_SUMMARY" $FLAG
 
       - name: Floor guard — is the floor still the right floor?
-        # compare_baseline above answers "did the candidate REGRESS against the
-        # floor". It cannot see a floor that has stopped describing reality: after
-        # #172 it kept passing while printing five IMPROVED lines that were read
-        # as noise for a night, leaving up to 23.4% silent regression headroom on
-        # repeated_logs@90. DRIFT catches that. DIRECTION is what makes DRIFT's
-        # remedy safe to recommend: regenerating the floor is WHOLESALE, so a PR
-        # that improves one dataset and regresses another would otherwise pass
-        # with failures=0 once regenerated, the regression laundered through the
-        # floor. An upward floor move is allowed only in a baseline-only PR.
-        # Non-blocking by construction: perf is never a required check, so this
-        # is a loud alarm on main rather than a merge blocker.
+        # compare_baseline above answers "did the candidate REGRESS against the floor". An upward floor move is allowed only in a baseline-only
+        # PR. Non-blocking by construction: perf is never a required check, so this is a loud alarm on main rather than a merge blocker.
         run: |
           git show origin/main:benchmarks/baseline_results.json \
             > "${RUNNER_TEMP}/floor-main.json"

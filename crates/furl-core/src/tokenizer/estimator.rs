@@ -1,16 +1,5 @@
-//! Character-density estimator. Used as a fallback for any tokenizer family
-//! we haven't wired in yet (Anthropic Claude, Google Gemini, Cohere, …).
-//!
-//! Mirrors `furl_ctx.tokenizers.estimator.EstimatingTokenCounter` in its
-//! FIXED-ratio mode. The formula is round-half-up:
-//! `max(1, int(chars / chars_per_token + 0.5))`. `chars` is *Unicode
-//! scalar count*, not byte length, to match Python's `len(text)`
-//! semantics on str.
-//!
-//! NOT mirrored (ARCH-6): Python's AUTO mode (no fixed ratio — density
-//! auto-detection + URL/UUID overhead), which Python uses for unknown
-//! models. This estimator is always fixed-ratio; see
-//! `tokenizer/registry.rs` for the divergence note.
+//! Character-density estimator. Used as a fallback for any tokenizer family we haven't wired in yet (Anthropic Claude,
+//! Google Gemini, Cohere, …). Mirrors `furl_ctx.tokenizers.estimator.EstimatingTokenCounter` in its FIXED-ratio mode.
 
 use super::{Backend, Tokenizer};
 
@@ -28,9 +17,8 @@ impl Default for EstimatingCounter {
 }
 
 impl EstimatingCounter {
-    /// `chars_per_token` must be `> 0.0`. Common calibrations:
-    /// - 3.5 — Claude-family (Python uses this in `_create_anthropic`)
-    /// - 4.0 — Gemini, Cohere, generic fallback
+    /// `chars_per_token` must be `> 0.0`. Common calibrations: - 3.5 — Claude-family
+    /// (Python uses this in `_create_anthropic`) - 4.0 — Gemini, Cohere, generic fallback
     pub fn new(chars_per_token: f64) -> Self {
         assert!(
             chars_per_token > 0.0,
@@ -45,13 +33,8 @@ impl Tokenizer for EstimatingCounter {
         if text.is_empty() {
             return 0;
         }
-        // Match Python `EstimatingTokenCounter.count_text`:
-        //     max(1, int(len(text) / chars_per_token + 0.5))
-        // Python `int()` truncates toward zero; for non-negative inputs that's
-        // identical to `as usize` saturating-cast semantics in Rust >= 1.45.
-        // Adding 0.5 then truncating yields round-half-up. We previously used
-        // ceil, which over-counted in the middle of the range (e.g. "aaaaa"
-        // at 4.0 cpt returned 2 here vs 1 in Python).
+        // Match Python `EstimatingTokenCounter.count_text`: max(1, int(len(text) / chars_per_token + 0.5)) Python `int()`
+        // truncates toward zero; for non-negative inputs that's identical to `as usize` saturating-cast semantics in Rust >= 1.45.
         let chars = text.chars().count() as f64;
         let raw = (chars / self.chars_per_token + 0.5) as usize;
         raw.max(1)

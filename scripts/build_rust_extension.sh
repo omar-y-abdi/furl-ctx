@@ -1,16 +1,4 @@
-#!/usr/bin/env bash
-# Build + install the Rust extension (furl_ctx._core) into the active venv.
-#
-# With single-wheel architecture (post-#355), `pip install -e .` invokes
-# maturin (declared in pyproject.toml's `[build-system]`) which builds the
-# Rust extension and installs it into site-packages alongside the Python
-# source. Earlier versions of this script symlinked the .so into the
-# in-tree `furl_ctx/` directory because the dual-package layout left the
-# .so in `crates/furl-py/python/furl_ctx/`. That dance is no longer
-# needed — maturin places the .so directly in the editable install's
-# overlay and Python's import system finds it.
-#
-# Idempotent. Safe to run repeatedly.
+# !/usr/bin/env bash Build + install the Rust extension (furl_ctx._core) into the active venv.
 
 set -euo pipefail
 
@@ -36,10 +24,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     fail "cargo not found on PATH. Install Rust toolchain (rustup) first."
 fi
 
-# Build + install in one shot. The `[build-system] build-backend = "maturin"`
-# in pyproject.toml means pip drives maturin under the hood. The resulting
-# wheel contains both the Python source and the compiled `furl_ctx/_core.so`,
-# and pip installs them into the editable overlay together.
+# Build + install in one shot.
 log "pip install -e . (drives maturin via build-backend)"
 python -m pip install -e . || fail "pip install -e . failed (see output above)"
 

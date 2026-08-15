@@ -85,9 +85,7 @@ def _crush_both_rows_dropped() -> tuple[SmartCrusher, str]:
     )
     blob_hash = result.get("ccr_hash")
     assert blob_hash, "fixture did not take the row-drop path (no ccr_hash)"
-    # Confirm BOTH colliding rows were DROPPED (offloaded to the parent), not
-    # kept in the visible sample — the kept rows are surfaced in `items`. Without
-    # this, a keep-both outcome would make the collision assertions vacuous.
+    # Confirm BOTH colliding rows were DROPPED (offloaded to the parent), not kept in the visible sample — the kept rows are surfaced in `items`.
     kept = result.get("items") or ""
     assert ROW_A not in kept and ROW_B not in kept, (
         "fixture setup wrong: a colliding row was kept in the visible sample instead of dropped"
@@ -118,13 +116,7 @@ def test_recovery_hash_collision_cannot_return_wrong_data() -> None:
 
     store = get_compression_store()
 
-    # (1) MECHANISM-INDEPENDENT INVARIANT — the property this file is named for:
-    # no dropped row's recovery key ever resolves to ANOTHER dropped row's
-    # content. Holds regardless of HOW the fix works — on buggy main ROW_A's key
-    # resolved to ROW_B's bytes (RED); under Design A the key resolves to nothing
-    # (None != foreign content). Catches BOTH a chunk-mirroring reintroduction
-    # AND the wrong-data outcome, so it is strictly stronger than the absence
-    # check below.
+    # MECHANISM-INDEPENDENT INVARIANT — the property this file is named for: no dropped row's recovery key ever resolves to ANOTHER dropped row's content.
     for row, other in ((ROW_A, ROW_B), (ROW_B, ROW_A)):
         entry = store.retrieve(_key(row, width))
         recovered = entry.original_content if entry is not None else None
@@ -133,20 +125,15 @@ def test_recovery_hash_collision_cannot_return_wrong_data() -> None:
             f"{other!r}'s content ({recovered!r})"
         )
 
-    # (2) MECHANISM-SPECIFIC (Design A): the colliding per-row keys are NOT
-    # independently addressable at all, because per-row chunks are never stored.
-    # A key that never resolves can never serve a DIFFERENT row's content. This
-    # pins today's implementation so a reintroduced mirror is caught even if a
-    # future key width happened to dodge this pair's collision.
+    # MECHANISM-SPECIFIC (Design A) because per-row chunks are never stored. A key that never resolves can never serve a DIFFERENT row's content.
     for row in (ROW_A, ROW_B):
         assert store.retrieve(_key(row, width)) is None, (
             f"{row!r}'s per-row chunk was mirrored as its own entry; a colliding "
             "chunk key could then serve foreign content"
         )
 
-    # (3) Both dropped rows recover as their OWN content from the whole-blob
-    # parent — the canonical array of every original row, keyed by its own
-    # 24-hex hash (which the store's collision guard protects independently).
+    # Both dropped rows recover as their OWN content from the whole-blob parent — the canonical array of every
+    # original row, keyed by its own 24-hex hash (which the store's collision guard protects independently).
     parent = store.retrieve(blob_hash)
     assert parent is not None, "whole-blob parent recovery entry is missing"
     recovered = json.loads(parent.original_content)

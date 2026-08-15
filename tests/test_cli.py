@@ -82,9 +82,8 @@ def test_retrieve_unknown_hash_exits_1() -> None:
 
 
 def test_eval_recall_over_corpus_dir(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    # A dir of two files: one compressible array, one plain doc. eval must
-    # parse `--recall`, compress the corpus for the ratio, and run the needle-
-    # recall trust gate.
+    # A dir of two files: one compressible array, one plain doc. eval must parse
+    # `--recall`, compress the corpus for the ratio, and run the needle- recall trust gate.
     (tmp_path / "rows.json").write_text(_big_array(), encoding="utf-8")
     (tmp_path / "note.txt").write_text("plain prose, nothing to drop\n", encoding="utf-8")
 
@@ -94,17 +93,14 @@ def test_eval_recall_over_corpus_dir(tmp_path) -> None:  # type: ignore[no-untyp
     # The corpus array compresses (ratio strictly between none and all).
     ratio = float(proc.stdout.split("corpus visible-token reduction:")[1].split("%")[0])
     assert 0.0 < ratio < 100.0
-    # The needle-recall trust gate is 100% on a healthy engine (the naming arm
-    # recalls its needle by construction); it drops if compression starts
-    # silently losing content.
+    # The needle-recall trust gate is 100% on a healthy engine (the naming arm recalls
+    # its needle by construction); it drops if compression starts silently losing content.
     recall = float(proc.stdout.split("trust gate):")[1].split("%")[0])
     assert recall == 100.0
 
 
 def test_eval_recall_is_optional_not_a_mandatory_flag(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    # Bug-13: --recall was a REQUIRED store_true flag (a mandatory flag conveying
-    # no choice). It is now optional — eval reports the ratio without it, and the
-    # (extra-work) needle-recall gate runs only when --recall is passed.
+    # Bug-13: --recall was a REQUIRED store_true flag (a mandatory flag conveying no choice).
     corpus = tmp_path / "rows.json"
     corpus.write_text(_big_array(), encoding="utf-8")
 
@@ -119,9 +115,8 @@ def test_eval_recall_is_optional_not_a_mandatory_flag(tmp_path) -> None:  # type
 
 
 def test_eval_missing_corpus_exits_1(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    # CAVEAT-14: a nonexistent corpus path used to silently "succeed" — the
-    # per-file OSError handler skipped it and eval still exited 0 with a
-    # bogus 0.0% ratio, as if the corpus were legitimately empty.
+    # CAVEAT-14: a nonexistent corpus path used to silently "succeed" — the per-file OSError handler
+    # skipped it and eval still exited 0 with a bogus 0.0% ratio, as if the corpus were legitimately empty.
     missing = tmp_path / "does-not-exist"
     proc = _run(["eval", str(missing), "--recall"])
     assert proc.returncode == 1
@@ -129,12 +124,8 @@ def test_eval_missing_corpus_exits_1(tmp_path) -> None:  # type: ignore[no-untyp
     assert proc.stdout == ""
 
 
-# ── retrieve slice tests (in-process round-trips) ────────────────────────────
-#
-# The FURL_CCR_BACKEND=memory store is per-process, so the compress step and the
-# retrieve step must share one Python process.  We call the library to compress,
-# capture the hash, then call ``main()`` directly (capturing stdout/stderr via
-# StringIO) to exercise the CLI without a subprocess boundary.
+# ── retrieve slice tests (in-process round-trips) ──────────────────────────── The FURL_CCR_BACKEND=memory
+# store is per-process, so the compress step and the retrieve step must share one Python process.
 
 
 def _compress_and_get_hash() -> str:
@@ -266,11 +257,8 @@ def test_retrieve_select_equals_suppress_does_not_conflict_with_range() -> None:
     assert [r["value"] for r in data_rows] == [3.0, 4.0, 5.0]
 
 
-# ── in-process purge / doctor / mcp / compress (coverage-visible) ─────────────
-#
-# The subprocess tests above exercise the CLI end-to-end but run in a child
-# process, so they contribute no coverage. These drive ``main()`` in-process
-# (via ``_call_main``) against a hermetic in-memory CCR store.
+# ── in-process purge / doctor / mcp / compress (coverage-visible) ───────────── The subprocess
+# tests above exercise the CLI end-to-end but run in a child process, so they contribute no coverage.
 
 
 @pytest.fixture
@@ -293,9 +281,8 @@ def test_purge_removes_a_stored_hash_then_second_purge_misses(
     """``furl purge HASH`` deletes a live original (exit 0), then a repeat purge misses (exit 1)."""
     from furl_ctx import retrieve
 
-    # Silence the High-8 profile banner so this asserts the strong invariant:
-    # a successful purge itself emits NOTHING on stderr (the banner is unrelated
-    # diagnostic output, covered by its own test).
+    # Silence the High-8 profile banner so this asserts the strong invariant: a successful purge itself
+    # emits NOTHING on stderr (the banner is unrelated diagnostic output, covered by its own test).
     monkeypatch.setenv("FURL_PROFILE_BANNER", "0")
 
     h = _compress_and_get_hash()
@@ -390,9 +377,8 @@ def test_mcp_missing_dependency_surfaces_clean_error_exit_1(
         raise ImportError("No module named 'mcp'")
 
     monkeypatch.setattr(mcp_mod, "main", _boom)
-    # Silence the High-8 profile banner so this asserts the clean-error contract
-    # on its own (the banner is separately tested); the ImportError must surface
-    # as a `furl:`-prefixed stderr line with no traceback.
+    # Silence the High-8 profile banner so this asserts the clean-error contract on its own (the banner is
+    # separately tested); the ImportError must surface as a `furl:`-prefixed stderr line with no traceback.
     monkeypatch.setenv("FURL_PROFILE_BANNER", "0")
     rc, _stdout, stderr = _call_main(["mcp"])
     assert rc == 1
@@ -744,10 +730,7 @@ def test_list_preview_redacts_secret_straddling_the_display_edge(inprocess_memor
     from furl_ctx.cache.compression_store import get_compression_store
 
     secret = "AK" + "IA" + "IOSFODNN7" + "EXAMPLE"
-    # Start the secret at char 70 so it straddles the 80-char display edge. The
-    # padding must END on a non-word char: the credential patterns are
-    # word-bounded, so abutting the secret with `x` would make it a different
-    # (non-secret) word and the fixture would prove nothing.
+    # Start the secret at char 70 so it straddles the 80-char display edge.
     padding = "x" * 69 + " "
     original = f"{padding}{secret} trailing"
     assert len(padding) == 70 and len(original) > 80, "fixture: secret must cross the edge"

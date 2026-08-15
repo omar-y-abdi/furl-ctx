@@ -79,17 +79,8 @@ from .content_detector import ContentType, DetectionResult
 from .content_detector import detect_content_type as _regex_detect_content_type
 from .net_mutation_gain import MutationContext, net_mutation_gain
 
-# Extracted seams. Re-imported here so that:
-#   * existing ``from ...content_router import X`` imports keep resolving,
-#   * the package lazy-export in ``transforms/__init__.py`` keeps working,
-#   * in-module callers reference these as module globals, and — load-bearing —
-#     the ENGINE resolves ``is_mixed_content`` / ``split_into_sections`` /
-#     ``_detect_content`` / the debug helpers / ``_word_count`` /
-#     ``_looks_like_ccr_output`` through THIS module's globals at call time
-#     (router_engine._cr), so the test suite's
-#     ``monkeypatch.setattr(content_router_module, "...", ...)`` keeps biting, and
-#   * ``content_router_module.time`` patches still target the same ``time``
-#     module object the cache uses.
+# Extracted seams. Re-imported here so that: * existing ``from ...content_router import X`` imports keep resolving, * the
+# package lazy-export in ``transforms/__init__.py`` keeps working, * in-module callers reference these as module globals, and.
 from .router_blocks import ContentBlockWalker
 from .router_cache import (
     _RECOMPUTE,
@@ -154,14 +145,12 @@ from .router_split import (
 )
 
 if TYPE_CHECKING:
-    # Annotation-only: the runtime import stays lazy inside
-    # ``_get_feedback_hints`` — content_router never imports the cache
-    # package at module level (same deferred-import rule as the CCR store).
+    # Annotation-only: the runtime import stays lazy inside ``_get_feedback_hints`` — content_router
+    # never imports the cache package at module level (same deferred-import rule as the CCR store).
     from ..cache.retrieval_feedback import FeedbackHints
 
-    # Annotation-only compressor types for the lazy `_get_*` delegators
-    # (TYPE-3): the compressor modules stay lazily imported inside
-    # `CompressorRegistry`; these imports never run at runtime.
+    # Annotation-only compressor types for the lazy `_get_*` delegators (TYPE-3): the compressor
+    # modules stay lazily imported inside `CompressorRegistry`; these imports never run at runtime.
     from .code_aware_compressor import CodeAwareCompressor
     from .diff_compressor import DiffCompressor
     from .log_compressor import LogCompressor
@@ -258,12 +247,8 @@ def _detect_content(content: str) -> DetectionResult:
     from furl_ctx._core import detect_content_type as _rust_detect
 
     rust_result = _rust_detect(content)
-    # Rust's `content_type` is the lowercase string tag (e.g.
-    # "json_array"); translate to the Python `ContentType` enum so
-    # downstream mapping keys match. An unrecognised tag (version skew
-    # between the Rust detector and this enum) maps to PLAIN_TEXT — the safe
-    # routing default — rather than raising a ValueError mid-pipeline. Total
-    # function: no exception-as-control-flow across the FFI boundary.
+    # Rust's `content_type` is the lowercase string tag (e.g. "json_array"); translate to the Python `ContentType`
+    # enum so downstream mapping keys match. Total function: no exception-as-control-flow across the FFI boundary.
     try:
         content_type = ContentType(rust_result.content_type)
     except ValueError:
@@ -310,59 +295,21 @@ class ContentRouterConfig:
     # Enable/disable specific compressors
     enable_smart_crusher: bool = True
     enable_search_compressor: bool = True
-    # LogTemplate (NR2-3b): lossless template-mining recode of log-shaped
-    # BUILD_OUTPUT, tried on the LOG arm BEFORE the lossy LogCompressor.
-    # `encode_verified` self-checks its round-trip and yields None on no
-    # structure / no token win / verify failure, so it is lossless-or-None —
-    # the same guarantee as SmartCrusher, not the lossy log/search/diff
-    # compressors. It therefore stays LIVE under `lossless_only` (strict mode
-    # is lossless-OR-passthrough, not passthrough-only) and writes no CCR
-    # store (the wire is self-describing). When it declines, the LOG arm falls
-    # through byte-identically to the historical lossy path.
+    # LogTemplate (NR2-3b): lossless template-mining recode of log-shaped BUILD_OUTPUT, tried on the LOG arm BEFORE the lossy LogCompressor. `encode_verified` self-checks its round-trip
+    # and yields None on no structure / no token win / verify failure, so it is lossless-or-None — the same guarantee as SmartCrusher, not the lossy log/search/diff compressors.
     enable_log_template: bool = True
     enable_log_compressor: bool = True
-    # net_mutation_gain (NR2-4): cache-economics gate. Compressing message i
-    # mutates the conversation prefix at i, so every token after i loses its
-    # provider prefix-cache discount on the next request; when that
-    # re-billing exceeds the tokens saved, compression is a net loss and is
-    # skipped (decision math in transforms/net_mutation_gain.py). Default
-    # OFF: engagement assumes IMPLICIT provider caching (marker-less, e.g.
-    # OpenAI auto-caching) and prices an estimate (whole-suffix-cached upper
-    # bound) — explicit `cache_control` prefixes are already frozen upstream
-    # in compress(), so flipping this on is a deployment-economics call the
-    # owner makes, not a correctness default.
+    # net_mutation_gain (NR2-4) cache-economics gate. Compressing message i mutates the conversation prefix at i so every token after i loses its provider prefix-cache discount on
+    # the next request. OpenAI auto-caching) and prices an estimate (whole-suffix-cached upper bound) explicit `cache_control` prefixes are already frozen upstream in compress()
     enable_net_mutation_gate: bool = False
     cached_token_rate: float = 0.1
-    # TextCrusher (Engine P2-11): deterministic extractive prose
-    # compression for PLAIN_TEXT. Size floors live in the crusher
-    # itself (600 chars / 15 segments → passthrough); every crush is
-    # CCR-backed with a retrieval marker, and the compressor refuses
-    # unmarked drops (store-failure vetoes to passthrough). Gated off
-    # by `lossless_only` like the other line-dropping compressors.
+    # TextCrusher (Engine P2-11): deterministic extractive prose compression for PLAIN_TEXT.
     enable_text_crusher: bool = True
-    # CodeAwareCompressor (Engine P2-12): OPT-IN AST-verified code
-    # compression for SOURCE_CODE. Default OFF — code keeps shipping
-    # unmangled (PASSTHROUGH), byte-identical to the pre-P2-12 engine.
-    # When True, detected source code routes to the tree-sitter
-    # compressor (optional `furl-ctx[code]` extra; missing dep →
-    # passthrough + one WARN). Every ship is syntax-verified and
-    # CCR-backed (full original persisted under the marker hash;
-    # store failure vetoes to passthrough). The analysis-intent /
-    # protect_recent_code protections run BEFORE routing and still
-    # win; `lossless_only` gates the dispatch arm off.
+    # CodeAwareCompressor (Engine P2-12): OPT-IN AST-verified code compression for SOURCE_CODE. Every ship is syntax-verified and CCR-backed (full original persisted under the marker
+    # hash; store failure vetoes to passthrough). The analysis-intent / protect_recent_code protections run BEFORE routing and still win; `lossless_only` gates the dispatch arm off.
     enable_code_aware: bool = False
-    # Retrieval-feedback loop (Engine P2-13): OPT-IN adaptive routing driven
-    # by the store's own retrieval bookkeeping. Default OFF — the feedback
-    # aggregator is never consulted and routing is byte-identical to the
-    # pre-P2-13 engine (pinned by test_retrieval_feedback_router.py). When
-    # True, the router consults ``furl_ctx.cache.retrieval_feedback`` at
-    # routing time: a content shape (tool name + detected content type) the
-    # model recently retrieved from the CCR store gets a keep-budget bias
-    # multiplier, and under sustained retrieval pressure a full compression
-    # skip (``router:feedback:skip``). Signals are LOCAL-ONLY — an in-process
-    # aggregator fed by ``CompressionStore.retrieve``/``search`` real hits
-    # (COR-37-honest; engine-internal verification reads opt out). No
-    # telemetry, no disk ledger.
+    # Retrieval-feedback loop (Engine P2-13): OPT-IN adaptive routing driven by the store's own retrieval bookkeeping. Default OFF —
+    # the feedback aggregator is never consulted and routing is byte-identical to the pre-P2-13 engine (pinned by the routing tests).
     enable_retrieval_feedback: bool = False
 
     # Fallback: unknown content types pass through unchanged (every current
@@ -374,109 +321,47 @@ class ContentRouterConfig:
     protect_recent_code: int = 4  # Don't compress CODE in last N messages (0 = disabled)
     protect_analysis_context: bool = True  # Detect "analyze/review" intent, protect code
 
-    # Protection: failed tool calls / error outputs stay verbatim.
-    # The model needs exact tracebacks and error text to recover; compressing
-    # them measurably hurts agent recovery. Outputs above the size cap still
-    # compress — LogCompressor preserves error lines in big logs, so the two
-    # features stay complementary.
+    # Protection: failed tool calls / error outputs stay verbatim. The model needs exact tracebacks and error text to recover; compressing
+    # them measurably hurts agent recovery. LogCompressor preserves error lines in big logs, so the two features stay complementary.
     protect_error_outputs: bool = True
     error_protection_max_chars: int = 8000  # ~2K tokens; larger errors compress
 
-    # Cache safety: assistant text-block compression.
-    # Default OFF. Assistant content is echoed back by the client in
-    # subsequent turns and becomes part of the upstream provider's
-    # prefix cache (Anthropic cache_control, DeepSeek/OpenAI auto).
-    # Compressing it changes the bytes that must match for a cache
-    # hit on the next turn. The hash-keyed result cache makes the
-    # compressed output deterministic *within* a process, but cache
-    # eviction or process restart can re-compress with a different
-    # output for stochastic compressors — and that miss costs the
-    # whole prefix discount. Enable only for deployments routed to
-    # backends that don't honor cache_control AND whose compressors
-    # are byte-deterministic.
+    # Cache safety The hash-keyed result cache makes the compressed output deterministic *within* a process Enable only
+    # for deployments routed to backends that don't honor cache_control AND whose compressors are byte-deterministic.
     compress_assistant_text_blocks: bool = False
 
-    # Minimum content length (in chars) at which a text or tool_result
-    # block is considered for compression. Below this, the overhead of
-    # routing/detecting/caching exceeds any savings, so the block is
-    # passed through verbatim.
+    # Minimum content length (in chars) at which a text or tool_result block is considered for compression.
     min_chars_for_block_compression: int = 500
 
-    # Adaptive Read protection: fraction of total messages to protect from
-    # compression.  At 10 msgs, protects ~5 Reads.  At 100 msgs, protects ~10.
-    # Old Reads beyond this window become compressible even though they are
-    # in DEFAULT_EXCLUDE_TOOLS.  0.0 = always exclude all (old behavior).
+    # Adaptive Read protection: fraction of total messages to protect from compression.
     protect_recent_reads_fraction: float = (
         0.0  # 0.0 = protect ALL excluded-tool outputs (safest for coding agents)
     )
 
-    # Adaptive compression ratio: scales with context pressure.
-    # A compression is ACCEPTED when its ratio is strictly below min_ratio
-    # (see the `ratio < min_ratio` gate); a higher min_ratio therefore accepts
-    # MORE compressions (including marginal ones).
-    # At low pressure (mostly-empty context), use the relaxed threshold — keep
-    # accepting only worthwhile compressions (reject marginal).
-    # At high pressure (nearly-full context), use the aggressive threshold —
-    # accept anything that helps, so the agent doesn't overflow exactly when
-    # context is tightest. Aggressive is therefore the HIGHER (more-permissive)
-    # threshold — an aggressive value below the relaxed one would REJECT
-    # marginal compressions at high pressure, the opposite of the intent.
+    # Adaptive compression ratio: scales with context pressure. At low pressure (mostly-empty context), use the relaxed threshold — keep accepting only worthwhile compressions (reject
+    # marginal). At high pressure (nearly-full context), use the aggressive threshold — accept anything that helps, so the agent doesn't overflow exactly when context is tightest.
     min_ratio_relaxed: float = 0.85  # when context is mostly empty (stricter)
     min_ratio_aggressive: float = 0.95  # when context is nearly full (permissive)
 
-    # CCR (Compress-Cache-Retrieve) retrieval-tool preference.
-    #
-    # HONEST SEMANTICS (these flags are NOT a data-loss switch): recovery
-    # pointers are UNCONDITIONAL on every drop — the lossy row-drop
-    # `<<ccr:HASH>>` sentinel, the opaque-substitution pointer, and the
-    # log/search/diff `Retrieve …: hash=…` marker lines are all emitted
-    # regardless of these flags, and the backing store writes happen
-    # regardless too (a drop without its pointer is silent loss, which the
-    # recovery invariant forbids — Defect 1, pinned by
-    # tests/test_ccr_recovery_invariant.py). What the flags actually do:
-    #   * gate the reversible CCR-offload fallback (`_should_ccr_offload`
-    #     — offload is optional, so "CCR off" honestly disables it);
-    #   * flow to `CCRConfig` / the Rust `advertise_retrieval_tool` field as the
-    #     retrieval-tool advertisement preference, preserved for external
-    #     embedders that read it back when deciding whether to inject the
-    #     `furl_retrieve` tool.
-    # To ship output with NO `<<ccr:` pointers at all, use
-    # `lossless_only=True` below — that mode never drops, so there is
-    # nothing to point at.
+    # CCR (Compress-Cache-Retrieve) retrieval-tool preference. HONEST SEMANTICS (these flags are NOT a data-loss switch): recovery pointers are UNCONDITIONAL on every
+    # drop. What the flags actually do: * gate the reversible CCR-offload fallback (`_should_ccr_offload` — offload is optional, so "CCR off" honestly disables it).
     ccr_enabled: bool = True
     ccr_inject_marker: bool = True
     smart_crusher_max_items_after_crush: int | None = None
     smart_crusher_with_compaction: bool = True
-    # Routing policy for the lossless-vs-lossy-recoverable choice (both
-    # recoverable, so no information is lost). ``"min-tokens"`` (default)
-    # ships whichever render is fewer tokens; ``"lossless-first"`` keeps
-    # the legacy lossless-wins-on-byte-ratio behavior.
+    # Routing policy for the lossless-vs-lossy-recoverable choice (both recoverable, so no information is lost). ``"min-tokens"``
+    # (default) ships whichever render is fewer tokens; ``"lossless-first"`` keeps the legacy lossless-wins-on-byte-ratio behavior.
     smart_crusher_routing_policy: str = "min-tokens"
 
-    # STRICT lossless-or-passthrough mode (default OFF — behavior
-    # unchanged). When True, only proven-lossless transforms run: JSON
-    # arrays are either replaced by a decoder-verifiable, opaque-free
-    # lossless render (SmartCrusher's compaction tier) or passed through
-    # untouched, and the lossy compressor routes (search / log / diff —
-    # all of which drop lines) plus the CCR-offload fallback resolve to
-    # passthrough. Output carries NO ``<<ccr:`` pointers and no
-    # ``Retrieve …: hash=…`` marker lines because nothing is ever
-    # dropped or substituted. For users who cannot tolerate ANY visible
-    # information reduction, even a CCR-recoverable one.
+    # STRICT lossless-or-passthrough mode (default OFF When True, only proven-lossless transforms run JSON arrays are either replaced by a decoder-verifiable, opaque-free lossless render
+    # (SmartCrusher's compaction tier) or passed through untouched, and the lossy compressor routes (search / log / diff. hash=…`` marker lines because nothing is ever dropped or substituted.
     lossless_only: bool = False
 
-    # Last-resort reversible offload: large content no compressor could
-    # shrink is stored byte-exact in the CCR store and ships as an identity
-    # preview + retrieval marker (see _ccr_offload). Requires ccr_enabled —
-    # offloading without the recovery plane would be silent loss.
+    # Last-resort reversible offload: large content no compressor could shrink is stored byte-exact
+    # in the CCR store and ships as an identity preview + retrieval marker (see _ccr_offload).
     ccr_offload_fallback: bool = True
 
-    # Tools to exclude from compression (output passed through unmodified)
-    # Set to None to use DEFAULT_EXCLUDE_TOOLS, or provide custom set.
-    # Entries match case-insensitively and may be fnmatch-style globs
-    # (e.g. "mcp__*"). The CCR retrieval tool (ALWAYS_EXCLUDE_TOOLS) is
-    # excluded unconditionally on top of whatever is configured here —
-    # overriding this field cannot re-enable retrieval-output compression.
+    # Tools to exclude from compression (output passed through unmodified) Set to None to use DEFAULT_EXCLUDE_TOOLS, or provide custom set.
     exclude_tools: set[str] | None = None
 
     # Read lifecycle management (stale/superseded detection)
@@ -487,27 +372,8 @@ class ContentRouterConfig:
     tool_profiles: dict[str, Any] | None = None
 
 
-# Strict allow-list for ``ContentRouter.apply(**kwargs)``. A key absent here is
-# rejected with a TypeError so a typo (e.g. ``protect_recents`` for
-# ``protect_recent``) fails loudly instead of being silently dropped.
-#
-# The set is the union of TWO sources:
-#   1. Keys apply() itself READS directly via ``kwargs.get(...)``.
-#   2. Keys a real caller PASSES but apply() never reads. The pipeline
-#      broadcasts the SAME ``**kwargs`` to every transform
-#      (``pipeline.py``: ``transform.apply(..., **kwargs)``), so apply()
-#      legitimately RECEIVES keys destined for the pipeline's public surface
-#      or for sibling transforms — e.g. ``model_limit`` / ``request_id``
-#      (documented in ``TransformPipeline.apply``),
-#      ``previous_prefix_hash`` (CacheAligner's documented turn-to-turn
-#      tracking kwarg, API-4), and ``model`` / ``messages`` / ``tokenizer``
-#      (positionals). These are valid, just not consumed here.
-#      (``record_metrics`` is NOT accepted: the pipeline pops it before the
-#      broadcast, so it can never legitimately arrive here. ``output_buffer``
-#      and ``tool_profiles`` are NOT accepted either —
-#      per-tool profiles are configured via ``ContentRouterConfig
-#      .tool_profiles``; passing either kwarg fails loudly instead of
-#      being silently ignored, API-16.)
+# Reject unknown `ContentRouter.apply` kwargs. Allow keys consumed here plus legitimate pipeline/sibling-transform
+# broadcast keys; typos and unsupported profile/output keys must fail loudly instead of being ignored.
 _APPLY_ALLOWED_KWARGS: frozenset[str] = frozenset(
     {
         # --- read by apply() directly ---
@@ -594,31 +460,16 @@ class ContentRouter(Transform):
         self.config = config or ContentRouterConfig()
         self._observer = observer
 
-        # Content-level compression engine: owns the lifetime-stable
-        # machinery — the lazy ``CompressorRegistry`` and the
-        # ``StrategyDispatcher`` — and the body of ``compress()``. It holds no
-        # router reference between calls: every engine method takes
-        # ``hooks=self`` per call, so instance and class-level monkeypatches
-        # on this class keep biting, and the observer reference stays HERE
-        # (``self._observer`` is runtime-reassignable router state the engine
-        # reads through the hooks).
+        # Content-level compression engine: owns the lifetime-stable machinery — the lazy
+        # ``CompressorRegistry`` and the ``StrategyDispatcher`` — and the body of ``compress()``.
         self._engine = ContentCompressionEngine(self.config)
-        # Back-compat aliases: the ``_get_*`` delegators resolve compressors
-        # through ``self._registry`` (the registry/dispatcher OBJECTS are the
-        # engine's).
+        # Back-compat aliases: the ``_get_*`` delegators resolve compressors through ``self._registry`` (the registry/dispatcher OBJECTS are the engine's).
         self._registry = self._engine._registry
         self._dispatcher = self._engine._dispatcher
-        # CCR-backing seam for the result-cache HIT path. Holds no router
-        # reference: the SmartCrusher getter is passed per-call by the
-        # ``_ensure_ccr_backed`` delegator (resolving ``self._get_smart_crusher``
-        # fresh), so monkeypatching that getter still bites. Only the
-        # lifetime-stable ``logger`` rides the constructor.
+        # CCR-backing seam for the result-cache HIT path. Only the lifetime-stable ``logger`` rides the constructor.
         self._ccr_mirror = CcrMirror(logger=logger)
-        # Anthropic content-block walker. Holds no router reference: the cache
-        # gate, ``compress``, and the per-tool policy callables are passed
-        # per-call by the ``_process_content_blocks`` delegator, so
-        # monkeypatching ``router.compress`` (as six suites do) still bites.
-        # Only the lifetime-stable ``config`` rides the constructor.
+        # Anthropic content-block walker. Holds no router reference: the cache gate, ``compress``, and the per-tool policy callables are passed per-call by the
+        # ``_process_content_blocks`` delegator, so monkeypatching ``router.compress`` (as six suites do) still bites. Only the lifetime-stable ``config`` rides the constructor.
         self._block_walker = ContentBlockWalker(self.config)
 
         self._cache = CompressionCache()
@@ -687,16 +538,8 @@ class ContentRouter(Transform):
                 )
                 task_results.append((r, (time.perf_counter() - t0) * 1000))
         else:
-            # Parallel compression via thread pool. Each compress() call
-            # is independent; per-task inputs are passed by argument.
-            # Submissions run under contextvars.copy_context() so the
-            # request-scoped ContextVars compress() binds — the originating
-            # tool name (content_kind) AND the per-tenant CCR store — reach
-            # the worker threads; a bare submit dropped both (multi-message
-            # calls stored content_kind=None and wrote the GLOBAL store even
-            # under an active namespace, while the inline path above kept
-            # them). Each submission copies its own Context: a single Context
-            # object cannot be entered by two threads concurrently.
+            # Parallel compression via thread pool. Submissions run under contextvars.copy_context() so the request-scoped ContextVars compress() binds — the originating tool name (content_kind)
+            # AND the per-tenant CCR store — reach the worker threads. Each submission copies its own Context: a single Context object cannot be entered by two threads concurrently.
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
                     executor.submit(
@@ -723,10 +566,8 @@ class ContentRouter(Transform):
             strategy_key = f"compressor:{result.strategy_used.value}"
             compressor_timing[strategy_key] = compressor_timing.get(strategy_key, 0.0) + compress_ms
 
-            # net_mutation_gain gate (NR2-4), BEFORE the cache store: a
-            # gated compression must leave no cache entry behind — the gate
-            # is position-dependent while the cache is content-keyed, so the
-            # same bytes must stay re-decidable at other positions.
+            # net_mutation_gain gate (NR2-4), BEFORE the cache store: a gated compression must leave no cache entry behind — the gate
+            # is position-dependent while the cache is content-keyed, so the same bytes must stay re-decidable at other positions.
             if suffix_tokens is not None:
                 gate_gain = net_mutation_gain(
                     token_counter(task_content) - token_counter(result.compressed),
@@ -1120,12 +961,8 @@ class ContentRouter(Transform):
                 self._cache.move_to_skip(content_key)
                 bump("ratio_too_high", "cache_hit")
                 return _SERVE_ORIGINAL
-            # Invariant: every <<ccr:HASH>> in a served output must be backed by
-            # a live CCR store entry. Both CCR stores (Rust + Python, 1800s TTL)
-            # expire independently of this result cache (30-min TTL). Re-mirror
-            # to refresh the backing; if a sentinel is unbackable (both CCR
-            # stores expired), DO NOT serve the stale dead pointer — evict and
-            # recompute (which re-creates + re-stores the CCR backing).
+            # Invariant: every <<ccr:HASH>> in a served output must be backed by a live CCR store entry. Both
+            # CCR stores (Rust + Python, 1800s TTL) expire independently of this result cache (30-min TTL).
             if self._ensure_ccr_backed(cached_compressed, context):
                 bump("cache_hit")
                 return ServeCached(cached_compressed, cached_strategy, cached_ratio)

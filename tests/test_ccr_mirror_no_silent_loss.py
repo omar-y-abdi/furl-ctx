@@ -60,10 +60,7 @@ from furl_ctx.transforms.smart_crusher import (
 from tests._fixtures import FailingStore as _FailingStore
 from tests._fixtures import make_fail_open_sqlite_backend
 
-# Row-drop fixture: the same 1000 distinct strings the recovery-invariant
-# suite uses (``_NON_DICT_CASES["strings"]``). A homogeneous flat array this
-# large takes SmartCrusher's lossy row-drop path and emits a ``<<ccr:>>``
-# pointer — empirically confirmed before writing this test.
+# Row-drop fixture: the same 1000 distinct strings the recovery-invariant suite uses (``_NON_DICT_CASES["strings"]``).
 _ROW_DROP_ITEMS = [f"log-line-{i}-payload" for i in range(1000)]
 
 
@@ -121,9 +118,8 @@ def test_store_write_failure_reverts_to_original(
     # below could pass for the wrong reason (no mirror attempted at all).
     assert store_writes_fail["n"] > 0, "store patch never fired; test target wrong"
 
-    # FAIL-SAFE: the tool message content is byte-for-byte the original. No
-    # rows dropped, no <<ccr:>> marker — compression reverted at the fail-open
-    # boundary because the recovery copy could not be persisted.
+    # FAIL-SAFE: the tool message content is byte-for-byte the original. No rows dropped, no <<ccr:>> marker
+    # — compression reverted at the fail-open boundary because the recovery copy could not be persisted.
     assert result.messages[1]["content"] == tool_msg["content"], (
         "row-drop output stood despite the recovery write failing — silent loss"
     )
@@ -160,9 +156,7 @@ def test_mirror_raises_ccr_mirror_error_on_store_write_failure(
     ``logger.debug`` + fall-through to a loud, fail-safe raise."""
     crusher = SmartCrusher(config=SmartCrusherConfig())
 
-    # Seed the Rust store with the store UNPATCHED so ``ccr_get`` returns a
-    # canonical payload (the mirror only attempts the Python write when Rust
-    # has it). The seeding crush itself mirrors fine; we patch AFTER.
+    # Seed the Rust store with the store UNPATCHED so ``ccr_get`` returns a canonical payload (the mirror only attempts the Python write when Rust has it).
     crushed = crusher.crush_array_json(json.dumps(_ROW_DROP_ITEMS), query="x")
     ccr_hash = crushed.get("ccr_hash")
     assert ccr_hash, "fixture did not produce a row-drop hash"
@@ -222,17 +216,8 @@ def test_logging_level_check_is_quiet_on_success(caplog: pytest.LogCaptureFixtur
     assert not mirror_errors, f"unexpected mirror ERROR logs on success: {mirror_errors}"
 
 
-# ─── COR-5: a TYPED hash missing from the Rust store is loss, not "leaked" ──
-#
-# The mirror's store-miss branch used to debug-skip EVERY miss as "marker
-# leaked from elsewhere" — an excuse valid only for SCRAPED hashes (substring-
-# scanned out of rendered text, where a foreign marker really can appear).
-# For a TYPED hash (``CrushResult.ccr_hashes`` / ``crush_array_json``'s
-# ``ccr_hash``) the engine ITSELF reported the drop, so a miss means the
-# entry was already evicted/expired: the surfaced ``<<ccr:HASH>>`` marker
-# dangles and the dropped rows are gone — silent loss. COR-4 bounds the
-# store flood at the producer, but in_memory.rs documents the residual
-# window "cannot be fully eliminated"; Python is the last place to catch it.
+# COR-5 a TYPED hash missing from the Rust store is loss, not "leaked" ── The mirror's store-miss branch used
+# to debug-skip EVERY miss as "marker leaked from elsewhere". COR-4 bounds the store flood at the producer
 
 
 class _CcrGetMissing:
@@ -309,16 +294,8 @@ def test_scraped_hash_store_miss_stays_debug_skip() -> None:
     )  # must NOT raise
 
 
-# ─── store-concurrency-honesty: the surfaced veto text must not self-contradict ─
-#
-# When the durable write loses the WHOLE lock-contention retry budget on the
-# row-drop (array) path, ``store.store(require_durable=True)`` raises
-# ``DurableWriteError`` whose text is already precise and honest: the original
-# IS retrievable from this process right now (volatile tier, named hash); it
-# just is not durable. The mirror's ``except Exception`` wrapper used to append
-# "; dropped rows would be unrecoverable" — producing ONE user-visible string
-# claiming BOTH "retrievable now" AND "unrecoverable". Confirmed live by an
-# external evaluator (two MCP servers sharing one namespace store).
+# store-concurrency-honesty the surfaced veto text must not self-contradict ─ When the durable write loses the WHOLE lock-contention retry budget
+# on the row-drop (array) path, ``store.store(require_durable=True)`` raises ``DurableWriteError`` whose text is already precise and honest
 
 
 def test_durable_veto_on_array_path_is_honest_not_unrecoverable(tmp_path: Any) -> None:
@@ -339,10 +316,8 @@ def test_durable_veto_on_array_path_is_honest_not_unrecoverable(tmp_path: Any) -
     cs.set_request_compression_store(store)
     try:
         tool_msg = _tool_message(_ROW_DROP_ITEMS)
-        # A FRESH default pipeline (identical transforms) instead of the shared
-        # singleton: this test's injected failure must not feed the singleton's
-        # circuit breaker (3 consecutive failures → 60 s open → every later
-        # compression test in the suite silently no-ops and fails).
+        # A FRESH default pipeline (identical transforms) instead of the shared singleton: this test's injected failure must not feed the
+        # singleton's circuit breaker (3 consecutive failures → 60 s open → every later compression test in the suite silently no-ops and fails).
         result = compress(_build_messages(tool_msg), pipeline=TransformPipeline())
     finally:
         cs.clear_request_compression_store()

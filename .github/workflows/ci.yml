@@ -1,22 +1,11 @@
 name: CI
 
-# Intelligent + parallel pipeline (cutover from the old 4-version matrix):
-#   changes      — paths-filter; skips heavy work for docs-only changes
-#   build-wheel  — compile the Rust ext ONCE (fast `ci` cargo profile), share via artifact
-#   lint         — ruff + mypy, once
-#   test         — 4 parallel shards (pytest-split), each a fresh runner VM
-#   build / commitlint — preserved
-#
-# Python-version policy: 3.12 remains the primary interpreter, but every
-# existing required shard is replayed on the declared compatibility endpoints
-# (3.10 and 3.14) using the exact same prebuilt abi3 wheel. This preserves the
-# six required check names while proving Python-level behavior at both edges;
-# wheel ABI compatibility alone cannot prove stdlib/runtime compatibility.
+# Parallel CI: path filtering skips heavy work for docs-only changes; one Rust-extension wheel artifact feeds
+# lint and four pytest shards on fresh runners. Commit-message checks remain separate from code-gated work.
 
 on:
-  # PRs are the merge gate. Main pushes and a daily scheduled pass re-check
-  # the repository after merges and catch runner/toolchain drift even when no
-  # pull request is open. Manual runs always execute the full suite.
+  # PRs are the merge gate. Main pushes and a daily scheduled pass re-check the repository
+  # after merges and catch runner/toolchain drift even when no pull request is open.
   pull_request:
     branches: [main]
   push:
@@ -32,10 +21,8 @@ on:
 
 permissions:
   contents: read
-  # paths-filter (the `changes` gate) and commitlint both read PR metadata
-  # via the API on pull_request events; without this every PR run fails the
-  # gate with "Resource not accessible by integration" and all real jobs
-  # (lint/test/build) are skipped.
+  # paths-filter (the `changes` gate) and commitlint both read PR metadata via the API on pull_request events; without this
+  # every PR run fails the gate with "Resource not accessible by integration" and all real jobs (lint/test/build) are skipped.
   pull-requests: read
 
 concurrency:
@@ -83,36 +70,13 @@ jobs:
               - '.release-please-config.json'
               - 'tests/**'
               - 'scripts/**'
-              # Top-level packages the SUITE IMPORTS, and the suite's own root
-              # config. Omitting them meant a PR touching only these skipped
-              # every heavy step, so the tests that would have caught it never
-              # ran: tests/test_effective_savings_offload_cost.py and
-              # tests/test_retrieve_overhead_drift_pin.py do
-              # `from verify.measure import ...`, tests/test_recheck_unflatten.py
-              # does `from verify.independent_recheck import ...`, and
-              # tests/test_benchmarks_fail_closed.py does `import
-              # benchmarks.metrics` (plus run_bench/needle_recall). conftest.py
-              # is the root pytest config every test in the repo loads.
-              # Not a hand-list to trust by eye: the `code` filter is derived
-              # and pinned by tests/test_ci_required_checks_guard.py, which
-              # walks the suite's real AST imports and fails red on any
-              # top-level package that is imported but unfiltered.
-              # Safe by construction — adding paths can only make `code` true
-              # MORE often, never less, so it cannot re-create the #15/#32/#56
-              # deadlock (which came from job-level `if:`, not from this list).
+              # Top-level packages the SUITE IMPORTS, and the suite's own root config. Omitting them meant a PR touching only these skipped
+              # every heavy step so the tests that would have caught it never ran. adding paths can only make `code` true MORE often, never less
               - 'verify/**'
               - 'benchmarks/**'
               - 'conftest.py'
-              # Conclusion of the required checks (lint/build-wheel/test) no
-              # longer depends on this filter: those jobs ALWAYS run and short-
-              # circuit their heavy steps when code=='false' (step-level `if`
-              # in each job), so every PR — regardless of diff shape —
-              # CONCLUDES on all six required contexts. This filter now only
-              # decides whether the EXPENSIVE work runs: it keeps the full
-              # suite exercised for CI/plugin/docs changes, while config-only
-              # PRs not listed here (e.g. .release-please-config.json, PR #56)
-              # still CONCLUDE in seconds via the short-circuit.
-              # Deadlock history — do NOT re-add job-level gating: #15, #32, #56.
+              # Conclusion of the required checks (lint/build-wheel/test) no longer depends on this filter: those jobs ALWAYS run and short- circuit their
+              # heavy steps when code=='false' (step-level `if` in each job), so every PR — regardless of diff shape CONCLUDES on all six required contexts.
               - '.github/workflows/**'
               - '.github/actions/**'
               - 'plugins/**'
@@ -121,9 +85,8 @@ jobs:
               - '**/*.md'
 
   lint:
-    # Required check — always runs so it CONCLUDES on every PR (ruleset
-    # 18484290); the heavy steps below short-circuit when code=='false',
-    # so a docs/config-only PR still concludes SUCCESS in seconds.
+    # Required check — always runs so it CONCLUDES on every PR (ruleset 18484290); the heavy steps below
+    # short-circuit when code=='false', so a docs/config-only PR still concludes SUCCESS in seconds.
     needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -158,15 +121,7 @@ jobs:
                       details.append(f"  {sha}: {', '.join(locations)}")
               raise SystemExit("external action SHA drift detected:\n" + "\n".join(details))
           print(f"External action pins are repository-consistent across {len(pins)} action(s).")
-      # Runs unconditionally (not gated behind needs.changes.outputs.code): llms.txt
-      # is agent-orientation content, not `.md`, so a PR that edits only llms.txt
-      # never trips the `code` path filter above — gating this step the same way
-      # would let a broken doc anchor land silently. Pure stdlib, no repo import,
-      # sub-second. Fails when llms.txt carries NO anchored doc links at all, so a
-      # bad edit that strips or malforms the last reference cannot pass vacuously.
-      # Keep in sync with tests/test_llms_txt_anchors.py, which runs the same check
-      # locally as part of the full gated suite — divergence between the two
-      # implementations is itself a bug.
+      # Runs unconditionally because agent-orientation edits do not trip the code filter; fail when no anchored documentation links remain.
       - name: llms.txt anchor guard
         shell: python
         run: |
@@ -175,10 +130,7 @@ jobs:
           from pathlib import Path
 
           llms_txt = Path("llms.txt").read_text(encoding="utf-8")
-          # The files llms.txt links into by #anchor. Extend this tuple (and the
-          # mirrored tests/test_llms_txt_anchors.py) if llms.txt ever gains anchored
-          # links into another document — anchor_ref_re is derived from it, so refs
-          # to a new doc cannot be silently skipped by a forgotten regex edit.
+          # Documentation targets referenced by anchored agent-orientation links.
           doc_names = ("README.md", "LIBRARY.md")
 
           heading_re = re.compile(r"^#{1,6}\s+(.+?)\s*$")
@@ -269,9 +221,8 @@ jobs:
           exit "$failed"
 
   build-wheel:
-    # Required check — always runs so it CONCLUDES on every PR (ruleset
-    # 18484290); the heavy steps below short-circuit when code=='false',
-    # so a docs/config-only PR still concludes SUCCESS in seconds.
+    # Required check — always runs so it CONCLUDES on every PR (ruleset 18484290); the heavy steps below
+    # short-circuit when code=='false', so a docs/config-only PR still concludes SUCCESS in seconds.
     needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -280,10 +231,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PY_VERSION }}
-      # toolchain pinned to rust-toolchain.toml's version (TEST-30): the
-      # action exports RUSTUP_TOOLCHAIN, which overrides the file — an
-      # unpinned @stable would build with a different compiler than
-      # rust.yml/local. Action ref stays @stable (see rust.yml note).
+      # Pin the action toolchain to the project toolchain; `RUSTUP_TOOLCHAIN` overrides local toolchain selection, so `@stable` would create CI drift.
       - if: needs.changes.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -306,17 +254,13 @@ jobs:
           if-no-files-found: error
 
   test:
-    # Required checks test (1..4) — always run so each shard CONCLUDES on
-    # every PR (ruleset 18484290); the heavy steps below short-circuit when
-    # code=='false', so a docs/config-only PR concludes SUCCESS in seconds.
+    # Required checks test (1..4) — always run so each shard CONCLUDES on every PR (ruleset 18484290); the
+    # heavy steps below short-circuit when code=='false', so a docs/config-only PR concludes SUCCESS in seconds.
     needs: [changes, build-wheel]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    # FURL_RELEASE_PR_CONTEXT arms the release-manifest/tag exception only for
-    # an authenticated Release Please PR. Branch naming alone is not authority:
-    # the PR must be same-repository, authored by the exact GITHUB_TOKEN bot,
-    # and use Release Please's canonical branch prefix. Ordinary PRs cannot
-    # obtain the exception merely by naming their branch `release-please--...`.
+    # FURL_RELEASE_PR_CONTEXT arms the release-manifest/tag exception only for an authenticated Release Please PR. Branch naming alone is not
+    # authority: the PR must be same-repository, authored by the exact GITHUB_TOKEN bot, and use Release Please's canonical branch prefix.
     env:
       FURL_RELEASE_PR_CONTEXT: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'github-actions[bot]' && startsWith(github.head_ref, 'release-please--') && '1' || '' }}
     strategy:
@@ -324,12 +268,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      # fetch-tags: true (fetch-depth stays default) so `git tag -l` sees real
-      # tags here: tests/test_release_manifest_tag_guard.py runs as part of
-      # `pytest tests` below and needs tag visibility to check the release
-      # manifest against git tags. Without this the default shallow checkout
-      # fetches zero tags and the guard can only skip, never actually verify
-      # anything, on every PR.
+      # Fetch tags so the release-manifest guard can compare metadata with real Git tags.
+      # A shallow checkout has no tags, which would make the guard skip verification.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-tags: true
@@ -356,29 +296,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           WHEEL="$(ls dist/*.whl)"
-          # mcp + code + google-re2 alongside dev: without them every test gated
-          # on pytest.importorskip("mcp"), skipif(not _HAS_TREE_SITTER) or
-          # skipif(not re2_available()) silently skips here, so a regression in
-          # furl_ctx/ccr/mcp_server.py, the AST code-aware compressor, or the
-          # RE2 regex-budget path could merge with green CI and zero signal.
-          # Dating this precisely, because "already" depends on where you look:
-          # BEFORE #178 the `dev` extra did NOT carry mcp/code, this line read
-          # `[dev,mcp]`, and the AST code suite genuinely DID skip in CI — the
-          # live gap #178 was written to close. SINCE #178 (721a3826) `dev`
-          # itself declares furl-ctx[mcp] and furl-ctx[code], so `[dev,mcp]`
-          # resolves tree-sitter transitively and the suite runs here. Verified
-          # against a wheel built from a pristine 721a3826 checkout: its
-          # METADATA carries `furl-ctx[code] ; extra == "dev"`, installing
-          # `[dev,mcp]` yields tree_sitter_language_pack, and the suite runs 31
-          # passed / 0 skipped. So naming `code` below adds no coverage today;
-          # it is named anyway, exactly as google-re2 is listed
-          # explicitly despite the mcp extra depending on furl-ctx[re2]: the
-          # requirement then reads directly off this line, matches the local
-          # gate's install command, and survives a change to the dev extra.
-          # tests/test_optional_suites_not_silently_disarmed.py pins this line
-          # so code can't be silently stripped. See docs/audits/
-          # IMPROVEMENT-LEDGER.md rows #119/#139 and the "CI test job installs
-          # only the [dev] extra" open candidate this closes.
+          # Install dev, MCP, code, and RE2 dependencies explicitly so optional MCP, tree-sitter, and regex-budget suites cannot silently skip if extras change.
           pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2
           # cwd's ./furl_ctx source tree shadows the installed wheel; copy the
           # compiled extension in so tests import it (no second cargo build).
@@ -409,13 +327,8 @@ jobs:
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
           cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
           python -c "from furl_ctx._core import DiffCompressor; print('Python 3.10 abi3 import OK')"
-          # These six modules are repository/tooling policy guards, not runtime
-          # compatibility tests. They import the Python 3.11+ stdlib `tomllib`
-          # directly and are already authoritative in the primary 3.12 shards
-          # (and replayed at the 3.14 ceiling). Running them under 3.10 creates a
-          # collection failure before any package compatibility test can run.
-          # Keep the exclusion explicit instead of injecting a `tomllib` shim:
-          # a shim could mask a real Python-3.10 package bug that CI should catch.
+          # These six modules are repository/tooling policy guards, not runtime compatibility tests. Running
+          # them under 3.10 creates a collection failure before any package compatibility test can run.
           py310_repo_policy_ignores=(
             --ignore=tests/test_optional_suites_not_silently_disarmed.py
             --ignore=tests/test_plugin_hooks_manifest.py
@@ -449,11 +362,7 @@ jobs:
             --tb=short -q
 
   commitlint:
-    # Advisory only. This repository squash-merges PRs and CONTRIBUTING.md
-    # defines the PR title as the conventional-commit field. Rewriting a PR's
-    # existing commit messages here would require destructive force-pushing
-    # contributor history, so PR Health fixes the title instead. We still audit
-    # individual commits for feedback, but they can never make CI red.
+    # Advisory only.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -516,8 +425,7 @@ jobs:
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           workspaces: ". -> target"
-      # Smoke check that the SHIPPED build (release profile) + sdist are wired
-      # right; release.yml's matrix is what actually publishes to PyPI.
+      # Smoke-check the shipped release-profile wheel and sdist; the release matrix performs the actual publication.
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip

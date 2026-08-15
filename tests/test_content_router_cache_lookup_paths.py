@@ -95,9 +95,8 @@ def _routable_block_content() -> str:
 
 
 def _tool_result_message(text: str) -> dict:
-    # Canonical Anthropic shape: a tool_result block inside a user-role message.
-    # The list-content dispatch routes it to _process_content_blocks regardless
-    # of role; tool_result blocks compress freely (they are tool outputs).
+    # Canonical Anthropic shape: a tool_result block inside a user-role message. The list-content dispatch routes
+    # it to _process_content_blocks regardless of role; tool_result blocks compress freely (they are tool outputs).
     return {
         "role": "user",
         "content": [{"type": "tool_result", "tool_use_id": "tu_pin", "content": text}],
@@ -128,9 +127,8 @@ class TestStringPathCacheLookup:
         after = dict(router._cache.stats)
         # The Tier-1 skip set was consulted and hit exactly once...
         assert after["cache_skip_hits"] - before["cache_skip_hits"] == 1
-        # ...and the Tier-2 result lookup was never reached: neither a hit nor a
-        # miss was recorded (a regression that ignored Tier-1 would fall through
-        # to get() → a miss → recompute, flipping both of these deltas).
+        # ...and the Tier-2 result lookup was never reached: neither a hit nor a miss was recorded (a regression
+        # that ignored Tier-1 would fall through to get() → a miss → recompute, flipping both of these deltas).
         assert after["cache_hits"] - before["cache_hits"] == 0
         assert after["cache_misses"] - before["cache_misses"] == 0
 
@@ -323,11 +321,8 @@ class TestCacheLookupRouteCounts:
         # The cached payload was served (proves the serve-cached branch, not a
         # tightened relocate or a recompute).
         assert result.messages[0]["content"] == payload
-        # Drift-guard on the DIVERGENT surface the extraction deliberately keeps
-        # in the caller: the string path formats a FLAT router:{strategy}:{ratio}
-        # transform (WITH the ratio). This is the exact format whose difference
-        # justifies NOT unifying the two callers — a "helpful" unification that
-        # collapsed it to the block path's label form would fail here.
+        # Pin the intentional string-path format `router:{strategy}:{ratio}`. It differs from
+        # the block-path label and must not be unified into a shape that drops the ratio.
         assert "router:log:0.30" in result.transforms_applied
         rc = obs.route_counts
         assert rc is not None
@@ -378,10 +373,8 @@ class TestCacheLookupRouteCounts:
         result = router.apply([_tool_result_message(text)], _make_tokenizer())
 
         assert _served_block_text(result) == payload
-        # Drift-guard, block-path counterpart: the content-block path threads a
-        # router:{label}:{strategy} transform (label, NO ratio) — the divergent
-        # counterpart to the string path's flat router:{strategy}:{ratio}. Pinning
-        # BOTH formats is what makes the deliberate non-unification drift-safe.
+        # Drift-guard, block-path counterpart: the content-block path threads a router:{label}:{strategy} transform
+        # (label, NO ratio) — the divergent counterpart to the string path's flat router:{strategy}:{ratio}.
         assert "router:tool_result:log" in result.transforms_applied
         rc = obs.route_counts
         assert rc is not None

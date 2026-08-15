@@ -13,20 +13,11 @@ from contextlib import suppress
 
 from .base import BaseTokenizer
 
-# Ratio detection and special-pattern overhead scanning operate on
-# a bounded PREFIX SAMPLE of the text. Auto-mode previously json.loads-parsed
-# multi-MB strings and regex-scanned the full text on EVERY count_text call
-# just to pick 3.2 vs 4.0 chars/token — on large tool outputs the "cheap
-# estimator" cost more than the content it was approximating. Texts at or
-# under the sample size keep the exact historical behavior.
+# Ratio detection and special-pattern overhead scanning operate on a bounded PREFIX SAMPLE of the text.
 _DETECTION_SAMPLE_CHARS = 4096
 
-# JSON-ness heuristic for texts LARGER than the sample (a truncated prefix
-# never json.loads-parses): after the ``[``/``{`` head check, classify as
-# JSON when the sample's structural-character density clears this floor.
-# Object arrays run >20% structural chars, bare numeric arrays ~8%, English
-# prose and bracketed log lines ("[INFO] ...") 2-3% — 1/16 (6.25%) splits
-# the classes cleanly.
+# JSON-ness heuristic for texts LARGER than the sample (a truncated prefix never json.loads-parses): after the
+# ``[``/``{`` head check, classify as JSON when the sample's structural-character density clears this floor.
 _JSON_STRUCTURAL_CHARS = frozenset(',:"{}[]')
 _JSON_STRUCTURAL_DENSITY = 1 / 16
 

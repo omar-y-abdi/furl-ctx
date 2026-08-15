@@ -39,10 +39,8 @@ async def _client(tmp_path, args=None):
         "FURL_WORKSPACE_DIR": str(tmp_path),
         "FURL_CCR_SQLITE_PATH": str(tmp_path / "ccr.sqlite3"),
         "FURL_MCP_LEGEND": "off",
-        # Opt out of per-project isolation (audit #4): this suite pins an
-        # explicit FURL_CCR_SQLITE_PATH and asserts on that single global file,
-        # so it must exercise the un-namespaced global store, not the per-project
-        # one main() would otherwise derive from cwd.
+        # Opt out of per-project isolation (audit #4): this suite pins an explicit FURL_CCR_SQLITE_PATH and asserts on that single global
+        # file, so it must exercise the un-namespaced global store, not the per-project one main() would otherwise derive from cwd.
         "FURL_CCR_PROJECT_DIR": "",
     }
     env.pop("FURL_CCR_BACKEND", None)  # exercise the real durable SQLite default
@@ -66,11 +64,8 @@ def _text(result) -> dict:
 async def test_stdio_initialize_reports_furl_version(tmp_path) -> None:
     async with _client(tmp_path) as (_session, init):
         assert init.serverInfo.name == "furl"
-        # Equality against the real source of truth: the server subprocess runs
-        # in this same environment, so it must report exactly the furl-ctx
-        # distribution version get_version() resolves here — never the MCP
-        # SDK's own version (the regression this guards: a Server constructed
-        # without version= falls back to the SDK's package version).
+        # Equality against the real source of truth: the server subprocess runs in this same environment,
+        # so it must report exactly the furl-ctx distribution version get_version() resolves here.
         assert init.serverInfo.version == get_version()
 
 
@@ -116,9 +111,8 @@ async def test_stdio_full_lifecycle_compress_retrieve_search_list_purge(tmp_path
     blob = json.dumps([{"id": i, "kind": "err" if i % 2 else "ok"} for i in range(6)])
 
     async with _client(tmp_path) as (session, _init):
-        # compress a blob → get a hash. F9: this small 6-row array is a router
-        # no-op (below_min_tokens), not stored by default; persist=True forces
-        # the store so the retrieve/search/list/purge lifecycle has a hash.
+        # compress a blob → get a hash. F9: this small 6-row array is a router no-op (below_min_tokens), not
+        # stored by default; persist=True forces the store so the retrieve/search/list/purge lifecycle has a hash.
         comp = _text(await _call(session, "furl_compress", {"content": blob, "persist": True}))
         hash_key = comp["hash"]
 

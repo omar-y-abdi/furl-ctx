@@ -37,9 +37,8 @@ from furl_ctx.transforms.text_crusher import TextCrusher, TextCrusherConfig
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
-# Narrative vocabulary on purpose: operational words (scheduler, queue,
-# validated, …) tip the detector toward BUILD_OUTPUT; these must detect
-# as PLAIN_TEXT to pin the TEXT route.
+# Narrative vocabulary on purpose: operational words (scheduler, queue, validated, …) tip
+# the detector toward BUILD_OUTPUT; these must detect as PLAIN_TEXT to pin the TEXT route.
 _SUBJECTS = [
     "The regional museum",
     "Our neighborhood bakery",

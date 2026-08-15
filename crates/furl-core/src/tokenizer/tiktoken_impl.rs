@@ -1,13 +1,5 @@
-//! `tiktoken-rs` adapter implementing [`Tokenizer`].
-//!
-//! `tiktoken-rs` and Python `tiktoken` use the same BPE merge tables; for the
-//! same model and same input, this returns byte-identical token IDs and
-//! therefore byte-identical token *counts*. This is what makes the parity
-//! tests "byte-equal" rather than "approximate".
-//!
-//! Initialization (loading the BPE table) is non-trivial. Each encoding is
-//! built lazily on first use and shared via `LazyLock<Arc<CoreBPE>>`, so the
-//! first `for_model` call pays the cost and every subsequent call is cheap.
+//! `tiktoken-rs` adapter implementing [`Tokenizer`]. `tiktoken-rs` and Python `tiktoken` use the same BPE merge tables;
+//! for the same model and same input, this returns byte-identical token IDs and therefore byte-identical token *counts*.
 
 use std::sync::{Arc, LazyLock};
 
@@ -24,9 +16,8 @@ pub enum TiktokenError {
     UnknownEncoding(String),
 }
 
-/// Lazy-built shared BPE for the four named encodings. Init failure here would
-/// indicate `tiktoken-rs` itself is broken; we treat that as a programmer error
-/// and panic.
+/// Lazy-built shared BPE for the four named encodings. Init failure here would indicate
+/// `tiktoken-rs` itself is broken; we treat that as a programmer error and panic.
 static O200K: LazyLock<Arc<CoreBPE>> =
     LazyLock::new(|| Arc::new(tiktoken_rs::o200k_base().expect("o200k_base init")));
 static CL100K: LazyLock<Arc<CoreBPE>> =
@@ -79,15 +70,8 @@ impl Tokenizer for TiktokenCounter {
             // Match Python `TiktokenCounter.count_text`: short-circuit empty.
             return 0;
         }
-        // For ORDINARY input (no literal special-token strings) `encode_ordinary`
-        // here and `encoding.encode(text)` in Python yield identical token IDs
-        // and counts — that's the byte-equality the parity harness verifies.
-        //
-        // Divergence (rare in practice): if `text` contains a literal
-        // `<|endoftext|>` (or any other special-token string), Python's default
-        // `encode` raises (because `disallowed_special="all"`) while we treat
-        // it as ordinary text. We chose tolerance over panic since users
-        // can legitimately send those substrings; document for future readers.
+        // For ORDINARY input (no literal special-token strings) `encode_ordinary` here and `encoding.encode(text)` in Python yield identical token IDs and counts if `text` contains
+        // a literal `<|endoftext|>` (or any other special-token string), Python's default `encode` raises (because `disallowed_special="all"`) while we treat it as ordinary text.
         self.bpe.encode_ordinary(text).len()
     }
 
@@ -96,14 +80,12 @@ impl Tokenizer for TiktokenCounter {
     }
 }
 
-/// Map model → encoding name. Mirrors `MODEL_ENCODINGS` and the prefix
-/// fallbacks in `furl_ctx/tokenizers/tiktoken_counter.py`.
+/// Map model to encoding name; keep mappings and prefix fallbacks aligned with Python.
 fn encoding_for(model: &str) -> Result<&'static str, TiktokenError> {
     let m = model.to_ascii_lowercase();
 
-    // o200k_base: GPT-4o + o1/o3 reasoning families + Claude (Q1).
-    // Claude's tokenizer is not public; o200k_base is the closest public BPE
-    // and far more accurate than the old 3.5 chars/token estimate.
+    // o200k_base: GPT-4o + o1/o3 reasoning families + Claude (Q1). Claude's tokenizer is not public;
+    // o200k_base is the closest public BPE and far more accurate than the old 3.5 chars/token estimate.
     if m.starts_with("gpt-4o")
         || m.starts_with("o1")
         || m.starts_with("o3")
@@ -156,11 +138,8 @@ mod tests {
 
     #[test]
     fn known_token_counts_for_o200k() {
-        // These constants are the o200k_base BPE token counts produced by
-        // both Python `tiktoken.encoding_for_model("gpt-4o-mini")` and
-        // `tiktoken-rs::o200k_base()` for the given strings. They lock in
-        // byte-equal parity so a future tiktoken-rs upgrade that subtly
-        // changes BPE behavior would fail this test.
+        // These constants are the o200k_base BPE token counts produced by both Python `tiktoken.encoding_for_model("gpt-4o-mini")` and `tiktoken-rs::o200k_base()`
+        // for the given strings. They lock in byte-equal parity so a future tiktoken-rs upgrade that subtly changes BPE behavior would fail this test.
         let t = TiktokenCounter::for_model("gpt-4o-mini").unwrap();
         assert_eq!(t.count_text("hello"), 1);
         assert_eq!(t.count_text("Hello, world!"), 4);
@@ -200,11 +179,7 @@ mod tests {
 
     #[test]
     fn special_token_literals_are_counted_as_ordinary_text() {
-        // Lock-in (P0-6): `encode_ordinary` treats literal special-token
-        // strings as plain text — no panic, no error. This is the Rust
-        // counterpart of the Python `disallowed_special=()` retry; a
-        // future switch to `encode` (which errors on these) would fail
-        // this test.
+        // Lock-in (P0-6): `encode_ordinary` treats literal special-token strings as plain text — no panic, no error.
         let t = TiktokenCounter::for_model("gpt-4o-mini").unwrap();
         for s in [
             "scraped text with <|endoftext|> literal inside",

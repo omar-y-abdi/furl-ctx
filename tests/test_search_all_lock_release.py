@@ -67,9 +67,8 @@ def test_search_all_releases_lock_during_decode(monkeypatch: pytest.MonkeyPatch)
 
     assert reached_decode.wait(timeout=5), "search_all never reached the decode/filter step"
 
-    # The decode/filter step is blocking. A concurrent lock-taking op must NOT be
-    # blocked by it: post-fix the lock is released during decode; pre-fix it is
-    # held across the whole comprehension and this op is starved.
+    # The decode/filter step is blocking. A concurrent lock-taking op must NOT be blocked by it: post-fix the
+    # lock is released during decode; pre-fix it is held across the whole comprehension and this op is starved.
     op_done = threading.Event()
 
     def concurrent_op() -> None:

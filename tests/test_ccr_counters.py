@@ -126,14 +126,8 @@ def test_store_counters_fail_open_on_unsupported_backend() -> None:
     advisory and must never break the store (the pinned-older-engine case)."""
 
     class _CounterlessBackend(InMemoryBackend):
-        # Shadow the OPTIONAL counter extras so getattr() finds no callable — a
-        # backend that predates the counter API. It still satisfies the REQUIRED
-        # durability contract by inheritance, which is the distinction: the
-        # counter extras are advisory and fail open, ``durable``/``set_durable``
-        # are required and fail loudly. (An earlier comment here claimed
-        # "set_durable is already absent" — true when the store inferred
-        # durability from that absence, false now that InMemoryBackend declares
-        # itself volatile explicitly.)
+        # Shadow the OPTIONAL counter extras so getattr() finds no callable — a backend that predates the counter API. It still satisfies the REQUIRED durability
+        # contract by inheritance, which is the distinction: the counter extras are advisory and fail open, ``durable``/``set_durable`` are required and fail loudly.
         increment_counter = None  # type: ignore[assignment]
         get_counters = None  # type: ignore[assignment]
 
@@ -194,23 +188,7 @@ def test_declared_volatile_backend_is_accepted_and_not_treated_as_durable() -> N
     assert InMemoryBackend().set_durable("h", None) is False  # honest, not "satisfied"
 
 
-# --------------------------------------------------------------------------- #
-# Negative-amount guard. These counters are MONOTONIC cumulative tallies, so a
-# negative increment has no meaning and silently corrupts the total it lands in.
-# The guard must hold at every layer a caller can reach, and each layer is a
-# genuinely separate reachability question, not a repetition:
-#
-#   * the memory backend — the volatile tally;
-#   * the SQLITE DURABLE path — a healthy backend NEVER touches ``self._memory``
-#     (it only delegates there when degraded or lock-lost), so a check living
-#     only in the memory backend would leave the primary durable path unguarded.
-#     This is the delegation gap the guard is really about;
-#   * the STORE surface — ``CompressionStore.increment_counter`` is documented
-#     fail-open and catches ``Exception`` broadly, so a ValueError raised by a
-#     backend is swallowed and returned as an indistinguishable ``None``. Without
-#     a store-level check the guard would exist in the backends and be invisible
-#     through the public API every real caller uses.
-# --------------------------------------------------------------------------- #
+# . so a negative increment has no meaning and silently corrupts the total it lands in.
 
 
 def test_memory_backend_rejects_negative_counter_amount() -> None:

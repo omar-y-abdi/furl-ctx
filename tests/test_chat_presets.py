@@ -196,10 +196,8 @@ def test_cache_does_not_mutate_input() -> None:
     assert messages == snapshot
 
 
-# ─── Bug-5: _with_cache_marker must never emit an empty text block ───────────
-# An empty ``{"type": "text", "text": ""}`` block is a 400 from the Anthropic
-# API. _with_cache_marker anchors cache_control on a valid, non-empty block for
-# every content shape.
+# ─── Bug-5: _with_cache_marker must never emit an empty text block ─────────── An
+# empty ``{"type": "text", "text": ""}`` block is a 400 from the Anthropic API.
 
 from furl_ctx.chat import _with_cache_marker  # noqa: E402
 

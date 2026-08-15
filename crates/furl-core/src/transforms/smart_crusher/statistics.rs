@@ -1,19 +1,9 @@
 //! Statistical helpers for field characterization.
-//!
-//! Direct port of the helpers at `smart_crusher.py:378-481`. These are
-//! used by the analyzer to classify fields (ID-like, score-like, etc.).
-//! Detection logic is heuristic; small numeric drift between Python and
-//! Rust would change classifications and break fixtures, so the math
-//! here mirrors Python step-by-step.
 
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Check if a string looks like a UUID.
-///
-/// Direct port of `_is_uuid_format` (Python `smart_crusher.py:378-392`).
-/// Format check only — no version-bit validation. Hex chars are lower
-/// or upper case, matching Python.
+/// Check if a string looks like a UUID. Format check only — no version-bit validation.
 pub fn is_uuid_format(value: &str) -> bool {
     if value.len() != 36 {
         return false;
@@ -39,20 +29,8 @@ pub fn is_uuid_format(value: &str) -> bool {
 }
 
 /// Shannon entropy of a string, normalized to `[0, 1]`.
-///
-/// Direct port of `_calculate_string_entropy` (`smart_crusher.py:395-423`).
-/// High entropy (>0.7) suggests random/ID-like content. Low entropy
-/// (<0.3) suggests repetitive/predictable content. Used by ID detection.
-///
-/// # Edge cases (matched to Python)
-/// - Empty or single-character strings return `0.0`.
-/// - All-identical chars: `freq` has 1 entry, `max_entropy = log2(min(1, n)) = 0.0`,
-///   we return `0.0` to avoid division by zero.
 pub fn calculate_string_entropy(s: &str) -> f64 {
-    // Python uses `len(s) < 2` and computes by character. Rust strings
-    // are UTF-8 so we iterate `chars()` to match Python's character-level
-    // semantics (Python iterates code points; Rust's `chars()` yields
-    // Unicode scalar values — same thing for non-surrogate text).
+    // Python uses `len(s) < 2` and computes by character.
     let n = s.chars().count();
     if n < 2 {
         return 0.0;
@@ -82,36 +60,15 @@ pub fn calculate_string_entropy(s: &str) -> f64 {
     }
 }
 
-/// Parse a string the way Python's built-in `int()` does for plain
-/// integer literals. Used by `detect_sequential_pattern` to mirror
-/// `int(v)` behavior exactly.
-///
-/// Python's `int()` accepts:
-///   - leading/trailing ASCII whitespace (stripped)
-///   - leading sign (`+` or `-`)
-///   - PEP 515 underscore digit separators (e.g. `"3_000"` → `3000`)
-///
-/// Rust's `str::parse::<i64>()` rejects all of those. If we used the
-/// raw `parse`, real-world payloads with `"  5  "` or `"+5"` would
-/// silently disagree with Python on whether the field is "numeric",
-/// which changes sequential classification and breaks fixtures.
-///
-/// We deliberately do NOT support Python's other `int()` features
-/// (base prefixes like `"0x10"`, scientific notation via `int(float(s))`,
-/// etc.) because the Python `_detect_sequential_pattern` call site
-/// uses the default-base `int()` overload — those paths are
-/// unreachable.
+/// Parse a string the way Python's built-in `int()` does for plain integer literals.
+/// Used by `detect_sequential_pattern` to mirror `int(v)` behavior exactly.
 fn python_int_parse(s: &str) -> Option<i64> {
     // Python: `int()` strips ASCII whitespace from both ends.
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return None;
     }
-    // Python: drop PEP 515 underscores between digits. The implementation
-    // is more careful than this (rejects leading/trailing/double underscores),
-    // but for our use-case any string with valid digits + underscore separators
-    // is what we want to accept. Edge cases like `"_5_"` will fail the
-    // i64::parse call below, matching Python's behavior of rejecting them.
+    // Accept PEP 515 digit separators by stripping valid internal underscores before integer parsing. Reject leading, trailing, or doubled underscores.
     let cleaned: String = if trimmed.contains('_') {
         // Reject patterns Python rejects: leading/trailing underscore,
         // double underscores. Otherwise strip them out.
@@ -128,43 +85,14 @@ fn python_int_parse(s: &str) -> Option<i64> {
     cleaned.parse::<i64>().ok()
 }
 
-/// Detect if numeric values form a sequential pattern (like IDs:
-/// 1, 2, 3, ...).
-///
-/// Direct port of `_detect_sequential_pattern` (`smart_crusher.py:426-481`)
-/// **with BUG #2 FIXED**.
-///
-/// # Bug #2 — string-padding misclassification
-/// Python's original implementation calls `int("001") == 1` and silently
-/// loses zero padding, so a list of padded string IDs like
-/// `["001", "002", ..., "100"]` looks like a sequential numeric pattern
-/// when in reality it's a categorical string field where the padding
-/// matters. The fix: when a value is a string that parses as a number,
-/// flag the input as "had string-encoded numerics". If ALL parsed values
-/// originated as strings, refuse to classify as a sequential numeric
-/// pattern. Mixed numeric+string inputs still parse as sequential because
-/// the unambiguous numeric values dominate the signal.
-///
-/// This fix is applied in BOTH languages simultaneously (Python `smart_crusher.py`
-/// gets the same fix in the same PR) so the parity fixtures continue to
-/// match. Tests covering this bug live at
-/// `tests/test_transforms/test_smart_crusher_bugs.py`.
-///
-/// # Args
-/// - `values`: items to inspect.
-/// - `check_order`: when true, also require ascending order in the
-///   original array (the Python flag — IDs are usually ascending in
-///   source order, scores are usually descending).
+/// Detect sequential numeric patterns, but reject all-string numerics so zero-padded identifiers are not coerced into
+/// numeric sequences. Mixed numeric/string data may still qualify; optional order checking requires ascending source order.
 pub fn detect_sequential_pattern(values: &[Value], check_order: bool) -> bool {
     if values.len() < 5 {
         return false;
     }
 
-    // Collect numeric values, tracking whether each value originated as
-    // a string. This is the BUG #2 fix: we still parse strings into
-    // numbers (so legitimate mixed-type fields work), but we'll refuse
-    // to flag the field as sequential if EVERY parseable value was a
-    // string.
+    // Collect numeric values, tracking whether each value originated as a string.
     let mut nums: Vec<f64> = Vec::new();
     let mut had_non_string_numeric = false;
 
@@ -181,15 +109,10 @@ pub fn detect_sequential_pattern(values: &[Value], check_order: bool) -> bool {
                 // bools are explicitly excluded.
             }
             Value::String(s) => {
-                // Python: `try: nums.append(int(v))`. `int("3.14")` raises
-                // and Rust's plain `parse::<i64>` differs from `int()` on
-                // edges like leading whitespace and PEP 515 underscores.
-                // `python_int_parse` mirrors Python exactly — see fn doc.
+                // Python: `try: nums.append(int(v))`. `python_int_parse` mirrors Python exactly — see fn doc.
                 if let Some(parsed) = python_int_parse(s) {
                     nums.push(parsed as f64);
-                    // BUG #2 fix: do NOT set had_non_string_numeric.
-                    // If we later find this is the ONLY source of numeric
-                    // values, we refuse to call it sequential.
+                    // BUG #2 fix: do NOT set had_non_string_numeric. If we later find this is the ONLY source of numeric values, we refuse to call it sequential.
                 }
             }
             _ => {}
@@ -366,9 +289,8 @@ mod tests {
 
     #[test]
     fn bug2_zero_padded_strings_no_longer_misclassified() {
-        // BUG #2: ["001", "002", ..., "010"] — Python's original code
-        // parsed each via int() and called this sequential. Fixed: every
-        // numeric value here originated as a string, so we refuse.
+        // BUG #2: ["001", "002", ..., "010"] — Python's original code parsed each via int() and called
+        // this sequential. Fixed: every numeric value here originated as a string, so we refuse.
         let v: Vec<Value> = (1..=10).map(|i| json!(format!("{:03}", i))).collect();
         assert!(
             !detect_sequential_pattern(&v, true),
@@ -378,10 +300,8 @@ mod tests {
 
     #[test]
     fn bug2_mixed_string_and_int_still_detected() {
-        // Sanity check the fix doesn't break the legitimate case: a
-        // field that has BOTH genuine ints AND string-encoded ints
-        // should still be detected (the unambiguous ints dominate the
-        // signal).
+        // Sanity check the fix doesn't break the legitimate case: a field that has BOTH genuine ints
+        // AND string-encoded ints should still be detected (the unambiguous ints dominate the signal).
         let v = vec![json!(1), json!(2), json!("3"), json!(4), json!(5), json!(6)];
         assert!(detect_sequential_pattern(&v, true));
     }
@@ -409,18 +329,15 @@ mod tests {
 
     #[test]
     fn sequential_fractional_unit_step() {
-        // Floats with non-integer values but constant unit step. avg_diff
-        // = 1.0, all diffs in [0.5, 2.0], should be sequential. (Suggestion
-        // S6 in code review — pins float arithmetic doesn't drift.)
+        // Floats with non-integer values but constant unit step. avg_diff = 1.0, all diffs in [0.5, 2.0], should be sequential.
         let v: Vec<Value> = vec![json!(1.5), json!(2.5), json!(3.5), json!(4.5), json!(5.5)];
         assert!(detect_sequential_pattern(&v, true));
     }
 
     #[test]
     fn bug2_all_unparseable_strings_returns_false() {
-        // S3 in code review: explicit test for the all-strings case where
-        // none parse. Falls out of `nums.len() < 5` already, but pinning
-        // the behavior protects against future refactors.
+        // S3 in code review: explicit test for the all-strings case where none parse. Falls out of
+        // `nums.len() < 5` already, but pinning the behavior protects against future refactors.
         let v: Vec<Value> = vec![
             json!("abc"),
             json!("def"),
@@ -433,9 +350,7 @@ mod tests {
 
     #[test]
     fn bug2_single_int_among_strings_still_detects() {
-        // S3 in code review: validates that the BUG #2 gate fires on
-        // "ANY non-string numeric", not "majority". One real int among
-        // string-encoded numerics should be enough to count as sequential.
+        // S3 in code review: validates that the BUG #2 gate fires on "ANY non-string numeric", not "majority".
         let v: Vec<Value> = vec![
             json!("001"),
             json!("002"),
@@ -494,9 +409,8 @@ mod tests {
 
     #[test]
     fn sequential_with_whitespace_padded_strings_via_python_int_parse() {
-        // I1 fix in code review: real fixtures may carry whitespace-padded
-        // numeric strings. With the python_int_parse helper, mixed real-int
-        // + whitespace-padded-string fields still detect correctly.
+        // I1 fix in code review: real fixtures may carry whitespace-padded numeric strings. With the
+        // python_int_parse helper, mixed real-int + whitespace-padded-string fields still detect correctly.
         let v: Vec<Value> = vec![
             json!(1),
             json!("  2  "),

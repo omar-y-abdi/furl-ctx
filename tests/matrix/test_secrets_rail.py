@@ -87,9 +87,8 @@ def test_configured_redactor_scrubs_secret_before_store(
 
 
 def test_raising_redactor_fails_closed_on_non_json_family(salt) -> None:
-    # Generalize the fail-closed guarantee to a NON-JSON family (B3 pins JSON): a
-    # redactor that raises must propagate out of compress() and leave nothing
-    # stored — no output rather than a leak.
+    # Generalize the fail-closed guarantee to a NON-JSON family (B3 pins JSON): a redactor that raises
+    # must propagate out of compress() and leave nothing stored — no output rather than a leak.
     secret = m.fake_openai_key()
     content = m.salted(m.yaml_document(secret=secret), salt)
 

@@ -40,9 +40,8 @@ def _decode_any(compressed: str) -> list[dict] | None:
 
 
 def test_affix_column_with_embedded_newline_roundtrips_byte_exact() -> None:
-    # Homogeneous array -> lossless columnar path. Every `match` shares the
-    # prefix "panic: nil deref at op_" and suffix ")" -> affix fold fires; the
-    # middle contains newlines -> the cell is CSV-quoted.
+    # Homogeneous array -> lossless columnar path. Every `match` shares the prefix "panic: nil deref at
+    # op_" and suffix ")" -> affix fold fires; the middle contains newlines -> the cell is CSV-quoted.
     items = [
         {
             "file": f"pkg/svc_{i:03d}/handler.go",

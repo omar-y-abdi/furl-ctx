@@ -299,9 +299,8 @@ def test_route_counts_whole_dict_matrix() -> None:
         "small": 2,
         "user_msg": 1,
     }
-    # The transform strings for the same run (flat string-path format vs
-    # label-threaded block-path format) — order is Pass-1 walk order with the
-    # Pass-3 merge appended.
+    # The transform strings for the same run (flat string-path format vs label-threaded
+    # block-path format) — order is Pass-1 walk order with the Pass-3 merge appended.
     assert result.transforms_applied == [
         "router:excluded:tool",
         "router:protected:user_message",

@@ -36,34 +36,22 @@ from furl_ctx.cache.compression_store import get_compression_store, reset_compre
 from furl_ctx.ccr import marker_grammar
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
-# Shared load-bearing fixtures (TEST-19): the tuned lossy fixture, its
-# drop canary, and the recovery-comparison helpers live in one canonical
-# place instead of being duplicated per file (they were previously copied
-# verbatim into test_result_cache_ccr_divergence.py and cross-imported by
-# test_lossless_column_encodings.py).
+# Shared load-bearing fixtures (TEST-19): the tuned lossy fixture, its drop canary, and the recovery-comparison helpers live in one canonical
+# place instead of being duplicated across recovery tests.
 from tests._fixtures import assert_fixture_drops
 from tests._fixtures import canonical_repr as _repr
 from tests._fixtures import decode_csv_schema_into as _decode_csv_schema
 from tests._fixtures import log_shaped_rows as _log_shaped_rows
 
-# Recovery-floor parsers. These deliberately use a LOOSER lower bound
-# (``{6,}``) than the strict consumer set ``marker_grammar.HASH_WIDTHS``
-# ({12, 24}): the recovery invariant must catch ANY surfaced ``<<ccr:`` pointer
-# of plausible width, not just the two canonical widths the strict scanner
-# accepts. The ``<<ccr:`` prefix and the hex class still come from the owned
-# grammar so a prefix/alphabet change is single-location; only the width bound
-# is intentionally distinct here. Do NOT tighten ``{6,}`` to the strict widths
-# — that would weaken recovery. ``HASH_WIDTHS`` itself is pinned by
-# tests/test_marker_grammar_smartcrusher_hash.py.
+# Recovery-floor parsers. These deliberately use a LOOSER lower bound (``{6,}``) than the strict consumer set ``marker_grammar.HASH_WIDTHS`` ({12, 24}):
+# the recovery invariant must catch ANY surfaced ``<<ccr:`` pointer of plausible width, not just the two canonical widths the strict scanner accepts.
 _PREFIX = re.escape(marker_grammar.CCR_PREFIX)
 # Row-drop pointer:   <<ccr:HASH N_rows_offloaded>>
 _DROP_RE = re.compile(rf"{_PREFIX}({marker_grammar.HEX_CLASS}{{6,}}) (\d+)_rows_offloaded>>")
 # Opaque-blob pointer: <<ccr:HASH,KIND,SIZE>>
 _OPAQUE_RE = re.compile(rf"{_PREFIX}({marker_grammar.HEX_CLASS}{{6,}}),[a-z0-9]+,[0-9.]+\w+>>")
 
-# Every (ccr_enabled, ccr_inject_marker) combination that turns the
-# retrieval-tool advertisement off. None of them may turn a drop into a
-# silent loss.
+# Every (ccr_enabled, ccr_inject_marker) combination that turns the retrieval-tool advertisement off. None of them may turn a drop into a silent loss.
 _MARKER_OFF_MATRIX = [
     pytest.param(True, False, id="enabled-True_marker-False"),
     pytest.param(False, False, id="enabled-False_marker-False"),
@@ -170,9 +158,8 @@ def _py_payload(store: object, h: str) -> str | None:
     return None
 
 
-# --------------------------------------------------------------------------- #
-# Defect 1 — non-dict drops surface a recovery pointer regardless of the flag.
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Defect 1 — non-dict drops surface a
+# recovery pointer regardless of the flag. --------------------------------------------------------------------------- #
 
 _NON_DICT_CASES = {
     "strings": [f"log-line-{i}-payload" for i in range(1000)],
@@ -208,11 +195,8 @@ def production_store(request, tmp_path, monkeypatch):
 def test_non_dict_drop_recovers_100pct_with_marker_off(
     shape: str, ccr_enabled: bool, ccr_inject_marker: bool, production_store: str
 ) -> None:
-    # PRODUCTION-FIDELITY: score recovery against the Python store ALONE (the
-    # store furl_retrieve reads), under both its memory and sqlite backends. The
-    # old Rust-OR-Python union could pass while the Python (production) mirror
-    # had regressed, whenever the process-local Rust copy still held the value —
-    # `store_scope="python"` removes that mask.
+    # PRODUCTION-FIDELITY: score recovery against the Python store ALONE (the store furl_retrieve reads), under both its memory and sqlite backends. The
+    # old Rust-OR-Python union could pass while the Python (production) mirror had regressed, whenever the process-local Rust copy still held the value
     items = _NON_DICT_CASES[shape]
     recovered = _recover_from_output(
         items,
@@ -233,10 +217,7 @@ def test_non_dict_drop_recovers_100pct_with_marker_off(
 def test_dict_array_recovers_100pct_with_marker_off(
     ccr_enabled: bool, ccr_inject_marker: bool, production_store: str
 ) -> None:
-    # Short distinct dict rows take the lossless:table path (CSV) — every row is
-    # present verbatim in the output, recoverable without CCR. Scored Python-only
-    # against both backends (production fidelity): even where survivors carry the
-    # rows, the invariant must never depend on the Rust store to pass.
+    # Short distinct dict rows take the lossless:table path (CSV) — every row is present verbatim in the output, recoverable without CCR.
     items = [{"id": i, "msg": f"record-{i}-distinct-payload"} for i in range(1000)]
     recovered = _recover_from_output(
         items,
@@ -268,22 +249,8 @@ def test_marker_off_actually_surfaces_pointer_in_output() -> None:
 
 
 def _opaque_rows(n: int = 50) -> list[dict]:
-    # base64 blobs > 256 bytes → CellClass::Opaque → substituted on the
-    # lossless:table path. A short shared `tag` keeps the table tabular so
-    # lossless wins and the markers reach the output.
-    #
-    # DETERMINISM (#26): the blobs are drawn from a FIXED seed, not
-    # ``os.urandom``. With random blobs, ~2% of blob sets per config routed to
-    # the lossy row-drop path instead of the lossless:table opaque-substitution
-    # path, emitting NO ``<<ccr:HASH,KIND,SIZE>>`` markers — which made the
-    # opaque-marker assertion below ~7.5% flaky across the 3-config matrix
-    # (1-(1-0.02)^3). The data was ALWAYS fully recoverable (the row-drop path
-    # has its own recovery markers, covered by the lossy-survivor tests); only
-    # this opaque-specific fixture was flaky. Seed 0 is verified to route every
-    # blob through the opaque-substitution path across all three matrix configs
-    # AND the default config, and routing is run-to-run deterministic once the
-    # blobs are fixed (no PYTHONHASHSEED sensitivity). os.urandom also violated
-    # the determinism contract (rule 8).
+    # Use fixed-seed opaque blobs so every matrix configuration deterministically takes the opaque-substitution
+    # path. Random blobs can validly route to row-drop recovery and make this opaque-specific assertion flaky.
     rng = random.Random(0)
     return [
         {
@@ -328,16 +295,8 @@ def test_opaque_blob_recovers_from_output_marker(
 def test_lossy_survivor_table_recovers_100pct(
     ccr_enabled: bool, ccr_inject_marker: bool, production_store: str
 ) -> None:
-    # The lossy-survivor CSV rendering (drop + sentinel LINE inside a JSON
-    # string) must satisfy the same invariant as every other shape: every
-    # distinct dropped row recoverable from the output alone.
-    #
-    # Scored PYTHON-ONLY, like the scalar/dict legs: the union would pass this
-    # test even with ``CompressionStore.retrieve`` — the exact call production's
-    # ``furl_retrieve`` makes — returning None for EVERYTHING, because the
-    # process-local Rust store still answers ``ccr_get``. That is a TOTAL
-    # production-retrieval failure going green, so the union has no place in a
-    # recovery invariant.
+    # The lossy-survivor CSV rendering (drop + sentinel LINE inside a JSON string) must satisfy the same invariant as every
+    # other shape every distinct dropped row recoverable from the output alone. Scored PYTHON-ONLY, like the scalar/dict legs
     items = _log_shaped_rows()
     recovered = _recover_from_output(
         items,
@@ -355,25 +314,8 @@ def test_lossy_survivor_table_recovers_100pct(
 
 
 def test_row_drop_recovers_from_python_store_only(production_store: str) -> None:
-    # PRODUCTION-FIDELITY recovery check for the lossy row-drop path.
-    #
-    # Production retrieval (MCP ``furl_retrieve``, ``ccr/mcp_server.py``;
-    # ``compression_store.py``) reads ONLY the Python ``CompressionStore`` via
-    # ``store.retrieve(hash)`` — never the Rust crusher store. The recovery
-    # helper ``_recover_from_output`` CAN score against either (``store_scope``);
-    # its callers above now all pass ``store_scope="python"`` precisely so a
-    # Python-mirror regression cannot hide behind the Rust copy. This test is the
-    # direct, helper-free form of that same check: it drives the lossy drop the
-    # survivor tests use and
-    # asserts the dropped rows recover BYTE-EXACT through the Python store
-    # ALONE — the exact call production makes — never touching ``ccr_get``.
-    #
-    # Runs on BOTH store backends (``production_store``). Python-scoping alone
-    # left this on the in-memory backend — a raw-``str`` identity — so the
-    # row-drop path, which IS the lossy path this whole file exists to guard,
-    # had never been proven through the ``surrogatepass`` BLOB round-trip the
-    # durable backend performs. Scope and backend are independent axes; fixing
-    # one does not cover the other.
+    # Verify lossy row-drop recovery through the Python production store only, on both backends. This catches
+    # mirror and durable surrogatepass/BLOB round-trip regressions that Rust-store recovery would hide.
     items = _log_shaped_rows()
     router = ContentRouter()
     py_store = get_compression_store()
@@ -384,18 +326,13 @@ def test_row_drop_recovers_from_python_store_only(production_store: str) -> None
     sentinel = json.loads(tree.split("\n")[-1])
     assert "_ccr_dropped" in sentinel, "lossy drop must surface the _ccr_dropped sentinel"
 
-    # The whole-blob pointer production resolves is the bare-hash row-drop
-    # marker (``<<ccr:HASH N_rows_offloaded>>``). The granular ``HASH#rows``
-    # index key is intentionally NOT stored in Python (its non-hex ``#rows``
-    # suffix fails the store's hex-hash validation — smart_crusher.py:830-833),
-    # so production resolves the bare hash and serves the whole offloaded blob.
+    # Whole-blob recovery uses the bare row-drop hash. Python does not store the `HASH#rows`
+    # key because its suffix is non-hex; retrieval therefore serves the full offloaded blob.
     drop_hashes = [h for h, _n in _DROP_RE.findall(sentinel["_ccr_dropped"])]
     assert drop_hashes, "row-drop sentinel must carry a <<ccr:HASH N_rows_offloaded>> pointer"
 
-    # Recover via the Python CompressionStore ONLY — this is the production
-    # call (store.retrieve(hash).original_content). We deliberately do NOT call
-    # crusher.ccr_get: a Python-mirror regression must fail here even while the
-    # Rust store still holds the bytes.
+    # Recover via the Python CompressionStore ONLY — this is the production call (store.retrieve(hash).original_content). We deliberately
+    # do NOT call crusher.ccr_get: a Python-mirror regression must fail here even while the Rust store still holds the bytes.
     recovered_rows: set[str] = set()
     for h in drop_hashes:
         payload = _py_payload(py_store, h)
@@ -408,11 +345,7 @@ def test_row_drop_recovers_from_python_store_only(production_store: str) -> None
         assert isinstance(parsed, list), "offloaded row-drop blob must be a JSON array of rows"
         recovered_rows.update(_repr(x) for x in parsed)
 
-    # The mirror must actually carry the dropped rows. A no-op mirror would
-    # make store.retrieve() a MISS (payload is None above) or yield an empty
-    # blob — either way this test fails. The recovered rows must be byte-exact
-    # input rows (subset of the distinct inputs), and they must cover every
-    # row dropped from the survivor table.
+    # The mirror must actually carry the dropped rows.
     assert recovered_rows, "Python-store recovery yielded no rows (no-op mirror?)"
     distinct = {_repr(x) for x in items}
     assert recovered_rows <= distinct, (
@@ -420,10 +353,8 @@ def test_row_drop_recovers_from_python_store_only(production_store: str) -> None
         "corrupted or re-encoded, not the original content"
     )
 
-    # Compute the rows that survived in the output (present outside the
-    # sentinel) and confirm every dropped row is recoverable from the Python
-    # store alone. ``_collect`` gathers kept scalars/rows; here we decode the
-    # survivor CSV body (everything before the sentinel line) and subtract.
+    # Compute the rows that survived in the output (present outside the sentinel) and confirm every dropped row is recoverable from the Python
+    # store alone. ``_collect`` gathers kept scalars/rows; here we decode the survivor CSV body (everything before the sentinel line) and subtract.
     survivor_body = "\n".join(tree.split("\n")[:-1])
     survivors: set[str] = set()
     _decode_csv_schema(survivor_body, survivors)
@@ -437,10 +368,7 @@ def test_row_drop_recovers_from_python_store_only(production_store: str) -> None
 
 
 def test_opaque_blob_default_config_recovers(production_store: str) -> None:
-    # Default ContentRouter (markers on) — the production default. Same
-    # invariant: every opaque blob recoverable from the output's marker.
-    # Exercise both production store backends so the default-path claim cannot
-    # be satisfied only by the in-memory identity path.
+    # Default ContentRouter (markers on) — the production default.
     items = _opaque_rows()
     blobs = {it["data"] for it in items}
     router = ContentRouter()
@@ -452,23 +380,15 @@ def test_opaque_blob_default_config_recovers(production_store: str) -> None:
     recovered = {crusher.ccr_get(h) for h in hashes if crusher.ccr_get(h) is not None}
     py_recovered = {p for h in hashes if (p := _py_payload(py_store, h)) is not None}
     assert blobs <= recovered
-    # The PRODUCTION-default config asserted only the Rust store, so a total
-    # failure of ``CompressionStore.retrieve`` — the single call production's
-    # ``furl_retrieve`` makes — passed here while its marker-off sibling
-    # (which already carries this assertion) went red. The default config is
-    # the one shipping to users; it must pin the production store too.
+    # The PRODUCTION-default config asserted only the Rust store, so a total failure of ``CompressionStore.retrieve`` — the single call
+    # production's ``furl_retrieve`` makes — passed here while its marker-off sibling (which already carries this assertion) went red.
     assert blobs <= py_recovered, (
         f"{len(blobs - py_recovered)} opaque blobs unrecoverable from the PRODUCTION "
         f"Python compression_store under the DEFAULT config (backend={production_store})"
     )
 
 
-# --------------------------------------------------------------------------- #
-# TEST-12 — the 256-byte opaque floor, pinned at the boundary from Python.
-# Rust pins classifier internals at 255/256/257 (`opaque_min_bytes`); the
-# Python fixtures above only used 600-byte-source blobs, so an off-by-one in
-# the `len <= opaque_min_bytes` gate was invisible from this side of the FFI.
-# --------------------------------------------------------------------------- #
+# .
 
 _OPAQUE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 

@@ -57,9 +57,8 @@ def server() -> FurlMCPServer:
 
 
 def _with_fail_open_store(server: FurlMCPServer, tmp_path, monkeypatch) -> CompressionStore:
-    # Tiny retry budget: the fail-open fixture never heals, so the veto is reached
-    # fast and deterministically (the durable-retry backoff would otherwise add a
-    # few tenths of a second per test).
+    # Tiny retry budget: the fail-open fixture never heals, so the veto is reached fast and
+    # deterministically (the durable-retry backoff would otherwise add a few tenths of a second per test).
     store = CompressionStore(
         backend=make_fail_open_sqlite_backend(tmp_path / "veto.sqlite3"),
         durable_retry_attempts=1,
@@ -85,14 +84,11 @@ def test_compress_veto_returns_volatile_hash_and_flags_not_durable(
     server, tmp_path, monkeypatch
 ) -> None:
     # store-concurrency-honesty REVISES the original F2 fix: dropping the hash was
-    # itself dishonest — the entry is in the volatile tier and retrievable RIGHT
-    # NOW. The veto now RETURNS that hash with a precise caveat instead of
-    # implying total loss.
+    # itself dishonest — the entry is in the volatile tier and retrievable RIGHT NOW.
     store = _with_fail_open_store(server, tmp_path, monkeypatch)
 
-    # F9: this short control string is a router no-op, no longer stored by
-    # default; persist=True forces the store so the durable-write VETO path (the
-    # subject of this test) actually runs and surfaces its volatile hash.
+    # F9: this short control string is a router no-op, no longer stored by default; persist=True forces the store
+    # so the durable-write VETO path (the subject of this test) actually runs and surfaces its volatile hash.
     out = server._compress_content("plain content for the durability veto test", persist=True)
 
     assert "hash" in out and out["hash"], "veto must surface the volatile retrieval hash"

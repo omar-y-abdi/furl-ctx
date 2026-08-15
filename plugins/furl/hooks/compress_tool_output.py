@@ -70,44 +70,23 @@ _ENGINE_MAX_BYTES_ENV = "FURL_MAX_COMPRESS_BYTES"
 _DEFAULT_MIN_CHARS = 2000
 _DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 _CCR_MARKER = "<<ccr:"
-# Extracted-text length (chars) at/above which the hook reroutes straight to the
-# engine's fast reversible CCR offload instead of the full crush pipeline. 5 MB
-# sits above the common multi-megabyte trace slice (which still gets full
-# columnar compression) and below the engine's own 8 MiB ceiling, so it is an
-# earlier, tighter guard. Chosen from measurements: on this host the pure crush
-# path runs ~0.9 s at 2.7 MB and ~3.6 s at 8 MB, while the offload runs ~0.2-0.6 s
-# across that range; rerouting at 5 MB keeps the hook well under the 30 s kill
-# even on a host several times slower, with the 8 MiB engine ceiling as backstop.
+# Extracted-text length (chars) at/above which the hook reroutes straight to
+# the engine's fast reversible CCR offload instead of the full crush pipeline.
 _DEFAULT_HOOK_MAX_BYTES = 5_000_000
 
-# Pin the durable, cross-process CCR store BEFORE furl_ctx builds it. Without this
-# the library default is an in-memory store that dies when this subprocess exits —
-# so a ``<<ccr:HASH>>`` marker this hook emits would have no retrievable original and
-# the `furl` MCP server's ``furl_retrieve`` would miss. ``setdefault`` keeps any
-# user override (e.g. ``FURL_CCR_BACKEND=memory``) intact. This does not depend on
-# the ``env`` block in hooks.json being honored by the host.
+# Pin the durable, cross-process CCR store BEFORE furl_ctx builds it. Without this the library default is an in-memory store that dies when this subprocess
+# exits — so a ``<<ccr:HASH>>`` marker this hook emits would have no retrievable original and the `furl` MCP server's ``furl_retrieve`` would miss.
 os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
-# Opt into the per-namespace durable SPILL tier (T6): a capacity-evicted entry is
-# demoted to this project's own ``-spill`` sqlite file instead of being dropped at
-# the 1000-entry cap, so a ``<<ccr:HASH>>`` marker stays retrievable past eviction.
-# ``setdefault`` keeps a user's ``FURL_CCR_SPILL=0`` opt-out intact. Matches the
-# same var in .mcp.json so the hook that spills and the server that reads it agree.
+# Opt into the per-namespace durable SPILL tier (T6): a capacity-evicted entry is demoted to this project's own ``-spill``
+# sqlite file instead of being dropped at the 1000-entry cap, so a ``<<ccr:HASH>>`` marker stays retrievable past eviction.
 os.environ.setdefault("FURL_CCR_SPILL", "1")
 os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")
 
-# Furl's own tool output must never be recompressed (would double-compress or
-# compress content the model just retrieved). Furl's MCP tools are namespaced
-# ``mcp__<server>__furl_*`` by the host. This is the built-in loop-guard base
-# (as a glob, always excluded); operators add more via FURL_HOOK_EXCLUDE_TOOLS.
+# Furl's own tool output must never be recompressed (would double-compress or compress content the model just retrieved).
 _SELF_TOOL_SUBSTR = "furl_"
 
-# --- observability counters (shared with the PreToolUse pipe + furl_stats) ------
-# Resolved ONCE per run in main() and stashed here so the terminal _passthrough /
-# _emit tally exactly one outcome (invariant: invocations == compressions + noop
-# buckets). Imported lazily and FAIL-OPEN — a counter problem never changes the
-# hook's stdout/exit or breaks the tool call. Inert until the runtime furl-ctx
-# ships the store-level counter API (older pinned engines just no-op here). See
-# _furl_ccr_counters and furl_stats' "store" block.
+# observability counters (shared with the PreToolUse pipe + furl_stats) ------ Resolved ONCE per run in main() and
+# stashed here so the terminal _passthrough / _emit tally exactly one outcome (invariant Imported lazily and FAIL-OPEN
 _run_counter_ctx: tuple[Any, Any] | None = None
 
 
@@ -300,22 +279,15 @@ def _extract_text(tool_response: Any) -> str | None:
         return tool_response or None
 
     if isinstance(tool_response, dict):
-        # Wrapped result / MCP-style blocks / Task(Agent) sub-agent answer. Kept
-        # first so the legacy ``{"content": ...}`` contract is byte-identical; only
-        # fall through when ``content`` is absent or carries no text, so a Bash-style
-        # sibling key (``stdout``) on the same dict is still reachable.
+        # Wrapped result / MCP-style blocks / Task(Agent) sub-agent answer.
         content = tool_response.get("content")
         if content is not None:
             text = _extract_text(content)
             if text is not None:
                 return text
 
-        # Bash: {"stdout","stderr","interrupted","isImage","noOutputExpected"}.
-        # Exactly ONE field is ever extracted (stdout preferred, stderr as the
-        # fallback for stderr-only output), so the compressed text has exactly one
-        # home in the mirrored object (``_reinject``) and a structured-array stdout
-        # keeps its compression ratio — folding a ``[stderr]`` tail onto it dropped
-        # a 23,890-char JSON stdout from ~98% to 0%.
+        # Bash: {"stdout","stderr","interrupted","isImage","noOutputExpected"}. Exactly ONE field is ever extracted (stdout preferred, stderr as the fallback for
+        # stderr-only output), so the compressed text has exactly one home in the mirrored object (``_reinject``) and a structured-array stdout keeps its compression ratio.
         stdout = tool_response.get("stdout")
         if isinstance(stdout, str):
             if stdout:
@@ -331,18 +303,8 @@ def _extract_text(tool_response: Any) -> str | None:
             if isinstance(value, str):
                 return value or None
 
-        # WebSearch: {"query": ..., "results": [{title, url, ...}, ...]}. The whole
-        # object is the payload — there is no single free-text field. An earlier
-        # revision extracted it AS ``json.dumps(tool_response)`` (its "Bug-14"), but
-        # that text could only ever be emitted as a bare string, which Claude Code
-        # >= 2.1.163 validates against WebSearch's output schema and DROPS on
-        # mismatch (the exact #68951 class this fix removes) — so no model ever saw
-        # a compressed WebSearch result on this path. Shape-mirroring (``_reinject``)
-        # replaces ONE field of the incoming object; whole-object JSON has no single
-        # field to map the compressed text back onto, so this shape now passes
-        # through UNMATCHED rather than emit a value the host rejects. A schema-valid
-        # WebSearch mirror that compresses each result's fields in place is future
-        # work (see the PR's follow-up note), not a shape this hook can invent.
+        # WebSearch: {"query": ..., "results": [{title, url, ...}, ...]}. An earlier revision extracted it AS ``json.dumps(tool_response)`` (its "Bug-14")
+        # which Claude Code >= 2.1.163 validates against WebSearch's output schema and DROPS on mismatch (the exact #68951 class this fix removes).
         return None
 
     if isinstance(tool_response, list):
@@ -403,9 +365,8 @@ def _reinject(
     if isinstance(tool_response, dict):
         content = tool_response.get("content")
         if content is not None and _extract_text(content) is not None:
-            # Thread ``redacted_stderr`` DOWN the recursion. The preserved stderr
-            # can live in a nested ``{"content": {"stdout", "stderr"}}`` frame, and
-            # dropping it here left that inner field holding its ORIGINAL bytes.
+            # Thread ``redacted_stderr`` DOWN the recursion. The preserved stderr can live in a nested ``{"content":
+            # {"stdout", "stderr"}}`` frame, and dropping it here left that inner field holding its ORIGINAL bytes.
             replaced = _reinject(content, compressed, redacted_stderr)
             if replaced is not None:
                 return {**tool_response, "content": replaced}
@@ -416,13 +377,8 @@ def _reinject(
                 updated: dict[str, Any] = {**tool_response, "stdout": compressed}
                 stderr = tool_response.get("stderr")
                 if isinstance(stderr, str) and stderr and redacted_stderr is not None:
-                    # The preserved (non-compressed) field must still honor
-                    # FURL_REDACT_PATTERNS: the legacy merge ran the whole blob
-                    # through redaction, so the mirrored stderr may not weaken that
-                    # guarantee. Identity when no patterns are configured.
-                    # Redacted ONCE by ``main`` and threaded in, never rescanned
-                    # here — and because a budget overrun withholds before any
-                    # emit, this can never receive an unredacted value.
+                    # The preserved (non-compressed) field must still honor FURL_REDACT_PATTERNS: the legacy merge
+                    # ran the whole blob through redaction, so the mirrored stderr may not weaken that guarantee.
                     updated["stderr"] = redacted_stderr
                 return updated
             stderr = tool_response.get("stderr")
@@ -595,17 +551,12 @@ def _apply_env_redaction(text: str) -> str | None:
             return text
         return redact_within_budget(text, redactor, budget_seconds=redact_budget_seconds())
     except RedactionBudgetExceeded:
-        # FAIL CLOSED on the module's own control-flow signal. ``redact_within_budget``
-        # guarantees this never escapes, so this is the second layer behind that
-        # guarantee, not the primary defence — but it must come BEFORE the generic
-        # catch below: folding a budget overrun into "return the original text"
-        # would fail OPEN on precisely the signal that means "this content could
-        # not be scanned safely", which is the leak this whole module closes.
+        # FAIL CLOSED on the module's own control-flow signal. ``redact_within_budget`` guarantees this
+        # never escapes, so this is the second layer behind that guarantee, not the primary defence.
         return None
     except Exception:
-        # Compiled-pattern re.sub does not raise, but stay fail-open on any
-        # OTHER surprise: the durable copy is redacted by compress() downstream,
-        # and a broken hook must never break the tool call.
+        # Compiled-pattern re.sub does not raise, but stay fail-open on any OTHER surprise: the durable
+        # copy is redacted by compress() downstream, and a broken hook must never break the tool call.
         return text
 
 
@@ -812,14 +763,8 @@ def main() -> None:
     if not isinstance(payload, dict):
         _passthrough("non-dict-payload")
 
-    # --- per-project CCR isolation (audit #4) ---
-    # Scope the durable store to THIS project so the shared ~/.furl DB cannot
-    # commingle originals across projects or evict cross-project. Prefer
-    # CLAUDE_PROJECT_DIR (Claude Code's project root) so this hook and the
-    # long-lived furl MCP server converge on ONE per-project store; the stdin
-    # ``cwd`` then os.getcwd() are fallbacks. ``setdefault`` keeps a user's
-    # shared-store override (FURL_CCR_NAMESPACE) or legacy-global opt-out
-    # (FURL_CCR_PROJECT_DIR="") intact.
+    # per-project CCR isolation (audit #4) --- Scope the durable store to THIS project so the shared ~/.furl DB cannot commingle originals across projects or evict
+    # cross-project. Prefer CLAUDE_PROJECT_DIR (Claude Code's project root) so this hook and the long-lived furl MCP server converge on ONE per-project store;
     _cwd = payload.get("cwd")
     os.environ.setdefault(
         "FURL_CCR_PROJECT_DIR",
@@ -828,26 +773,14 @@ def main() -> None:
         or os.getcwd(),
     )
 
-    # --- T7: cheap (no subprocess) version floor check ---
-    # Resolved once, early, and reused below both for the first-run note's
-    # wording and for the post-kill-switch short-circuit. ``_floor_met`` is
-    # False only when furl_ctx.host_version has POSITIVELY IDENTIFIED a host
-    # below MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT (from the native
-    # installer's env vars — no subprocess spawn, safe on this per-tool-call
-    # path); None means "cannot prove either way" (non-native install, or
-    # furl_ctx unavailable) and is intentionally treated as "assume today's
-    # behavior", never as "assume broken" — see host_version's module docstring.
+    # T7 ``_floor_met`` is False only when furl_ctx.host_version has POSITIVELY IDENTIFIED a
+    # host below MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT (from the native installer's env vars
     _hv = _host_version_module()
     _host_version = _hv.detect_host_version() if _hv is not None else None
     _floor_met = _hv.meets_compression_floor(_host_version) if _hv is not None else None
 
-    # --- observability: record THIS invocation (every run past payload parse) ---
-    # Resolved once here (after the project dir is scoped, so it hits the SAME
-    # per-project store the MCP server reads) and stashed for the terminal
-    # _passthrough / _emit, which tally the run's single outcome. On the FIRST
-    # durably-recorded invocation, a one-line #68951 heads-up is written to stderr
-    # (once per store, not per call — the in-memory backend never triggers it, so
-    # a no-op stays byte-silent). All fail-open: counting never breaks the hook.
+    # observability record THIS invocation (every run past payload parse) --- Resolved once here (after the project dir is scoped.
+    # On the FIRST durably-recorded invocation, a one-line #68951 heads-up is written to stderr (once per store, not per call
     global _run_counter_ctx
     _cmod = _counters_module()
     _cstore = _cmod.resolve_store() if _cmod is not None else None
@@ -866,14 +799,8 @@ def main() -> None:
     if not _flag_enabled(os.environ.get(_ENABLED_ENV)):
         _passthrough("disabled")
 
-    # --- T7: below the compression floor, Claude Code is CONFIRMED to ignore
-    # updatedToolOutput (the anthropics/claude-code#68951 class), so whatever
-    # this hook produced would never reach the model — including the
-    # redaction-only emit further down, which is equally inert on these hosts.
-    # Short-circuit before any of that work (compression, redaction) and
-    # bucket the no-op distinctly so hook_compressions_applied never counts an
-    # undeliverable replacement as "applied". Unknown (_floor_met is None)
-    # intentionally falls through unchanged.
+    # T7 so whatever this hook produced would never reach the model including the redaction-only emit further down Short-circuit before any of that work
+    # (compression, redaction) and bucket the no-op distinctly so hook_compressions_applied never counts an undeliverable replacement as "applied".
     if _floor_met is False:
         _passthrough("below-version-floor")
 
@@ -892,36 +819,14 @@ def main() -> None:
     if _CCR_MARKER in text:
         _passthrough("already-compressed")
 
-    # --- secret redaction (FURL_REDACT_PATTERNS), BEFORE the size gate ---
-    # Scrub configured secrets from what the model sees even when the output is
-    # too small to compress. With no patterns set this returns text unchanged,
-    # so the hook stays byte-identical when redaction is off.
-    #
-    # ORDERING IS LOAD-BEARING AND MUST NOT BE FLIPPED. The gate below is
-    # ``_min_chars()`` — a MINIMUM ("too small to bother compressing"), not a cap.
-    # Moving it above this line would stop redacting every below-threshold output
-    # and reinstate exactly the leak review Finding 1 closed, and the gate itself
-    # reads ``len(redacted)`` and the redacted mirror, so it cannot run first.
-    # Pinned by ``test_redaction_runs_before_the_min_chars_gate``.
-    #
-    # A size cap could not substitute for the budget either. At worst-case seeding
-    # density the quadratic term measures 0.165 s at 16 KB, 0.590 s at 32 KB,
-    # 2.635 s at 64 KB and 10.656 s at 128 KB (exponent 2.02), so it blows any
-    # realistic budget while still FAR below any cap that would admit ordinary tool
-    # output — a 5 MB legitimate blob costs about 0.5-1.2 s on the same box. Cost
-    # scales with density as well as size, so no size threshold separates the two
-    # cases. Bounding TIME is the only bound that holds, which is what
-    # ``_apply_env_redaction`` now applies. (An earlier revision of this comment
-    # cited 0.101 s at 64 KB and ~500 s at 5 MB; those came from a sparsely seeded
-    # corpus and were ~25x low. The conclusion strengthened — it trips sooner.)
+    # Apply configured secret redaction before the minimum-size compression gate so small outputs
+    # cannot bypass scrubbing. Time-budget the scan; a size limit cannot bound dense-regex worst cases.
     _budget_seconds = _redaction_budget_seconds()
     redacted = _apply_env_redaction(text)
     if redacted is None:
         _withhold_for_redaction_budget(tool_response, _budget_seconds)
 
-    # The Bash-shaped preserved stderr is a second model-visible field. Redact it
-    # ONCE here so the scanner runs at most once per field, and fail closed on it
-    # too — a wedge hiding in stderr is the same disclosure path as one in stdout.
+    # The Bash-shaped preserved stderr is a second model-visible field.
     _preserved = _preserved_stderr(tool_response)
     redacted_stderr: str | None = None
     if _preserved is not None:
@@ -931,32 +836,20 @@ def main() -> None:
 
     # --- size gate ---
     if len(redacted) < _min_chars():
-        # Below the compression threshold. If redaction changed ANY model-visible
-        # field — the extracted one OR a preserved Bash stderr — emit the fully
-        # scrubbed mirror so no secret reaches the model (review Finding 1);
-        # otherwise keep a byte-identical passthrough.
+        # Below the compression threshold.
         if _redaction_changed_visible_output(tool_response, text, redacted, redacted_stderr):
             _emit(tool_response, redacted, compressed=False, redacted_stderr=redacted_stderr)
         _passthrough("below-min-chars")
 
-    # --- size reroute (F2): above the hook threshold, force the engine's fast
-    # reversible CCR offload so a huge blob can never drive the super-linear
-    # crush/mixed path past the 30 s hooks.json kill. Armed BEFORE compress() so
-    # the engine reads the lowered ceiling; the run is tallied as a distinct
-    # hook_size_reroute breadcrumb (below), NOT a no-op — it still emits a marker.
+    # Above the hook size threshold, force fast reversible CCR offload so huge blobs cannot drive slower crush/mixed paths past the 30-second host limit.
     size_rerouted = _arm_size_reroute(len(redacted))
 
-    # --- compress (returns None + a distinct reason unless it genuinely helped) ---
-    # The originating tool (from the payload, already read above) rides through
-    # compress() so the CCR entry it stores records content_kind (audit: hook
-    # entries previously all showed content_kind=null).
+    # compress (returns None + a distinct reason unless it genuinely helped) --- The originating tool (from the payload, already read
+    # above) rides through compress() so the CCR entry it stores records content_kind (audit: hook entries all showed content_kind=null).
     tool_label = tool_name if isinstance(tool_name, str) and tool_name else None
     compressed, compress_fail_reason = _compress_text(redacted, tool_label)
     if compressed is None:
-        # Compression did not help. Emit the fully scrubbed mirror if redaction
-        # changed any model-visible field (extracted OR a preserved Bash stderr —
-        # review Finding 1); otherwise leave the original untouched (byte-identical
-        # passthrough).
+        # Compression did not help.
         if _redaction_changed_visible_output(tool_response, text, redacted, redacted_stderr):
             _emit(tool_response, redacted, compressed=False, redacted_stderr=redacted_stderr)
         _passthrough(compress_fail_reason or "no-savings")

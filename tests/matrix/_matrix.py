@@ -49,8 +49,7 @@ from typing import Any
 from furl_ctx import compress, retrieve
 from furl_ctx.cache.compression_store import get_compression_store
 
-# Reuse the canonical recovery-comparison helpers instead of re-deriving them —
-# same helpers ``test_ccr_recovery_invariant.py`` uses for the lossy:table path.
+# Reuse the canonical recovery-comparison helpers instead of re-deriving them — the same helpers used by the lossy-table recovery tests.
 from tests._fixtures import canonical_repr, decode_csv_schema_into
 
 _MODEL = "gpt-4o"

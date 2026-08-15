@@ -61,7 +61,7 @@ _UUID_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
-# Engine hash primitives, reproduced byte-for-byte (anchor_selector.rs).
+# Engine hash primitives reproduced byte-for-byte for the benchmark mirror.
 # ---------------------------------------------------------------------------
 
 
@@ -89,9 +89,8 @@ def stable_item_hash(item: Any, exclude: frozenset[str]) -> str:
     return whole_item_hash(projected)
 
 
-# ---------------------------------------------------------------------------
-# Identity exclude-set, mirrored from field_role.rs::compute_exclude_set.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Identity exclude-set, mirrored from
+# the Rust module::compute_exclude_set. ---------------------------------------------------------------------------
 
 
 def _is_sequential(values: list[Any]) -> bool:

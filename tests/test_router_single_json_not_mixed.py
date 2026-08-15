@@ -28,9 +28,8 @@ from furl_ctx.transforms.router_debug import _mixed_indicators
 from furl_ctx.transforms.router_policy import CompressionStrategy
 from furl_ctx.transforms.router_split import _is_single_json_array, is_mixed_content
 
-# A single-line array whose STRING VALUES are prose-like (each name matches
-# ``_PROSE_PATTERN`` = ``[A-Z][a-z]+\s+\w+\s+\w+``), exactly the shape that a
-# ``jq -c`` Chrome-trace slice produces.
+# A single-line array whose STRING VALUES are prose-like (each name matches ``_PROSE_PATTERN`` =
+# ``[A-Z][a-z]+\s+\w+\s+\w+``), exactly the shape that a ``jq -c`` Chrome-trace slice produces.
 _PROSE_EVENT_NAMES = [
     "Parse HTML Document Tree",
     "Recalculate Style Rules",
@@ -54,10 +53,8 @@ _SINGLE_LINE_ARRAY = json.dumps(
     separators=(",", ":"),
 )
 
-# A prose-laden single JSON OBJECT (review F-1). It trips the same 2 indicators as
-# the array, but a top-level object is NOT detected as json_array, so it must stay
-# on the MIXED path to reach SmartCrusher. Its keys/values repeat so the columnar
-# route compresses it well; excusing it from MIXED stranded it at ratio 1.0.
+# A prose-laden single JSON OBJECT (review F-1). It trips the same 2 indicators as the array, but a
+# top-level object is NOT detected as json_array, so it must stay on the MIXED path to reach SmartCrusher.
 _PROSE_LADEN_OBJECT = json.dumps(
     {
         f"field_{i}": {

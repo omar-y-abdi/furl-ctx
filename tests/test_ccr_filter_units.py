@@ -29,10 +29,7 @@ from furl_ctx.ccr.retrieve_filters import (
     apply_filters,
 )
 
-# A generous wall-clock ceiling: the ReDoS guards make these paths return in
-# microseconds. A real catastrophic backtrack would take many seconds/minutes,
-# so < 1s cleanly separates "guarded" from "hung" without being flaky on a
-# loaded CI box.
+# A generous wall-clock ceiling: the ReDoS guards make these paths return in microseconds.
 _REDOS_DEADLINE_S = 1.0
 _CATASTROPHIC = r"(a+)+$"  # classic exponential-backtracking pattern
 
@@ -82,9 +79,8 @@ def test_parse_accepts_open_ended_range() -> None:
     assert spec.line_end is None
 
 
-# ─── RetrieveFilters.parse — comparison boundaries ──────────────────────────
-# One accepted/rejected pair straddling every ``<``/``>``/``<``-derived bound in
-# the smart constructor, so a mutated operator (``>`` → ``>=`` etc.) is caught.
+# ─── RetrieveFilters.parse — comparison boundaries ────────────────────────── One accepted/rejected pair straddling
+# every ``<``/``>``/``<``-derived bound in the smart constructor, so a mutated operator (``>`` → ``>=`` etc.) is caught.
 
 
 @pytest.mark.parametrize(
@@ -157,9 +153,8 @@ def test_apply_fields_skips_non_object_elements() -> None:
     assert out.total_count == 4  # all array elements
 
 
-# ─── apply_filters line-window boundaries ───────────────────────────────────
-# The clamp arithmetic (``start > total`` → empty; ``end = min(total, end)``)
-# lives only in ``_filter_lines`` and is unreachable from the parse tests.
+# ─── apply_filters line-window boundaries ─────────────────────────────────── The clamp arithmetic (``start >
+# total`` → empty; ``end = min(total, end)``) lives only in ``_filter_lines`` and is unreachable from the parse tests.
 
 _THREE_LINES = "l1\nl2\nl3"
 
@@ -199,10 +194,7 @@ def test_apply_pattern_numbers_matched_lines() -> None:
 
 
 def test_apply_pattern_matches_substring_in_single_giant_line_review_f3() -> None:
-    # Review F3: a minified / single-line JSON blob stores as ONE line far
-    # longer than the per-line regex cap. A backtracking-bounded pattern (a
-    # literal) must still find a substring that is unambiguously present — pre-
-    # fix the over-long line was silently skipped and matched_count came back 0.
+    # Review F3: a minified / single-line JSON blob stores as ONE line far longer than the per-line regex cap.
     blob = '{"exception":{"type":"EXC_BAD_ACCESS","signal":"SIGSEGV"},"frames":['
     blob += ",".join(f'{{"sym":"frame_{i}","off":{i}}}' for i in range(2000))
     blob += "]}"
@@ -217,13 +209,7 @@ def test_apply_pattern_matches_substring_in_single_giant_line_review_f3() -> Non
 
 
 def test_apply_regex_metachar_pattern_over_long_line_stays_capped_review_rf1() -> None:
-    # Review RF1: ONLY a pure LITERAL bypasses the per-line cap. A pattern
-    # carrying any regex metacharacter (here '.') is a regex, so on a line longer
-    # than the cap it is NOT searched and reports zero matches even though its
-    # target is present. The same regex on a SHORT line DOES match, proving the
-    # zero is the long-line cap at work, not a malformed pattern. Pre-fix the
-    # quantifier heuristic cleared '.' (it carries no '* + {') and ran it on the
-    # giant line, returning a match — the behavior RF1 removes; this asserts 0.
+    # Review RF1: ONLY a pure LITERAL bypasses the per-line cap.
     needle = "EXC_BAD_ACCESS"
     blob = '{"exception":{"type":"' + needle + '"},"frames":['
     blob += ",".join(f'{{"sym":"frame_{i}","off":{i}}}' for i in range(2000))
@@ -247,15 +233,7 @@ def test_apply_regex_metachar_pattern_over_long_line_stays_capped_review_rf1() -
 
 
 def test_apply_optional_heavy_pattern_over_long_line_returns_fast_review_rf1() -> None:
-    # Review RF1 + A12: a '?'-heavy pattern backtracks exponentially yet carries
-    # no '* + {', so the retired quantifier heuristic cleared it and ran it on a
-    # giant line, hanging for tens of seconds. RF1 first confined it to the
-    # per-line cap; A12 now rejects the optional-chain shape one step earlier, at
-    # PARSE, so it never reaches the matcher on a short OR a long line (the cap
-    # bounds line length, not backtracking width, so it never protected short
-    # lines). Either way the security property — no hang — holds; this pins the
-    # stronger parse-time rejection. The long-line input cap itself is pinned
-    # independently by test_regex_line_char_cap_boundary.
+    # Review RF1 + A12
     pattern = ".?" * 21 + "." * 21 + "END"  # 21 optional quantifiers > the bound of 12
     start = time.monotonic()
     spec = RetrieveFilters.parse({"pattern": pattern})
@@ -282,10 +260,8 @@ def test_mode_parse_unknown_is_error_string() -> None:
     assert "unknown mode" in out
 
 
-# ─── build_mode_pipeline: mode → router config (behavior, not readback) ──────
-# The mode's whole point is that it changes the ContentRouterConfig the pipeline
-# carries. Pin each mode's config to a fixed vector so a swapped/dropped knob is
-# caught here (the MCP tests only observe the emergent token delta downstream).
+# ─── build_mode_pipeline: mode → router config (behavior, not readback) ────── The
+# mode's whole point is that it changes the ContentRouterConfig the pipeline carries.
 
 
 def test_normal_mode_uses_default_pipeline() -> None:
@@ -387,18 +363,13 @@ def test_partition_alternating_runs() -> None:
     ]
 
 
-# ─── SEC-1/SEC-2: ReDoS guards ──────────────────────────────────────────────
-# Two complementary guards, both exercised here:
-#   (a) an input cap so a catastrophic pattern over a LONG line returns at once
-#       instead of backtracking (the matcher never sees the over-cap line);
-#   (b) a parse-time heuristic that rejects the pathological pattern shape as a
-#       typed error before it is ever compiled/run.
+# ─── SEC-1/SEC-2: ReDoS guards ────────────────────────────────────────────── Two complementary guards, both exercised here: (a) an
+# input cap so a catastrophic pattern over a LONG line returns at once instead of backtracking (the matcher never sees the over-cap line).
 
 
 def test_compress_catastrophic_pattern_over_long_line_returns_fast() -> None:
-    # _resolve_matcher bypasses parse (the unit/tool-name path), so the INPUT
-    # CAP is what protects it: a 20k-char line is past the 10k cap → no match,
-    # no backtracking. Without the cap, (a+)+$ over this line hangs for minutes.
+    # _resolve_matcher bypasses parse (the unit/tool-name path), so the INPUT CAP is
+    # what protects it: a 20k-char line is past the 10k cap → no match, no backtracking.
     long_line = "a" * 20_000
     start = time.monotonic()
     result = _resolve_matcher(_CATASTROPHIC)(long_line)
@@ -407,10 +378,8 @@ def test_compress_catastrophic_pattern_over_long_line_returns_fast() -> None:
 
 
 def test_compress_section_filter_over_long_line_is_protected_and_fast() -> None:
-    # Same guard through the public partition path: an over-cap line stays fast
-    # (the matcher never runs on it) AND, per the conservative safety choice, is
-    # treated as PROTECTED — an unfilterable line ships verbatim rather than
-    # being compressed. The short line is ordinary (eligible).
+    # Same guard through the public partition path: an over-cap line stays fast (the matcher never runs on it) AND, per the
+    # conservative safety choice, is treated as PROTECTED — an unfilterable line ships verbatim rather than being compressed.
     long_line = "a" * 20_000
     content = "short ok line\n" + long_line
     patterns = SectionPatterns(include=(), exclude=(_CATASTROPHIC,))
@@ -426,9 +395,8 @@ def test_compress_section_filter_over_long_line_is_protected_and_fast() -> None:
 
 
 def test_compress_over_long_line_protected_even_with_include_filter() -> None:
-    # With an include filter present, an over-long line is still protected — the
-    # length guard fires before include matching, so the conservative outcome is
-    # consistent regardless of which filter family is in play.
+    # With an include filter present, an over-long line is still protected — the length guard fires before
+    # include matching, so the conservative outcome is consistent regardless of which filter family is in play.
     long_line = "b" * 20_000
     patterns = SectionPatterns(include=("keepme",), exclude=())
     assert patterns.line_is_eligible(long_line) is False
@@ -447,10 +415,7 @@ def test_compress_parse_rejects_overlong_pattern() -> None:
 
 
 def test_retrieve_catastrophic_pattern_over_long_line_returns_fast() -> None:
-    # A benign compiled pattern over a single 50k-char line: the input cap skips
-    # the over-cap line from selection, so the per-line search never runs on it.
-    # (A catastrophic pattern is rejected at parse — covered below — so the cap
-    # is the guard for lines that slip past a heuristic-safe pattern.)
+    # A benign compiled pattern over a single 50k-char line: the input cap skips the over-cap line from selection, so the per-line search never runs on it.
     content = "a" * 50_000
     spec = RetrieveFilters.parse({"pattern": "zzz"})
     assert isinstance(spec, RetrieveFilters)
@@ -492,18 +457,10 @@ def test_regex_line_char_cap_boundary() -> None:
     assert _resolve_matcher("a+")("a" * 10_001) is False
 
 
-# ─── A12: optional-chain ReDoS on SHORT (within-cap) lines ──────────────────
-# The long-line literal-only path (F3) already protects lines OVER the cap. A12
-# is the short-line gap: an optional-chain like '.?' repeated dozens of times is
-# under _MAX_PATTERN_CHARS and carries no nested quantifier, yet backtracks
-# exponentially on a line WITHIN the 10k cap (empirically '.?'×22 + a failing
-# tail ≈ 1.5s, doubling per added pair — '.?'×40 hangs for hours). The input cap
-# bounds line LENGTH, not backtracking WIDTH, so it does not save short lines.
-# The fix rejects the shape at parse; these pin that it stays fast.
+# ─── A12: optional-chain ReDoS on SHORT (within-cap) lines ────────────────── The long-line literal-only path (F3) already
+# protects lines OVER the cap. The input cap bounds line LENGTH, not backtracking WIDTH, so it does not save short lines.
 
 # '.?' × 40 followed by a literal that forces the exponential search to fail.
-# 81 chars (< 200 cap), no nested quantifier — invisible to the other two
-# screens; only the variable-quantifier count (40 > 12) catches it.
 _OPTIONAL_CHAIN = ".?" * 40 + "b"
 
 
@@ -520,11 +477,7 @@ def test_compress_parse_rejects_optional_chain_pattern() -> None:
 
 
 def test_retrieve_optional_chain_within_cap_is_guarded_and_fast() -> None:
-    # The end-to-end wall-clock pin. On a SHORT within-cap line the guard must
-    # keep the public parse→apply path fast. With the guard, parse returns a
-    # FilterError at once. If a future change drops the guard, parse yields a
-    # spec, apply_filters runs '.?'×40 over the line, and this backtracks for
-    # far longer than the deadline — a loud regression signal.
+    # The end-to-end wall-clock pin. On a SHORT within-cap line the guard must keep the public parse→apply path fast.
     line = "a" * 40  # within the 10k cap; forces the exponential blow-up
     start = time.monotonic()
     spec = RetrieveFilters.parse({"pattern": _OPTIONAL_CHAIN})
@@ -539,9 +492,8 @@ def test_variable_quantifier_guard_preserves_normal_patterns() -> None:
     # A handful of quantifiers (the realistic case) must still pass both surfaces.
     for ok in ("ERROR.*", r"^\d+$", "a?b?c?", r"\d{1,3}-\d{1,3}", "(?:foo)?(?:bar)?"):
         assert isinstance(RetrieveFilters.parse({"pattern": ok}), RetrieveFilters), ok
-    # The boundary: exactly _MAX_VARIABLE_QUANTIFIERS (12) passes; 13 is rejected.
-    # Distinct atoms so each '?' is a valid quantifier (stacked '???' is a regex
-    # error, a different rejection channel).
+    # The boundary: exactly _MAX_VARIABLE_QUANTIFIERS (12) passes; 13 is rejected. Distinct atoms so
+    # each '?' is a valid quantifier (stacked '???' is a regex error, a different rejection channel).
     twelve = "".join(f"{c}?" for c in "abcdefghijkl")  # 12 optional quantifiers
     assert isinstance(RetrieveFilters.parse({"pattern": twelve}), RetrieveFilters)
     assert isinstance(RetrieveFilters.parse({"pattern": twelve + "m?"}), FilterError)

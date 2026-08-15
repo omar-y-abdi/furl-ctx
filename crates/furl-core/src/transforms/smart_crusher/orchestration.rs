@@ -1,31 +1,5 @@
-//! Index-set orchestration helpers used by every planning method.
-//!
-//! Direct port of three Python methods from `smart_crusher.py`:
-//!
-//! - `_deduplicate_indices_by_content` (line 1721) — collapse multiple
-//!   indices pointing at content-identical items into a single index
-//!   (lowest wins).
-//! - `_fill_remaining_slots` (line 1794) — when dedup leaves us under
-//!   `effective_max`, fill back up with diverse stride-sampled indices
-//!   that don't repeat content.
-//! - `_prioritize_indices` (line 1891) — apply dedup + fill, then —
-//!   if still over budget — keep ALL critical items (errors,
-//!   structural outliers, numeric anomalies) plus first-3 / last-2,
-//!   discarding non-critical items beyond the budget.
-//!
-//! All three operate on `BTreeSet<usize>` (sorted, deterministic
-//! iteration). Item content hashes use the Python-compatible
-//! `compute_item_hash` from `anchor_selector` so the same item collapses
-//! to the same hash in both languages.
-//!
-//! # Learned field-semantics — not supported
-//!
-//! Python's `_prioritize_indices` used to accept an optional
-//! `field_semantics` map (from the retired cross-user learning
-//! system) and pin items with values in learned-important fields.
-//! That system was removed; this port permanently mirrors the
-//! "no field_semantics provided" branch (no learned-important
-//! indices).
+//! Deterministic index orchestration deduplicates identical content, fills unused slots with diverse indices, then
+//! preserves critical items plus boundary anchors when over budget. Stable hashes share Python-compatible serialization.
 
 use md5::{Digest, Md5};
 use serde_json::Value;
@@ -36,18 +10,8 @@ use super::outliers::{detect_error_items_for_preservation, detect_structural_out
 use super::types::{ArrayAnalysis, FieldStats, FieldType};
 use crate::transforms::anchor_selector::stable_item_hash;
 
-/// Collapse content-duplicate indices to their lowest representative.
-///
-/// Python: `_deduplicate_indices_by_content`. Iterates `keep_indices`
-/// in ascending order and records the FIRST index that hashes to a
-/// given content fingerprint. Subsequent matches drop. Out-of-bounds
-/// indices skip.
-///
-/// The grouping hash is the field-aware [`stable_item_hash`]: when `exclude`
-/// is empty it is byte-equal to `compute_item_hash` (so the dedup outcome is
-/// byte-equal across languages and unchanged for non-identity data); when
-/// `exclude` lists high-cardinality identity columns, two rows that differ
-/// ONLY in those columns hash equal and collapse (DESIGN.md Improvement 2).
+/// Collapse content-duplicate indices to their lowest representative. Iterates `keep_indices` in ascending order and records
+/// the FIRST index that hashes to a given content fingerprint. The grouping hash is the field-aware [`stable_item_hash`]
 pub fn deduplicate_indices_by_content(
     keep_indices: &BTreeSet<usize>,
     items: &[Value],
@@ -57,9 +21,8 @@ pub fn deduplicate_indices_by_content(
     deduplicate_indices_memo(keep_indices, &mut memo)
 }
 
-/// [`deduplicate_indices_by_content`] against a shared [`HashMemo`] so a
-/// caller running dedup + fill + novelty (the prioritizer) hashes each
-/// item at most once per call instead of once per pass (PERF-3).
+/// [`deduplicate_indices_by_content`] against a shared [`HashMemo`] so a caller running dedup + fill +
+/// novelty (the prioritizer) hashes each item at most once per call instead of once per pass (PERF-3).
 fn deduplicate_indices_memo(
     keep_indices: &BTreeSet<usize>,
     memo: &mut HashMemo<'_>,
@@ -81,18 +44,8 @@ fn deduplicate_indices_memo(
     seen.values().copied().collect()
 }
 
-/// Fill `keep_indices` back up to `effective_max` with diverse,
-/// content-unique items. Python: `_fill_remaining_slots`.
-///
-/// Strategy:
-/// 1. Compute hashes of currently-kept items.
-/// 2. Walk candidates (indices NOT in keep_indices) with stride-based
-///    sampling for spatial diversity.
-/// 3. Add a candidate if its content hash is fresh.
-///
-/// Python uses two nested loops with `start_offset` to interleave
-/// stride scans — we mirror that exactly so the same items are picked
-/// in the same order for parity fixtures.
+/// Fill `keep_indices` back up to `effective_max` with diverse, content-unique items. Python uses two nested loops with `start_offset`
+/// to interleave stride scans — we mirror that exactly so the same items are picked in the same order for parity fixtures.
 pub fn fill_remaining_slots(
     keep_indices: &BTreeSet<usize>,
     items: &[Value],
@@ -117,10 +70,7 @@ fn fill_remaining_slots_memo(
         return keep_indices.clone();
     }
 
-    // Hashes of items we're already keeping — bound the working set
-    // we won't re-add. Uses the stable-projection hash so a fill
-    // candidate that is identical-modulo-identity to a kept row counts
-    // as a duplicate and is skipped (real diversity, not identity noise).
+    // Hashes of items we're already keeping — bound the working set we won't re-add.
     let mut seen: HashSet<String> = HashSet::new();
     for &idx in keep_indices {
         if idx < n {
@@ -138,9 +88,8 @@ fn fill_remaining_slots_memo(
     let step = (candidates.len() / (remaining + 1)).max(1);
     let mut added = 0;
 
-    // Python's interleaved stride: outer loop offsets [0, step),
-    // inner loop walks `start_offset, +step, +step, ...`. The result
-    // visits every candidate exactly once across the outer iterations.
+    // Python's interleaved stride: outer loop offsets [0, step), inner loop walks `start_offset,
+    // +step, +step, ...`. The result visits every candidate exactly once across the outer iterations.
     'outer: for start_offset in 0..step {
         if added >= remaining {
             break;
@@ -164,13 +113,6 @@ fn fill_remaining_slots_memo(
 }
 
 /// Borrowed parameter bundle for [`prioritize_indices`].
-///
-/// Groups the eight related inputs the prioritizer needs so the public
-/// signature stays one argument wide (the loose-arg form tripped
-/// `clippy::too_many_arguments`). Every field is a borrow or `Copy`
-/// scalar — the struct is a cheap, immutable view over caller-owned data,
-/// so passing it by value is a no-op move. `'a` ties all the borrows to
-/// the caller's data for the duration of the call.
 pub struct PrioritizeParams<'a> {
     /// SmartCrusher config (dedup toggle, variance threshold).
     pub config: &'a SmartCrusherConfig,
@@ -188,28 +130,12 @@ pub struct PrioritizeParams<'a> {
     pub exclude: &'a BTreeSet<String>,
     /// Query-relevant indices the planner pinned (anchor + relevance hits).
     pub query_pinned: &'a BTreeSet<usize>,
-    /// Pre-computed JSON serializations of `items` (index-aligned), when
-    /// the caller already paid for them. Threaded into the over-budget
-    /// error-keyword scan so it never re-serializes the array (PERF-3).
-    /// `None` falls back to on-the-fly serialization — byte-identical
-    /// detection either way.
+    /// Pre-computed JSON serializations of `items` (index-aligned), when the caller already paid for them.
+    /// Threaded into the over-budget error-keyword scan so it never re-serializes the array (PERF-3).
     pub item_strings: Option<&'a [String]>,
 }
 
-/// Top-level prioritizer. Python: `_prioritize_indices`.
-///
-/// Pipeline:
-/// 1. **Dedup**: collapse content-duplicate indices.
-/// 2. **Fill**: top up to `effective_max` with diverse uniques.
-/// 3. **Already under budget?** Return as-is.
-/// 4. **Otherwise**: keep ALL critical items (errors + structural
-///    outliers + numeric anomalies — non-negotiable per Python's
-///    "quality guarantee"). Then add first-3 + last-2 if room. Then
-///    fill remaining with non-critical kept indices in ascending order.
-///
-/// May return MORE than `effective_max` items when critical items
-/// alone exceed the budget — Python's documented behavior, mirrored
-/// here.
+/// Top-level prioritizer. May return MORE than `effective_max` items when critical items alone exceed the budget
 pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
     // Unpack the borrowed bundle once; the body below is byte-for-byte
     // the loose-argument form (every field is a borrow / `Copy` scalar).
@@ -225,15 +151,11 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
         item_strings,
     } = params;
 
-    // One shared per-index content-hash memo for the whole call: dedup,
-    // fill, and novelty ranking all consume the same md5-over-JSON hash,
-    // which used to be recomputed 3-4× per item across the passes
-    // (PERF-3). The memo serializes+hashes each index at most once.
+    // One shared per-index content-hash memo for the whole call: dedup, fill, and novelty ranking all consume the same md5-over-JSON
+    // hash, which used to be recomputed 3-4× per item across the passes (PERF-3). The memo serializes+hashes each index at most once.
     let mut memo = HashMemo::new(items, exclude);
 
-    // Dedup pass. Uses the field-aware stable hash (`exclude` lists
-    // identity columns); empty `exclude` => byte-equal to the prior
-    // whole-item dedup.
+    // Dedup pass. Uses the field-aware stable hash (`exclude` lists identity columns); empty `exclude` => byte-equal to the prior whole-item dedup.
     let mut current = if config.dedup_identical_items {
         deduplicate_indices_memo(keep_indices, &mut memo)
     } else {
@@ -251,14 +173,8 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
 
     // Over budget — apply critical-items-first prioritization.
 
-    // Errors (keyword-detected — preservation guarantee) + structural
-    // outliers (statistical — rare fields, rare statuses). The analyzer
-    // already ran BOTH detections over this exact array inside
-    // `analyze_crushability` (PERF-3) — reuse its memoized indices when
-    // the caller passed the analysis. Analysis-less callers (direct API
-    // use, unit fixtures) recompute with the same functions — identical
-    // output either way; the error scan reuses the caller's pre-computed
-    // serializations instead of re-serializing every item.
+    // Errors (keyword-detected — preservation guarantee) + structural outliers (statistical — rare fields, rare statuses). The analyzer already ran
+    // BOTH detections over this exact array inside `analyze_crushability` (PERF-3) — reuse its memoized indices when the caller passed the analysis.
     let memoized = analysis.and_then(|a| a.crushability.as_ref());
     let error_indices: BTreeSet<usize> = match memoized {
         Some(c) => c.error_keyword_indices.iter().copied().collect(),
@@ -276,29 +192,12 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
 
     let mut prioritized: BTreeSet<usize> = BTreeSet::new();
 
-    // Error-keyword pins are SEMANTIC needles (an "ERROR"/"panic"
-    // token) — they are meaningful regardless of how many rows carry
-    // them, so they pin unconditionally.
+    // Error-keyword pins are SEMANTIC needles (an "ERROR"/"panic" token) — they are
+    // meaningful regardless of how many rows carry them, so they pin unconditionally.
     prioritized.extend(&error_indices);
 
-    // DEGENERACY GATE (rarity-class pins). Structural outliers (rare
-    // fields / rare statuses) and numeric anomalies (>variance_threshold σ)
-    // are *rarity* signals: a row is pinned because it is unusual relative
-    // to its peers. On high-entropy near-unique data that premise breaks —
-    // a uniformly-random integer column produces a seed-dependent scatter
-    // of ">2σ" rows and a bounded column (0..80) makes a variable slice of
-    // rows look "rare", so these signals fire on a large, unstable fraction
-    // of rows. Pinning them then degenerates to "keep almost everything":
-    // the survivor count swings between the budget and ~n depending only on
-    // the random draw, which flips the MinTokens router between the
-    // aggressive lossy render and the no-drop lossless render (measured:
-    // 34% vs 94% on the same shape across seeds). Since every un-pinned row
-    // stays CCR-recoverable (unconditional persist + surfaced
-    // `<<ccr:HASH>>` pointer), suppressing a non-informative rarity signal
-    // loses NO information — it just stops the noise from defeating the
-    // CCR-backed budget. Same `rarity_signal_is_informative` test the
-    // singleton pin already uses: a rarity signal that flags a majority of
-    // rows distinguishes nothing.
+    // Apply rarity pins only when they identify a minority. On high-entropy data, majority
+    // outlier/anomaly pins carry no information and would defeat the CCR-backed item budget.
     if rarity_signal_is_informative(outlier_indices.len(), n) {
         prioritized.extend(&outlier_indices);
     }
@@ -306,33 +205,12 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
         prioritized.extend(&anomaly_indices);
     }
 
-    // Query-relevant pinning. Rows the planner flagged as matching the
-    // user's query (deterministic anchor hits + capped high-confidence
-    // relevance — see `apply_query_signals`) are what the model most
-    // needs VISIBLE; the over-budget path used to let them compete with
-    // generic fill and lose by position. Pin them like critical items.
-    // The set is bounded by the planner (anchor matches are exact-match
-    // only; relevance pins are capped), mirroring top_n's additive
-    // query-preservation precedent.
+    // Query-relevant pinning. Rows the planner flagged as matching the user's query (deterministic anchor hits
+    // + capped high-confidence relevance The set is bounded by the planner (anchor matches are exact-match only;
     prioritized.extend(query_pinned);
 
-    // 1B — Field-value singleton pinning. Rows carrying a value that
-    // appears EXACTLY ONCE across a (non-identity) field are needles:
-    // the over-budget fill used to drop them purely by index position.
-    // Pin them like structural outliers, but CAPPED so a high-singleton
-    // array can't blow far past `effective_max` and inflate tokens. The
-    // identity columns are excluded (a unique uuid/timestamp per row is
-    // noise, not a needle), reusing the Imp2 exclude-set.
-    //
-    // DEGENERACY GATE: "singleton" is a *rarity* signal — a needle is a
-    // row that is unusual relative to its peers. When a MAJORITY of rows
-    // are singletons (e.g. an all-distinct array: every git-log subject
-    // unique), the signal carries no information and pinning degenerates
-    // to first-K-by-index — exactly the positional bias 1B was built to
-    // remove (measured: on the all-distinct logs benchmark the pins were
-    // literally indices 0..cap-1). Skip pinning in that case; every
-    // skipped row remains CCR-recoverable via the unconditional persist
-    // + surfaced `<<ccr:HASH>>` pointer, so nothing is lost.
+    // Pin singleton field values only for non-identity fields and only while singletons remain a minority.
+    // Cap pins to the item budget; majority-singleton arrays would otherwise recreate positional bias.
     let singleton_indices = field_value_singletons(items, exclude);
     if rarity_signal_is_informative(singleton_indices.len(), items.len()) {
         let singleton_cap = singleton_pin_cap(effective_max);
@@ -349,9 +227,8 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
 
     // First 3 / last 2 anchors if we have room.
     let mut remaining = effective_max.saturating_sub(prioritized.len());
-    // The two ranges overlap when `n <= 4`; a repeat visit is a no-op
-    // because `BTreeSet::insert` reports it as already-present, exactly
-    // like the old `!contains` guard.
+    // The two ranges overlap when `n <= 4`; a repeat visit is a no-op because
+    // `BTreeSet::insert` reports it as already-present, exactly like the old `!contains` guard.
     for i in (0..3.min(n)).chain(n.saturating_sub(2)..n) {
         if remaining == 0 {
             break;
@@ -361,13 +238,8 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
         }
     }
 
-    // 1B — Novelty-ranked fill. The remaining budget used to be filled
-    // lowest-index-first, which dropped a distinct mid-array needle
-    // purely by position. Instead rank `current \ prioritized` by
-    // NOVELTY — rarity of the row's stable-hash family (rarer = more
-    // novel) with index as a deterministic tie-break — and fill the most
-    // novel first. Empty `exclude` keeps the stable hash byte-equal to
-    // the whole-item hash, so this is well-defined on every dataset.
+    // Rank non-prioritized candidates by stable-hash-family rarity, then index, and fill the most novel first.
+    // With no excluded identity fields, the stable hash remains byte-equivalent to the whole-item hash.
     if remaining > 0 {
         let others: Vec<usize> = current.difference(&prioritized).copied().collect();
         let ranked = rank_by_novelty_memo(&others, &mut memo);
@@ -384,40 +256,19 @@ pub fn prioritize_indices(params: PrioritizeParams<'_>) -> BTreeSet<usize> {
     prioritized
 }
 
-/// Cap on how many field-value singletons the over-budget path pins
-/// (1B). Set to `effective_max` so pinned singletons can fill the budget
-/// but a singleton-heavy array (e.g. every row has a unique field value)
-/// cannot push survivors arbitrarily far past the target — they compete
-/// for the same budget as the other critical signals. Measured against
-/// the benchmark: this keeps the logs survivor count bounded while still
-/// rescuing the mid-array needle that the lowest-index fill dropped.
+/// Cap on how many field-value singletons the over-budget path pins (1B). Set to
+/// `effective_max` so pinned singletons can fill the budget but a singleton-heavy array (e.g.
 fn singleton_pin_cap(effective_max: usize) -> usize {
     effective_max
 }
 
-/// Is a RARITY signal informative for this array?
-///
-/// Rarity signals — field-value singletons, structural outliers (rare
-/// fields / rare statuses), numeric anomalies (>variance_threshold σ) —
-/// all flag a row because it is unusual *relative to its peers*. That
-/// premise only holds when the flagged rows are a minority: a needle is
-/// rare by definition. When a strict majority of rows are flagged, the
-/// array is simply high-entropy (all-distinct subjects, uniformly-random
-/// numeric columns) and the signal distinguishes nothing; pinning by it
-/// degenerates to first-K-by-index positional noise and, on the
-/// CCR-backed lossy path, defeats the aggressive keep budget. At-most-half
-/// keeps the borderline case (exactly half) pinned.
-///
-/// Shared by every rarity-class pin so the gate is identical and the
-/// behavior is deterministic across signal types.
+/// Is a RARITY signal informative for this array? That premise only holds when the flagged rows are a minority: a needle is rare by definition.
 fn rarity_signal_is_informative(flagged_count: usize, n: usize) -> bool {
     flagged_count * 2 <= n
 }
 
-/// Indices of rows carrying a value that appears EXACTLY ONCE across some
-/// non-excluded field — true needles. Excludes identity columns (a
-/// per-row uuid/timestamp is unique-by-construction noise, not a needle).
-/// Returned in ascending index order (deterministic).
+/// Indices of rows carrying a value that appears EXACTLY ONCE across some non-excluded
+/// field — true needles. Returned in ascending index order (deterministic).
 fn field_value_singletons(items: &[Value], exclude: &BTreeSet<String>) -> Vec<usize> {
     // Per-field value frequency (string-rendered, like the analyzer's
     // uniqueness computation). One pass to count, one pass to flag.
@@ -464,9 +315,8 @@ fn field_value_singletons(items: &[Value], exclude: &BTreeSet<String>) -> Vec<us
     out
 }
 
-/// Stable per-value signature for frequency counting. Strings compare by
-/// content; everything else by canonical JSON (so `1` and `"1"` differ,
-/// matching the analyzer's value semantics).
+/// Stable per-value signature for frequency counting. Strings compare by content; everything
+/// else by canonical JSON (so `1` and `"1"` differ, matching the analyzer's value semantics).
 fn value_signature(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -474,9 +324,8 @@ fn value_signature(v: &Value) -> String {
     }
 }
 
-/// Rank `candidates` by descending NOVELTY: rarity of the row's
-/// stable-hash family across the whole array (a singleton family is
-/// maximally novel), with ascending index as a deterministic tie-break.
+/// Rank `candidates` by descending NOVELTY: rarity of the row's stable-hash family across the whole
+/// array (a singleton family is maximally novel), with ascending index as a deterministic tie-break.
 #[cfg(test)]
 fn rank_by_novelty(
     candidates: &[usize],
@@ -487,15 +336,10 @@ fn rank_by_novelty(
     rank_by_novelty_memo(candidates, &mut memo)
 }
 
-/// [`rank_by_novelty`] against a shared [`HashMemo`] (PERF-3): family
-/// sizes need every index's hash, and the prioritizer's dedup/fill
-/// passes usually hashed most of them already — the memo makes the
-/// whole prioritize call hash each item at most once.
+/// [`rank_by_novelty`] against a shared [`HashMemo`] (PERF-3): family sizes need every index's hash, and the prioritizer's
+/// dedup/fill passes usually hashed most of them already — the memo makes the whole prioritize call hash each item at most once.
 fn rank_by_novelty_memo(candidates: &[usize], memo: &mut HashMemo<'_>) -> Vec<usize> {
-    // Family sizes over the whole array (rarity signal). Hashes are
-    // remembered per index so the sort below never re-serializes — the
-    // comparator runs O(n log n) times and an MD5-over-JSON per
-    // comparison would dominate the fill cost.
+    // Family sizes over the whole array (rarity signal).
     let hashes: Vec<String> = (0..memo.len()).map(|i| memo.hash_at(i)).collect();
     let mut family_size: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for h in &hashes {
@@ -575,12 +419,8 @@ fn is_numeric_field_with_variance(stats: &FieldStats) -> bool {
         && stats.variance.unwrap_or(0.0) > 0.0
 }
 
-/// Per-index content-hash memo shared across the prioritizer's passes
-/// (PERF-3). [`item_content_hash`] serializes + MD5-hashes an item; the
-/// dedup, fill, and novelty passes all consume the same hash, which used
-/// to be recomputed up to 3-4× per item. The memo computes each index at
-/// most once per lifetime; repeat lookups clone the memoized 16-char
-/// string (noise next to a serialize+MD5).
+/// Per-index content-hash memo shared across the prioritizer's passes (PERF-3). [`item_content_hash`] serializes + MD5-hashes
+/// an item; the dedup, fill, and novelty passes all consume the same hash, which used to be recomputed up to 3-4× per item.
 struct HashMemo<'a> {
     items: &'a [Value],
     exclude: &'a BTreeSet<String>,
@@ -601,9 +441,8 @@ impl<'a> HashMemo<'a> {
         self.items.len()
     }
 
-    /// The content hash for `idx`, computed on first access. Callers
-    /// bound-check against [`Self::len`] (mirrors the pre-memo code,
-    /// which skipped out-of-bounds indices before hashing).
+    /// The content hash for `idx`, computed on first access. Callers bound-check against
+    /// [`Self::len`] (mirrors the pre-memo code, which skipped out-of-bounds indices before hashing).
     fn hash_at(&mut self, idx: usize) -> String {
         if self.slots[idx].is_none() {
             self.slots[idx] = Some(item_content_hash(&self.items[idx], idx, self.exclude));
@@ -612,25 +451,13 @@ impl<'a> HashMemo<'a> {
     }
 }
 
-/// Hash function used by all orchestration helpers.
-///
-/// Wraps the field-aware [`stable_item_hash`] (Python-compatible
-/// json.dumps over the non-excluded keys + md5[:16]) with a fail-safe
-/// fallback: if the item is not a JSON object/array, fall back to a
-/// scalar hash (or `__idx_<i>__` on an unrepresentable value). Mirrors
-/// Python's `try/except (TypeError, ValueError, RecursionError)` block
-/// which also falls back to `f"__idx_{idx}__"` on serialization failure.
-///
-/// When `exclude` is empty, [`stable_item_hash`] is byte-equal to
-/// `compute_item_hash`, so this is unchanged for non-identity data.
+/// Hash function used by all orchestration helpers. Wraps the field-aware [`stable_item_hash`] (Python-compatible json.dumps over the non-excluded keys +
+/// md5[:16]) with a fail-safe fallback if the item is not a JSON object/array, fall back to a scalar hash (or `__idx_<i>__` on an unrepresentable value).
 fn item_content_hash(item: &Value, idx: usize, exclude: &BTreeSet<String>) -> String {
     if item.is_object() || item.is_array() {
         stable_item_hash(item, exclude)
     } else {
-        // Python: `else: content = str(item)` for non-dict items —
-        // they get a real hash too. We don't strictly need that for
-        // SmartCrusher's dict-array use case but we mirror it.
-        // Fallback to index-stamp only on serialization failure.
+        // Python: `else: content = str(item)` for non-dict items — they get a real hash too. Fallback to index-stamp only on serialization failure.
         let content = match item {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),
@@ -639,9 +466,8 @@ fn item_content_hash(item: &Value, idx: usize, exclude: &BTreeSet<String>) -> St
             _ => format!("__idx_{}__", idx),
         };
         let digest = Md5::digest(content.as_bytes());
-        // Per-byte `{:02x}` (digest 0.11 `Array` has no `LowerHex`);
-        // byte-identical to the old `format!("{:x}", digest)[..16]`
-        // (16 hex chars = first 8 digest bytes).
+        // Per-byte `{:02x}` (digest 0.11 `Array` has no `LowerHex`); byte-identical to
+        // the old `format!("{:x}", digest)[..16]` (16 hex chars = first 8 digest bytes).
         digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
     }
 }
@@ -738,9 +564,7 @@ mod tests {
 
     #[test]
     fn dedup_collapses_rows_differing_only_in_excluded_identity() {
-        // Two log rows: same message, different timestamp/id. With the
-        // identity columns excluded they project to the same stable hash
-        // and collapse to the lower index (DESIGN.md Imp2).
+        // Rows with the same message but different identity fields must project to the same stable hash and collapse to the lower index.
         let items = vec![
             json!({"ts": "2026-06-12T10:00:00Z", "id": "aaaa1111", "msg": "disk full"}),
             json!({"ts": "2026-06-12T10:00:05Z", "id": "bbbb2222", "msg": "disk full"}),
@@ -856,13 +680,8 @@ mod tests {
 
     #[test]
     fn prioritize_includes_first_3_and_last_2_when_room() {
-        // TEST-17: the old fixture (kept = 5..15, budget 10) was exactly AT
-        // budget, so the first-3/last-2 branch — which only runs on the
-        // OVER-budget path — never executed, and the sole assert
-        // (`len <= 10`) could not fail. Drive the over-budget path for
-        // real: all 30 indices kept, budget 10, no critical items (all
-        // distinct rows → the singleton rarity gate suppresses itself;
-        // linear `v` produces no >2σ anomalies; no error keywords).
+        // TEST-17: the old fixture (kept = 5..15, budget 10) was exactly AT budget, so the first-3/last-2 branch —
+        // which only runs on the OVER-budget path — never executed, and the sole assert (`len <= 10`) could not fail.
         let items: Vec<Value> = (0..30).map(|i| json!({"id": i, "v": i})).collect();
         let kept: BTreeSet<usize> = (0..30).collect();
         let result = prioritize_indices(test_params(
@@ -894,9 +713,7 @@ mod tests {
         let mut items: Vec<Value> = (0..9).map(|i| json!({"i": i, "status": "ok"})).collect();
         items.push(json!({"i": 9, "status": "PANIC"}));
         let singletons = field_value_singletons(&items, &no_exclude());
-        // Every row has a unique `i`, so all are singletons under that
-        // field — the helper flags a row if ANY field value is unique.
-        // The point this test pins: the PANIC row is included.
+        // Every row has a unique `i`, so all are singletons under that field — the helper flags a row if ANY field value is unique.
         assert!(
             singletons.contains(&9),
             "unique-status needle must be flagged"
@@ -929,9 +746,8 @@ mod tests {
 
     #[test]
     fn prioritize_skips_degenerate_singleton_pinning_on_all_distinct() {
-        // 90 all-distinct rows (every row a singleton under `msg`).
-        // Pinning would degenerate to indices 0..cap-1; the gate must
-        // skip it so the kept set stays at the budget, not budget+extras.
+        // 90 all-distinct rows (every row a singleton under `msg`). Pinning would degenerate to indices
+        // 0..cap-1; the gate must skip it so the kept set stays at the budget, not budget+extras.
         let items: Vec<Value> = (0..90)
             .map(|i| json!({"msg": format!("unique subject number {} entirely", i)}))
             .collect();
@@ -945,9 +761,7 @@ mod tests {
             &no_exclude(),
             &BTreeSet::new(),
         ));
-        // No errors/outliers/anomalies fire on this shape; without the
-        // degenerate pinning the result is anchors + novelty fill, capped
-        // at the budget.
+        // No errors/outliers/anomalies fire on this shape; without the degenerate pinning the result is anchors + novelty fill, capped at the budget.
         assert!(
             result.len() <= 15,
             "degenerate singleton pinning must not blow past the budget; got {}",
@@ -984,10 +798,7 @@ mod tests {
 
     #[test]
     fn prioritize_pins_query_relevant_rows_over_budget() {
-        // 40 all-distinct rows, tiny budget, one mid-array row flagged as
-        // query-pinned. It fires no error/outlier/anomaly signal and the
-        // singleton gate (all-distinct => degenerate) skips pinning — so
-        // ONLY the query pin can rescue it from the positional drop.
+        // 40 all-distinct rows, tiny budget, one mid-array row flagged as query-pinned.
         let items: Vec<Value> = (0..40)
             .map(|i| json!({"msg": format!("entirely distinct message {}", i)}))
             .collect();
@@ -1024,9 +835,7 @@ mod tests {
 
     #[test]
     fn rank_by_novelty_puts_rare_families_first() {
-        // 8 identical rows (family size 8) + 2 distinct rows (size 1 each).
-        // Novelty ranking must surface the two rare rows ahead of the
-        // common family.
+        // 8 identical rows (family size 8) + 2 distinct rows (size 1 each). Novelty ranking must surface the two rare rows ahead of the common family.
         let mut items: Vec<Value> = (0..8).map(|_| json!({"msg": "common"})).collect();
         items.push(json!({"msg": "rare-A"})); // idx 8
         items.push(json!({"msg": "rare-B"})); // idx 9
@@ -1038,10 +847,8 @@ mod tests {
 
     #[test]
     fn prioritize_novelty_fill_rescues_mid_array_needle() {
-        // 30 rows: a flat common shape, with ONE distinct mid-array needle
-        // at index 15 that fires no error/outlier/anomaly constraint. The
-        // old lowest-index fill would drop it past budget; novelty fill
-        // surfaces it because its stable-hash family is size 1.
+        // 30 rows: a flat common shape, with ONE distinct mid-array needle at index 15 that fires no error/outlier/anomaly constraint.
+        // The old lowest-index fill would drop it past budget; novelty fill surfaces it because its stable-hash family is size 1.
         let mut items: Vec<Value> = (0..30)
             .map(|_| json!({"kind": "routine", "payload": "same"}))
             .collect();

@@ -37,16 +37,13 @@ import re
 import subprocess
 from collections.abc import Mapping
 
-# First release this project has empirically confirmed applies a PostToolUse
-# updatedToolOutput replacement that mirrors the tool's output schema, rather
-# than silently keeping the original. See the module docstring.
+# First release this project has empirically confirmed applies a PostToolUse updatedToolOutput replacement
+# that mirrors the tool's output schema, rather than silently keeping the original. See the module docstring.
 MIN_VERSION_FOR_POST_TOOL_USE_REPLACEMENT = (2, 1, 163)
 
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
-# Undocumented, native-installer-only env vars — see the module docstring for
-# what was and was not verifiable. Tried in this order; either shape can be
-# missing or malformed independently, so both are attempted before giving up.
+# Undocumented, native-installer-only env vars — see the module docstring for what was and was not verifiable.
 _EXECPATH_ENV = "CLAUDE_CODE_EXECPATH"
 _AI_AGENT_ENV = "AI_AGENT"
 

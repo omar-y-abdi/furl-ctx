@@ -21,9 +21,8 @@ import mcp.types as mt  # noqa: E402
 from furl_ctx.cache.compression_store import reset_compression_store  # noqa: E402
 from furl_ctx.ccr.mcp_server import CCR_TOOL_NAME, FurlMCPServer  # noqa: E402
 
-# The exact parameter set _handle_retrieve honors: hash + query (read directly)
-# plus every key RetrieveFilters.parse reads. The schema must advertise exactly
-# this set — no hidden params, no advertised-but-ignored params.
+# The exact parameter set _handle_retrieve honors: hash + query (read directly) plus every key RetrieveFilters.parse
+# reads. The schema must advertise exactly this set — no hidden params, no advertised-but-ignored params.
 _HONORED_RETRIEVE_PARAMS = {
     "hash",
     "query",

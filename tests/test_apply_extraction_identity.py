@@ -163,11 +163,8 @@ def _big_protected_suffix() -> str:
     return "please continue the analysis of the preceding data set carefully " * 700
 
 
-# --------------------------------------------------------------------------- #
-# Corpus — each case is (config, messages, kwargs). A capturing observer and a
-# fresh tokenizer are supplied by the runner. Pre-seed hooks mutate the router's
-# cache before apply() to force ServeCached / ServeOriginal.
-# --------------------------------------------------------------------------- #
+# . A capturing observer and a fresh tokenizer are supplied by the runner. Pre-seed hooks mutate the router's cache before
+# apply() to force ServeCached / ServeOriginal. --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Case:
     name: str
@@ -312,9 +309,8 @@ def _build_corpus() -> list[Case]:
             messages=[_tool_message(log)],
             preseed=_preseed_serve_original(log),
         ),
-        # --- net_mutation_gate on the Recompute serve site (position econ):
-        # a large protected suffix makes the cache re-billing penalty exceed the
-        # compression savings, so the freshly-compressed result is rejected. ---
+        # --- net_mutation_gate on the Recompute serve site (position econ): a large protected suffix makes the
+        # cache re-billing penalty exceed the compression savings, so the freshly-compressed result is rejected. ---
         Case(
             name="net_mutation_gate_recompute",
             config=ContentRouterConfig(enable_net_mutation_gate=True, cached_token_rate=0.9),
@@ -324,9 +320,8 @@ def _build_corpus() -> list[Case]:
             ],
             kwargs={"model_limit": 1_000_000},
         ),
-        # --- net_mutation_gate on the ServeCached hit site: the gate is
-        # re-evaluated on cache hits (content-keyed cache, position-dependent
-        # gate), so the same large suffix rejects the cached compression too. ---
+        # --- net_mutation_gate on the ServeCached hit site: the gate is re-evaluated on cache hits (content-keyed
+        # cache, position-dependent gate), so the same large suffix rejects the cached compression too. ---
         Case(
             name="net_mutation_gate_serve_cached",
             config=ContentRouterConfig(enable_net_mutation_gate=True, cached_token_rate=0.9),
@@ -480,9 +475,8 @@ def test_corpus_covers_every_routing_arm() -> None:
             f"out of its target branch"
         )
 
-    # already_compressed: pinning books nothing beyond serving the message
-    # verbatim; assert the CCR-marked message is returned byte-identical and no
-    # compression transform was emitted for it.
+    # already_compressed: pinning books nothing beyond serving the message verbatim; assert the
+    # CCR-marked message is returned byte-identical and no compression transform was emitted for it.
     ac = live["already_compressed"]
     assert ac["transforms_applied"] == ["router:noop:already_compressed"], (
         "already_compressed case did not pin — the CCR marker no longer matches "

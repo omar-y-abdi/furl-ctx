@@ -92,9 +92,8 @@ def test_text_after_block_close_does_not_fuse() -> None:
 
 
 def test_deliberately_adjacent_inline_text_still_fuses() -> None:
-    # No whitespace in the source between the <b> runs: a browser renders
-    # "10USD", so the extractor must too — separators are only ever
-    # reintroduced where the source had a boundary (whitespace/cell/block).
+    # No whitespace in the source between the <b> runs: a browser renders "10USD", so the extractor must
+    # too — separators are only ever reintroduced where the source had a boundary (whitespace/cell/block).
     assert extract_main_content("<p>Price <b>10</b><b>USD</b> total</p>") == "Price 10USD total"
 
 

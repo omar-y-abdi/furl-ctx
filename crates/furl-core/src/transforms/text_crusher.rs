@@ -1,72 +1,5 @@
-//! TextCrusher — deterministic, ML-free extractive prose compressor
-//! for `PLAIN_TEXT` (Engine P2-11).
-//!
-//! Fills the largest capability gap left by the ML-compressor excision:
-//! `PLAIN_TEXT` routed to a passthrough since Chunk 1. Upstream replaced
-//! its ML compressor with a ~360-line deterministic extractive selector;
-//! this module implements that design under THIS fork's stricter
-//! reversibility invariants.
-//!
-//! # Pipeline
-//!
-//! 1. **Protect** — [`super::tag_protector::protect_tags`] swaps custom
-//!    workflow tags (`<system-reminder>`, `<tool_call>`, …) for opaque
-//!    placeholders. Segments containing a placeholder are mandatory
-//!    keeps, so a protected span can never be dropped or split.
-//! 2. **Segment** — markdown-structure-aware splitting: code fences are
-//!    atomic blocks (never split), headers and list-item lines are their
-//!    own segments, paragraphs split into sentence-ish segments on
-//!    `.`/`!`/`?` + whitespace + non-lowercase lookahead.
-//! 3. **Score** — BM25 against the optional `query` (reuses
-//!    [`crate::relevance::BM25Scorer`]) + a U-shaped serial-position
-//!    prior (openings state the topic, endings state conclusions) +
-//!    salience: error/warn keywords ([`crate::signals::KeywordDetector`]
-//!    with [`ImportanceContext::Text`]), numeric tokens, capitalized
-//!    entities, and structure kind.
-//! 4. **Dedup** — word-shingle Jaccard: a segment ≥ `dedup_threshold`
-//!    similar to an earlier unique segment collapses (first occurrence
-//!    survives). Above `max_pairwise_dedup_segments` only exact
-//!    normalized-hash dedup runs (keeps worst-case cost linear-ish).
-//! 5. **Select** — mandatory keeps (headers, placeholder segments, the
-//!    first/last `always_keep_*`) + highest-scoring segments under a
-//!    char budget of `len × target_ratio × bias`, floored at
-//!    `min_kept_segments`. Output preserves original order; original
-//!    inter-segment whitespace is kept between adjacent survivors and
-//!    dropped runs are marked with a `[...]` elision line.
-//! 6. **Restore** — placeholders are spliced back
-//!    ([`super::tag_protector::restore_tags`]); since placeholder
-//!    segments are mandatory keeps, restoration never discards a wrap.
-//!
-//! # Reversibility (STRICTER than the log/search siblings)
-//!
-//! The log/search compressors can ship dropped lines without a marker
-//! when below their CCR thresholds. TextCrusher never does: **a crush
-//! that drops segments ships if and only if the full original is stored
-//! and the `[N segments compressed to M. Retrieve more: hash=…]` marker
-//! is appended.** No store, `enable_ccr = false`, or savings below the
-//! shippable threshold → byte-exact passthrough. Prose has no
-//! line-number structure a reader could use to notice elisions, so an
-//! unmarked drop would be silent loss — the invariant CCR-RETENTION.md
-//! forbids. (The Python wrapper extends the same discipline across the
-//! FFI: a production store-write failure vetoes the compression.)
-//!
-//! # Size floors (and why 600 / 15)
-//!
-//! `min_chars = 600` (~150 tokens): the marker line alone costs ~20-30
-//! tokens, so on smaller inputs the ceiling on net savings (~85 tokens
-//! at the default ratio) is marginal against the routing/CCR overhead.
-//! `min_segments = 15`: mandatory keeps (first 2 + last 2) plus the
-//! `min_kept_segments = 5` floor already retain ≥ 5 segments, i.e. a
-//! third of a 15-segment document — the default `target_ratio = 0.35`.
-//! Below 15 segments there is nothing meaningful left to drop.
-//!
-//! # Determinism
-//!
-//! No RNG, no clocks, no ML. Ordering is pinned everywhere: stable
-//! sorts with explicit `(score desc, index asc)` tie-breaks,
-//! `f32::total_cmp`, `BTreeSet` shingle signatures, and the
-//! fixed-key `DefaultHasher`. Same input + config + query + bias →
-//! byte-identical output (pinned by `determinism_byte_identical`).
+//! Deterministic prose compression protects custom tags, segments Markdown-aware text, scores relevance/salience, deduplicates, selects under
+//! budget, and restores tags. Any dropped prose ships only with a successfully persisted CCR recovery marker; otherwise return input unchanged.
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -124,22 +57,13 @@ pub struct TextCrusherConfig {
     /// Above this many segments, pairwise Jaccard is skipped and only
     /// exact normalized-hash dedup runs (bounds worst-case cost).
     pub max_pairwise_dedup_segments: usize,
-    /// CCR backing. `false` disables the compressor outright (drops
-    /// without recovery are forbidden — see module docs), it does NOT
-    /// enable unmarked drops.
+    /// CCR backing. `false` disables the compressor outright (drops without recovery are forbidden — see module docs), it does NOT enable unmarked drops.
     pub enable_ccr: bool,
-    /// Final ratio (marker included) at or above which the crush is not
-    /// worth shipping: passthrough instead. Keeps "compressed output ⟺
-    /// marker present ⟺ store backed" while refusing marginal crushes.
+    /// Final ratio (marker included) at or above which the crush is not worth shipping: passthrough
+    /// instead. Keeps "compressed output ⟺ marker present ⟺ store backed" while refusing marginal crushes.
     pub max_shippable_ratio: f64,
-    /// Secret-mask keep rail (input-side defense, complements the
-    /// store-side redaction): segments containing secret-shaped tokens
-    /// (long high-entropy hex/base64 runs, `AKIA`/`ghp_`/`sk-` prefixed
-    /// keys, PEM armor, JWTs) join the mandatory keeps, so the lossy
-    /// selector can NEVER drop them into CCR-only visibility where a
-    /// reviewer would not see them. A drop-protection rail, NOT content
-    /// rewriting — log exposure is the store-side redaction's job.
-    /// `false` restores the pre-rail selection byte-for-byte.
+    /// Secret-mask keep rail (input-side defense, complements the store-side redaction). A drop-protection rail, NOT content
+    /// rewriting — log exposure is the store-side redaction's job. `false` restores the pre-rail selection byte-for-byte.
     pub secret_keep_rail: bool,
 }
 
@@ -172,9 +96,8 @@ pub struct TextCrushResult {
     pub original: String,
     pub original_segment_count: usize,
     pub compressed_segment_count: usize,
-    /// Char-level ratio (compressed/original), parity with siblings.
-    /// The router recomputes token-level ratios via its own counter
-    /// (COR-17); this field is diagnostic.
+    /// Char-level ratio (compressed/original), parity with siblings. The router recomputes
+    /// token-level ratios via its own counter (COR-17); this field is diagnostic.
     pub compression_ratio: f64,
     pub cache_key: Option<String>,
 }
@@ -190,9 +113,8 @@ pub struct TextCrusherStats {
     pub protected_tag_blocks: usize,
     /// Segments kept unconditionally (structure/placeholder/ends).
     pub mandatory_keeps: usize,
-    /// Segments promoted to mandatory by the secret-mask keep rail
-    /// (counted only when the rail promoted them — segments that were
-    /// already mandatory for another reason are not double-counted).
+    /// Segments promoted to mandatory by the secret-mask keep rail (counted only when the rail promoted
+    /// them — segments that were already mandatory for another reason are not double-counted).
     pub secret_keep_segments: usize,
     pub ccr_emitted: bool,
     pub ccr_skip_reason: Option<&'static str>,
@@ -215,9 +137,7 @@ pub enum SegmentKind {
     CodeFence,
 }
 
-/// One segment of the cleaned (tag-protected) text. Spans are byte
-/// offsets into the cleaned text; the bytes between one segment's `end`
-/// and the next segment's `start` are whitespace by construction.
+/// One segment of the cleaned (tag-protected) text.
 #[derive(Debug, Clone)]
 pub struct Segment {
     pub idx: usize,
@@ -387,15 +307,7 @@ fn is_list_item_line(trimmed: &str) -> bool {
     }
 }
 
-/// Split a paragraph span into sentence-ish segments.
-///
-/// Boundary rule: a run of `.`/`!`/`?` (plus trailing ASCII closers
-/// `)"'\]`), followed by whitespace whose next non-whitespace byte is
-/// NOT ascii-lowercase, ends a sentence. Requiring a non-lowercase
-/// continuation suppresses abbreviation splits (`e.g. foo`); numbers
-/// (`3.14`) never split because the terminator must be followed by
-/// whitespace. End-of-paragraph always terminates. All split points sit
-/// at ASCII bytes, so byte slicing stays on char boundaries.
+/// Split a paragraph span into sentence-ish segments. Boundary rule numbers (`3.14`) never split because the terminator must be followed by whitespace.
 fn split_sentences(text: &str, pstart: usize, pend: usize, segments: &mut Vec<Segment>) {
     let bytes = text.as_bytes();
     let mut sent_start = pstart;
@@ -476,10 +388,7 @@ impl TextCrusher {
         }
     }
 
-    /// Compress without CCR persistence — always a passthrough for any
-    /// input the selector would want to drop from (see module docs).
-    /// Exists for parity with siblings; production callers use
-    /// [`Self::compress_with_store`].
+    /// Compress without CCR persistence — always a passthrough for any input the selector would want to drop from (see module docs).
     pub fn compress(
         &self,
         content: &str,
@@ -489,10 +398,7 @@ impl TextCrusher {
         self.compress_with_store(content, query, bias, None)
     }
 
-    /// Compress `content`, persisting the FULL ORIGINAL to `store` and
-    /// appending the retrieval marker when segments are dropped. Any
-    /// missing precondition for recovery (no store, CCR disabled,
-    /// marginal savings) → byte-exact passthrough, never unmarked drops.
+    /// Compress `content`, persisting the FULL ORIGINAL to `store` and appending the retrieval marker when segments are dropped.
     pub fn compress_with_store(
         &self,
         content: &str,
@@ -507,9 +413,7 @@ impl TextCrusher {
             return (passthrough(content, 0), stats);
         }
 
-        // Protection rail: swap custom workflow tags for placeholders
-        // BEFORE segmentation so a tag block is opaque (and atomic) to
-        // the splitter.
+        // Protection rail: swap custom workflow tags for placeholders BEFORE segmentation so a tag block is opaque (and atomic) to the splitter.
         let (cleaned, blocks) = protect_tags(content, false);
         stats.protected_tag_blocks = blocks.len();
 
@@ -524,11 +428,8 @@ impl TextCrusher {
 
         let scores = self.score_segments(&cleaned, &segments, query);
         let mut mandatory = self.mandatory_flags(&segments);
-        // Secret-mask keep rail: a segment carrying a secret-shaped token
-        // must never be dropped (masked-content silently vanishing into
-        // CCR-only visibility is exactly what a reviewer would miss).
-        // Runs BEFORE dedup so a secret segment is also never collapsed
-        // as a near-duplicate of an earlier non-secret line.
+        // Secret-mask keep rail: a segment carrying a secret-shaped token must never be dropped
+        // (masked-content silently vanishing into CCR-only visibility is exactly what a reviewer would miss).
         if self.config.secret_keep_rail {
             for (i, seg) in segments.iter().enumerate() {
                 if !mandatory[i] && segment_has_secret(&cleaned[seg.start..seg.end]) {
@@ -570,11 +471,7 @@ impl TextCrusher {
         let rendered = render(&cleaned, &segments, &kept);
         let restored = restore_tags(&rendered, &blocks);
 
-        // Key + marker via the shared `ccr::persist` helpers (ARCH-5) —
-        // but NOT `persist_and_mark`: the ratio veto below is computed
-        // over the FINAL output (body + marker), so the store write must
-        // wait until after the gate or a passthrough would leave an
-        // orphan store entry.
+        // Key + marker via the shared `ccr::persist` helpers (ARCH-5).
         let key = md5_hex_24(content);
         let marker =
             retrieve_more_marker_line(segments.len(), kept.len(), &key, RetrieveUnit::Segments);
@@ -684,21 +581,8 @@ impl TextCrusher {
 
     // ─── Shingle dedup ──────────────────────────────────────────────────
 
-    /// Mark near-duplicate segments (first occurrence survives).
-    /// Mandatory segments are never marked duplicates but DO register as
-    /// dedup references, so later copies of a header/end segment still
-    /// collapse against it.
-    ///
-    /// Three deterministic tiers:
-    /// 1. exact normalized-word hash — verbatim repeats;
-    /// 2. digit-masked hash — repeats that differ only in numerals
-    ///    (progress counters, sequence numbers: the dominant prose
-    ///    redundancy; same normalization idea as the log compressor's
-    ///    conservative warning dedupe). The first occurrence keeps its
-    ///    exact numbers; the varying copies are CCR-recoverable;
-    /// 3. word-shingle Jaccard ≥ `dedup_threshold` on the masked words —
-    ///    paraphrase-level overlap on longer segments. Skipped above
-    ///    `max_pairwise_dedup_segments` (tiers 1-2 remain).
+    /// Mark near-duplicate segments (first occurrence survives). Three deterministic tiers: 1. exact normalized-word hash — verbatim repeats; 2. digit-masked hash — repeats that
+    /// differ only in numerals (progress counters, sequence numbers: the dominant prose redundancy; same normalization idea as the log compressor's conservative warning dedupe).
     fn duplicate_flags(
         &self,
         cleaned: &str,
@@ -800,10 +684,7 @@ impl TextCrusher {
 
 // ─── Rendering ──────────────────────────────────────────────────────────
 
-/// Stitch kept segments back together in original order. Adjacent
-/// survivors keep their original inter-segment whitespace; a dropped run
-/// becomes one `[...]` elision line. Leading/trailing drops get the same
-/// elision so the reader can see the document was cut at the edges.
+/// Stitch kept segments back together in original order.
 fn render(cleaned: &str, segments: &[Segment], kept: &[usize]) -> String {
     let mut out = String::with_capacity(cleaned.len());
     let mut prev: Option<usize> = None;
@@ -855,9 +736,8 @@ fn passthrough(content: &str, segment_count: usize) -> TextCrushResult {
     }
 }
 
-/// Mark segments containing a tag-protector placeholder. Placeholders
-/// contain no whitespace, so each sits fully inside exactly one segment
-/// (segment boundaries only occur at whitespace).
+/// Mark segments containing a tag-protector placeholder. Placeholders contain no whitespace, so
+/// each sits fully inside exactly one segment (segment boundaries only occur at whitespace).
 fn mark_placeholder_segments(cleaned: &str, blocks: &[(String, String)], segments: &mut [Segment]) {
     for (placeholder, _) in blocks {
         let mut from = 0usize;
@@ -945,16 +825,10 @@ fn hash_u64(s: &str) -> u64 {
     h.finish()
 }
 
-// `md5_hex_24` (the CCR cache key, same algorithm as the diff/log/search
-// siblings) lives in `crate::ccr::persist` — one shared implementation
-// (ARCH-5), imported at the top of this module.
+// `md5_hex_24` (the CCR cache key, same algorithm as the diff/log/search siblings) lives in
+// `crate::ccr::persist` — one shared implementation (ARCH-5), imported at the top of this module.
 
-// ─── Secret-mask keep rail (input-side defense) ─────────────────────────
-//
-// Deterministic, regex-free detection of secret-shaped tokens. A hit only
-// ever KEEPS a segment (drop-protection), so the false-positive cost is a
-// few extra kept chars — the thresholds therefore lean sensitive. Content
-// is never rewritten here; log exposure is the store-side redaction's job.
+// ─── Secret-mask keep rail (input-side defense) ───────────────────────── Deterministic, regex-free detection of secret-shaped tokens.
 
 /// Minimum length of a hex run considered secret-shaped (digests, keys).
 const SECRET_HEX_MIN_LEN: usize = 32;
@@ -963,18 +837,15 @@ const SECRET_HEX_MIN_LEN: usize = 32;
 const SECRET_HEX_MIN_ENTROPY: f64 = 3.0;
 /// Minimum length of a base64-ish run considered secret-shaped.
 const SECRET_B64_MIN_LEN: usize = 40;
-/// Minimum Shannon entropy (bits/char) for a base64-ish run. Random
-/// base64 sits near 5.2-5.7; prose-like camelCase runs sit lower but a
-/// false keep is safe, so the gate stays permissive.
+/// Minimum Shannon entropy (bits/char) for a base64-ish run.
 const SECRET_B64_MIN_ENTROPY: f64 = 4.0;
 /// Minimum char count after a `ghp_`-family / `sk-` key prefix.
 const SECRET_KEY_BODY_MIN_LEN: usize = 20;
 /// Minimum char count per dot-separated JWT section.
 const SECRET_JWT_PART_MIN_LEN: usize = 8;
 
-/// True when `text` contains at least one secret-shaped token: PEM armor,
-/// a well-known key prefix (`AKIA…`, `ghp_…`, `sk-…`), a JWT (`eyJ…`), or
-/// a long high-entropy hex/base64 run. Public for tests.
+/// True when `text` contains at least one secret-shaped token: PEM armor, a well-known key
+/// prefix (`AKIA…`, `ghp_…`, `sk-…`), a JWT (`eyJ…`), or a long high-entropy hex/base64 run.
 pub fn segment_has_secret(text: &str) -> bool {
     // PEM armor opens every RFC-7468 block (private keys, certs, CSRs).
     if text.contains("-----BEGIN ") {
@@ -983,9 +854,8 @@ pub fn segment_has_secret(text: &str) -> bool {
     has_prefixed_secret(text) || has_high_entropy_run(text)
 }
 
-/// Byte offsets of every occurrence of `needle` in `haystack` whose
-/// PRECEDING byte is not alphanumeric (word-ish boundary) — so `task-…`
-/// never counts as an `sk-` hit while `KEY=sk-…` / `"sk-…` do.
+/// Byte offsets of every occurrence of `needle` in `haystack` whose PRECEDING byte is not alphanumeric
+/// (word-ish boundary) — so `task-…` never counts as an `sk-` hit while `KEY=sk-…` / `"sk-…` do.
 fn boundary_occurrences<'a>(
     haystack: &'a str,
     needle: &'a str,
@@ -1081,16 +951,11 @@ fn shannon_entropy_bits(bytes: &[u8]) -> f64 {
         .sum()
 }
 
-/// Long high-entropy hex or base64 runs (unprefixed key material,
-/// signatures, tokens). Walks maximal base64-charset runs (a superset of
-/// the hex charset) and gates each run — and its maximal hex sub-runs —
-/// on length, character-class mix, and Shannon entropy, so degenerate
-/// runs (`aaaa…`, repeated words) never trigger.
+/// Long high-entropy hex or base64 runs (unprefixed key material, signatures, tokens).
 fn has_high_entropy_run(text: &str) -> bool {
     let is_b64 = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'-' | b'_');
-    // `split` also yields empty runs (adjacent/leading/trailing
-    // separators); both gates below start with a `len() >= MIN` check,
-    // so an empty run short-circuits to false before any entropy math.
+    // `split` also yields empty runs (adjacent/leading/trailing separators); both gates below start
+    // with a `len() >= MIN` check, so an empty run short-circuits to false before any entropy math.
     text.as_bytes()
         .split(|&b| !is_b64(b))
         .any(|run| base64_run_is_secret(run) || hex_subruns_are_secret(run))
@@ -1170,10 +1035,8 @@ mod tests {
         )
     }
 
-    /// 40 lexically varied sentences across 8 paragraphs — clears both
-    /// floors with plenty of droppable material, and no two sentences
-    /// collapse under any dedup tier (verified: index arithmetic keeps
-    /// all (subject, verb, object, tail) combos distinct).
+    /// 40 lexically varied sentences across 8 paragraphs — clears both floors with plenty of droppable material, and no two
+    /// sentences collapse under any dedup tier (verified: index arithmetic keeps all (subject, verb, object, tail) combos distinct).
     fn big_prose() -> String {
         let mut paras: Vec<String> = Vec::new();
         for p in 0..8usize {
@@ -1321,9 +1184,8 @@ mod tests {
 
     #[test]
     fn shingle_dedup_collapses_near_identical_sentences() {
-        // 30 near-copies (only a run counter varies) + 10 lexically
-        // distinct sentences. The copies must collapse via the
-        // digit-masked tier; the distinct survivors carry the info.
+        // 30 near-copies (only a run counter varies) + 10 lexically distinct sentences. The
+        // copies must collapse via the digit-masked tier; the distinct survivors carry the info.
         let mut sentences: Vec<String> = Vec::new();
         for i in 0..30 {
             sentences.push(format!(
@@ -1580,9 +1442,8 @@ mod tests {
 
     #[test]
     fn insufficient_savings_means_passthrough_and_no_store_write() {
-        // Force marginal savings via a target_ratio near 1: everything
-        // fits the budget except a couple of segments, so the marker
-        // overhead pushes the final ratio past max_shippable_ratio.
+        // Force marginal savings via a target_ratio near 1: everything fits the budget except a
+        // couple of segments, so the marker overhead pushes the final ratio past max_shippable_ratio.
         let crusher = TextCrusher::new(TextCrusherConfig {
             target_ratio: 0.99,
             max_shippable_ratio: 0.9,
@@ -1614,9 +1475,8 @@ mod tests {
 
     // ─── Secret-mask keep rail ─────────────────────────────────────────
 
-    /// Obviously-fake secret-shaped tokens, one per detector class,
-    /// constructed at runtime from parts so no contiguous token-shaped
-    /// literal sits in the source (scanner hygiene).
+    /// Obviously-fake secret-shaped tokens, one per detector class, constructed at runtime
+    /// from parts so no contiguous token-shaped literal sits in the source (scanner hygiene).
     fn fake_secret_sentences() -> Vec<String> {
         let gh_token = format!("ghp_{}", "abcdEFGH1234".repeat(3));
         // The AWS documentation example access key id (public, not real).
@@ -1641,9 +1501,8 @@ mod tests {
         ]
     }
 
-    /// Fixture where every filler carries a digit (numeric-bonus parity
-    /// with the secret sentences) so mid-document survival can only come
-    /// from the rail, never from scoring luck.
+    /// Fixture where every filler carries a digit (numeric-bonus parity with the secret
+    /// sentences) so mid-document survival can only come from the rail, never from scoring luck.
     fn prose_with_secrets_mid_document() -> (String, Vec<String>) {
         let mut sentences: Vec<String> = (0..60)
             .map(|i| format!("{} in batch {}.", varied_filler(i).trim_end_matches('.'), i))
@@ -1714,9 +1573,8 @@ mod tests {
 
     #[test]
     fn rail_off_restores_old_behavior_and_drops_secrets() {
-        // Same fixture, rail off: the mid-document secret segments score
-        // like any filler and the aggressive budget drops them — proving
-        // the rail (not scoring luck) is what keeps them above.
+        // Same fixture, rail off: the mid-document secret segments score like any filler and the
+        // aggressive budget drops them — proving the rail (not scoring luck) is what keeps them above.
         let (content, secrets) = prose_with_secrets_mid_document();
         let store = InMemoryCcrStore::new();
         let cfg = TextCrusherConfig {

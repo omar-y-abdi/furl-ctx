@@ -134,9 +134,7 @@ def test_whole_blob_route_full_retrieve_is_byte_exact() -> None:
     )
     payload = retrieve(result.ccr_hashes[0])
     assert payload is not None, "surfaced hash dangles — original unrecoverable"
-    # Route guard: the whole-blob route stores raw text, NOT a JSON array. If this
-    # ever parses as a list the fixture has drifted onto the crush path and the
-    # byte-exactness assertion would be testing the wrong contract.
+    # Route guard: the whole-blob route stores raw text, NOT a JSON array.
     with pytest.raises((json.JSONDecodeError, ValueError)):
         json.loads(payload)
 

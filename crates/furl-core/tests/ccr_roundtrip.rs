@@ -1,12 +1,5 @@
-//! End-to-end CCR roundtrip: compress → store → retrieve → reconstruct.
-//!
-//! These tests pin **the cornerstone guarantee** of CCR: every row the
-//! lossy path drops out of the prompt is recoverable from the CCR store
-//! by hash. Lossy on the wire, lossless end-to-end.
-//!
-//! If any test in this file regresses, we are silently losing data —
-//! the prompt advertises a `<<ccr:HASH ...>>` pointer that the runtime
-//! cannot honor. That is the bug class these tests exist to catch.
+//! End-to-end CCR roundtrip: compress → store → retrieve → reconstruct. These tests pin **the cornerstone guarantee** of CCR: every
+//! row the lossy path drops out of the prompt is recoverable from the CCR store by hash. Lossy on the wire, lossless end-to-end.
 
 use std::sync::Arc;
 
@@ -34,10 +27,7 @@ fn lossy_friendly_items(n: usize) -> Vec<Value> {
 
 #[test]
 fn default_crusher_stores_dropped_rows() {
-    // The default `SmartCrusher::new()` ships with both lossless-first
-    // compaction AND a CCR store (matches Python's default — CCR
-    // enabled). So a real lossy crush should leave the original parked
-    // in the store, retrievable by hash.
+    // The default `SmartCrusher::new()` ships with both lossless-first compaction AND a CCR store (matches Python's default
     let crusher = SmartCrusher::new(force_lossy_config());
     let items = lossy_friendly_items(50);
 
@@ -50,19 +40,15 @@ fn default_crusher_stores_dropped_rows() {
     let store = crusher.ccr_store().expect("default crusher has a store");
 
     let retrieved = store.get(hash).expect("hash must resolve in the store");
-    // TEST-10: byte equality against the canonical serialization — the
-    // recovery contract is byte-exact; parsed-Value equality alone let
-    // key-order/number-form changes ship silently.
+    // TEST-10: byte equality against the canonical serialization — the recovery contract is
+    // byte-exact; parsed-Value equality alone let key-order/number-form changes ship silently.
     assert_eq!(retrieved, canonical_json(&items), "byte-exact roundtrip");
 }
 
 #[test]
 fn without_compaction_also_stores_dropped_rows() {
-    // The legacy / parity constructor still carries a default store —
-    // CCR is the no-data-loss contract, not an opt-in extra. TEST-10:
-    // the drop is asserted as a PRECONDITION — the old
-    // `if let Some(hash)` gate made this test vacuously green whenever
-    // the fixture stopped dropping.
+    // The legacy / parity constructor still carries a default store TEST-10: the drop is asserted as a PRECONDITION
+    // — the old `if let Some(hash)` gate made this test vacuously green whenever the fixture stopped dropping.
     let crusher = SmartCrusher::without_compaction(SmartCrusherConfig::default());
     let items = lossy_friendly_items(30);
 
@@ -79,9 +65,8 @@ fn without_compaction_also_stores_dropped_rows() {
 
 #[test]
 fn shared_external_store_sees_writes() {
-    // Production wiring: the runtime owns the store; SmartCrusher
-    // writes through it. The proxy keeps an `Arc` for retrieval; this
-    // test models that arrangement.
+    // Production wiring: the runtime owns the store; SmartCrusher writes through
+    // it. The proxy keeps an `Arc` for retrieval; this test models that arrangement.
     let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
     let crusher = SmartCrusherBuilder::new(force_lossy_config())
         .with_default_oss_setup()
@@ -99,9 +84,7 @@ fn shared_external_store_sees_writes() {
 
 #[test]
 fn passthrough_does_not_write_to_store() {
-    // Below adaptive_k: nothing dropped, nothing to recover, no store
-    // write. Otherwise we'd accumulate noise on the hot passthrough
-    // path.
+    // Below adaptive_k: nothing dropped, nothing to recover, no store write. Otherwise we'd accumulate noise on the hot passthrough path.
     let crusher = SmartCrusher::new(SmartCrusherConfig::default());
     let store = crusher.ccr_store().unwrap().clone();
     let starting_len = store.len();
@@ -115,14 +98,7 @@ fn passthrough_does_not_write_to_store() {
 
 #[test]
 fn lossless_win_does_not_write_to_store() {
-    // Lossless wins → nothing dropped, no CCR retrieval needed → no
-    // store write. The store should only see writes when the prompt
-    // actually loses data. TEST-10: the lossless win is asserted as a
-    // PRECONDITION — the old `if result.compacted.is_some()` gate made
-    // this test vacuously green forever: under the default MinTokens
-    // routing this fixture actually ships the LOSSY smart_sample render
-    // (fewer tokens), so the gated asserts never ran. LosslessFirst
-    // routing puts the test on the path its name promises.
+    // Lossless wins → nothing dropped, no CCR retrieval needed → no store write. The store should only see writes when the prompt actually loses data.
     let crusher = SmartCrusher::new(SmartCrusherConfig {
         routing_policy: RoutingPolicy::LosslessFirst,
         ..SmartCrusherConfig::default()
@@ -194,9 +170,8 @@ fn distinct_inputs_produce_distinct_store_entries() {
     assert_eq!(store.get(&ha).unwrap(), canonical_json(&a));
     assert_eq!(store.get(&hb).unwrap(), canonical_json(&b));
 
-    // Each crush stores EXACTLY ONE entry — the whole-blob original. No
-    // per-row chunks and no `{hash}#rows` index are written (Design A):
-    // row-level recovery is served from the whole-blob parent.
+    // Each crush stores EXACTLY ONE entry — the whole-blob original. No per-row chunks and no
+    // `{hash}#rows` index are written (Design A): row-level recovery is served from the whole-blob parent.
     for blob_hash in [&ha, &hb] {
         assert!(
             store.get(&format!("{blob_hash}#rows")).is_none(),
@@ -211,9 +186,8 @@ fn distinct_inputs_produce_distinct_store_entries() {
 
 #[test]
 fn dropped_summary_marker_points_at_stored_hash() {
-    // The marker the LLM sees in the prompt encodes the same hash that
-    // resolves the stored payload. Pin the format so the retrieval-tool
-    // contract stays honest.
+    // The marker the LLM sees in the prompt encodes the same hash that resolves the
+    // stored payload. Pin the format so the retrieval-tool contract stays honest.
     let crusher = SmartCrusher::new(force_lossy_config());
     let store = crusher.ccr_store().unwrap().clone();
     let items = lossy_friendly_items(50);
@@ -236,12 +210,8 @@ fn dropped_summary_marker_points_at_stored_hash() {
 
 #[test]
 fn dropped_count_ties_out_kept_plus_advertised() {
-    // A crusher that drops the WRONG number of rows still roundtrips the
-    // stored blob (the payload is the full original), so the recovery
-    // pointer is silently meaningless unless the arithmetic ties out:
-    // kept + advertised-dropped == original N. The existing roundtrip tests
-    // assert the payload recovers but NEVER pin this count, so a drop that
-    // mis-reports its size survives them. Pin it.
+    // A crusher that drops the WRONG number of rows still roundtrips the stored blob (the payload is the full original), so
+    // the recovery pointer is silently meaningless unless the arithmetic ties out: kept + advertised-dropped == original N.
     let crusher = SmartCrusher::new(force_lossy_config());
     let n = 50usize;
     let items = lossy_friendly_items(n);
@@ -254,9 +224,8 @@ fn dropped_count_ties_out_kept_plus_advertised() {
         "a lossy crush must actually drop rows (kept {kept} of {n})"
     );
     let dropped = n - kept;
-    // The marker the model sees must advertise EXACTLY the rows that left.
-    // `<<ccr:{hash} {dropped}_rows_offloaded>>` — a `dropped+1` / `dropped-1`
-    // miscount (or kept/dropped swap) flips this.
+    // The marker the model sees must advertise EXACTLY the rows that left. `<<ccr:{hash}
+    // {dropped}_rows_offloaded>>` — a `dropped+1` / `dropped-1` miscount (or kept/dropped swap) flips this.
     assert!(
         result
             .dropped_summary
@@ -269,11 +238,8 @@ fn dropped_count_ties_out_kept_plus_advertised() {
 
 #[test]
 fn full_crush_pipeline_roundtrips_through_store() {
-    // End-to-end through the public `crush()` API (the entry point
-    // that ContentRouter calls). TEST-10: the old version asserted only
-    // `store.len() > 0` — it roundtripped NOTHING (any write of any
-    // garbage passed). Now the marker hash in the OUTPUT must resolve
-    // to the byte-exact canonical original.
+    // End-to-end through the public `crush()` API (the entry point that ContentRouter calls).
+    // Now the marker hash in the OUTPUT must resolve to the byte-exact canonical original.
     let crusher = SmartCrusher::new(force_lossy_config());
     let store = crusher.ccr_store().unwrap().clone();
 
@@ -298,9 +264,8 @@ fn full_crush_pipeline_roundtrips_through_store() {
 
 #[test]
 fn lossy_crush_injects_marker_into_output_json() {
-    // Cornerstone of PR8: the public `crush()` API output now carries
-    // the `<<ccr:HASH ...>>` marker as a string element of the array.
-    // Without this, the LLM never sees the retrieval pointer.
+    // Cornerstone of the public `crush()` API output now carries the `<<ccr:HASH ...>>` marker
+    // as a string element of the array. Without this, the LLM never sees the retrieval pointer.
     let crusher = SmartCrusher::new(force_lossy_config());
     let items = lossy_friendly_items(50);
     let raw = serde_json::to_string(&Value::Array(items)).unwrap();
@@ -358,9 +323,8 @@ fn nested_array_inside_object_gets_marker_injected() {
 
 #[test]
 fn opaque_string_in_object_emits_marker_and_stores_original() {
-    // Walker semantics in process_value: a long base64-ish blob in
-    // an object field should be replaced with a CCR marker AND the
-    // original bytes stashed in the store.
+    // Walker semantics in process_value: a long base64-ish blob in an object field
+    // should be replaced with a CCR marker AND the original bytes stashed in the store.
     let crusher = SmartCrusher::new(SmartCrusherConfig::default());
     let store = crusher.ccr_store().unwrap().clone();
     let starting_len = store.len();
@@ -392,9 +356,8 @@ fn opaque_string_in_object_emits_marker_and_stores_original() {
 
 #[test]
 fn stringified_json_array_recurses_and_compacts() {
-    // A field whose value is a JSON-encoded array should be parsed,
-    // recursively crushed, and re-encoded — the walker behavior, now
-    // available from the main pipeline.
+    // A field whose value is a JSON-encoded array should be parsed, recursively crushed,
+    // and re-encoded — the walker behavior, now available from the main pipeline.
     let crusher = SmartCrusher::new(force_lossy_config());
     let inner = (0..50)
         .map(|i| json!({"id": i, "status": "ok"}))
@@ -406,9 +369,8 @@ fn stringified_json_array_recurses_and_compacts() {
     let parsed: Value = serde_json::from_str(&result.compressed).unwrap();
     let payload = parsed.get("payload").and_then(|v| v.as_str()).unwrap();
 
-    // The payload string went through process_value's String arm,
-    // which parsed it as JSON, recursed, and re-emitted. Result:
-    // either a marker-bearing array string or a direct-rendered form.
+    // The payload string went through process_value's String arm, which parsed it as JSON, recursed,
+    // and re-emitted. Result: either a marker-bearing array string or a direct-rendered form.
     assert!(
         payload.contains("<<ccr:") || payload.contains("rows_offloaded"),
         "expected stringified-JSON to be processed, got: {payload}"
@@ -432,15 +394,8 @@ fn document_walker_with_store_roundtrips_opaque_blob() {
     assert_eq!(store.get(&h).unwrap(), big);
 }
 
-// ─── COR-4: one document must never dangle its own markers ─────────
-//
-// The recovery invariant's hardest edge: `persist_dropped` writes into a
-// BOUNDED FIFO store (default 1000 entries). If one document's persists
-// flood the store, entries a marker in that SAME document still points
-// at get evicted before the consumer (the Python mirror, which runs
-// AFTER `crush()` returns) can read them — the surfaced `<<ccr:HASH>>`
-// dangles and the drop becomes silent loss. These tests pin the fix:
-// a single document's own markers always resolve.
+// COR-4 one document must never dangle its own markers ───────── The recovery invariant's hardest edge If one document's persists
+// flood the store, entries a marker in that SAME document still points at get evicted before the consumer (the Python mirror
 
 /// Extract the sentinel object (`{"_ccr_dropped": ..}`) appended to the
 /// array at `key` in the crushed document.
@@ -456,14 +411,7 @@ fn sentinel_for_array<'a>(parsed: &'a Value, key: &str) -> &'a serde_json::Map<S
 
 #[test]
 fn two_large_arrays_in_one_document_keep_every_marker_resolvable() {
-    // COR-4 reproduction (two-array flavour): a document with TWO large
-    // droppable arrays. Before the fix, `persist_dropped` wrote one
-    // store entry per ORIGINAL row (kept rows included), so the second
-    // array's ~1000-row chunk flood evicted the first array's
-    // whole-blob out of the 1000-entry store — the first `_ccr_dropped`
-    // marker dangled and the mirror (which reads the store only after
-    // `crush()` returns) recovered nothing. RED before the fix; GREEN
-    // after (oversized drops persist the whole-blob only).
+    // COR-4 reproduction (two-array flavour) a document with TWO large droppable arrays. GREEN after (oversized drops persist the whole-blob only).
     let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
     let crusher = SmartCrusherBuilder::new(SmartCrusherConfig::default())
         .with_default_oss_setup()
@@ -490,9 +438,7 @@ fn two_large_arrays_in_one_document_keep_every_marker_resolvable() {
             .expect("sentinel carries the whole-blob pointer");
         let hash = extract_hash_from_marker(marker).expect("marker embeds a hash");
 
-        // THE invariant: a marker surfaced by this very document must
-        // resolve — the second array's persist must not have evicted
-        // the first array's whole-blob.
+        // THE invariant: a marker surfaced by this very document must resolve — the second array's persist must not have evicted the first array's whole-blob.
         let payload = store.get(&hash).unwrap_or_else(|| {
             panic!(
                 "array {key:?}'s `<<ccr:{hash}>>` marker DANGLES — its \
@@ -510,12 +456,8 @@ fn two_large_arrays_in_one_document_keep_every_marker_resolvable() {
 
 #[test]
 fn single_oversized_array_never_advertises_unresolvable_chunks() {
-    // A large array's drop: row-level recovery is served from the
-    // whole-blob parent, so the output advertises NO granular `_ccr_rows`
-    // index that could dangle. (Historically the per-row chunk flood
-    // self-evicted its own earliest chunks, leaving the surfaced index
-    // pointing at row hashes that no longer resolved; the index is now
-    // gone entirely — whole-blob only.)
+    // A large array's drop: row-level recovery is served from the whole-blob parent,
+    // so the output advertises NO granular `_ccr_rows` index that could dangle.
     let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
     let crusher = SmartCrusherBuilder::new(SmartCrusherConfig::default())
         .with_default_oss_setup()
@@ -547,9 +489,8 @@ fn single_oversized_array_never_advertises_unresolvable_chunks() {
         "byte-exact whole-blob recovery"
     );
 
-    // An oversized drop advertises NO granular `_ccr_rows` index at all —
-    // row-level recovery is served from the whole-blob parent, so there is
-    // never a per-row index that could dangle.
+    // An oversized drop advertises NO granular `_ccr_rows` index at all — row-level recovery is
+    // served from the whole-blob parent, so there is never a per-row index that could dangle.
     assert!(
         !sentinel.contains_key("_ccr_rows"),
         "an oversized drop must not advertise a granular row index"
@@ -558,10 +499,8 @@ fn single_oversized_array_never_advertises_unresolvable_chunks() {
 
 // ─── helpers ──────────────────────────────────────────────────────
 
-/// The byte-exact canonical form the store payload is written in
-/// (`persist::canonical_array_json` = `serde_json::to_string` over the
-/// item slice). TEST-10: roundtrip asserts compare against THESE bytes,
-/// not a parsed `Value` — key-order/number-form drift must fail.
+/// The byte-exact canonical form the store payload is written in (`persist::canonical_array_json` = `serde_json::to_string` over the
+/// item slice). TEST-10: roundtrip asserts compare against THESE bytes, not a parsed `Value` — key-order/number-form drift must fail.
 fn canonical_json(items: &[Value]) -> String {
     serde_json::to_string(items).expect("test fixtures serialize")
 }

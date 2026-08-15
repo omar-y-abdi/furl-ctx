@@ -117,14 +117,12 @@ from functools import lru_cache
 from types import FrameType
 from typing import Any, Final
 
-# The per-line wall-clock budget. Generous next to a realistic filter (an
-# ``ERROR.*`` search over a 5 000-character line measured 0.01 ms, ~4 orders of
-# magnitude under) and small enough that a wedge is a blip rather than a hang.
+# The per-line wall-clock budget. Generous next to a realistic filter (an ``ERROR.*`` search over a 5 000-character
+# line measured 0.01 ms, ~4 orders of magnitude under) and small enough that a wedge is a blip rather than a hang.
 DEFAULT_MATCH_BUDGET_SECONDS: Final = 0.1
 
-# The smallest interval a restored caller timer may be re-armed with (B7).
-# ``setitimer(0.0)`` DISARMS, so a caller deadline that elapsed during our match
-# must be re-armed just above zero to fire immediately rather than never.
+# The smallest interval a restored caller timer may be re-armed with (B7). ``setitimer(0.0)`` DISARMS, so a caller
+# deadline that elapsed during our match must be re-armed just above zero to fire immediately rather than never.
 _MIN_RESTORED_TIMER: Final = 1e-6
 
 
@@ -309,10 +307,8 @@ def _search_with_watchdog(
         # never an exception escaping into a filter loop.
         return MatchVerdict.NO_MATCH
     finally:
-        # Disarm ours first, then restore the caller's handler, then re-arm what
-        # the caller had pending. A 0.0 remaining from setitimer means "was not
-        # armed at all", and setitimer(0.0) IS the disarm, so that case needs no
-        # re-arm and must not get an epsilon.
+        # Disarm ours first, then restore the caller's handler, then re-arm what the caller had pending. A 0.0 remaining from setitimer
+        # means "was not armed at all", and setitimer(0.0) IS the disarm, so that case needs no re-arm and must not get an epsilon.
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
         if previous_remaining:
@@ -355,20 +351,8 @@ def search_within_budget(
             return MatchVerdict.MATCH if engine.search(text) else MatchVerdict.NO_MATCH
     if _can_use_sigalrm():
         return _search_with_watchdog(compiled, text, budget_seconds)
-    # THE RESIDUAL (see module docstring): off the main thread with no RE2 form of
-    # this pattern. No stdlib mechanism can interrupt a backtracking match here --
-    # the GIL makes any in-process watchdog unobservable -- so this runs
-    # unbudgeted. The syntactic screens and the input cap still apply, but they do
-    # not bound backtracking. T11: the shipped MCP server no longer reaches this
-    # on a plain re2-less install -- it refuses an agent-supplied
-    # pattern/include_patterns/exclude_patterns outright before ever dispatching
-    # to a worker thread (see mcp_server._refuse_regex_filters), regardless of
-    # pattern shape. What remains reachable here is any OTHER off-main-thread
-    # caller of this module -- e.g. the library's own furl_ctx.retrieve(), called
-    # from a caller's own worker thread -- that sits outside the MCP server's
-    # guard, whether because RE2 is absent there too or because it passed a
-    # pattern RE2 refuses (lookaround, a backreference) that its own ingress
-    # did not screen out.
+    # THE RESIDUAL (see module docstring) the shipped MCP server no longer reaches this on a plain re2-less install -- it refuses an agent-supplied
+    # pattern/include_patterns/exclude_patterns outright before ever dispatching to a worker thread (see mcp_server._refuse_regex_filters), regardless of pattern shape.
     try:
         return MatchVerdict.MATCH if compiled.search(text) else MatchVerdict.NO_MATCH
     except re.error:

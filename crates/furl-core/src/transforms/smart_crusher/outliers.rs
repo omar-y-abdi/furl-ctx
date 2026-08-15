@@ -1,62 +1,12 @@
-//! Outlier detectors used to mark items as "must preserve" during compression.
-//!
-//! Direct port of `_detect_structural_outliers`, `_detect_rare_status_values`,
-//! and `_detect_error_items_for_preservation` from
-//! `smart_crusher.py:606-748`.
-//!
-//! Python's `_detect_items_by_learned_semantics` was not ported — it
-//! depended on the retired cross-user learning system's
-//! `FieldSemantics` type, which was removed along with that system.
-//!
-//! # Bug #3 fix — `detect_rare_status_values`
-//!
-//! Python's original guard at `smart_crusher.py:674`
-//! `if not (2 <= len(unique_values) <= 10): continue`
-//! caps cardinality at 10, so error-code domains with 50+ codes are
-//! skipped entirely — even when one or two codes appear at <1% rates
-//! and clearly deserve outlier flagging.
-//!
-//! The fix replaces the cap-and-dominance approach with a Pareto check:
-//!
-//! 1. Cardinality cap raised to **50** (above which the field is
-//!    almost certainly an ID/free-form column, not a status enum).
-//! 2. Sort value frequencies descending. Find the smallest K such
-//!    that the top-K values cover ≥80% of items.
-//! 3. If `K ≤ 5`, the remaining values are "rare" and items
-//!    containing them are outliers.
-//!
-//! This unifies both cases the original algorithm partially handled:
-//!
-//! - **Low cardinality + dominant**: 95×"ok" + 5 errors → top-1 covers
-//!   95% → 4 rare values flagged. Same as before.
-//! - **Higher cardinality + bimodal**: 60×"info" + 25×"warn" + 15
-//!   distinct rare errors → top-2 covers 85% → 15 rare values flagged.
-//!   New, correct, and was missed entirely by the old code.
-//! - **Uniform distribution**: 50 distinct values, 2 each → top-K
-//!   never reaches 80% with K ≤ 5 → skip. Correctly identifies as
-//!   non-categorical.
-//!
-//! The same fix lands in `furl_ctx/transforms/smart_crusher.py` later
-//! in this PR so the parity fixtures continue to byte-match.
+//! Preserve structural/error outliers and rare status values. Status rarity uses a bounded Pareto test:
+//! ≤50 values, top ≤5 covering ≥80%; uniform/high-cardinality fields are not treated as status enums.
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::error_keywords::ERROR_KEYWORDS;
 
-/// Detect items that are structural outliers (error-like or
-/// uncommonly-shaped).
-///
-/// Direct port of `_detect_structural_outliers` (Python
-/// `smart_crusher.py:606-650`). Returns deduplicated, ascending-sorted
-/// indices.
-///
-/// # Detection
-///
-/// 1. **Rare-field outliers**: items containing a field that appears
-///    in <20% of the array.
-/// 2. **Rare-status outliers**: forwarded to `detect_rare_status_values`,
-///    which finds items with statistically rare categorical values.
+/// Detect items that are structural outliers (error-like or uncommonly-shaped).
 pub fn detect_structural_outliers(items: &[Value]) -> Vec<usize> {
     if items.len() < 5 {
         return Vec::new();
@@ -107,25 +57,12 @@ pub fn detect_structural_outliers(items: &[Value]) -> Vec<usize> {
     outlier_set.into_iter().collect()
 }
 
-/// Detect items with rare values in status-like categorical fields.
-///
-/// **Bug #3 fix** — see module-level doc. Algorithm:
-///
-/// 1. Cardinality 2..=50 (was 2..=10 in Python).
-/// 2. Pareto check: top-K values covering ≥80% with `K ≤ 5`.
-/// 3. Items NOT in top-K → outliers.
-///
-/// Returns indices in the order they were discovered (mirrors
-/// Python's append-order behavior; downstream `detect_structural_outliers`
-/// dedupes via BTreeSet).
+/// Detect items with rare values in status-like categorical fields. **Bug #3 fix** — see module-level doc. Returns indices in the
+/// order they were discovered (mirrors Python's append-order behavior; downstream `detect_structural_outliers` dedupes via BTreeSet).
 pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String>) -> Vec<usize> {
     let mut outlier_indices: Vec<usize> = Vec::new();
 
-    // Iterate fields in sorted order for determinism. Python iterates
-    // a `set`, which has non-deterministic order — but the eventual
-    // output is deduped via the caller's set, so order here only
-    // affects which fields drive detection if multiple status-like
-    // fields exist. Sorting gives us a stable, fixture-friendly order.
+    // Iterate fields in sorted order for determinism.
     let mut sorted_fields: Vec<&String> = common_fields.iter().collect();
     sorted_fields.sort();
 
@@ -138,16 +75,8 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
             .filter_map(|m| m.get(field_name))
             .collect();
 
-        // Stringify non-null values and dedupe to get cardinality. Python:
-        //   `unique_values = {str(v) for v in values if v is not None}`
-        // We use `python_repr_value`-equivalent stringification: simple
-        // scalars use their natural form; nested values use serde_json
-        // serialization. This stringification is only used for set-
-        // dedup and frequency counting, not surfaced to callers, so the
-        // python_repr-vs-json distinction we made for anchors doesn't
-        // matter here — the SAME stringification is used for both the
-        // "is this rare" computation and the per-item lookup, so the
-        // surface is internally consistent.
+        // Stringify non-null values and dedupe to get cardinality. This stringification is only used for set- dedup and frequency
+        // counting, not surfaced to callers, so the python_repr-vs-json distinction we made for anchors doesn't matter here.
         let stringify = |v: &Value| -> String {
             match v {
                 Value::Null => unreachable!("null filtered above"),
@@ -189,9 +118,7 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
         // Pareto check (BUG #3 FIX): find smallest K such that top-K
         // values cover ≥80% of items.
         let mut sorted_counts: Vec<(&String, &usize)> = value_counts.iter().collect();
-        // Sort by count descending; tiebreak by key ascending so the
-        // result is deterministic when multiple values have the same
-        // frequency.
+        // Sort by count descending; tiebreak by key ascending so the result is deterministic when multiple values have the same frequency.
         sorted_counts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
 
         let threshold = (total as f64 * 0.8).ceil() as usize;
@@ -233,19 +160,8 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
     outlier_indices
 }
 
-/// Detect items containing error keywords for PRESERVATION.
-///
-/// Direct port of `_detect_error_items_for_preservation` (Python
-/// `smart_crusher.py:711-748`). Used by the orchestrator's
-/// `_prioritize_indices` to ensure error items are NEVER dropped.
-///
-/// # Args
-///
-/// - `items`: array items to scan.
-/// - `item_strings`: pre-computed JSON serializations to avoid
-///   redundant `to_string` work. Pass `None` to serialize on the fly.
-///   When provided, must be the same length as `items` (Python's
-///   bounds-check via `i < len(item_strings)` is mirrored).
+/// Detect items containing error keywords for PRESERVATION. Used by the orchestrator's `_prioritize_indices` to ensure error items are
+/// NEVER dropped. . When provided, must be the same length as `items` (Python's bounds-check via `i < len(item_strings)` is mirrored).
 pub fn detect_error_items_for_preservation(
     items: &[Value],
     item_strings: Option<&[String]>,
@@ -258,11 +174,8 @@ pub fn detect_error_items_for_preservation(
             continue;
         }
 
-        // Reuse cached serialization or serialize fresh. Python:
-        //   `if item_strings is not None and i < len(item_strings):
-        //        item_str = item_strings[i].lower()
-        //    else:
-        //        item_str = json.dumps(item).lower()`
+        // Reuse cached serialization or serialize fresh. Python: `if item_strings is not None and i <
+        // len(item_strings): item_str = item_strings[i].lower() else: item_str = json.dumps(item).lower()`
         let serialized: String = match item_strings {
             Some(arr) if i < arr.len() => arr[i].to_lowercase(),
             _ => match serde_json::to_string(item) {
@@ -338,9 +251,8 @@ mod tests {
 
     #[test]
     fn rare_status_bug3_fix_high_cardinality_bimodal() {
-        // BUG #3 case: cardinality 17 (1 dominant + 1 second + 15
-        // singletons). Old code: 17 > 10 → skip. New code: top-2 covers
-        // 85%, K=2 ≤ 5, remaining 15 values flagged.
+        // BUG #3 case: cardinality 17 (1 dominant + 1 second + 15 singletons). Old code: 17
+        // > 10 → skip. New code: top-2 covers 85%, K=2 ≤ 5, remaining 15 values flagged.
         let mut items: Vec<Value> = Vec::new();
         for _ in 0..60 {
             items.push(json!({"code": "INFO"}));
@@ -359,9 +271,7 @@ mod tests {
 
     #[test]
     fn rare_status_uniform_distribution_no_outliers() {
-        // 50 items, 50 distinct values, 1 each. Top-K never reaches
-        // 80% with K ≤ 5 → no outliers (correctly identified as
-        // non-categorical).
+        // 50 items, 50 distinct values, 1 each. Top-K never reaches 80% with K ≤ 5 → no outliers (correctly identified as non-categorical).
         let items: Vec<Value> = (0..50)
             .map(|i| json!({"code": format!("CAT_{}", i)}))
             .collect();
@@ -395,17 +305,8 @@ mod tests {
 
     #[test]
     fn rare_status_nulls_filtered_from_cardinality() {
-        // Pinned Python parity: `unique_values = {str(v) for v in values
-        // if v is not None}` — nulls are excluded from the cardinality
-        // computation. With 95×"ok" + 5×null, cardinality = 1 (just "ok"),
-        // which fails the 2..=50 gate and the field is skipped entirely.
-        // Pre-fix Python had the same behavior; the null-aware
-        // `__none__` mapping only kicks in inside `value_counts` which
-        // is unreachable when the cardinality gate fails first.
-        //
-        // If we ever want null to count as a distinct categorical value
-        // (so missing-status items get flagged), that's a separate
-        // behavior change.
+        // Pinned Python parity: `unique_values = {str(v) for v in values if v is not None}` — nulls are excluded from the cardinality
+        // computation. With 95×"ok" + 5×null, cardinality = 1 (just "ok"), which fails the 2..=50 gate and the field is skipped entirely.
         let mut items: Vec<Value> = (0..95).map(|_| json!({"s": "ok"})).collect();
         for _ in 0..5 {
             items.push(json!({"s": null}));
@@ -420,15 +321,8 @@ mod tests {
 
     #[test]
     fn rare_status_nulls_count_in_value_counts_when_cardinality_passes() {
-        // Once cardinality >= 2 (with nulls excluded from the set), the
-        // value_counts loop maps null → "__none__" and treats it as a
-        // distinct value for frequency counting. Mirrors Python's
-        // `key = str(v) if v is not None else "__none__"`.
-        //
-        // Setup: 90×"ok" + 5×"warn" + 5×null → unique_values = {"ok", "warn"},
-        // cardinality 2, gate passes. value_counts: ok=90, warn=5,
-        // __none__=5. top-1 = "ok" (90/100 = 90%) covers ≥80%, K=1 ≤ 5.
-        // Items with "warn" or null are flagged.
+        // Once cardinality >= 2 (with nulls excluded from the set), the value_counts loop
+        // maps null → "__none__" and treats it as a distinct value for frequency counting.
         let mut items: Vec<Value> = (0..90).map(|_| json!({"s": "ok"})).collect();
         for _ in 0..5 {
             items.push(json!({"s": "warn"}));
@@ -475,9 +369,8 @@ mod tests {
 
     #[test]
     fn error_keywords_uses_cached_strings_when_provided() {
-        // If `item_strings` is passed, we use those rather than
-        // re-serializing. Test that a custom cached string can drive
-        // a hit even when the actual item wouldn't.
+        // If `item_strings` is passed, we use those rather than re-serializing. Test that
+        // a custom cached string can drive a hit even when the actual item wouldn't.
         let items: Vec<Value> = vec![json!({"a": 1}), json!({"b": 2})];
         let cached = vec!["error".to_string(), "ok".to_string()];
         let errs = detect_error_items_for_preservation(&items, Some(&cached));

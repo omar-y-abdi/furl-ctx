@@ -24,9 +24,8 @@ def test_search_compressor_compress_paths_and_ccr() -> None:
     assert no_match.original_match_count == 0
     assert no_match.compressed == "plain text only"
 
-    # Build a large input so the Rust adaptive sizer's min_k=5 floor doesn't
-    # absorb everything and compression actually fires (must drop the
-    # ratio below `min_compression_ratio_for_ccr=0.8`).
+    # Build a large input so the Rust adaptive sizer's min_k=5 floor doesn't absorb everything and
+    # compression actually fires (must drop the ratio below `min_compression_ratio_for_ccr=0.8`).
     lines = [f"src/auth.py:{i}:auth event {i}" for i in range(1, 51)]
     lines += [f"src/db.py:{i}:db query {i}" for i in range(1, 31)]
     content = "\n".join(lines)
@@ -48,9 +47,8 @@ def test_search_compressor_fails_open_when_omissions_lack_ccr() -> None:
     assert mixed_result.cache_key is None
     assert mixed_result.compressed == mixed
 
-    # Rust str::trim does not treat U+001C as whitespace; the native
-    # lines_unparsed sidecar must therefore catch it even though Python
-    # str.strip() would erase it.
+    # Rust str::trim does not treat U+001C as whitespace; the native lines_unparsed
+    # sidecar must therefore catch it even though Python str.strip() would erase it.
     control_separator = "src/a.py:1:hit\n\x1c\n"
     separator_result = SearchCompressor().compress(control_separator)
     assert separator_result.cache_key is None
@@ -97,10 +95,8 @@ def test_search_compressor_persist_to_python_ccr(monkeypatch: pytest.MonkeyPatch
         ),
     )
     compressor._persist_to_python_ccr("orig", "comp", "abc123")
-    # explicit_hash carries the Rust marker key so retrieval of the
-    # marker hash finds the entry (issue #816). compression_strategy
-    # attributes the entry to its route for the retrieval-feedback loop
-    # (Engine P2-13).
+    # explicit_hash carries the Rust marker key so retrieval of the marker hash finds the entry ().
+    # compression_strategy attributes the entry to its route for the retrieval-feedback loop (Engine P2-13).
     assert seen["call"] == ("orig", "comp", "abc123", "search")
 
     # Loud failure: the store raises, but persist swallows + logs (no

@@ -1,33 +1,4 @@
-//! `SmartCrusherBuilder` — explicit composition of the three traits.
-//!
-//! `SmartCrusher::new(config)` returns the OSS default composition
-//! (HybridScorer) — drop-in compatible with the original callers.
-//! Error-item and structural-outlier preservation are hardwired into
-//! the planner (see `planning.rs`), not composed here.
-//!
-//! Builder is for callers who want to customize the composition:
-//!
-//! ```ignore
-//! use furl_core::transforms::smart_crusher::{
-//!     SmartCrusher, SmartCrusherConfig, SmartCrusherBuilder,
-//! };
-//! // Enterprise: swap the scorer.
-//! let crusher = SmartCrusherBuilder::new(SmartCrusherConfig::default())
-//!     .with_scorer(Box::new(my_loop_scorer))
-//!     .build();
-//! ```
-//!
-//! # Defaults vs explicit
-//!
-//! `SmartCrusherBuilder::new()` starts EMPTY — no compaction, no CCR
-//! store. Two build-time fallbacks exist so an all-defaults `build()`
-//! still produces a working crusher: an unset scorer becomes
-//! `HybridScorer::default()` and an unset routing tokenizer becomes the
-//! gpt-4o tiktoken counter (both documented on
-//! [`build`](SmartCrusherBuilder::build)). Everything else you must ask
-//! for. Use
-//! [`with_default_oss_setup`](SmartCrusherBuilder::with_default_oss_setup)
-//! to start from the OSS default and customize from there.
+//! `SmartCrusherBuilder` Error-item and structural-outlier preservation are hardwired into the planner (see `the Rust module`), not composed here.
 
 use std::sync::Arc;
 
@@ -61,51 +32,31 @@ impl SmartCrusherBuilder {
         }
     }
 
-    /// Set the relevance scorer. The Enterprise plug-in point — pass
-    /// a `LoopScorer`, a `HybridScorer`, or any other `RelevanceScorer`
-    /// impl.
+    /// Set the relevance scorer. The Enterprise plug-in point — pass a `LoopScorer`, a `HybridScorer`, or any other `RelevanceScorer` impl.
     pub fn with_scorer(mut self, scorer: Box<dyn RelevanceScorer + Send + Sync>) -> Self {
         self.scorer = Some(scorer);
         self
     }
 
-    /// Apply the OSS default setup: `HybridScorer`. Equivalent to
-    /// `SmartCrusher::new(config)` if no further customization is
-    /// applied. Use this when starting from the OSS preset and
-    /// adding a few enterprise components.
+    /// Apply the OSS default setup: `HybridScorer`. Use this when starting from the OSS preset and adding a few enterprise components.
     pub fn with_default_oss_setup(self) -> Self {
         self.with_scorer(Box::<HybridScorer>::default())
     }
 
-    /// Plug in a compaction stage. When set, `crush_array` runs the
-    /// stage before the lossy pipeline; if it produces a non-`Untouched`
-    /// compaction the rendered bytes are returned via
-    /// [`CrushArrayResult::compacted`]. The lossy result still fills
-    /// `items` so callers can choose either output.
-    ///
-    /// [`CrushArrayResult::compacted`]: super::crusher::CrushArrayResult::compacted
+    /// Plug in a compaction stage. When set, `crush_array` runs the stage before the lossy pipeline; if it
+    /// produces a non-`Untouched` compaction the rendered bytes are returned via [`CrushArrayResult::compacted`].
     pub fn with_compaction(mut self, stage: CompactionStage) -> Self {
         self.compaction = Some(stage);
         self
     }
 
-    /// Convenience: enable the OSS compaction preset (CSV+schema
-    /// formatter, default `CompactConfig`). Equivalent to
-    /// `with_compaction(CompactionStage::default_csv_schema())`.
+    /// Convenience: enable the OSS compaction preset (CSV+schema formatter, default
+    /// `CompactConfig`). Equivalent to `with_compaction(CompactionStage::default_csv_schema())`.
     pub fn with_default_compaction(self) -> Self {
         self.with_compaction(CompactionStage::default_csv_schema())
     }
 
-    /// Plug in a CCR store. Both lossy and lossless paths stash their
-    /// originals here keyed by hash, so the runtime can serve retrieval
-    /// tool calls with no data loss:
-    ///
-    /// - The lossy `crush_array` path stashes each dropped array's full
-    ///   original (row-drop CCR).
-    /// - The lossless compaction stage stashes each substituted
-    ///   opaque-blob's original (Defect 2) — wired into the stage at
-    ///   [`build`](Self::build) so call order with `with_compaction`
-    ///   doesn't matter.
+    /// Plug in a CCR store. Both lossy and lossless paths stash their originals here keyed by hash.
     pub fn with_ccr_store(mut self, store: Arc<dyn CcrStore>) -> Self {
         self.ccr_store = Some(store);
         self
@@ -117,31 +68,22 @@ impl SmartCrusherBuilder {
         self.with_ccr_store(Arc::new(InMemoryCcrStore::new()))
     }
 
-    /// Construct the `SmartCrusher`. If `with_scorer` was not called,
-    /// falls back to `HybridScorer::default()` so a builder with no
-    /// other customization still produces a working crusher.
+    /// Construct the `SmartCrusher`. If `with_scorer` was not called, falls back to
+    /// `HybridScorer::default()` so a builder with no other customization still produces a working crusher.
     pub fn build(self) -> SmartCrusher {
         let analyzer = SmartAnalyzer::new(self.config.clone());
         let anchor_selector = AnchorSelector::new(AnchorConfig::default());
         let scorer = self
             .scorer
             .unwrap_or_else(|| Box::<HybridScorer>::default());
-        // Defect 2: propagate the CCR store into the compaction stage so
-        // lossless opaque-blob substitutions persist their originals
-        // under the marker hash. Done here (not in `with_compaction` /
-        // `with_ccr_store`) so the two builder calls compose in any
-        // order. The same `Arc` backs both the row-drop and opaque-blob
-        // writes — one store, one retrieve contract.
+        // Defect 2: propagate the CCR store into the compaction stage so lossless opaque-blob substitutions persist their originals
+        // under the marker hash. Done here (not in `with_compaction` / `with_ccr_store`) so the two builder calls compose in any order.
         let compaction = match (self.compaction, &self.ccr_store) {
             (Some(stage), Some(store)) => Some(stage.with_ccr_store(Arc::clone(store))),
             (stage, _) => stage,
         };
-        // Strict lossless-or-passthrough (`lossless_only`): opaque
-        // substitution replaces visible bytes with a `<<ccr:` pointer AND
-        // writes the store EAGERLY inside `compact()` — before the crusher
-        // could reject the render — so it must be switched off at the
-        // stage, not filtered at the routing layer. Composed here for the
-        // same any-order reason as the store wiring above.
+        // Strict lossless-or-passthrough (`lossless_only`): opaque substitution replaces visible bytes with a `<<ccr:` pointer
+        // AND writes the store EAGERLY inside `compact()`. Composed here for the same any-order reason as the store wiring above.
         let compaction = match compaction {
             Some(mut stage) if self.config.lossless_only => {
                 stage.config.substitute_opaque = false;
@@ -149,10 +91,7 @@ impl SmartCrusherBuilder {
             }
             stage => stage,
         };
-        // Default the routing tokenizer to a gpt-4o tiktoken counter when
-        // the caller did not supply one. Only the relative ranking of the
-        // two candidate renders matters to the routing choice, so the
-        // absolute model is immaterial; tiktoken is the honest metric.
+        // Default the routing tokenizer to a gpt-4o tiktoken counter when the caller did not supply one.
         let tokenizer = self
             .tokenizer
             .unwrap_or_else(|| crate::tokenizer::get_tokenizer(DEFAULT_ROUTING_TOKENIZER_MODEL));
@@ -168,15 +107,8 @@ impl SmartCrusherBuilder {
     }
 }
 
-/// Default model name handed to `get_tokenizer` for the `MinTokens`
-/// routing decision when no tokenizer is supplied to the builder.
-/// `gpt-4o` routes to the real tiktoken BPE (byte-identical to Python
-/// `tiktoken`) and matches the engine's benchmark model, so routing
-/// decisions made here line up with the token numbers the benchmark
-/// reports. The choice only compares two renders relative to each
-/// other, so this default never changes WHICH render is correct — it
-/// just makes the metric the honest tokenizer rather than misleading
-/// byte length.
+/// Default model name handed to `get_tokenizer` for the `MinTokens` routing decision when no tokenizer is supplied to the
+/// builder. The choice only compares two renders relative to each other so this default never changes WHICH render is correct
 pub const DEFAULT_ROUTING_TOKENIZER_MODEL: &str = "gpt-4o";
 
 #[cfg(test)]

@@ -53,13 +53,7 @@ from benchmarks.metrics import (
 )
 from furl_ctx import compress
 
-# Two KNOWN, unique needle rows — one per base-row family. Each is distinct,
-# identifiable, and shaped like a real row of its family (so it enters the
-# same code path), but with an unmistakable sentinel value so recall is
-# measurable. The needle is the *probe*; the array it is injected into is
-# 100% real captured rows.
-#
-# SEARCH needle — shaped like an rg --json match (lossless columnar regime).
+# Two KNOWN, unique needle rows — one per base-row family.
 SEARCH_NEEDLE: dict[str, Any] = {
     "path": "NEEDLE/unique_marker_42.py",
     "line_number": 999999,
@@ -67,9 +61,7 @@ SEARCH_NEEDLE: dict[str, Any] = {
     "lines": "def __FURL_NEEDLE_DO_NOT_DROP__(): return 0xC0FFEE",
 }
 
-# LOGS needle — shaped like a git-log row (lossy drop regime: varying-field
-# rows force unique hashes -> the engine drops most rows). This is where the
-# audited needle-loss is expected to surface.
+# LOGS needle — shaped like a git-log row (lossy drop regime: varying-field rows force unique hashes -> the engine drops most rows).
 LOGS_NEEDLE: dict[str, Any] = {
     "commit": "ffffffffffffffffffffffffffffffffffffffff",
     "author": "Needle Author",
@@ -84,10 +76,7 @@ NEEDLE = SEARCH_NEEDLE
 POSITIONS = ("start", "middle", "end")
 CARDINALITIES = (30, 90, 300)
 
-# Query arms (EFF-7): "naming" quotes the needle's sentinel token in the
-# query; "control" describes the need without ANY of the needle's literal
-# tokens. Reported separately — the committed floor gate reads the naming
-# number, the control number is the honest non-quoting-user figure.
+# Query arms (EFF-7): "naming" quotes the needle's sentinel token in the query; "control" describes the need without ANY of the needle's literal tokens.
 ARMS = ("naming", "control")
 
 
@@ -194,10 +183,7 @@ def _trial(
         {"role": "tool", "content": content, "tool_call_id": "needle_call"},
     ]
     result = compress(messages, model=model)
-    # A2 / RG2: fail closed, never measure a broken engine. A fail-open returns
-    # the ORIGINAL messages, so the needle is trivially present and recall reads
-    # a fabricated 100% -- the most flattering possible number from a dead
-    # engine. Same contract as the dataset path in ``metrics``.
+    # A2 / RG2: fail closed, never measure a broken engine.
     _abort_if_fail_open(f"needle:{family.name}@{cardinality}/{position}/{arm}", result)
     output_text = _stringify(result.messages[-1].get("content"))
 

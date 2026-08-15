@@ -43,10 +43,8 @@ _HOOKS = Path(__file__).resolve().parents[1] / "plugins" / "furl" / "hooks"
 _PRETOOL = _HOOKS / "pretool_pipe.py"
 _COMPRESSOR = _HOOKS / "pipe_compress.py"
 
-# Hermetic settings scope for every hook subprocess: the deny/ask guard
-# (reviewer-84 F3, tests/test_pretool_deny_guard.py) reads permission rules from
-# the payload cwd and HOME. These tests target the ZERO-RULES path, so both must
-# be rule-free fresh dirs regardless of the developer's real ~/.claude.
+# Hermetic settings scope: the deny/ask guard reads permission rules from the
+# payload cwd and HOME. These tests target the ZERO-RULES path, so both must be rule-free fresh dirs regardless of the developer's real ~/.claude.
 _EMPTY_HOME = tempfile.mkdtemp(prefix="furl-pipe-tests-home-")
 _NO_RULES_CWD = tempfile.mkdtemp(prefix="furl-pipe-tests-cwd-")
 
@@ -93,7 +91,7 @@ def _with_local_compressor(rewritten: str) -> str:
     return _UV_PREFIX_RE.sub(shlex.quote(sys.executable), rewritten)
 
 
-# --- pretool_pipe.py: the gate + rewrite emission --------------------------------
+# --- Pipe gate and rewrite emission --------------------------------
 
 
 def _pretool(payload: dict, flag: str | None) -> subprocess.CompletedProcess[str]:
@@ -112,10 +110,8 @@ def _pretool(payload: dict, flag: str | None) -> subprocess.CompletedProcess[str
     )
 
 
-# The FURL_PRETOOL_PIPE flag gate (unset/empty/truthy/falsy/junk spellings) is
-# pinned over its full enumeration — for the python gate AND the shipped hooks.json
-# SHELL gate — by test_plugin_hooks_manifest.py::test_pretool_gate_parity_shell_and_python
-# (_GATE_PARITY_CASES). This file covers the rewrite itself, not the flag gate.
+# The FURL_PRETOOL_PIPE flag gate (unset/empty/truthy/falsy/junk spellings) is pinned over its full enumeration — for the python gate
+# and the shipped shell gate; `_GATE_PARITY_CASES` must keep Python and shell behavior identical.
 
 
 def test_enabled_rewrites_bash_with_transparent_marker() -> None:
@@ -244,9 +240,8 @@ def test_fail_open_when_tempfile_unavailable(tmp_path) -> None:
     )
     assert proc.returncode == 9, f"original exit code lost (stderr: {proc.stderr!r})"
     assert proc.stdout.strip() == "HELLO_MUST_RUN", "original command must still run"
-    # The fallback must be silent plumbing: every wrapper-internal failure
-    # (mktemp lookup, probe redirect, rm) is stderr-suppressed, so the user sees
-    # only the original command's own streams.
+    # The fallback must be silent plumbing: every wrapper-internal failure (mktemp lookup, probe
+    # redirect, rm) is stderr-suppressed, so the user sees only the original command's own streams.
     assert proc.stderr == "", f"wrapper noise leaked to stderr: {proc.stderr!r}"
 
 
@@ -400,9 +395,8 @@ def test_large_output_is_compressed_and_retrievable(tmp_path) -> None:
         finally:
             store.close()
         assert entry is not None, "the marker's original must be retrievable"
-        # SmartCrusher stores the array rows semantically (compact re-serialization,
-        # identical to the PostToolUse path), so compare parsed content, not
-        # incidental input whitespace.
+        # SmartCrusher stores the array rows semantically (compact re-serialization, identical
+        # to the PostToolUse path), so compare parsed content, not incidental input whitespace.
         assert json.loads(entry.original_content) == json.loads(payload)
     finally:
         for k, v in prev.items():
@@ -441,16 +435,8 @@ def test_pipe_compress_fail_open_when_furl_ctx_missing(tmp_path) -> None:
     assert proc.stdout == data  # furl_ctx unimportable → raw passthrough
 
 
-# --- T8: built-in credential redaction on the pipe path (audit finding) -----------
-# ``pipe_compress.py`` used to scrub secrets with ``build_env_redactor`` only — the
-# operator-configured ``FURL_REDACT_PATTERNS`` regexes, a true no-op with nothing
-# configured. The ON-by-default built-in credential patterns
-# (``furl_ctx.redaction.build_default_redactor`` — AWS keys, GitHub tokens, etc.)
-# live in ``build_store_redactor`` and never ran on this path, so a below-threshold
-# or non-compressing Bash output carrying a real credential shape reached the model
-# byte-exact. The PostToolUse hook (``compress_tool_output.py``) already used
-# ``build_store_redactor`` for the identical purpose — this is the pipe path catching
-# up to parity, not new behavior.
+# Built-in credential redaction is mandatory on the pipe path; operator-configured patterns extend it rather than replacing it.
+# ``FURL_REDACT_PATTERNS`` regexes, a true no-op with nothing configured. The ON-by-default built-in credential patterns (``furl_ctx.redaction.build_default_redactor``
 
 
 def _credential_bearing_output() -> str:

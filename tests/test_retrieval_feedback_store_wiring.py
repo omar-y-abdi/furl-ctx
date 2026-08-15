@@ -104,9 +104,8 @@ def test_store_retrieve_hit_emits_one_signal_with_entry_shape() -> None:
 
     assert entry is not None
     assert _events_in_window() == 1
-    # The signal carries the entry's compression metadata: tool_name plus the
-    # strategy mapped to its content-type tag, so the router's
-    # (tool, detected-type) lookup finds it.
+    # The signal carries the entry's compression metadata: tool_name plus the strategy
+    # mapped to its content-type tag, so the router's (tool, detected-type) lookup finds it.
     hints = get_retrieval_feedback().get_hints(routing_shape_key("websearch", "json_array"))
     assert hints.retrievals_in_window == 1
 
@@ -120,9 +119,8 @@ def test_store_retrieve_miss_emits_nothing() -> None:
 
 def test_store_retrieve_expired_entry_emits_nothing() -> None:
     store, hash_key = _seeded_store()
-    # Age the entry past its TTL through the backend (retrieve() itself is an
-    # access and would contaminate the assertion — same pattern as the COR-37
-    # pins in test_compression_store_search_bump.py).
+    # Age the entry past its TTL through the backend (retrieve() itself is an access and would
+    # contaminate the assertion; isolate the store so the test observes only this call.
     entry = store._backend.get(hash_key)
     assert entry is not None
     entry.created_at -= entry.ttl + 60
@@ -203,9 +201,8 @@ def test_zero_result_search_emits_nothing() -> None:
 
 
 def test_ccr_mirror_backing_check_emits_nothing() -> None:
-    # The result-cache HIT path verifies every <<ccr:HASH>> against the store
-    # via retrieve(); that is the engine talking to itself, not the model
-    # retrieving compressed-away content.
+    # The result-cache HIT path verifies every <<ccr:HASH>> against the store via retrieve();
+    # that is the engine talking to itself, not the model retrieving compressed-away content.
     from furl_ctx.cache.compression_store import get_compression_store
     from furl_ctx.transforms.content_router import ContentRouter
 
@@ -224,9 +221,8 @@ def test_ccr_mirror_backing_check_emits_nothing() -> None:
 
 
 def test_ccr_offload_round_trip_verify_emits_nothing() -> None:
-    # The reversible offload stores the original and immediately retrieves it
-    # to verify byte-exact recovery before emitting the marker — an
-    # engine-internal read that must not count as a model retrieval.
+    # The reversible offload stores the original and immediately retrieves it to verify byte-exact recovery
+    # before emitting the marker — an engine-internal read that must not count as a model retrieval.
     from furl_ctx.transforms.content_router import ContentRouter
     from furl_ctx.transforms.router_policy import CompressionStrategy
 

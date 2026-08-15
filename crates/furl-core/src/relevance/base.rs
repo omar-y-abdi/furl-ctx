@@ -1,14 +1,8 @@
-//! Base trait and types for relevance scoring.
-//!
-//! Direct port of `furl_ctx/relevance/base.py`. The Python version uses
-//! ABC + abstractmethod; we use a Rust trait with the same required
-//! method (`score`) plus a default `score_batch` that delegates to
-//! per-item `score`.
+//! Base trait and types for relevance scoring. The Python version uses ABC + abstractmethod; we use a Rust trait
+//! with the same required method (`score`) plus a default `score_batch` that delegates to per-item `score`.
 
-/// Relevance score with explainability fields.
-///
-/// Mirrors Python's `RelevanceScore` dataclass. The `__post_init__`
-/// score-clamp is enforced via the `new` constructor.
+/// Relevance score with explainability fields. Mirrors Python's `RelevanceScore`
+/// dataclass. The `__post_init__` score-clamp is enforced via the `new` constructor.
 #[derive(Debug, Clone)]
 pub struct RelevanceScore {
     pub score: f64,
@@ -40,18 +34,11 @@ impl Default for RelevanceScore {
 }
 
 /// Trait that every relevance scorer implements.
-///
-/// Mirrors Python's `RelevanceScorer` ABC: required `score` for single
-/// items, with a default `score_batch` for collections (subclasses
-/// override for vectorized impls; otherwise the per-item fallback runs).
 pub trait RelevanceScorer {
     /// Score a single item against the context.
     fn score(&self, item: &str, context: &str) -> RelevanceScore;
 
-    /// Score a batch of items. Default impl delegates to per-item
-    /// `score` — override when the scorer can amortize work across
-    /// items (BM25 pre-tokenizes context once, embeddings batch the
-    /// matrix multiplication, etc.).
+    /// Score a batch of items.
     fn score_batch(&self, items: &[&str], context: &str) -> Vec<RelevanceScore> {
         items.iter().map(|item| self.score(item, context)).collect()
     }

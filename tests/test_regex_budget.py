@@ -46,19 +46,8 @@ from furl_ctx.ccr.retrieve_filters import (
     _reject_pathological_pattern,
 )
 
-# Each pattern is agent-supplyable and passes the parse-time screens (or, for
-# ``(a+)+Z``, is the classic shape the screens DO catch -- pinned here so the
-# budget holds even if a future screen change lets it through). The line is >5k
-# chars and adversarial for that pattern: ambiguous ``ab`` repeats for the
-# alternation case, a pure ``a`` run for the ``a+`` chains.
-#
-# Every pattern ends in ``Z`` that the line does NOT contain, so the true answer
-# is always "no match" and the engine must exhaust its search to prove it -- that
-# is what makes them catastrophic. (A bare ``"a+" * 30`` against an all-``a`` line
-# is NOT a zero-match case: such a line genuinely matches, and RE2 says so in
-# microseconds. The trailing ``Z`` is what forces the failing search.)
-# Verified fail-before at d9c6691c semantics: each of these runs >6s under a
-# plain unbudgeted ``pattern.search(text)``.
+# Each pattern is agent-supplyable and passes the parse-time screens (or, for ``(a+)+Z``, is the classic shape
+# the screens DO catch -- pinned here so the budget holds even if a future screen change lets it through).
 ADVERSARIAL: list[tuple[str, str]] = [
     ("(a|b|ab)+Z", "ab" * 2600),  # ambiguous alternation under one +
     ("a+" * 30 + "Z", "a" * 5200),  # flat + chain, no nesting, no ?/*
@@ -279,22 +268,11 @@ def test_re2_ascii_class_divergence_is_known_and_pinned() -> None:
 # Barrier -- the disclosed divergence stays contained to BOOLEAN-verdict callers
 # ---------------------------------------------------------------------------
 
-# regex_budget entry points that return a BOOLEAN does-a-match-EXIST verdict under
-# the disclosed ASCII/Unicode class divergence (see their docstrings). Correct for
-# a caller that needs yes/no; WRONG for one where which byte matched decides output.
+# regex_budget entry points that return a BOOLEAN does-a-match-EXIST verdict under the disclosed ASCII/Unicode class divergence (see their docstrings).
 _BOOLEAN_VERDICT_FUNCS = frozenset({"matches_within_budget", "search_within_budget"})
 
-# Modules whose output depends on WHICH bytes matched, so the boolean verdict above
-# is the wrong primitive and they must never route through it. redaction and
-# compression_store are the security-critical case: they ``re.sub`` the matched
-# span, so both leftmost-first/longest and the ASCII/Unicode divergence would change
-# which bytes get scrubbed -- and strengthening the guard to close that divergence
-# would drop word-class patterns to the unbudgeted worker-thread residual (#26). The
-# rest read match content to decode/tokenize/score. This is the guarded FLOOR;
-# ``test_span_sensitive_module_list_is_complete`` keeps it honest by deriving the
-# match-span readers mechanically and reddening if a new one is neither listed here
-# nor exempted below. Do NOT shrink it to "just redaction" -- a hand-list of one is
-# exactly the silent-staleness hole that completeness test closes.
+# Modules whose output depends on WHICH bytes matched so the boolean verdict above is the wrong primitive and they must never route
+# through it. redaction and compression_store are the security-critical case. The rest read match content to decode/tokenize/score.
 _SPAN_SENSITIVE_MODULES = (
     "furl_ctx/cache/compression_store.py",
     "furl_ctx/ccr/marker_grammar.py",
@@ -311,21 +289,15 @@ _SPAN_SENSITIVE_MODULES = (
     "furl_ctx/transforms/router_split.py",
 )
 
-# Mechanically flagged by the deriver but NOT re.Match span reads, so the
-# boolean-verdict path is irrelevant to them. Recorded WITH a reason (not silently
-# omitted from the list) so the completeness test forces this judgement to be
-# revisited if the file changes, and so a stale exemption is caught when its signal
-# later disappears.
+# These detected `.start()` calls are not regex-match spans, so boolean regex verdicts
+# are safe. Keep explicit reasons so future signal changes force reconsideration.
 _SPAN_SIGNAL_EXEMPT = {
     "furl_ctx/cli.py": "exc.start is a UnicodeDecodeError byte offset, not re.Match.start",
     "furl_ctx/tokenizers/tiktoken_counter.py": "thread.start(), not re.Match.start",
 }
 
-# re.Match / re.Pattern members that expose WHICH bytes matched -- span, position,
-# captured group, or substituted/found substrings -- as opposed to search() /
-# match() / fullmatch(), whose result is only boolean-usable. Superset of the audit
-# list: adds findall/finditer, which return matched substrings / match objects and
-# would otherwise be a silent gap of exactly the kind the completeness test closes.
+# re.Match / re.Pattern members that expose WHICH bytes matched -- span, position, captured group, or
+# substituted/found substrings -- as opposed to search() / match() / fullmatch(), whose result is only boolean-usable.
 _SPAN_METHOD_NAMES = frozenset(
     {
         "sub",
@@ -491,9 +463,8 @@ def test_span_sensitive_module_list_is_complete() -> None:
     assert checked.isdisjoint(exempt), (
         f"modules both guarded and exempted (pick one): {sorted(checked & exempt)}"
     )
-    # Every exemption must correspond to a module the deriver still flags; a stale
-    # exemption (its span signal was removed) must be pruned, not left to mask a
-    # later real hit in the same file.
+    # Every exemption must correspond to a module the deriver still flags; a stale exemption (its
+    # span signal was removed) must be pruned, not left to mask a later real hit in the same file.
     assert exempt <= derived, (
         f"stale _SPAN_SIGNAL_EXEMPT entries no longer trip a span signal, remove "
         f"them: {sorted(exempt - derived)}"
@@ -666,10 +637,8 @@ def test_inline_flags_stay_on_the_re2_path() -> None:
     assert time.monotonic() - start < _CEILING_SECONDS
 
 
-# ---------------------------------------------------------------------------
-# F3 -- the agent filter call sites must compile FLAGLESS, so a future
-#       constructor flag cannot silently reopen the unbudgeted residual
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- F3 -- the agent filter call sites must compile FLAGLESS, so a future
+# constructor flag cannot silently reopen the unbudgeted residual ---------------------------------------------------------------------------
 
 
 def test_retrieve_filter_compiles_the_pattern_flagless() -> None:
@@ -766,11 +735,7 @@ def test_unarmed_caller_timer_stays_unarmed(without_re2: None) -> None:
         signal.signal(signal.SIGALRM, previous)
 
 
-# ---------------------------------------------------------------------------
-# T11 -- the mcp extra must always pull in RE2 (the hard-dependency half of
-# the fix; the runtime-refusal half is pinned in
-# tests/test_mcp_server_handlers.py against the actual MCP handlers).
-# ---------------------------------------------------------------------------
+# RE2 must remain a hard MCP dependency; handler tests separately pin runtime refusal when the engine is unavailable.
 
 _PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 

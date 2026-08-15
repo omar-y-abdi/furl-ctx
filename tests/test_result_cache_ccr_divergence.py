@@ -56,9 +56,7 @@ from furl_ctx.tokenizer import Tokenizer
 from furl_ctx.tokenizers import EstimatingTokenCounter
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
-# Shared load-bearing fixture (TEST-19): previously a verbatim copy of
-# test_ccr_recovery_invariant.py's `_log_shaped_rows` — delicately tuned to
-# stay lossy; this suite rotted to vacuous-green whenever the copies drifted.
+# Use the shared lossy log-shaped fixture so result-cache and recovery tests cannot drift into vacuous pass-through coverage.
 from tests._fixtures import assert_fixture_drops, canonical_repr
 from tests._fixtures import log_shaped_rows as _log_rows
 
@@ -194,9 +192,8 @@ class TestResultCacheCCRDivergence:
                 f"Precondition: first apply left hash {h!r} unbacked"
             )
 
-        # --- Simulate CCR TTL expiry: wipe the Python store only ---
-        # The router's result cache (_cache) is NOT cleared — it lives on the
-        # ContentRouter object and is only bounded by its own 30-min TTL.
+        # Simulate CCR TTL expiry: wipe the Python store only --- The router's result cache (_cache) is
+        # NOT cleared — it lives on the ContentRouter object and is only bounded by its own 30-min TTL.
         reset_compression_store()
         py_store = get_compression_store()
 
@@ -224,9 +221,8 @@ class TestResultCacheCCRDivergence:
         hashes2 = _extract_ccr_hashes(out2)
         assert hashes2 == hashes1, "Served output changed its CCR hashes unexpectedly"
 
-        # --- Invariant: every served hash must now be backed in the Python store,
-        # and the backing must be BYTE-EXACT original rows — "an entry exists"
-        # (TEST-11) also passed when the store held garbage for the hash.
+        # Invariant: every served hash must now be backed in the Python store, and the backing must be BYTE-EXACT
+        # original rows — "an entry exists" (TEST-11) also passed when the store held garbage for the hash.
         original_reprs = {canonical_repr(row) for row in _log_rows(90)}
         for h in hashes2:
             entry = py_store.retrieve(h)
@@ -319,11 +315,7 @@ class TestResultCacheCCRDivergence:
             "The Tier-2 result cache may not be engaged for this content shape."
         )
 
-    # ------------------------------------------------------------------ #
-    # BOTH-EXPIRED hardening: Rust + Python CCR stores both gone (1800 s TTL)
-    # while the result cache (30-min TTL) still holds the crushed output.
-    # The strengthened fix must NOT serve a dead pointer — it recomputes.
-    # ------------------------------------------------------------------ #
+    # .
 
     def test_both_stores_expired_recomputes_and_rebacks(self):
         """Both CCR stores expired + result-cache HIT → recompute re-backs.
@@ -354,9 +346,7 @@ class TestResultCacheCCRDivergence:
         assert crusher is not None, "SmartCrusher must be available for this test"
         assert crusher.ccr_len() >= 1, "Rust store should hold the backing after first apply"
 
-        # Simulate BOTH stores expired:
-        #   - Python store wiped
-        #   - Rust ccr_get returns None until a fresh crush() re-stores
+        # Simulate BOTH stores expired: - Python store wiped - Rust ccr_get returns None until a fresh crush() re-stores
         reset_compression_store()
         real_rust = crusher._rust
         shim = _ExpiringRustShim(real_rust)
@@ -378,9 +368,8 @@ class TestResultCacheCCRDivergence:
             "the fix did not fall through to the recompute path."
         )
 
-        # Invariant: every served sentinel resolves in the Python store again,
-        # and the recomputed backing is byte-exact original rows (TEST-11 —
-        # "backed" alone also passed on a store holding garbage).
+        # Invariant: every served sentinel resolves in the Python store again, and the recomputed backing
+        # is byte-exact original rows (TEST-11 — "backed" alone also passed on a store holding garbage).
         py_store = get_compression_store()
         original_reprs = {canonical_repr(row) for row in _log_rows(90)}
         for h in hashes2:

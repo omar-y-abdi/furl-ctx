@@ -1,17 +1,7 @@
 name: autofix apply
 
-# Trusted bridge for same-repository PRs. The source `autofix` workflow is
-# intentionally unprivileged and may execute PR-controlled code; this workflow
-# therefore treats every source artifact as hostile input.
-#
-# Security invariant: no job in this workflow checks out a PR head, restores a
-# dependency cache, executes repository scripts, imports repository modules, or
-# runs Cargo/Ruff against PR-controlled files. The verifier only parses candidate
-# Python source as data with the CPython tokenizer/AST and proves that the
-# candidate preserves the original AST and security-significant comments. Only
-# that narrow formatting-only subset can cross into the write job. Rust and
-# lint-fix changes remain available in the unprivileged patch artifact but are
-# never auto-pushed from a privileged trigger.
+# Trusted bridge for same-repository PRs. Security invariant no job in this workflow checks out a PR head, restores a
+# dependency cache, executes repository scripts, imports repository modules, or runs Cargo/Ruff against PR-controlled files.
 on:
   workflow_run:
     workflows: [autofix]
@@ -264,9 +254,8 @@ jobs:
               raw = entry["path"]
               suffix = pathlib.PurePosixPath(raw).suffix
               if suffix not in SAFE_SUFFIXES:
-                  # Rust formatting remains in the reviewable patch. Auto-pushing
-                  # it would require trusting a Rust parser/formatter in this
-                  # privileged trigger, which defeats the privilege boundary.
+                  # Rust formatting remains in the reviewable patch. Auto-pushing it would require trusting
+                  # a Rust parser/formatter in this privileged trigger, which defeats the privilege boundary.
                   continue
               live_entry = live.get(raw)
               if not live_entry or live_entry.get("mode") not in {"100644", "100755"}:
@@ -284,9 +273,8 @@ jobs:
               before = parse_python(original, raw)
               after = parse_python(candidate, raw)
               if ast.dump(before, include_attributes=False) != ast.dump(after, include_attributes=False):
-                  # Ruff's lint fixes can be safe, but a privileged bridge should
-                  # not need to trust that classification. Only AST-preserving
-                  # formatting crosses this boundary automatically.
+                  # Ruff's lint fixes can be safe, but a privileged bridge should not need to trust that
+                  # classification. Only AST-preserving formatting crosses this boundary automatically.
                   print(f"leaving semantic/lint change in patch artifact only: {raw}")
                   continue
               before_comments, before_directives = comments(original, raw)
@@ -456,8 +444,6 @@ jobs:
           tree_entries = []
           for entry in manifest["files"]:
               # Re-prove the original blob identity at the exact parent tree.
-              # This prevents a sanitized payload from being replayed against a
-              # different file version even if the branch ref check were wrong.
               current = current_blobs.get(entry["path"])
               if not current or current.get("sha") != entry["original_blob"] or current.get("mode") != entry["mode"]:
                   raise SystemExit(f"live parent blob identity changed for {entry['path']}")

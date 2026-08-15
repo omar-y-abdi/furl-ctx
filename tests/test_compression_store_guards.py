@@ -115,9 +115,8 @@ def test_stale_heap_eviction_respects_max_entries() -> None:
     a = store.store(json.dumps([{"id": 0}]), "<<ccr:aaaaaa>>", explicit_hash="aaaaaa")
     b = store.store(json.dumps([{"id": 1}]), "<<ccr:bbbbbb>>", explicit_hash="bbbbbb")
 
-    # Force the stale-heap state: heap entries with WRONG timestamps (so they
-    # are popped as stale, evicting nothing real) and stale_ratio < 0.5 so the
-    # rebuild guard does not pre-emptively fire.
+    # Force the stale-heap state: heap entries with WRONG timestamps (so they are popped as stale,
+    # evicting nothing real) and stale_ratio < 0.5 so the rebuild guard does not pre-emptively fire.
     store._eviction_heap = [(0.0, a), (0.0, b)]
     heapq.heapify(store._eviction_heap)
     store._stale_heap_entries = 0
@@ -134,10 +133,8 @@ def test_stale_heap_eviction_respects_max_entries() -> None:
 
 
 def test_eviction_caps_with_many_stale_heap_refs() -> None:
-    # Harder #23 case: the heap is polluted with MANY ghost references (more than
-    # a naive fixed budget) plus the real stale-ts entries, and the counter
-    # under-reports. The eviction loop must still rebuild from the live backend
-    # and cap the store — a budget-bounded fix would exit over capacity here.
+    # Harder #23 case: the heap is polluted with MANY ghost references (more than a
+    # naive fixed budget) plus the real stale-ts entries, and the counter under-reports.
     store = CompressionStore(max_entries=2)
     a = store.store(json.dumps([{"id": 0}]), "<<ccr:aaaaaa>>", explicit_hash="aaaaaa")
     b = store.store(json.dumps([{"id": 1}]), "<<ccr:bbbbbb>>", explicit_hash="bbbbbb")

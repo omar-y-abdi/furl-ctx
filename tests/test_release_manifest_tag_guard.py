@@ -62,24 +62,15 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 _MANIFEST = _ROOT / ".release-please-manifest.json"
 
-# release-please-config.json pins this today: include-v-in-tag=true,
-# include-component-in-tag=false, single package at ".". If either ever changes,
-# the tag-name derivation below must change with it — this constant is the single
-# edit point, and a renamed/added package key fails loudly below rather than being
-# silently skipped over.
+# release-please-config.json pins this today: include-v-in-tag=true, include-component-in-tag=false, single package at ".". If either ever changes, the tag-name derivation
+# below must change with it — this constant is the single edit point, and a renamed/added package key fails loudly below rather than being silently skipped over.
 _MANIFEST_PACKAGE_KEY = "."
 
-# Release-PR escape hatch. ci.yml's `test` job sets this to "1" only for
-# release-please-- head branches, and to empty everywhere else; see this module's
-# docstring for the full rationale. The exact-match boundary is deliberately
-# narrow: the variable disarms a supply-chain drift guard, so only the one value
-# ci.yml sets counts, and unset / "" / "0" / "true" all leave the guard armed.
+# Release-PR escape hatch: CI sets this only for release automation branches; all other runs must leave it empty.
 _RELEASE_PR_ENV_VAR = "FURL_RELEASE_PR_CONTEXT"
 
-# GitHub Actions provides this automatically. A missing expected tag cannot be
-# classified as transient-vs-stale from a PR merge ref alone because tag publication
-# is asynchronous and repository-global, so only that missing-tag verdict is
-# deferred on pull_request events. Scheduled/manual runs remain the drift guard.
+# GitHub Actions provides this automatically. A missing expected tag cannot be classified as transient-vs-stale from a PR merge ref alone
+# because tag publication is asynchronous and repository-global, so only that missing-tag verdict is deferred on pull_request events.
 _GITHUB_EVENT_NAME_ENV_VAR = "GITHUB_EVENT_NAME"
 
 

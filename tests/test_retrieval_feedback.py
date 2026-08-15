@@ -96,9 +96,8 @@ def test_defaults_are_the_documented_sane_constants() -> None:
     assert DEFAULT_SKIP_MIN_RETRIEVALS >= DEFAULT_HINT_MIN_RETRIEVALS >= 1
 
 
-# ---------------------------------------------------------------------------
-# Hysteresis: N retrievals in window before a hint fires; N-1 does not
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Hysteresis: N retrievals in window
+# before a hint fires; N-1 does not ---------------------------------------------------------------------------
 
 
 def test_hint_fires_at_threshold_not_below() -> None:
@@ -188,10 +187,8 @@ def test_content_type_isolation() -> None:
 
 
 def test_anonymous_tool_records_count_toward_named_lookup() -> None:
-    # Most live CCR producers store with tool_name=None (the SmartCrusher
-    # mirrors, the sidecar compressor stores). Those signals land in the
-    # tool-anonymous bucket and must still inform routing decisions for the
-    # named tool whose output has the same content shape.
+    # Most live CCR producers store with tool_name=None (the SmartCrusher mirrors, the sidecar compressor stores). Those signals land
+    # in the tool-anonymous bucket and must still inform routing decisions for the named tool whose output has the same content shape.
     fb = _feedback(FakeClock())
     for _ in range(3):
         fb.record_retrieval(ShapeKey(tool="", content_type="json_array"))
@@ -240,10 +237,7 @@ def test_entry_shape_key_maps_strategies_to_content_type_tags() -> None:
 
 
 def test_content_type_tags_pinned_to_detector_enum_values() -> None:
-    # The feedback module deliberately does NOT import furl_ctx.transforms
-    # (dependency-light cache module, mirrors router_policy's design note).
-    # Its local tag strings MUST stay equal to the ContentType enum values the
-    # router passes at lookup time — this pin is the coupling contract.
+    # The feedback module deliberately does NOT import furl_ctx.transforms (dependency-light cache module, mirrors router_policy's design note).
     from furl_ctx.transforms.content_detector import ContentType
     from furl_ctx.transforms.router_policy import (
         CompressionStrategy,

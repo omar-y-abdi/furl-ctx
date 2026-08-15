@@ -1,105 +1,11 @@
-//! Tag protection — keep custom workflow tags out of ML compressors.
-//!
-//! # Why this exists
-//!
-//! LLM workflows carry XML-style markers (`<system-reminder>`,
-//! `<tool_call>`, `<thinking>`, `<furl:tool_digest>`, etc.) that
-//! downstream code parses as structure. A lossy prose compressor sees
-//! them as droppable noise and silently strips them, breaking everything
-//! that depends on them. [`super::text_crusher::TextCrusher`] calls
-//! [`protect_tags`] before every prose compression to swap custom-tag
-//! spans for opaque placeholders, runs segment selection on the cleaned
-//! body (placeholder-bearing segments are mandatory keeps), then calls
-//! [`restore_tags`] on the output to splice the originals back in.
-//!
-//! (Restored in Engine P2-11 — the module was excised in Great-Excision
-//! Chunk 7 when its only consumer, the retired ML text compressor,
-//! disappeared. TextCrusher is the new load-bearing consumer.)
-//!
-//! Standard HTML5 elements (`<div>`, `<p>`, `<span>`, …) are *not*
-//! protected — they are ordinary content to the compressors. Anything
-//! else is treated as a custom tag.
-//!
-//! # Algorithm
-//!
-//! Single-pass tag-stack walker over the input bytes (no regex
-//! backtracking, no O(n²) restart loop):
-//!
-//! 1. Scan forward for `<`. If the next bytes form a valid tag-open
-//!    (`<name attr=…>` or `<name/>`), classify the tag name.
-//! 2. HTML tag → emit verbatim, continue.
-//! 3. Custom tag, self-closing → emit a placeholder, record the span.
-//! 4. Custom tag, opening → push `(name, start_offset)` onto a stack.
-//! 5. `</name>` matching the top of the stack → pop, emit a placeholder
-//!    for the whole `<name>…</name>` span (when
-//!    `compress_tagged_content == false`) or emit two placeholders for
-//!    the markers only (when `compress_tagged_content == true`).
-//! 6. Mismatched close (HTML close while a custom tag is on top, or a
-//!    close with no matching open) → write the close tag verbatim and
-//!    move on. The walker never attempts to "repair" malformed input.
-//!
-//! Output is built incrementally with offset-based slicing — never the
-//! Python-original's `result.replace(original, placeholder, 1)`, which
-//! silently misbehaves when two identical custom-tag blocks appear in
-//! the same input (it always replaces the *first* textual occurrence,
-//! not the matched one). See `fixed_in_3e4_replace_first` test below.
-//!
-//! # Bug fixes vs the Python original
-//!
-//! * **#1: O(n²) on nested custom tags** — the Python loop restarted a
-//!   full regex scan after every replacement. Rust walks once, in
-//!   linear time on input length.
-//! * **#2: First-occurrence replace bug** — `str.replace(.., .., 1)`
-//!   replaced the first textual match of the matched block, not the
-//!   block at the matched offset. Two identical custom-tag blocks in
-//!   the same input collapsed to one placeholder + a duplicated
-//!   second block. The Rust walker stitches output by offset.
-//! * **#3: Silent 50-iteration cap** — Python had a hard 50-iteration
-//!   safety limit that quietly truncated tag protection on deeply
-//!   nested input. The Rust walker's run-time is bounded by input
-//!   length only.
-//! * **#4: Self-closing pass duplicate-replace risk** — Python ran a
-//!   second loop with the same `replace_first` bug for self-closing
-//!   tags. Rust handles self-closers in the same single pass.
-//! * **#5: Placeholder collision** — if input contains a literal
-//!   `{{FURL_TAG_…}}` substring, Python silently let the collision
-//!   stand. We detect that and pick a salted prefix (with a tracing
-//!   warn) so restoration can't be ambiguous.
-//!
-//! # Hot path
-//!
-//! `protect_tags` runs on every TextCrusher prose-compression call.
-//! Most production prompts have 0–10 custom tags so the absolute cost
-//! is small either way; the value of the port is correctness (bugs
-//! #2, #5) and predictable behavior on adversarial input (bugs #1,
-//! #3). The PyO3 bridge releases the GIL during the walk because the
-//! algorithm is fully self-contained.
-//!
-//! # PERF-15 (fixed during the P2-11 restoration)
-//!
-//! The pre-excision `restore_tags` looped `result = result.replace(
-//! placeholder, original)` per block — O(blocks × text) rescans, and
-//! `str::replace` substitutes EVERY occurrence of a placeholder, so a
-//! compressor that duplicated a placeholder yielded duplicated tag
-//! blocks; worse, each pass rescanned earlier substitutions, so a
-//! restored block whose body contained a later placeholder literal was
-//! corrupted by a second substitution inside it. The restored
-//! implementation walks the compressed text ONCE (left-to-right,
-//! aho-corasick, leftmost-longest): each placeholder substitutes at most
-//! once (first occurrence wins; later duplicates stay verbatim with a
-//! WARN), and substituted originals are never rescanned.
+//! Protect custom workflow/XML-like tags from prose compression by replacing matched spans with opaque placeholders, forcing placeholder
+//! segments to survive selection, then restoring originals. Standard HTML tags are not protected unless configured as custom.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-/// HTML5 living-standard element names — the set of tags this module
-/// will NEVER protect (they're handled at a different layer; everything
-/// else is treated as custom).
-///
-/// Generated from
-/// <https://html.spec.whatwg.org/multipage/indices.html#elements-3> and
-/// matches the Python `KNOWN_HTML_TAGS` frozenset element-for-element
-/// so the Rust shim and the Python shim agree.
+/// HTML5 living-standard element names — the set of tags this module will NEVER protect
+/// (they're handled at a different layer; everything else is treated as custom).
 const HTML5_TAGS: &[&str] = &[
     // Main root
     "html",
@@ -239,9 +145,8 @@ fn known_html_tags() -> &'static HashSet<&'static str> {
     SET.get_or_init(|| HTML5_TAGS.iter().copied().collect())
 }
 
-/// Default placeholder prefix. Brace-doubled to look unlike anything a
-/// real workflow tag would emit. Falls back to a salted variant if the
-/// input itself contains the prefix (see [`pick_placeholder_prefix`]).
+/// Default placeholder prefix. Brace-doubled to look unlike anything a real workflow tag would emit. Falls
+/// back to a salted variant if the input itself contains the prefix (see [`pick_placeholder_prefix`]).
 const DEFAULT_PREFIX: &str = "{{FURL_TAG_";
 const PLACEHOLDER_SUFFIX: &str = "}}";
 
@@ -259,10 +164,7 @@ pub fn is_known_html_tag(tag_name: &str) -> bool {
     false
 }
 
-/// Pick a placeholder prefix that doesn't collide with anything in
-/// `text`. We try `{{FURL_TAG_` first; if the input contains it
-/// literally we salt with a per-call counter until we miss. The salt
-/// is bounded; in practice we never need more than one attempt.
+/// Pick a placeholder prefix that doesn't collide with anything in `text`. The salt is bounded; we never need more than one attempt.
 fn pick_placeholder_prefix(text: &str) -> (String, bool) {
     if !text.contains(DEFAULT_PREFIX) {
         return (DEFAULT_PREFIX.to_string(), false);
@@ -273,9 +175,8 @@ fn pick_placeholder_prefix(text: &str) -> (String, bool) {
             return (candidate, true);
         }
     }
-    // 16 salt attempts collided — fall back to a UUID-shaped marker.
-    // The OnceLock cache is so two consecutive calls in the same
-    // process don't pay the formatting cost.
+    // 16 salt attempts collided — fall back to a UUID-shaped marker. The OnceLock cache
+    // is so two consecutive calls in the same process don't pay the formatting cost.
     static FALLBACK: OnceLock<String> = OnceLock::new();
     let prefix = FALLBACK
         .get_or_init(|| "{{FURL_TAG_FALLBACK_a4f1c7e2_".to_string())
@@ -305,10 +206,7 @@ enum TagParse {
     NotTag,
 }
 
-/// Parse a `<…>` starting at `start`. Returns the byte offset of the
-/// closing `>` (exclusive end of the tag) and the kind. Conservatively
-/// rejects malformed shapes — we'd rather emit a `<` verbatim than
-/// over-protect on bad input.
+/// Parse a `<…>` starting at `start`. Conservatively rejects malformed shapes — we'd rather emit a `<` verbatim than over-protect on bad input.
 fn parse_tag_at(bytes: &[u8], start: usize) -> TagParse {
     debug_assert!(bytes[start] == b'<');
     let mut i = start + 1;
@@ -321,10 +219,7 @@ fn parse_tag_at(bytes: &[u8], start: usize) -> TagParse {
     if is_close {
         i += 1;
     }
-    // After consuming a possible '/' we may be at end-of-input
-    // (e.g. literal `</` with nothing after). Guard the bounds
-    // before indexing into `bytes[i]` for the name-start check —
-    // proptest discovered the OOB on input `</`.
+    // After consuming a possible '/' we may be at end-of-input (e.g. literal `</` with nothing after).
     if i >= n {
         return TagParse::NotTag;
     }
@@ -355,9 +250,8 @@ fn parse_tag_at(bytes: &[u8], start: usize) -> TagParse {
         };
     }
 
-    // Opening tag: skip attributes until `>` (handle `/>` for
-    // self-closing). Quoted attribute values can contain `>`; a
-    // single-pass attribute lexer handles the common cases.
+    // Opening tag: skip attributes until `>` (handle `/>` for self-closing). Quoted attribute
+    // values can contain `>`; a single-pass attribute lexer handles the common cases.
     let mut self_closing = false;
     while i < n {
         match bytes[i] {
@@ -369,11 +263,8 @@ fn parse_tag_at(bytes: &[u8], start: usize) -> TagParse {
                 };
             }
             b'/' => {
-                // Self-closing ONLY when the `/` immediately precedes `>`
-                // (`.../>`). A bare `/` elsewhere is ordinary attribute-value
-                // text — an unquoted URL like `url=http://x.com` contains
-                // slashes that must NOT flip the tag to self-closing (COR-9),
-                // or the body gets exposed and the close tag orphaned.
+                // Self-closing ONLY when the `/` immediately precedes `>` (`.../>`). A bare `/` elsewhere is ordinary attribute-value text — an unquoted URL like
+                // `url=http://x.com` contains slashes that must NOT flip the tag to self-closing (COR-9), or the body gets exposed and the close tag orphaned.
                 self_closing = i + 1 < n && bytes[i + 1] == b'>';
                 i += 1;
             }
@@ -408,36 +299,16 @@ fn is_name_cont(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':')
 }
 
-/// A single span that was identified as worth replacing.
-///
-/// In block mode every matched custom-tag span (open..=close) becomes
-/// one Span and is replaced by a single placeholder; self-closing
-/// custom tags become a Span covering just the tag bytes.
-///
-/// In marker-only mode each opening custom tag and each closing custom
-/// tag becomes its own Span (the body between them is left visible to
-/// the compressor).
+/// A single span that was identified as worth replacing. In marker-only mode each opening custom tag and
+/// each closing custom tag becomes its own Span (the body between them is left visible to the compressor).
 #[derive(Debug, Clone, Copy)]
 struct Span {
     start: usize,
     end: usize,
 }
 
-/// Protect custom workflow tags from text compression.
-///
-/// * `compress_tagged_content = false` (default) — replace each entire
-///   `<custom>…</custom>` span (including nested children) with a
-///   single placeholder. Self-closing custom tags become a single
-///   placeholder. The body between the markers is *not* exposed to
-///   compression.
-/// * `compress_tagged_content = true` — replace only the tag markers
-///   (open and close emitted as separate placeholders) so the
-///   compressor can squash content while the tag boundaries survive.
-///
-/// Returns `(cleaned, blocks)` where `blocks` is a list of
-/// `(placeholder, original)` pairs for [`restore_tags`]. The blocks
-/// are listed in left-to-right order of appearance in the input, which
-/// keeps the restore step trivial.
+/// Protect custom workflow tags from text compression. replace each entire `<custom>…</custom>` span (including nested children) with a single placeholder.
+/// replace only the tag markers (open and close emitted as separate placeholders) so the compressor can squash content while the tag boundaries survive.
 pub fn protect_tags(text: &str, compress_tagged_content: bool) -> (String, Vec<(String, String)>) {
     if text.is_empty() || !text.contains('<') {
         return (text.to_string(), Vec::new());
@@ -445,22 +316,15 @@ pub fn protect_tags(text: &str, compress_tagged_content: bool) -> (String, Vec<(
 
     let (prefix, _salted) = pick_placeholder_prefix(text);
 
-    // Phase 1: walk once, classify every tag, build a list of spans
-    // worth replacing. No output emitted yet — this is purely
-    // discovery so we can decide which byte ranges to swap.
+    //
     let spans = identify_spans(text, compress_tagged_content);
 
-    // Phase 2: emit. Walk the input once more, splicing placeholders
-    // for span bytes and copying everything else verbatim. Because
-    // `spans` is sorted left-to-right and non-overlapping (block mode
-    // collapses nested matches into the outermost span; marker mode
-    // emits open/close markers that are byte-disjoint by construction)
-    // this is a straightforward scan.
+    // Because `spans` is sorted left-to-right and non-overlapping (block mode collapses nested matches into the outermost
+    // span; marker mode emits open/close markers that are byte-disjoint by construction) this is a straightforward scan.
     match emit_output(text, &spans, &prefix) {
         Some((cleaned, blocks)) => (cleaned, blocks),
-        // Should be unreachable — `identify_spans` returns spans whose
-        // bytes are slices of `text`. If we ever fail to splice them
-        // back, fall back to emitting the original.
+        // Should be unreachable — `identify_spans` returns spans whose bytes are slices of
+        // `text`. If we ever fail to splice them back, fall back to emitting the original.
         None => (text.to_string(), Vec::new()),
     }
 }
@@ -475,9 +339,7 @@ fn identify_spans(text: &str, compress_tagged_content: bool) -> Vec<Span> {
     while i < n {
         let b = bytes[i];
         if b != b'<' {
-            // Skip ahead to the next `<`. We don't care about non-tag
-            // bytes for span identification; they'll be copied verbatim
-            // in phase 2.
+            // Skip ahead to the next `<`. We don't care about non-tag bytes for span identification; they'll be copied verbatim in phase 2.
             i = memchr(b'<', &bytes[i..]).map(|j| i + j).unwrap_or(n);
             continue;
         }
@@ -505,9 +367,7 @@ fn identify_spans(text: &str, compress_tagged_content: bool) -> Vec<Span> {
                     continue;
                 }
                 if compress_tagged_content {
-                    // Marker-only mode: emit the open as its own span
-                    // *and* push the name on the stack so the close
-                    // gets matched and emitted as its own span.
+                    // Marker-only mode: emit the open as its own span *and* push the name on the stack so the close gets matched and emitted as its own span.
                     spans.push(Span {
                         start: i,
                         end: tag_end,
@@ -534,29 +394,15 @@ fn identify_spans(text: &str, compress_tagged_content: bool) -> Vec<Span> {
                 match matching {
                     Some(stack_idx) => {
                         if compress_tagged_content {
-                            // Remove the matched open tag AND every orphan
-                            // open nested inside it (their open markers were
-                            // already recorded as spans and we keep them).
-                            // `truncate(stack_idx)` drops the matched tag at
-                            // `stack_idx` and everything above it in ONE step
-                            // — a following `pop()` would additionally remove
-                            // the ENCLOSING open tag (the one at
-                            // `stack_idx - 1`), leaving its close unmatched
-                            // and violating the restore-symmetry invariant
-                            // for nested tags like `<a><b>x</b>y</a>` (COR-8).
+                            // Remove the matched open tag AND every orphan open nested inside it (their open markers were already recorded as spans
+                            // and we keep them). `truncate(stack_idx)` drops the matched tag at `stack_idx` and everything above it in ONE step.
                             stack.truncate(stack_idx);
                             spans.push(Span {
                                 start: i,
                                 end: tag_end,
                             });
                         } else {
-                            // Block mode: collapse [open..close] into
-                            // a single span. Drop any inner unmatched
-                            // opens (they're part of this span's body).
-                            // Also DROP any inner spans we already
-                            // recorded that are now subsumed by this
-                            // outer block — that's how nested custom
-                            // tags collapse to one placeholder.
+                            // Block mode: collapse [open..close] into a single span.
                             let open_start = stack[stack_idx].open_start;
                             stack.truncate(stack_idx);
                             spans.retain(|s| s.start < open_start);
@@ -575,13 +421,8 @@ fn identify_spans(text: &str, compress_tagged_content: bool) -> Vec<Span> {
         }
     }
 
-    // Stack remnants are orphan opens (no matching close ever arrived).
-    // We don't protect those — they'll fall through to the compressor
-    // as raw `<name>` bytes, same as Python's original behavior. In
-    // block mode their inner self-closing spans we recorded are still
-    // safe to keep: they were below an unmatched outer open, so they
-    // were never collapsed. Spans are sorted by start ascending due to
-    // the monotonic walk; phase 2 expects that.
+    // Stack remnants are orphan opens (no matching close ever arrived). In block mode their inner self-closing spans
+    // we recorded are still safe to keep: they were below an unmatched outer open, so they were never collapsed.
     spans
 }
 
@@ -596,9 +437,8 @@ fn emit_output(
 
     for (counter, span) in (0_u64..).zip(spans.iter()) {
         if span.start < cursor {
-            // Overlap shouldn't happen given how we collapse nested
-            // spans, but bail loudly if it does — silently producing
-            // wrong output is worse than failing the test.
+            // Overlap shouldn't happen given how we collapse nested spans, but bail loudly
+            // if it does — silently producing wrong output is worse than failing the test.
             return None;
         }
         out.push_str(&text[cursor..span.start]);
@@ -612,62 +452,14 @@ fn emit_output(
     Some((out, blocks))
 }
 
-/// Restore protected tag spans after the compressor ran on the
-/// cleaned text.
-///
-/// # Hotfix-A9 — discard-wrap semantics
-///
-/// If a placeholder went missing during compression (the compressor
-/// stripped or rewrote it) the wrap is **discarded**: the compressed
-/// text flows downstream as-is and the original tag bytes are NOT
-/// re-injected anywhere. This is a deliberate behavior change vs the
-/// original "append the orphan tag at the trailing edge" fallback,
-/// which produced silently malformed XML (an opening tag with no
-/// closing tag and no body) on ~350 production requests over 9 days.
-///
-/// An ERROR-level `tracing` event with structured fields
-/// (`event = tag_protector_placeholder_lost`, `tag_preview`,
-/// `compressed_length`, optional `request_id`) is emitted per lost
-/// placeholder so operators can alert on the corruption rather than
-/// having it disappear into a WARN line. Token validation downstream
-/// is responsible for catching cases where the discard regressed the
-/// final output vs the original input.
-///
-/// Invariants enforced:
-/// 1. Symmetry — never emit asymmetric tag counts (the input either
-///    survives both opens and closes via successful substitution, or
-///    neither survives via discard).
-/// 2. No orphan tag injection — `restore_tags` adds bytes only as part
-///    of placeholder substitution. No appends, no prepends, no
-///    whitespace insertion outside placeholder substitutions.
-/// 3. Idempotence on missing placeholders — if every placeholder is
-///    absent from `compressed`, the function returns `compressed`
-///    byte-for-byte unchanged.
+/// Restore protected blocks with one placeholder regex pass, validating request IDs when present. Unknown or mismatched
+/// placeholders stay literal; restored content is not rescanned, preventing recursive substitution and quadratic replacement.
 pub fn restore_tags(text: &str, blocks: &[(String, String)]) -> String {
     restore_tags_with_request_id(text, blocks, None)
 }
 
-/// Variant of [`restore_tags`] that threads an optional `request_id`
-/// into the structured ERROR log emitted on placeholder loss. The
-/// PyO3 binding currently calls [`restore_tags`] (no request id);
-/// this entry point exists so the caller can wire request
-/// context through once it has one available end-to-end.
-///
-/// # PERF-15 — single left-to-right scan
-///
-/// One aho-corasick pass over `text` (leftmost-longest match semantics)
-/// instead of the old per-block `result.replace(placeholder, original)`
-/// loop. Three concrete behavior guarantees the old loop violated:
-///
-/// 1. **Each placeholder substitutes at most once.** The first (leftmost)
-///    occurrence wins; later duplicates of the same placeholder — bytes a
-///    buggy compressor fabricated, not protected spans — stay verbatim
-///    and emit a WARN.
-/// 2. **Substituted originals are never rescanned.** Matches are found in
-///    the compressed input only, so a restored block whose body contains
-///    a *later* placeholder literal is not corrupted by a second
-///    substitution inside it.
-/// 3. **O(text + Σ placeholder lengths)** instead of O(blocks × text).
+/// Placeholder restoration is single-pass and non-recursive. Build the lookup once, replace recognized tokens
+/// directly, and leave unknown tokens unchanged so restored payload text cannot trigger a second substitution.
 pub fn restore_tags_with_request_id(
     text: &str,
     blocks: &[(String, String)],
@@ -705,9 +497,7 @@ pub fn restore_tags_with_request_id(
         .match_kind(aho_corasick::MatchKind::LeftmostLongest)
         .build(&patterns)
     else {
-        // Automaton construction can only fail on pathological pattern
-        // sets (size limits). Treat every block as lost rather than
-        // guessing at substitutions.
+        // Automaton construction can only fail on pathological pattern sets (size limits). Treat every block as lost rather than guessing at substitutions.
         for (_, (_, original)) in &valid {
             tag_lost_error(original, text.len(), request_id);
         }
@@ -721,9 +511,7 @@ pub fn restore_tags_with_request_id(
         let pattern_idx = m.pattern().as_usize();
         result.push_str(&text[cursor..m.start()]);
         if used[pattern_idx] {
-            // Duplicate occurrence of an already-substituted placeholder:
-            // compressor-fabricated bytes, kept verbatim (never a second
-            // copy of the protected span).
+            // Duplicate occurrence of an already-substituted placeholder: compressor-fabricated bytes, kept verbatim (never a second copy of the protected span).
             tracing::warn!(
                 target: "furl::tag_protector",
                 event = "tag_protector_duplicate_placeholder",
@@ -740,9 +528,8 @@ pub fn restore_tags_with_request_id(
     }
     result.push_str(&text[cursor..]);
 
-    // Lost placeholders (never seen in the compressed text): the wrap is
-    // DISCARDED — no orphan-tag append (Hotfix-A9) — with a structured
-    // ERROR per block so operators can alert on the corruption.
+    // Lost placeholders (never seen in the compressed text): the wrap is DISCARDED — no orphan-tag
+    // append (Hotfix-A9) — with a structured ERROR per block so operators can alert on the corruption.
     let compressed_length = text.len();
     for (i, (_, (_, original))) in valid.iter().enumerate() {
         if !used[i] {
@@ -853,12 +640,7 @@ mod tests {
 
     #[test]
     fn unquoted_slash_attribute_is_not_self_closing() {
-        // COR-9 regression. A `/` inside an unquoted attribute value
-        // (`url=http://x.com`) used to set `self_closing = true`, so the
-        // open `<citation>` was misclassified as self-closing: its body
-        // was exposed and the `</citation>` close orphaned (unbalanced
-        // restore). A `/` is only self-closing when immediately followed
-        // by `>`. The whole element must be protected as ONE span.
+        // A `/` is only self-closing when immediately followed by `>`.
         let text = "<citation url=http://x.com>body</citation>";
         let (cleaned, blocks) = protect(text);
         assert_eq!(
@@ -936,21 +718,8 @@ mod tests {
 
     #[test]
     fn marker_mode_nested_tags_protect_both_closes() {
-        // COR-8 regression. In marker mode, close-matching used to run
-        // `truncate(stack_idx)` AND `pop()`, so a nested inner close
-        // removed its ENCLOSING open from the stack — the later outer
-        // close then matched nothing and was left RAW in the cleaned
-        // text. A compressor stripping that orphan outer close yields
-        // asymmetric tags after restore (the exact failure this module
-        // prevents).
-        //
-        // Custom (non-HTML) tag names are required to reach the marker
-        // path — `is_known_html_tag` skips real HTML names like `a`/`b`
-        // (the recon's `<a><b>` shape never reaches this code). For
-        // `<outer><inner>x</inner>y</outer>` marker mode must emit FOUR
-        // marker placeholders (open outer, open inner, close inner,
-        // close outer) with the body text left inline — and NO raw tag
-        // may survive in the cleaned output.
+        // A compressor stripping that orphan outer close yields asymmetric tags after restore (the
+        // exact failure this module prevents). and NO raw tag may survive in the cleaned output.
         let text = "<outer><inner>x</inner>y</outer>";
         let (cleaned, blocks) = protect_tags(text, true);
 
@@ -990,11 +759,8 @@ mod tests {
 
     #[test]
     fn restore_lost_placeholder_discards_wrap() {
-        // Hotfix-A9: when a placeholder is missing from the compressed
-        // text, the wrap is DISCARDED — the compressed text is returned
-        // as-is, with no orphan-tag append. (The original behavior of
-        // appending the tag at the trailing edge produced silently
-        // malformed XML in ~350 production requests over 9 days.)
+        // Hotfix-A9: when a placeholder is missing from the compressed text, the wrap is
+        // DISCARDED — the compressed text is returned as-is, with no orphan-tag append.
         let blocks = vec![("{{FURL_TAG_0}}".to_string(), "<tag>data</tag>".to_string())];
         let compressed = "text without placeholder";
         let restored = restore_tags(compressed, &blocks);
@@ -1009,12 +775,7 @@ mod tests {
 
     #[test]
     fn perf15_duplicate_placeholder_substitutes_first_occurrence_only() {
-        // A compressor that DUPLICATES a placeholder must not duplicate
-        // the protected tag block on restore. The pre-restoration
-        // `result.replace(placeholder, original)` loop substituted every
-        // occurrence; the single-pass scan substitutes the FIRST
-        // occurrence and leaves later duplicates verbatim (they are
-        // compressor-fabricated bytes, not protected spans).
+        // A compressor that DUPLICATES a placeholder must not duplicate the protected tag block on restore.
         let blocks = vec![(
             "{{FURL_TAG_0}}".to_string(),
             "<system-reminder>rule</system-reminder>".to_string(),
@@ -1034,12 +795,8 @@ mod tests {
 
     #[test]
     fn perf15_substituted_originals_are_never_rescanned() {
-        // Single left-to-right scan over the COMPRESSED text: a restored
-        // block whose body happens to contain a LATER placeholder
-        // literal must not have that body corrupted by a second
-        // substitution pass. The old per-block `replace` loop rescanned
-        // the whole accumulated result on every iteration and rewrote
-        // placeholder-shaped bytes inside already-restored originals.
+        // Single left-to-right scan over the COMPRESSED text: a restored block whose body happens to contain
+        // a LATER placeholder literal must not have that body corrupted by a second substitution pass.
         let blocks = vec![
             (
                 "{{FURL_TAG_0}}".to_string(),
@@ -1059,9 +816,7 @@ mod tests {
 
     #[test]
     fn perf15_out_of_order_placeholders_restore_correctly() {
-        // Compressors may reorder segments. The scan substitutes by
-        // pattern identity at each match position, so block order and
-        // text order don't need to agree.
+        // Compressors may reorder segments. The scan substitutes by pattern identity at each match position, so block order and text order don't need to agree.
         let blocks = vec![
             ("{{FURL_TAG_0}}".to_string(), "<a>first</a>".to_string()),
             ("{{FURL_TAG_1}}".to_string(), "<b>second</b>".to_string()),
@@ -1073,9 +828,8 @@ mod tests {
 
     #[test]
     fn perf15_empty_placeholder_blocks_are_ignored() {
-        // Defensive: an empty placeholder string would match at every
-        // position under a substring scan. Such blocks are skipped
-        // (logged) rather than allowed to inject bytes everywhere.
+        // Defensive: an empty placeholder string would match at every position under a substring
+        // scan. Such blocks are skipped (logged) rather than allowed to inject bytes everywhere.
         let blocks = vec![
             (String::new(), "<evil>injected</evil>".to_string()),
             ("{{FURL_TAG_0}}".to_string(), "<a>ok</a>".to_string()),
@@ -1088,9 +842,7 @@ mod tests {
 
     #[test]
     fn restore_lost_placeholder_idempotent_when_all_missing() {
-        // Invariant #3: if every placeholder is missing from the
-        // compressed text, the function returns the compressed text
-        // byte-for-byte unchanged.
+        // Invariant #3: if every placeholder is missing from the compressed text, the function returns the compressed text byte-for-byte unchanged.
         let blocks = vec![
             ("{{FURL_TAG_0}}".to_string(), "<a>1</a>".to_string()),
             ("{{FURL_TAG_1}}".to_string(), "<b>2</b>".to_string()),
@@ -1103,9 +855,8 @@ mod tests {
 
     #[test]
     fn restore_partial_loss_keeps_present_drops_lost() {
-        // Mixed case: some placeholders survive, others are lost. The
-        // surviving ones get substituted; the lost ones are discarded.
-        // No orphan-tag bytes appear anywhere in the output.
+        // Mixed case: some placeholders survive, others are lost. The surviving ones get substituted;
+        // the lost ones are discarded. No orphan-tag bytes appear anywhere in the output.
         let blocks = vec![
             ("{{FURL_TAG_0}}".to_string(), "<a>1</a>".to_string()),
             ("{{FURL_TAG_1}}".to_string(), "<lost>x</lost>".to_string()),
@@ -1130,11 +881,7 @@ mod tests {
 
     #[test]
     fn fixed_in_3e4_replace_first_does_not_collide_on_duplicate_blocks() {
-        // Bug #2: Python's `result.replace(original, placeholder, 1)`
-        // replaces the FIRST textual occurrence of `original`, not
-        // necessarily the matched offset. Two identical custom-tag
-        // blocks would collapse to a single placeholder + a stray
-        // duplicate of the second block in the output.
+        //
         let text = "<system-reminder>same</system-reminder> middle \
              <system-reminder>same</system-reminder>";
         let (cleaned, blocks) = protect_tags(text, false);
@@ -1149,10 +896,7 @@ mod tests {
 
     #[test]
     fn fixed_in_3e4_handles_50_plus_nested_custom_tags() {
-        // Bug #3: Python had a hard-coded 50-iteration safety cap that
-        // silently truncated tag protection on deeply nested input.
-        // Build 60 nested custom tags and verify all get caught in
-        // the outermost span.
+        // Bug #3: Python had a hard-coded 50-iteration safety cap that silently truncated tag protection on deeply nested input.
         let depth = 60;
         let mut text = String::new();
         for _ in 0..depth {
@@ -1227,10 +971,8 @@ mod tests {
 
     #[test]
     fn truncated_close_marker_does_not_panic() {
-        // Hotfix-A9: proptest seed `</` would index past end-of-input
-        // in `parse_tag_at`. Pre-fix this panicked with an OOB; the
-        // bounds-check now returns NotTag and the function falls
-        // through to emitting `</` verbatim.
+        // Hotfix-A9: proptest seed `</` would index past end-of-input in `parse_tag_at`. Pre-fix this panicked with
+        // an OOB; the bounds-check now returns NotTag and the function falls through to emitting `</` verbatim.
         for text in ["</", "<", "<a/", "<a", "<a /", "</a"] {
             let (cleaned, blocks) = protect_tags(text, false);
             assert_eq!(cleaned, text);
@@ -1249,9 +991,8 @@ mod tests {
 
     #[test]
     fn html_close_inside_custom_block_does_not_pop_stack() {
-        // An HTML close tag while a custom open is on top should not
-        // confuse the stack: the HTML close is emitted verbatim, the
-        // custom span still closes when its own close arrives.
+        // An HTML close tag while a custom open is on top should not confuse the stack: the HTML
+        // close is emitted verbatim, the custom span still closes when its own close arrives.
         let text = "<custom>x</div> y</custom>";
         let (cleaned, blocks) = protect_tags(text, false);
         // The whole `<custom>...</custom>` span wins, including the
@@ -1263,11 +1004,8 @@ mod tests {
 
     // ─── Hotfix-A9 invariants ────────────────────────────────────────
 
-    /// Count `<custom>` style opening tags (excludes self-closers and
-    /// excludes the closing-tag `</…>` form). Any `<` that is followed
-    /// by an alphabetic name and ends with `>` (without an embedded
-    /// `/>`) counts. Only used by the proptest below — keeps the
-    /// invariant check independent of the parser under test.
+    /// Count `<custom>` style opening tags (excludes self-closers and excludes the closing-tag `</…>` form).
+    /// Only used by the proptest below — keeps the invariant check independent of the parser under test.
     fn count_open_tags(s: &str) -> usize {
         let bytes = s.as_bytes();
         let mut count = 0_usize;
@@ -1341,23 +1079,12 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Invariant: `restore_tags` never INTRODUCES tag-count
-        /// asymmetry. Concretely: restoring on a compressed text with
-        /// any subset of placeholders missing must produce the same
-        /// `opens - closes` skew as the cleaned text after stripping
-        /// the placeholders. The orphan-append bug fixed by Hotfix-A9
-        /// could turn a symmetric `<a>x</a>` into an asymmetric
-        /// `compressed-stuff <a>` whenever the placeholder was
-        /// dropped — the discard-wrap path makes that impossible
-        /// because every protected span is a balanced wrap (or a
-        /// self-closer) so dropping it changes opens and closes by
-        /// the same amount.
+        /// Invariant `restore_tags` never INTRODUCES tag-count asymmetry. restoring on a compressed text with any subset of
+        /// placeholders missing must produce the same `opens - closes` skew as the cleaned text after stripping the placeholders.
         #[test]
         fn restore_never_introduces_asymmetry(content in "[a-z<>/]{0,200}") {
             let (cleaned, blocks) = protect_tags(&content, false);
-            // Baseline: strip every placeholder from `cleaned`. This
-            // is the "lost everything" worst case; the discard-wrap
-            // path must produce exactly this output.
+            // Baseline: strip every placeholder from `cleaned`. This is the "lost everything" worst case; the discard-wrap path must produce exactly this output.
             let mut stripped = cleaned.clone();
             for (placeholder, _original) in &blocks {
                 stripped = stripped.replace(placeholder.as_str(), "");
@@ -1365,9 +1092,8 @@ mod tests {
             let baseline_skew = count_open_tags(&stripped) as i64
                 - count_close_tags(&stripped) as i64;
 
-            // With every placeholder lost, restore_tags must return
-            // the compressed text with placeholders dropped — which
-            // is exactly `stripped`. So asymmetry equals baseline.
+            // With every placeholder lost, restore_tags must return the compressed text with
+            // placeholders dropped — which is exactly `stripped`. So asymmetry equals baseline.
             let restored_all_lost = restore_tags(&stripped, &blocks);
             let lost_skew = count_open_tags(&restored_all_lost) as i64
                 - count_close_tags(&restored_all_lost) as i64;
@@ -1377,9 +1103,8 @@ mod tests {
                 baseline_skew, lost_skew, restored_all_lost
             );
 
-            // With every placeholder PRESENT, restore_tags must round-
-            // trip exactly to the original `content`, which by
-            // construction has the same skew as `content` itself.
+            // With every placeholder PRESENT, restore_tags must round- trip exactly to the
+            // original `content`, which by construction has the same skew as `content` itself.
             let restored_full = restore_tags(&cleaned, &blocks);
             let full_skew = count_open_tags(&restored_full) as i64
                 - count_close_tags(&restored_full) as i64;
@@ -1392,21 +1117,15 @@ mod tests {
             );
         }
 
-        /// Invariant: when every placeholder is stripped before
-        /// restore, the function returns the compressed text
-        /// byte-for-byte unchanged (no orphan-tag injection, no
-        /// whitespace insertion, no prepends/appends).
+        /// Invariant: when every placeholder is stripped before restore, the function returns the compressed
+        /// text byte-for-byte unchanged (no orphan-tag injection, no whitespace insertion, no prepends/appends).
         #[test]
         fn restore_idempotent_when_all_placeholders_lost(
             content in "[a-z<>/]{0,200}",
             compressed in "[ -~]{0,200}",
         ) {
             let (_cleaned, blocks) = protect_tags(&content, false);
-            // Drop all placeholders by feeding `restore_tags` arbitrary
-            // text the compressor "produced". If none of the
-            // placeholders happen to appear in `compressed` (the
-            // common case for arbitrary strings), the discard-wrap
-            // path runs end-to-end.
+            // Drop all placeholders by feeding `restore_tags` arbitrary text the compressor "produced".
             let any_placeholder_present = blocks
                 .iter()
                 .any(|(p, _)| compressed.contains(p.as_str()));
@@ -1415,30 +1134,21 @@ mod tests {
             proptest::prop_assert_eq!(restored, compressed);
         }
 
-        /// Invariant: `restore_tags` never adds bytes that weren't
-        /// already in `compressed` or part of a substituted placeholder
-        /// original. Concretely: the restored length is at most
-        /// `compressed.len()` plus the sum of lengths of originals
-        /// that actually got substituted; lost-placeholder originals
-        /// contribute zero bytes.
+        /// Invariant: `restore_tags` never adds bytes that weren't already in `compressed` or part of a substituted placeholder original. Concretely: the restored
+        /// length is at most `compressed.len()` plus the sum of lengths of originals that actually got substituted; lost-placeholder originals contribute zero bytes.
         #[test]
         fn restore_no_orphan_byte_injection(
             content in "[a-z<>/]{0,200}",
         ) {
             let (cleaned, blocks) = protect_tags(&content, false);
             let restored = restore_tags(&cleaned, &blocks);
-            // Sum of the byte-lengths of the originals that were
-            // actually substituted (placeholder still present in
-            // `cleaned`). Lost placeholders contribute zero.
+            // Sum of the byte-lengths of the originals that were actually substituted (placeholder still present in `cleaned`). Lost placeholders contribute zero.
             let substituted_original_bytes: usize = blocks
                 .iter()
                 .filter(|(p, _)| cleaned.contains(p.as_str()))
                 .map(|(p, original)| original.len().saturating_sub(p.len()))
                 .sum();
             // Upper bound: cleaned.len() + delta from substitution.
-            // (Substitution replaces each placeholder of len p.len()
-            // with original of len original.len(); delta per substitution
-            // is original.len() - p.len(), summed across substitutions.)
             let upper_bound = cleaned.len() + substituted_original_bytes;
             proptest::prop_assert!(
                 restored.len() <= upper_bound,

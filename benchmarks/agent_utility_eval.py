@@ -169,10 +169,8 @@ def run_corpus(
     """Compress corpus once; emit one record per (corpus, archetype)."""
     messages = [{"role": "tool", "content": corpus_str}]
     result = compress(messages, model=MODEL)
-    # A2 / B4: fail closed, never measure a broken engine. compress() never
-    # raises — it fail-opens with `error` set and tokens_after == 0, which this
-    # harness would otherwise record as compression_ratio 1.0 and write out as a
-    # "Baseline". Abort before any measurement derives from it.
+    # A2 / B4: fail closed, never measure a broken engine. compress() never raises — it fail-opens with `error` set and
+    # tokens_after == 0, which this harness would otherwise record as compression_ratio 1.0 and write out as a "Baseline".
     _abort_if_fail_open(f"agent_utility:{corpus_id}", result)
 
     blob = blob_str(result.messages)
@@ -280,11 +278,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42, help="RNG seed for generated corpora")
     args = parser.parse_args()
 
-    # A2 / B4: fail CLOSED on a broken engine, matching run_bench.main(). Running
-    # this from the repo root puts the extension-less source tree ahead of the
-    # built wheel on sys.path, so every compress() fail-opens and this harness
-    # would otherwise write a fictional baseline at rc=0. Verify the native core
-    # imports up front and abort BEFORE measuring or writing anything.
+    # Abort benchmarking unless native `_core` imports. Repo-root source shadowing can
+    # otherwise make compression fail open and produce a fictional successful baseline.
     try:
         import furl_ctx._core  # noqa: F401  (native extension presence check)
     except Exception as exc:  # noqa: BLE001 - any import failure is fatal here
@@ -323,10 +318,8 @@ def main() -> int:
                     f"transforms={r0['transforms']}"
                 )
             except BenchmarkAbortedError:
-                # MUST precede the bare handler below (B4): a fail-open abort is
-                # not a per-corpus hiccup to log and skip past — it means the
-                # engine is broken, so nothing may be measured or written.
-                # `continue` would swallow it and still emit a baseline at rc=0.
+                # MUST precede the bare handler below (B4): a fail-open abort is not a per-corpus hiccup to
+                # log and skip past — it means the engine is broken, so nothing may be measured or written.
                 raise
             except Exception as exc:
                 import traceback

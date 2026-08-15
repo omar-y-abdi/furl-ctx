@@ -23,12 +23,7 @@ from furl_ctx.transforms.content_router import (
 def test_compression_cache_handles_hits_skips_evictions_and_clear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The cache's expiry math rides time.monotonic() (ENGINE P1-9: wall-clock
-    # NTP steps must not break TTL semantics), so that is the clock to fake.
-    # A settable clock, NOT an exhaustible iterator (TEST-21): every
-    # monotonic() read observes the same instant until the test advances it,
-    # so a refactor that adds or removes clock reads can neither raise
-    # StopIteration nor shift the expiry schedule.
+    # The cache's expiry math rides time.monotonic() (ENGINE P1-9: wall-clock NTP steps must not break TTL semantics), so that is the clock to fake.
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(content_router_module.time, "monotonic", lambda: clock.now)
     monkeypatch.setattr(content_router_module.time, "perf_counter_ns", lambda: 50)
@@ -116,9 +111,8 @@ def test_detection_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     Python detector disagrees — is pinned by the parity tests below
     (`test_detect_content_*`).
     """
-    # Monkeypatch the Rust binding to return a deterministic fake
-    # result; verify _detect_content propagates the content_type
-    # tag back as the Python ContentType enum.
+    # Monkeypatch the Rust binding to return a deterministic fake result; verify
+    # _detect_content propagates the content_type tag back as the Python ContentType enum.
     import furl_ctx._core as _core
 
     fake_rust_result = SimpleNamespace(
@@ -497,18 +491,8 @@ def test_log_strategy_has_no_fallback_when_log_is_noop(
     assert strategy_chain == ["log"]
 
 
-# ---------------------------------------------------------------------------
-# Cache-safety tests for _process_content_blocks. These pin down the
-# block-level invariants that protect upstream prefix caches:
-#
-#   * cache_control on a block is the client's explicit cache breakpoint —
-#     never modified, regardless of role/type.
-#   * assistant text blocks are part of the cache prefix in subsequent
-#     turns; default-skipped, opt-in via compress_assistant_text_blocks.
-#   * user/system text blocks are the prompt; never modified.
-#   * tool/function text blocks are tool outputs; freely compressed.
-#   * min_chars threshold gates short blocks.
-# ---------------------------------------------------------------------------
+# Cache-safety tests for _process_content_blocks. These pin down the block-level invariants that protect upstream prefix caches: * cache_control on a block is
+# the client's explicit cache breakpoint — never modified, regardless of role/type. * assistant text blocks are part of the cache prefix in subsequent turns.
 
 
 def _process_blocks(router: ContentRouter, msg: dict, **overrides):

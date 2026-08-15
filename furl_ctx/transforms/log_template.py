@@ -55,16 +55,11 @@ from furl_ctx.transforms.log_template_miner import (
 
 # --- Constants ---------------------------------------------------------------
 
-# A template must be backed by at least this many source lines for the transform
-# to bother emitting the header + records at all.  Below this, the header cost
-# outweighs any saving and the input has "no exploitable template structure"
-# (spec).  Three is the smallest count where a shared template can plausibly pay
-# for itself (one header line amortised over >=3 record lines).
+# A template must be backed by at least this many source lines for the transform to bother emitting the header + records at all.
 MIN_TEMPLATE_SUPPORT: int = 3
 
-# Tokeniser: alternating whitespace runs and non-whitespace runs.  This is the
-# concatenation-preserving split that makes templating lossless — ``"".join`` of
-# the result is the exact input.
+# Tokeniser: alternating whitespace runs and non-whitespace runs. This is the concatenation-preserving
+# split that makes templating lossless — ``"".join`` of the result is the exact input.
 _TOKEN_RE = re.compile(r"\s+|\S+")
 
 
@@ -123,11 +118,8 @@ def content_and_terminators(text: str) -> tuple[tuple[str, str], ...]:
         else:
             buf.append(ch)
             i += 1
-    # Trailing content with no terminator (also covers empty input -> [("","")]).
-    # Only when there IS trailing content (or nothing at all): text ending in a
-    # terminator must NOT grow a phantom empty line — the docstring's "empty
-    # terminator iff text does not end with a newline" invariant, and the stats
-    # (templated_lines/verbatim_lines) count real lines only.
+    # Trailing content with no terminator (also covers empty input -> [("","")]). Only when there IS
+    # trailing content (or nothing at all): text ending in a terminator must NOT grow a phantom empty line.
     if buf or not pairs:
         pairs.append(("".join(buf), fmt.TERMINATOR_NONE))
     return tuple(pairs)
@@ -181,12 +173,7 @@ def _render_template_text(template: Template) -> str:
             parts.append(fmt.WILDCARD)
         else:
             fixed = str(tok)  # miner stores str at fixed positions
-            # Escape FIRST, then substitute the sentinel: the sentinel's own
-            # backslash must reach the wire raw. The reverse order double-
-            # escaped it ("\\w"), which the decoder faithfully unescaped back
-            # to a literal "\w" instead of "<*>" — caught by encode_verified.
-            # Safe: "<*>" carries no escapable bytes, so it survives _escape
-            # intact, and no escape output can fabricate a false "<*>".
+            # Escape FIRST, then substitute the sentinel: the sentinel's own backslash must reach the wire raw.
             parts.append(_escape(fixed).replace(fmt.WILDCARD, fmt.WILDCARD_SENTINEL))
     return "".join(parts)
 
@@ -261,10 +248,7 @@ def encode(text: str) -> LogTemplateEncoding | None:
     # determinism and reader-friendliness.
     header_lines = [_header_line(templates_by_id[tid]) for tid in sorted(usable_ids)]
 
-    # Emit records in original order.  A line uses its template only when that
-    # template is usable AND the template actually reproduces the line (guarded
-    # by re-render equality — cheap insurance against any pattern/param drift);
-    # otherwise it ships verbatim.
+    # Emit records in original order.
     record_lines: list[str] = []
     templated_count = 0
     verbatim_count = 0

@@ -40,8 +40,7 @@ import json
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
-# Force the lossless-first path so these corpora exercise the lossless
-# CSV-schema tier directly (mirrors tests/test_csv_schema_decoder_roundtrip_fuzz).
+# Force lossless-first routing so these corpora exercise the lossless CSV-schema tier directly.
 _LOSSLESS_FIRST = ContentRouterConfig(smart_crusher_routing_policy="lossless-first")
 
 # A long constant column guarantees the render clears the 30% byte-savings

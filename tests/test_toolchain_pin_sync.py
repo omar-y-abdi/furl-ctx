@@ -87,8 +87,7 @@ import tomllib
 try:
     import yaml
 except ModuleNotFoundError as exc:
-    # Hard-fail (not skip), mirroring tests/test_ci_required_checks_guard.py:
-    # PyYAML is declared as `pyyaml>=6` in the [dev] optional-dependencies.
+    # Hard-fail rather than skip because PyYAML is a declared development dependency.
     raise ModuleNotFoundError(
         "tests/test_toolchain_pin_sync.py requires PyYAML to parse the workflows "
         "(declared as `pyyaml>=6` in the [dev] optional-dependencies). Install it with "
@@ -100,23 +99,14 @@ _RUST_TOOLCHAIN_TOML = _ROOT / "rust-toolchain.toml"
 _WORKFLOWS_DIR = _ROOT / ".github" / "workflows"
 _DEVCONTAINER_JSON = _ROOT / ".devcontainer" / "devcontainer.json"
 
-# The devcontainer feature that installs Rust. Its `version` is the same pin one
-# layer out: a contributor whose container ships a different compiler from CI hits
-# exactly the "passes locally, fails in CI" split rust-toolchain.toml exists to close.
+# The devcontainer feature that installs Rust.
 _RUST_FEATURE_MARKER = "features/rust"
 
-# The action every pin site uses. A workflow whose text names it is installing Rust
-# and must therefore contribute at least one parsed pin; if it does not, the walk
-# has stopped understanding that file's shape.
+# The action every pin site uses.
 _ACTION_MARKER = "dtolnay/rust-toolchain"
 
-# An anchored scan for the `toolchain:` KEY at the start of a line. This is NOT the
-# version-string scan the module docstring argues against, and the distinction is the
-# whole point: a scan for "1.95.0" matches rust.yml's prose comment about the action
-# ref, whereas this pattern cannot match a comment, because a comment line begins with
-# `#` and so fails the anchor. Scanning for the key is safe; scanning for the value is
-# not. It exists only to cross-check the structural walk's COUNT, never to supply the
-# pins themselves.
+# An anchored scan for the `toolchain:` KEY at the start of a line. This is NOT the version-string scan the module docstring argues against,
+# and the distinction is the whole point. It exists only to cross-check the structural walk's COUNT, never to supply the pins themselves.
 _TOOLCHAIN_KEY_RE = re.compile(r"^[ \t]*toolchain:[ \t]*\S", re.MULTILINE)
 
 

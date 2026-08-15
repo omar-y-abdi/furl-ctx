@@ -89,9 +89,8 @@ def test_legend_flag_read_at_construction_not_import(monkeypatch) -> None:
 
 
 def test_legend_names_every_shipped_encoding() -> None:
-    # One mention per shipped encoding family (source of truth:
-    # formatter.rs / csv_schema_decoder.py). Substring pins, not prose
-    # equality — wording may evolve, coverage may not.
+    # One mention per shipped encoding family (source of truth: the Rust module / the
+    # module). Substring pins, not prose equality — wording may evolve, coverage may not.
     for needle in (
         "[N]{col:type,...}",  # declaration line
         "type=V",  # constant fold
@@ -116,9 +115,8 @@ def test_legend_names_every_shipped_encoding() -> None:
 
 
 def test_legend_is_agent_first_structured() -> None:
-    # The restructure (agent-first): a plain-English summary and ONE worked
-    # example come BEFORE the compact grammar reference, so a fresh agent can
-    # decode a table without reverse-engineering the grammar first.
+    # The restructure (agent-first): a plain-English summary and ONE worked example come BEFORE the compact
+    # grammar reference, so a fresh agent can decode a table without reverse-engineering the grammar first.
     legend = CSV_DECODE_LEGEND
     assert "GRAMMAR:" in legend, "grammar reference section is missing"
     grammar_at = legend.index("GRAMMAR:")
@@ -133,27 +131,16 @@ def test_legend_is_agent_first_structured() -> None:
 
 
 def test_legend_stays_within_token_budget() -> None:
-    # Server-level instructions cost tokens on every conversation — a guard
-    # against future bloat. The cap was 255 for the agent-first grammar legend
-    # (which actually measured ~248, not the "~190" an older comment claimed).
-    # Naming the INPUT SHAPE each output comes from (JSON array -> table;
-    # line-oriented text -> head+tail + marker) — the grammar-truth fix that
-    # stops an agent assuming a log was tabled when it was offloaded — cost
-    # ~25 tokens. F4 (the `[kept/total]` header + `__stats:` numeric summary)
-    # and F5 (the `0x1F`-envelope raw-JSON cell) add ~74 tokens of genuinely new
-    # decode grammar, so the cap is 330 (measured ~322). Still a tight guard.
+    # Server instructions consume tokens every conversation, so keep them bounded while naming each output grammar: JSON arrays may become
+    # tables; line-oriented text may become head/tail plus a marker. This prevents agents from misreading offloaded logs as tables.
     tiktoken = pytest.importorskip("tiktoken")
     enc = tiktoken.get_encoding("o200k_base")
     assert len(enc.encode(CSV_DECODE_LEGEND)) <= 330
 
 
 def test_legend_names_input_shape_for_each_output() -> None:
-    # Grammar-truth pin (docs-to-reality): the legend must tie each output form
-    # to the INPUT that produces it, or an agent reasons wrongly about what is
-    # safe to skip retrieving. Verified live: a JSON array routes to
-    # SmartCrusher's `[N]{col:type,...}` table, while line-oriented text
-    # (a ping log) routes to router:ccr_offload — head+tail + a <<ccr:HASH>>
-    # marker, NOT a table, in BOTH normal and aggressive modes.
+    # Pin the decode legend to actual routing: structured JSON arrays may become compact
+    # tables; line-oriented text is not tabled and may offload as head/tail plus a CCR marker.
     legend = CSV_DECODE_LEGEND
     # The table is attributed to a structured JSON array, not "tool outputs".
     assert "structured JSON array" in legend
@@ -167,11 +154,7 @@ def test_legend_names_input_shape_for_each_output() -> None:
     assert "packs long tool outputs into small tables" not in legend
 
 
-# ─── Grammar pins: every legend claim decoded by the reference decoder ──────
-#
-# The legend is prose; these decode fixtures make each claim executable.
-# If the grammar (or the decoder) ever changes shape, the legend must be
-# re-verified — these tests are that forcing function.
+# ─── Grammar pins: every legend claim decoded by the reference decoder ────── The legend is prose; these decode fixtures make each claim executable.
 
 
 @pytest.mark.parametrize(
@@ -233,9 +216,7 @@ def test_legend_names_input_shape_for_each_output() -> None:
             [{"v": None}, {}, {"v": "real"}],
         ),
         (
-            # F4: "`[kept/total]` when rows dropped: total = original count". The
-            # body carries the KEPT rows; the total is metadata (recoverable from
-            # the text).
+            # F4: "`[kept/total]` when rows dropped: total = original count". The body carries the KEPT rows; the total is metadata (recoverable from the text).
             "kept/total header",
             "[2/9]{name:string}\nalice\nbob",
             [{"name": "alice"}, {"name": "bob"}],
@@ -248,9 +229,8 @@ def test_legend_claim_decodes_as_documented(claim: str, encoded: str, expected: 
 
 
 def test_legend_claim_json_container_envelope() -> None:
-    # F5: "json cell 0x1F+len+JSON or CSV-quoted = that object/array". A json
-    # column cell led by 0x1F + a code-point length + raw JSON decodes to that
-    # container. `{"a":1}` is 7 code points; `[1,2]` is 5.
+    # F5: "json cell 0x1F+len+JSON or CSV-quoted = that object/array". A json column
+    # cell led by 0x1F + a code-point length + raw JSON decodes to that container.
     rows = decode_csv_schema_rows('[2]{cfg:json,id:int=1+1}\n\x1f7{"a":1}\n\x1f5[1,2]')
     assert rows == [{"cfg": {"a": 1}, "id": 1}, {"cfg": [1, 2], "id": 2}]
 

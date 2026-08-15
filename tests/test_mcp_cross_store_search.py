@@ -112,9 +112,7 @@ async def test_no_hash_no_query_still_errors(server) -> None:
 
 
 async def test_no_hash_query_rejects_filter_keys_and_query_only_still_works(server) -> None:
-    # Schema-honesty symmetry with the with-hash path: filters project a single
-    # entry and require a hash. Before this pin, {query, select_field} with no
-    # hash SILENTLY ignored the filter and ran a plain cross-store search.
+    # Schema-honesty symmetry with the with-hash path: filters project a single entry and require a hash.
     _seed(server, "a" * 12, "alpha needleword beta gamma")
 
     # Direction 1: query + a select filter (no hash) errors cleanly.

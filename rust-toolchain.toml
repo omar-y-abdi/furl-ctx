@@ -1,44 +1,6 @@
 [toolchain]
-# Pin to a specific stable version so CI and local use the EXACT same
-# compiler. With `channel = "stable"`, CI runners (dtolnay/rust-
-# toolchain@stable) always grab the latest stable while local dev
-# machines run whatever version was last installed — a clippy lint
-# added in a newer stable then breaks CI without firing locally
-# (this happened on 2026-04-27: `unnecessary_sort_by` landed in
-# clippy 1.95 while a dev box had 1.92). Pinning makes "passes
-# locally" = "passes in CI" for every check that depends on the
-# toolchain.
-#
-# CI note (TEST-30, corrected): the previous version of this comment said
-# dtolnay/rust-toolchain exports RUSTUP_TOOLCHAIN and thereby OVERRIDES
-# this file on the runner. That is not true of the action, at any ref —
-# RUSTUP_TOOLCHAIN appears zero times at the pinned SHA, at @master, at
-# @v1, and in a repo-wide code search. The action runs `rustup toolchain
-# install <input>` then `rustup default <input>`, and `rustup default` is
-# the lowest-precedence selector rustup has: this file outranks it, so
-# in-repo cargo calls follow the channel below, not the input.
-#
-# Every workflow still passes `with: toolchain: <channel>` (the action-ref
-# stays @stable; the @1.95.0 ref errors on ubuntu-latest, see rust.yml),
-# and the same version is pinned once more outside the workflows, in
-# .devcontainer/devcontainer.json's rust feature. Keeping them equal is
-# what makes this pin's guarantee hold: a drifted site installs a
-# toolchain it will not use, derives the action's cachekey from a
-# compiler the build never runs, leaves that version as the default for
-# anything invoked outside the repo directory — and if this file is ever
-# removed or renamed, the drifted inputs silently govern every job.
-#
-# Those sites are deliberately NOT listed here any more.
-# tests/test_toolchain_pin_sync.py discovers every `toolchain:` input by
-# parsing the workflow YAML and fails if any disagrees with the channel
-# below. A hand-kept list rots, and this one had: it named five inputs
-# when eight existed, so a bump following it EXACTLY would have left
-# perf.yml (x2) and autofix.yml (x1) behind.
-#
-# Bump procedure: edit the channel string below, run
-# `pytest tests/test_toolchain_pin_sync.py` and update every site it
-# names, run `rustup update`, run `make ci-precheck`, fix any new
-# lints, commit.
+# Pin one Rust toolchain version for local, CI, and devcontainer use. Keep every workflow/toolchain
+# site synchronized through the dedicated pin test; drift can change compiler behavior and cache keys.
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

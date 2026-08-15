@@ -336,9 +336,8 @@ class TestCompressFrozenPrefixByteIdentity:
         survived — eliminating the exception-fallback and inflation-guard
         false-green paths.
         """
-        # Message 0: large compressible JSON (NO cache_control — this is the
-        # key test: it sits *before* the marker, so the frozen-prefix count
-        # must include it even though it has no cache_control itself).
+        # Message 0: large compressible JSON (NO cache_control — this is the key test: it sits *before* the
+        # marker, so the frozen-prefix count must include it even though it has no cache_control itself).
         msg0 = {"role": "user", "content": _big_json_content()}
 
         # Message 1: cache_control marker at index k=1
@@ -372,9 +371,7 @@ class TestCompressFrozenPrefixByteIdentity:
         )
 
         out = result.messages
-        # No messages dropped AND none injected: the 3 input messages map to
-        # exactly 3 output messages. `>= 3` would pass a path that silently
-        # appended a message; pin the exact count (input was [msg0, msg1, msg2]).
+        # No messages dropped AND none injected: the 3 input messages map to exactly 3 output messages.
         assert len(out) == len(messages) == 3, "exactly the 3 input messages, none dropped or added"
 
         # Self-validation: compression actually ran (msg2 was compressed).
@@ -488,10 +485,8 @@ class TestCompressFrozenPrefixByteIdentity:
         )
 
 
-# ---------------------------------------------------------------------------
-# COR-49 — a fully (or nearly fully) frozen conversation must WARN, not
-# silently no-op; TransformResult.warnings must reach CompressResult.warnings
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- COR-49 — a fully (or nearly fully) frozen conversation must WARN, not
+# silently no-op; TransformResult.warnings must reach CompressResult.warnings ---------------------------------------------------------------------------
 
 
 def _marker_message(text: str) -> dict[str, Any]:
@@ -632,10 +627,8 @@ class TestTransformWarningsPlumbed:
         assert "transform-level warning" in result.warnings
 
 
-# ---------------------------------------------------------------------------
-# COR-50 — moving the cache breakpoint forward across a previously-transformed
-# message: characterization of the behavior + the best-effort detector
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- COR-50 — moving the cache breakpoint forward across a previously-transformed
+# message: characterization of the behavior + the best-effort detector ---------------------------------------------------------------------------
 
 
 def _unique_tool_rows() -> str:
@@ -688,9 +681,7 @@ class TestMovingBreakpointOverTransformedTurn:
         r2 = compress(turn2, model="gpt-4o", protect_recent=0, min_tokens_to_compress=1)
 
         assert r2.error is None
-        # Characterization of the COR-50 behavior itself: the previously
-        # deduped message is now inside the frozen prefix, so it ships as the
-        # ORIGINAL bytes — NOT the sentinel the provider cached last turn.
+        # NOT the sentinel the provider cached last turn.
         assert r2.messages[3]["content"] == big
         # The regression is invisible in the token metrics; the signal is the
         # warning naming the suspect frozen message.
@@ -722,9 +713,8 @@ class TestMovingBreakpointOverTransformedTurn:
             {"role": "user", "content": "any difference?"},
         ]
 
-        # First call populates the CCR registry (the live copy is deduped);
-        # the second, identical call is where a naive detector would
-        # misfire on the frozen first occurrence.
+        # First call populates the CCR registry (the live copy is deduped); the second,
+        # identical call is where a naive detector would misfire on the frozen first occurrence.
         r1 = compress(messages, model="gpt-4o", protect_recent=0, min_tokens_to_compress=1)
         assert r1.error is None
         r2 = compress(messages, model="gpt-4o", protect_recent=0, min_tokens_to_compress=1)

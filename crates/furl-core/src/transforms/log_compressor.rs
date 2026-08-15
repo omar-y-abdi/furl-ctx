@@ -1,48 +1,5 @@
-//! Log/build-output compressor — Rust port of
-//! `furl_ctx.transforms.log_compressor`.
-//!
-//! Compresses build and test output (pytest, npm, cargo, jest, make,
-//! generic). Typical input: 10,000+ lines with 5-10 actual errors.
-//! Typical compression: 10-50×.
-//!
-//! # Pipeline
-//!
-//! 1. Format detection (pytest / npm / cargo / jest / make / generic).
-//! 2. Per-line classification: level (ERROR/FAIL/WARN/INFO/DEBUG/TRACE),
-//!    stack-trace membership, summary-line membership.
-//! 3. Per-line scoring (level base + stack-trace + summary boosts).
-//! 4. Adaptive total-lines budget via
-//!    [`crate::transforms::adaptive_sizer::compute_optimal_k`].
-//! 5. Category selection: errors (first/last/top), fails, warnings
-//!    (deduped), stack traces, summaries; context window around each
-//!    selection; final adaptive cap.
-//! 6. Optional CCR storage when `compression_ratio < 0.5`.
-//!
-//! # Bug fixes vs Python (2026-04-30)
-//!
-//! Each fix is paired with a `fixed_in_3e5` parity-fixture marker.
-//!
-//! - **Stack-trace state machine.** Python's machine terminated on any
-//!   blank line, dropping mid-trace lines from chained-exception
-//!   traces (which embed blank separators between cause groups). The
-//!   Rust dispatcher tracks per-flavor termination rules: Python
-//!   `Traceback` ends on a non-indented non-blank line *after at least
-//!   one indented frame*; JS at the next non-`at`-prefixed line
-//!   immediately after the last `at` frame; etc.
-//! - **Conservative dedupe.** Python's `_dedupe_similar` blanket-
-//!   normalized digits/paths/hex into single tokens, so segfaults at
-//!   different addresses or test failures with different IDs collapsed
-//!   into a single survivor. The Rust normalizer preserves the
-//!   *message prefix* (everything before the first `:` or `=`) so two
-//!   distinct errors with the same trailing address pattern stay
-//!   distinct, and only the trailing variable region is tokenized.
-//! - **Loud CCR failures.** Python silently swallowed all exceptions
-//!   from the store. Rust emits `tracing::warn!` and the Python shim
-//!   logs at `warning` level so operators see misconfigured stores.
-//! - **`LogLevel::FAIL` is documented as cosmetic-equivalent to
-//!   `ERROR`.** Both score 1.0 in Python; the distinction is purely
-//!   for human-readable summary output. Preserved for parity but
-//!   future code should treat them as equivalent.
+//! Compress build/test logs by classifying severity, stack traces, summaries, and context, then applying an adaptive
+//! line budget. Preserve distinct error identities and surface CCR storage failures instead of swallowing them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -94,12 +51,7 @@ pub enum LogLevel {
     Unknown,
 }
 
-/// One classified log line.
-///
-/// `Eq`/`Hash` are based on `line_number` only (matches Python's custom
-/// dunders). Two `LogLine`s at the same line_number are considered the
-/// same entry regardless of content/level — supports the set-based
-/// dedupe in selection.
+/// One classified log line. `Eq`/`Hash` are based on `line_number` only (matches Python's custom dunders).
 #[derive(Debug, Clone)]
 pub struct LogLine {
     pub line_number: usize,
@@ -272,12 +224,8 @@ impl FormatDetector {
 
     fn detect(&self, lines: &[&str]) -> LogFormat {
         let sample: Vec<&str> = lines.iter().take(100).copied().collect();
-        // Python's per-format inner loop counts at most ONE hit per line
-        // ("for pattern in patterns: ... break"), so `is_match` suffices.
-        //
-        // `.rev()` is load-bearing: `max_by_key` returns the LAST maximum,
-        // while the original `score > best` kept the FIRST. Reversing the
-        // iteration restores first-format-wins tie-breaking.
+        // Python's per-format inner loop counts at most ONE hit per line ("for pattern in patterns: ...
+        // break"), so `is_match` suffices. Reversing the iteration restores first-format-wins tie-breaking.
         self.matchers
             .iter()
             .map(|(fmt, ac)| (*fmt, sample.iter().filter(|l| ac.is_match(l)).count()))
@@ -291,10 +239,8 @@ impl FormatDetector {
 
 // ─── Level classifier ────────────────────────────────────────────────────
 
-/// Word-boundary aware level classifier. Replaces Python's
-/// `_LEVEL_PATTERNS` regexes with a single aho-corasick scan + ASCII
-/// word-boundary post-filter (same technique
-/// `signals::keyword_detector` uses).
+/// Word-boundary aware level classifier. Replaces Python's `_LEVEL_PATTERNS` regexes with a single
+/// aho-corasick scan + ASCII word-boundary post-filter (same technique `signals::keyword_detector` uses).
 struct LevelClassifier {
     automaton: AhoCorasick,
     /// Parallel array: index of `pattern_idx` → LogLevel returned.
@@ -303,9 +249,8 @@ struct LevelClassifier {
 
 impl LevelClassifier {
     fn new() -> Self {
-        // Order matters — Python checks ERROR before FAIL, and we want
-        // first-match wins. AhoCorasick's MatchKind::LeftmostFirst gives
-        // us pattern-order priority on left-equal matches.
+        // Order matters — Python checks ERROR before FAIL, and we want first-match wins. AhoCorasick's
+        // MatchKind::LeftmostFirst gives us pattern-order priority on left-equal matches.
         let entries: &[(LogLevel, &[&str])] = &[
             (
                 LogLevel::Error,
@@ -335,9 +280,8 @@ impl LevelClassifier {
         }
         let automaton = AhoCorasickBuilder::new()
             .ascii_case_insensitive(false)
-            // LeftmostLongest so "warning" wins over "warn" at the same
-            // start position (otherwise "warn" matches first, fails the
-            // word-boundary check, and the longer pattern is missed).
+            // LeftmostLongest so "warning" wins over "warn" at the same start position (otherwise
+            // "warn" matches first, fails the word-boundary check, and the longer pattern is missed).
             .match_kind(MatchKind::LeftmostLongest)
             .build(&patterns)
             .expect("level-classifier automaton must build (static input)");
@@ -368,16 +312,8 @@ fn is_word_byte(b: u8) -> bool {
 
 // ─── Stack-trace detector ──────────────────────────────────────────────
 
-/// Hand-rolled stack-trace dispatcher. Each language flavor has its
-/// own opening-marker recogniser; the state machine then continues
-/// marking lines as part of the trace until a flavor-specific
-/// termination rule fires OR `stack_trace_max_lines` is reached.
-///
-/// Bug fixed vs Python (`fixed_in_3e5_chained_exception_traces`):
-/// Python terminated on any blank line, dropping mid-trace lines from
-/// chained-exception traces (which embed blank lines between cause
-/// groups). We only treat blank lines as terminators for flavors that
-/// don't legitimately embed them.
+/// Hand-rolled stack-trace dispatcher. Each language flavor has its own opening-marker recogniser; the state machine then continues
+/// marking lines as part of the trace until a flavor-specific termination rule fires OR `stack_trace_max_lines` is reached.
 struct StackTraceDetector;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,12 +326,6 @@ enum TraceFlavor {
 }
 
 /// How a line relates to the currently-open trace run (fixed_in_cor25).
-///
-/// The old boolean return couldn't express "this line is the trace's
-/// final line": Python's `ExceptionType: message` terminator answered
-/// `false` (keep running), but so did every following uppercase-starting
-/// log line (`INFO …`, `Build succeeded …`), sweeping unrelated noise
-/// into the trace until a lowercase/digit line or the line cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceTermination {
     /// Line is part of the trace; the run stays open.
@@ -507,15 +437,7 @@ impl StackTraceDetector {
         let trimmed = line.trim_start();
         match flavor {
             TraceFlavor::PythonTraceback => {
-                // Continue across blank lines (chained-exception fix)
-                // and across known continuation markers (`Traceback`,
-                // `File`, "During handling..."). A non-indented
-                // uppercase-starting line is the `ExceptionType:
-                // message` terminator: it belongs inside the trace, but
-                // the run ends with it (fixed_in_cor25 — previously it
-                // kept the run open, so unrelated `INFO …` / `Build …`
-                // lines after a traceback were swept in until a
-                // lowercase/digit line or the line cap).
+                // Continue across blank lines (chained-exception fix) and across known continuation markers (`Traceback`, `File`, "During handling...").
                 let is_indented_or_blank = line.starts_with([' ', '\t']) || line.is_empty();
                 let is_continuation = trimmed.starts_with("Traceback")
                     || trimmed.starts_with("File ")
@@ -554,14 +476,8 @@ impl StackTraceDetector {
         }
     }
 
-    /// After a Python trace's `ExceptionType: message` terminator, the
-    /// run continues only when the next non-blank line is a chained-
-    /// exception connective ("During handling of the above exception…" /
-    /// "The above exception was the direct cause…"). CPython separates
-    /// the terminator and the connective with a single blank line, so
-    /// blank lines are skipped when looking ahead. Keeps chained traces
-    /// contiguous (fixed_in_3e5) while still ending the run before
-    /// unrelated log lines (fixed_in_cor25).
+    /// After a Python trace's `ExceptionType message` terminator, the run continues only when the next non-blank line is a
+    /// chained- exception connective ("During handling of the above exception…" / "The above exception was the direct cause…").
     fn python_chain_continues(lines: &[&str], from: usize) -> bool {
         for line in &lines[from..] {
             if line.trim().is_empty() {
@@ -578,13 +494,8 @@ impl StackTraceDetector {
 // ─── Summary detector ──────────────────────────────────────────────────
 
 fn is_summary_line(line: &str) -> bool {
-    // Python's _SUMMARY_PATTERNS (anchored at start of line):
-    //   ^={3,}            → e.g. pytest separator
-    //   ^-{3,}
-    //   ^\d+ (passed|failed|skipped|error|warning)
-    //   ^(Tests?|Suites?):?\s+\d+
-    //   ^(TOTAL|Total|Summary)
-    //   ^(Build|Compile|Test).*(succeeded|failed|complete)
+    // Python's _SUMMARY_PATTERNS (anchored at start of line): ^={3,} → e.g. pytest separator ^-{3,} ^\d+ (passed|failed|skipped|error|warning)
+    // ^(Tests?|Suites?):?\s+\d+ ^(TOTAL|Total|Summary) ^(Build|Compile|Test).*(succeeded|failed|complete)
     if line.starts_with("===") || line.starts_with("---") {
         return true;
     }
@@ -647,13 +558,7 @@ impl LogCompressor {
         self.compress_with_store(content, bias, None)
     }
 
-    /// Compress with the CCR `cache_key` computed but NOTHING persisted
-    /// (PERF-8). Byte-identical output (compressed bytes, marker,
-    /// `cache_key`, stats) to `compress_with_store(.., Some(store))` —
-    /// only the store write is skipped. For callers that own persistence
-    /// themselves: the PyO3 bridge's Python shim re-persists the
-    /// original into the production `CompressionStore` under this exact
-    /// key and vetoes the compression if that write fails.
+    /// Compress with the CCR `cache_key` computed but NOTHING persisted (PERF-8).
     pub fn compress_key_only(
         &self,
         content: &str,
@@ -714,24 +619,15 @@ impl LogCompressor {
         let ratio = compressed.len() as f64 / content.len().max(1) as f64;
 
         let mut cache_key = None;
-        // No-silent-loss contract: a recovery marker MUST be emitted
-        // whenever ANY line is dropped, so every dropped line stays
-        // CCR-recoverable. The ratio threshold is only an optimization for
-        // the case where NOTHING was dropped (nothing to recover) — it must
-        // NOT gate recovery. Unique/unexpected-line preservation inflates
-        // the compressed body and can push the ratio above the threshold
-        // while lines are still dropped; gating on ratio alone would then
-        // silently lose them.
+        // No-silent-loss contract: a recovery marker MUST be emitted whenever ANY line is dropped, so every dropped line stays CCR-recoverable.
+        // The ratio threshold is only an optimization for the case where NOTHING was dropped (nothing to recover) — it must NOT gate recovery.
         let lines_dropped = selected.len() < original_line_count;
         if self.config.enable_ccr {
             if ratio >= self.config.min_compression_ratio_for_ccr && !lines_dropped {
                 stats.ccr_skip_reason = Some("compression ratio too high");
             } else {
-                // Shared key→[put]→marker tail (`ccr::persist`, ARCH-5);
-                // the leading `\n` is composed there so the marker
-                // grammar in `ccr::markers` stays newline-free. Key and
-                // marker bytes are identical across backings (PERF-8) —
-                // only whether the original is persisted differs.
+                // Shared key→[put]→marker tail (`ccr::persist`, ARCH-5); the leading `\n` is composed there so the marker grammar in `ccr::markers`
+                // stays newline-free. Key and marker bytes are identical across backings (PERF-8) — only whether the original is persisted differs.
                 let keyed = match backing {
                     MarkerBacking::Store(store) => Some(persist_and_mark(
                         store,
@@ -786,12 +682,7 @@ impl LogCompressor {
         let mut out: Vec<LogLine> = Vec::with_capacity(lines.len());
         let mut active: Option<TraceFlavor> = None;
         let mut trace_lines = 0usize;
-        // Flavor of a trace whose run was closed by `stack_trace_max_lines`
-        // but whose lines keep coming (COR-41). While set, its continuation
-        // is consumed WITHOUT re-opening: frame lines match the opener
-        // patterns, so the tail of one oversized trace used to re-open as a
-        // "new" trace per cap window — each chunk then consumed a
-        // `max_stack_traces` slot and re-inflated the kept line count.
+        // Flavor of a trace whose run was closed by `stack_trace_max_lines` but whose lines keep coming (COR-41).
         let mut ended_by_cap: Option<TraceFlavor> = None;
 
         for (i, line) in lines.iter().enumerate() {
@@ -799,34 +690,24 @@ impl LogCompressor {
             entry.level = self.levels.classify(line);
             entry.is_summary = is_summary_line(line);
 
-            // Stack-trace state machine: open on a new flavor match, then
-            // mark subsequent lines until the flavor terminates or we hit
-            // `stack_trace_max_lines`.
+            // Stack-trace state machine: open on a new flavor match, then mark subsequent lines until the flavor terminates or we hit `stack_trace_max_lines`.
             if let Some(flavor) = active {
                 if trace_lines >= self.config.stack_trace_max_lines {
                     active = None;
                     trace_lines = 0;
                     // The cap closed the RUN, not necessarily the trace.
-                    // Classify the current line against the capped flavor:
-                    // its own continuation must not re-open as a "new"
-                    // trace; only a naturally-ended trace frees the line
-                    // for a fresh opener check.
                     match StackTraceDetector::terminates(flavor, line) {
                         TraceTermination::Continue => {
                             ended_by_cap = Some(flavor);
                         }
                         TraceTermination::IncludeAndEnd => {
-                            // Terminator line (beyond the cap, unmarked).
-                            // A chained exception keeps the consumption
-                            // going, exactly like the active-run path.
+                            // Terminator line (beyond the cap, unmarked). A chained exception keeps the consumption going, exactly like the active-run path.
                             if StackTraceDetector::python_chain_continues(lines, i + 1) {
                                 ended_by_cap = Some(flavor);
                             }
                         }
                         TraceTermination::End => {
-                            // The capped trace ended right here — a
-                            // genuinely NEW trace can start on the same
-                            // line that hit the cap (pre-existing case).
+                            // The capped trace ended right here — a genuinely NEW trace can start on the same line that hit the cap (pre-existing case).
                             if let Some(new_flavor) = StackTraceDetector::flavor_for(line) {
                                 active = Some(new_flavor);
                                 trace_lines = 1;
@@ -841,11 +722,8 @@ impl LogCompressor {
                             trace_lines += 1;
                         }
                         TraceTermination::IncludeAndEnd => {
-                            // The `ExceptionType: message` terminator is
-                            // part of the trace (fixed_in_cor25); the run
-                            // ends after it unless a chained-exception
-                            // connective follows, in which case the whole
-                            // chain stays one contiguous trace.
+                            // The `ExceptionType: message` terminator is part of the trace (fixed_in_cor25); the run ends after it
+                            // unless a chained-exception connective follows, in which case the whole chain stays one contiguous trace.
                             entry.is_stack_trace = true;
                             trace_lines += 1;
                             if !StackTraceDetector::python_chain_continues(lines, i + 1) {
@@ -856,9 +734,7 @@ impl LogCompressor {
                         TraceTermination::End => {
                             active = None;
                             trace_lines = 0;
-                            // Re-check the current line against opener —
-                            // chained traces start a new flavor on the same
-                            // line that terminated the previous one.
+                            // Re-check the current line against opener — chained traces start a new flavor on the same line that terminated the previous one.
                             if let Some(new_flavor) = StackTraceDetector::flavor_for(line) {
                                 active = Some(new_flavor);
                                 trace_lines = 1;
@@ -868,9 +744,7 @@ impl LogCompressor {
                     }
                 }
             } else if let Some(capped) = ended_by_cap {
-                // Tail of a trace whose run hit `stack_trace_max_lines`:
-                // consume it (unmarked — it is beyond the cap) without
-                // re-opening until the trace ends naturally.
+                // Tail of a trace whose run hit `stack_trace_max_lines`: consume it (unmarked — it is beyond the cap) without re-opening until the trace ends naturally.
                 match StackTraceDetector::terminates(capped, line) {
                     TraceTermination::Continue => {}
                     TraceTermination::IncludeAndEnd => {
@@ -909,14 +783,8 @@ impl LogCompressor {
         let adaptive_max =
             compute_optimal_k(&all_strings, bias, 10, Some(self.config.max_total_lines));
 
-        // Single pass to categorize (Python does 4) — over line INDICES.
-        // A `LogLine`'s identity is its `line_number`, which equals its
-        // index in `log_lines` by construction (`parse_lines`) — the
-        // same invariant the context-window lookup below has always
-        // relied on (`log_lines[line_number]`). Running the whole
-        // selection on `usize` sets means each selected line is cloned
-        // exactly ONCE, at the output materialization — the old shape
-        // cloned every categorized line 2-3× (PERF-7).
+        // Single pass to categorize (Python does 4) — over line INDICES. A `LogLine`'s identity is its `line_number`, which equals its index in
+        // `log_lines` by construction (`parse_lines`) — the same invariant the context-window lookup below has always relied on (`log_lines[line_number]`).
         let mut errors: Vec<usize> = Vec::new();
         let mut fails: Vec<usize> = Vec::new();
         let mut warnings: Vec<usize> = Vec::new();
@@ -945,9 +813,7 @@ impl LogCompressor {
         }
         stats.stack_traces_seen = stack_traces.len();
 
-        // BTreeSet<usize> over indices — identical dedup + ascending
-        // iteration semantics to the old BTreeSet<LogLine> (whose Ord
-        // was line_number-only).
+        // BTreeSet<usize> over indices — identical dedup + ascending iteration semantics to the old BTreeSet<LogLine> (whose Ord was line_number-only).
         let mut selected: BTreeSet<usize> = BTreeSet::new();
 
         selected.extend(self.select_indices_with_first_last(
@@ -979,18 +845,8 @@ impl LogCompressor {
             selected.extend(summaries);
         }
 
-        // ─── Unique / unexpected log selection ────────────────────────────
-        // Surface rare INFO/DEBUG-class lines that carry signal but would
-        // otherwise be dropped as "just noise". A line is a candidate when
-        // its normalized template occurs <= `unique_log_threshold` times;
-        // repetitive lines collapse to a high count and are excluded.
-        //
-        // Templates are counted with the LOCAL `normalize_for_unique_count`
-        // (whole-line collapse) — NOT the shared `normalize_for_dedupe`,
-        // which preserves the message prefix so distinct warnings never
-        // merge (fixed_in_3e5). This path wants the OPPOSITE for colon-less
-        // lines: repetitive ones (e.g. `worker 5 done`) must collapse to a
-        // single template so they are not each counted as "unique".
+        // Unique / unexpected log selection ──────────────────────────── Surface rare INFO/DEBUG-class lines that carry signal but would otherwise be dropped as "just noise". A line
+        // is a candidate when its normalized template occurs <= `unique_log_threshold` times; which preserves the message prefix so distinct warnings never merge (fixed_in_3e5).
         let mut template_counts: BTreeMap<String, usize> = BTreeMap::new();
         let mut unique_norms: Vec<String> = Vec::with_capacity(log_lines.len());
         for line in log_lines {
@@ -1014,9 +870,8 @@ impl LogCompressor {
             }
         }
 
-        // Rarest first, ties by line order: `unique_candidates` is built in
-        // ascending index order and `sort_by_key` is stable, so ties keep
-        // that order — same result as the explicit `a.cmp(&b)` tie-break.
+        // Rarest first, ties by line order: `unique_candidates` is built in ascending index order and
+        // `sort_by_key` is stable, so ties keep that order — same result as the explicit `a.cmp(&b)` tie-break.
         unique_candidates.sort_by_key(|&a| *template_counts.get(&unique_norms[a]).unwrap_or(&0));
 
         let mut unique_templates_selected: BTreeSet<String> = BTreeSet::new();
@@ -1076,10 +931,8 @@ impl LogCompressor {
             .collect()
     }
 
-    /// Index-set core of [`select_with_first_last`](Self::select_with_first_last)
-    /// (PERF-7): `candidates` index into `lines`; nothing is cloned.
-    /// First/last pins + score-descending fill, deduped by the line's
-    /// `line_number` — behavior-identical to the owning-Vec shape.
+    /// Index-set core of [`select_with_first_last`](Self::select_with_first_last) (PERF-7): `candidates` index into `lines`; nothing is
+    /// cloned. First/last pins + score-descending fill, deduped by the line's `line_number` — behavior-identical to the owning-Vec shape.
     fn select_indices_with_first_last(
         &self,
         lines: &[LogLine],
@@ -1126,9 +979,8 @@ impl LogCompressor {
         out
     }
 
-    /// Index-set sibling of [`dedupe_similar`](Self::dedupe_similar)
-    /// (PERF-7): dedupes `candidates` (indices into `log_lines`) by the
-    /// normalized message prefix without cloning any line.
+    /// Index-set sibling of [`dedupe_similar`](Self::dedupe_similar) (PERF-7): dedupes `candidates`
+    /// (indices into `log_lines`) by the normalized message prefix without cloning any line.
     fn dedupe_similar_indices(&self, log_lines: &[LogLine], candidates: &[usize]) -> Vec<usize> {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut out: Vec<usize> = Vec::with_capacity(candidates.len());
@@ -1142,12 +994,8 @@ impl LogCompressor {
     }
 
     pub fn dedupe_similar(&self, lines: Vec<LogLine>) -> Vec<LogLine> {
-        // Conservative dedupe (fixed_in_3e5_dedupe_preserves_distinct_messages):
-        // Python normalised digits/paths/hex everywhere in the line, which
-        // collapsed segfaults at different addresses or test failures with
-        // different IDs. Rust normaliser preserves the *message prefix*
-        // (everything before the first `:` or `=`), so two distinct error
-        // categories don't accidentally merge.
+        // Conservative dedupe (fixed_in_3e5_dedupe_preserves_distinct_messages): Python normalised digits/paths/hex
+        // everywhere in the line, which collapsed segfaults at different addresses or test failures with different IDs.
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut out: Vec<LogLine> = Vec::with_capacity(lines.len());
         for line in lines {
@@ -1174,18 +1022,8 @@ impl LogCompressor {
 
         let mut output: Vec<String> = selected.iter().map(|l| l.content.clone()).collect();
 
-        // Omission banner. The per-level breakdown is tallied over the lines
-        // that were actually OMITTED — all_lines minus the selected set, keyed
-        // by line_number (a LogLine's identity) — NOT over all lines, so the
-        // counts always sum to the omitted total. Pre-fix the breakdown used
-        // whole-log counts (`stats[...]`) that could exceed the omitted total
-        // and even report a level whose only lines were all kept (review F5).
-        // ERROR and FAIL fold into one ERROR bucket: FAIL is cosmetic-
-        // equivalent to ERROR (see the module header) and an internal
-        // classification detail, so surfacing it as its own category names a
-        // "FAIL" bucket the source never wrote (review F4). A catch-all OTHER
-        // bucket collects omitted DEBUG/TRACE/UNKNOWN lines so the breakdown is
-        // exhaustive: ERROR + WARN + INFO + OTHER == omitted, always.
+        // Omission banner. ERROR and FAIL fold into one ERROR bucket: FAIL is cosmetic- equivalent to ERROR (see the module header) and an
+        // internal classification detail, so surfacing it as its own category names a "FAIL" bucket the source never wrote (review F4).
         let selected_line_numbers: BTreeSet<usize> =
             selected.iter().map(|l| l.line_number).collect();
         let (mut n_error, mut n_warn, mut n_info, mut n_other) = (0u64, 0u64, 0u64, 0u64);
@@ -1232,9 +1070,7 @@ fn warnings_dropped(all: &[LogLine], deduped_len: usize) -> usize {
     original_warnings.saturating_sub(deduped_len)
 }
 
-// We need BTreeSet ordering on LogLine; wrap insertion ordering by
-// line_number (Eq/Hash already match, so PartialOrd/Ord by
-// line_number is consistent).
+// We need BTreeSet ordering on LogLine; wrap insertion ordering by line_number (Eq/Hash already match, so PartialOrd/Ord by line_number is consistent).
 impl PartialOrd for LogLine {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -1259,33 +1095,18 @@ fn score_log_line(line: &LogLine) -> f32 {
     (level_score + stack_boost + summary_boost).min(1.0_f32)
 }
 
-/// Conservative normalizer for warning dedup. Preserves message prefix
-/// (everything before the first `:` or `=`) verbatim; only normalizes
-/// the trailing variable region (digits, hex addresses, paths).
-///
-/// fixed_in_3e5: Python's `_dedupe_similar` blanket-normalised the
-/// whole line, collapsing distinct error messages that happened to
-/// share the trailing variable shape. Splitting on the first `:` or
-/// `=` keeps the message identifier intact so segfault and heap
-/// overflow at different addresses stay distinct entries.
+/// Conservative normalizer for warning dedup. Preserves message prefix (everything before the first `:` or `=`) verbatim; only normalizes the trailing variable region (digits, hex
+/// addresses, paths). fixed_in_3e5: Python's `_dedupe_similar` blanket-normalised the whole line, collapsing distinct error messages that happened to share the trailing variable shape.
 fn normalize_for_dedupe(content: &str) -> String {
-    // DESIGN.md Imp2 broadening: a leading identity token (ISO-8601
-    // timestamp, UUID, or long hex run) is pure per-line noise — it can
-    // never be the message identifier. Template it to a placeholder
-    // FIRST so two otherwise-identical messages with different leading
-    // timestamps/ids dedupe. This is applied only to the LEADING token,
-    // so a distinct error category (which lives in the message body
-    // after the timestamp) is still preserved by the prefix split below.
+    // Treat a leading ISO timestamp, UUID, or long hex token as per-line identity noise; preserve distinct error categories from the message body.
     let content = strip_leading_identity(content);
 
     let split_at = content.find([':', '=']).unwrap_or(content.len());
     let prefix = &content[..split_at];
     let suffix = &content[split_at..];
 
-    // Same three substitutions Python uses, applied only to the
-    // suffix. Pre-compiled once via `OnceLock` to avoid per-call
-    // regex compile cost (Python had this anti-pattern inside its
-    // hot loop).
+    // Same three substitutions Python uses, applied only to the suffix. Pre-compiled once via `OnceLock`
+    // to avoid per-call regex compile cost (Python had this anti-pattern inside its hot loop).
     let digit_re = digit_regex();
     let hex_re = hex_regex();
     let path_re = path_regex();
@@ -1296,15 +1117,8 @@ fn normalize_for_dedupe(content: &str) -> String {
     format!("{}{}", prefix, stage3)
 }
 
-/// Whole-line template normalizer for the unique/unexpected-log counter.
-///
-/// Unlike [`normalize_for_dedupe`] — which preserves the message prefix
-/// (everything before the first `:` or `=`) so distinct warnings never
-/// merge (fixed_in_3e5) — this path WANTS repetitive lines to collapse to
-/// a single template. A colon-less repetitive line (e.g. `worker 5 done`,
-/// `worker 6 done`) must normalize to ONE template so it is counted as
-/// noise, not surfaced as many distinct "unique" lines. So it normalizes
-/// the WHOLE line (digits/hex/paths) and never splits on `:`/`=`.
+/// Whole-line template normalizer for the unique/unexpected-log counter. Unlike [`normalize_for_dedupe`] — which preserves the message prefix (everything
+/// before the first `:` or `=`) so distinct warnings never merge (fixed_in_3e5) — this path WANTS repetitive lines to collapse to a single template.
 fn normalize_for_unique_count(content: &str) -> String {
     let content = strip_leading_identity(content);
     let stage1 = digit_regex().replace_all(&content, "N");
@@ -1313,12 +1127,8 @@ fn normalize_for_unique_count(content: &str) -> String {
     stage3.into_owned()
 }
 
-/// Template a single leading identity token (ISO-8601 datetime, UUID, or
-/// a hex run of 12+ chars) plus any immediately-following whitespace into
-/// the fixed placeholder `<TS> `. Returns the original string unchanged when no
-/// leading identity token is present, so non-timestamped lines are
-/// untouched. Only the FIRST token is considered — the message body that
-/// distinguishes error categories is preserved.
+/// Template a single leading identity token (ISO-8601 datetime, UUID, or a hex run of 12+
+/// chars) plus any immediately-following whitespace into the fixed placeholder `<TS> `.
 fn strip_leading_identity(s: &str) -> std::borrow::Cow<'_, str> {
     let token_len = leading_identity_len(s);
     if token_len == 0 {
@@ -1334,9 +1144,7 @@ fn strip_leading_identity(s: &str) -> std::borrow::Cow<'_, str> {
 fn leading_identity_len(s: &str) -> usize {
     let bytes = s.as_bytes();
 
-    // ISO-8601 datetime: YYYY-MM-DDTHH:MM:SS (>=19 chars), optionally with
-    // fractional seconds / timezone offset that we let run on as digits/
-    // +/-/:/./Z.
+    // ISO-8601 datetime: YYYY-MM-DDTHH:MM:SS (>=19 chars), optionally with fractional seconds / timezone offset that we let run on as digits/ +/-/:/./Z.
     if is_iso8601_prefix(bytes) {
         let mut end = 19;
         // Extend over fractional seconds + timezone: . , : + - and digits,
@@ -1418,9 +1226,8 @@ fn path_regex() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"/[\w/]+/").expect("static regex must compile"))
 }
 
-// `md5_hex_24` (the CCR cache key) lives in `crate::ccr::persist` —
-// one shared implementation for the diff/log/search/text family
-// (ARCH-5); the tail above rides it via `persist_and_mark`.
+// `md5_hex_24` (the CCR cache key) lives in `crate::ccr::persist` — one shared implementation
+// for the diff/log/search/text family (ARCH-5); the tail above rides it via `persist_and_mark`.
 
 #[cfg(test)]
 mod tests {
@@ -1501,9 +1308,8 @@ mod tests {
 
     #[test]
     fn fixed_in_3e5_chained_exception_traces_survive_blank_lines() {
-        // Python machine terminated stack trace on first blank line,
-        // dropping subsequent frames in chained-exception traces. The
-        // Rust dispatcher continues across blank lines for Python tracebacks.
+        // Python machine terminated stack trace on first blank line, dropping subsequent frames in
+        // chained-exception traces. The Rust dispatcher continues across blank lines for Python tracebacks.
         let c = cmp();
         let lines = c.parse_lines(&[
             "Traceback (most recent call last):",
@@ -1516,10 +1322,8 @@ mod tests {
             "  File \"b.py\", line 2, in <module>",
             "RuntimeError: y",
         ]);
-        // First trace: lines 0-2 (header, frame, terminator)
-        // Blank lines (3, 5): kept inside trace, NOT terminating
-        // The "During handling..." line is a Traceback continuation marker
-        // Second trace re-opens at line 6 with a fresh "Traceback ..." header
+        // First trace: lines 0-2 (header, frame, terminator) Blank lines (3, 5): kept inside trace, NOT terminating The "During
+        // handling..." line is a Traceback continuation marker Second trace re-opens at line 6 with a fresh "Traceback ..." header
         for (i, expect) in [
             (0, true),
             (1, true),
@@ -1541,13 +1345,8 @@ mod tests {
 
     #[test]
     fn fixed_in_cor25_traceback_terminator_ends_trace_before_log_lines() {
-        // The `ExceptionType: message` terminator used to keep the run
-        // open (`!starts_with(uppercase)` was false for it AND for every
-        // following uppercase-starting log line), so `INFO …` / `Build …`
-        // lines after a traceback were swept into the trace until a
-        // lowercase/digit line or the `stack_trace_max_lines` cap —
-        // inflating the +0.3 stack boost and stack-trace selection with
-        // unrelated noise.
+        // The `ExceptionType: message` terminator used to keep the run open (`!starts_with(uppercase)`
+        // was false for it AND for every following uppercase-starting log line).
         let c = cmp();
         let lines = c.parse_lines(&[
             "Traceback (most recent call last):",
@@ -1578,20 +1377,13 @@ mod tests {
 
     #[test]
     fn capped_trace_does_not_reopen_per_chunk() {
-        // COR-41: a trace longer than `stack_trace_max_lines` used to
-        // re-open as a "new" trace on the next frame line of the SAME
-        // traceback (frame lines match the opener patterns), chunking one
-        // real trace into several runs — each chunk then consumed a
-        // `max_stack_traces` slot downstream and re-inflated the kept
-        // line count. The capped trace's own continuation must be
-        // consumed without re-opening until it terminates naturally.
+        // The capped trace's own continuation must be consumed without re-opening until it terminates naturally.
         let c = LogCompressor::new(LogCompressorConfig {
             stack_trace_max_lines: 2,
             ..Default::default()
         });
-        // Digit-ending `File "…", line N` frames match the opener pattern
-        // (`is_python_file_frame`), so the tail of a capped trace used to
-        // re-open on every such frame.
+        // Digit-ending `File "…", line N` frames match the opener pattern (`is_python_file_frame`),
+        // so the tail of a capped trace used to re-open on every such frame.
         let input = [
             "Traceback (most recent call last):", // 0: opener (run line 1)
             "  File \"a.py\", line 1",            // 1: frame (run line 2 = cap)
@@ -1648,9 +1440,7 @@ mod tests {
 
     #[test]
     fn dedupe_collapses_leading_timestamp_variation() {
-        // DESIGN.md Imp2 broadening: identical messages with different
-        // leading ISO-8601 timestamps now collapse — the timestamp is
-        // pure per-line identity noise, never the message identifier.
+        // Collapse messages that differ only by a leading ISO-8601 timestamp; timestamps are per-line identity noise, not message identity.
         let c = cmp();
         let lines = vec![
             LogLine::new(0, "2026-06-12T10:00:00Z worker started processing batch"),
@@ -1726,10 +1516,8 @@ mod tests {
 
     #[test]
     fn key_only_mode_is_byte_identical_to_store_mode() {
-        // PERF-8 pin: `compress_key_only` must produce byte-equal output
-        // (compressed bytes incl. marker, cache_key, counts, stats) to
-        // `compress_with_store(.., Some(store))` — the ONLY difference
-        // is that nothing is persisted.
+        // PERF-8 pin: `compress_key_only` must produce byte-equal output (compressed bytes incl. marker, cache_key,
+        // counts, stats) to `compress_with_store(.., Some(store))` — the ONLY difference is that nothing is persisted.
         use crate::ccr::InMemoryCcrStore;
         let content: String = (0..200)
             .map(|i| {
@@ -1850,12 +1638,8 @@ mod tests {
 
     #[test]
     fn ccr_marker_fires_when_lines_dropped_even_at_high_ratio() {
-        // Unique-line preservation inflates the compressed body, so the byte
-        // ratio can land ABOVE min_compression_ratio_for_ccr while lines are
-        // still dropped. The recovery marker must be decoupled from the
-        // ratio optimization and fire whenever ANY line is dropped. A
-        // near-zero ratio floor forces the "ratio too high" region that
-        // pre-fix suppressed CCR in — proving the decoupling.
+        // Unique-line preservation inflates the compressed body, so the byte ratio can land ABOVE min_compression_ratio_for_ccr while
+        // lines are still dropped. The recovery marker must be decoupled from the ratio optimization and fire whenever ANY line is dropped.
         let c = LogCompressor::new(LogCompressorConfig {
             min_compression_ratio_for_ccr: 0.01,
             ..Default::default()
@@ -1900,12 +1684,8 @@ mod tests {
 
     #[test]
     fn colon_less_warnings_differing_only_by_digits_stay_distinct() {
-        // Re-applying the unique-log feature must NOT mutate the shared
-        // `normalize_for_dedupe`: it keeps its `.unwrap_or(content.len())`
-        // split so colon-less warnings that differ only by variable DIGITS
-        // are NOT collapsed into one (fixed_in_3e5). Digit-differing inputs
-        // are the discriminating case: under whole-line normalization (the
-        // reverted bug) `\d+` templates 5/6/7 to N and all three collapse.
+        // Re-applying the unique-log feature must NOT mutate the shared `normalize_for_dedupe`: it keeps its `.unwrap_or(content.len())`
+        // split so colon-less warnings that differ only by variable DIGITS are NOT collapsed into one (fixed_in_3e5).
         let c = cmp();
         let warnings = vec![
             LogLine::new(0, "WARN queue depth exceeded 5 items"),
@@ -1922,10 +1702,8 @@ mod tests {
 
     #[test]
     fn unique_count_normalizer_collapses_colon_less_variants() {
-        // The unique-log path's LOCAL normalizer collapses colon-less
-        // repetitive lines (whole-line digit templating) — the SHARED
-        // dedupe normalizer deliberately does not (it preserves the prefix
-        // so distinct warnings stay distinct). This asymmetry is Fix 2.
+        // The unique-log path's LOCAL normalizer collapses colon-less repetitive lines (whole-line digit templating) —
+        // the SHARED dedupe normalizer deliberately does not (it preserves the prefix so distinct warnings stay distinct).
         assert_eq!(
             normalize_for_unique_count("worker 5 heartbeat"),
             normalize_for_unique_count("worker 6 heartbeat"),
@@ -1961,11 +1739,7 @@ mod tests {
         .collect::<Vec<_>>();
         let selected = vec![all_lines[0].clone()];
         let (output, stats) = c.format_output(&selected, &all_lines);
-        // The breakdown is over the OMITTED lines only. The sole ERROR line
-        // (idx 0) was kept, so it must NOT appear in the omitted breakdown;
-        // the omitted set is 1 WARN + 2 INFO = 3, which sums to the omitted
-        // count (review F4/F5 — pre-fix this wrongly read "1 ERROR, 1 WARN,
-        // 2 INFO" summing to 4 against an omitted count of 3).
+        // The breakdown is over the OMITTED lines only. The sole ERROR line (idx 0) was kept, so it must NOT appear in the omitted breakdown.
         assert!(
             output.contains("[3 lines omitted: 1 WARN, 2 INFO]"),
             "banner over-counts or names a kept level: {output}"
@@ -1977,10 +1751,8 @@ mod tests {
 
     #[test]
     fn omission_banner_breakdown_sums_to_omitted_count() {
-        // Review F5: the per-level breakdown must sum to the omitted total.
-        // Pre-fix the breakdown was tallied over ALL lines, so an INFO-heavy
-        // log reported far more than were omitted (e.g. "90 lines omitted:
-        // 3 ERROR, 2 WARN, 120 INFO" — 125 != 90).
+        // Review F5: the per-level breakdown must sum to the omitted total. Pre-fix the breakdown was tallied over ALL lines,
+        // so an INFO-heavy log reported far more than were omitted (e.g. "90 lines omitted: 3 ERROR, 2 WARN, 120 INFO"
         let c = cmp();
         let all_lines: Vec<LogLine> = (0..40)
             .map(|i| {
@@ -2013,10 +1785,8 @@ mod tests {
 
     #[test]
     fn omission_banner_folds_fail_into_error_no_phantom_category() {
-        // Review F4: a line containing "failed" (no "error"/"warn") classifies
-        // as LogLevel::Fail. FAIL is cosmetic-equivalent to ERROR, so the
-        // banner must fold it into ERROR and never name a "FAIL" category the
-        // source did not write.
+        // Review F4: a line containing "failed" (no "error"/"warn") classifies as LogLevel::Fail. FAIL is cosmetic-equivalent
+        // to ERROR, so the banner must fold it into ERROR and never name a "FAIL" category the source did not write.
         let c = cmp();
         let mut all_lines: Vec<LogLine> = (0..30)
             .map(|i| {

@@ -1,19 +1,5 @@
-//! TEST-8 (ARCH-6): cross-language tokenizer parity pins.
-//!
-//! The same corpus + expected counts are pinned in
-//! `tests/test_tokenizer_rust_parity.py` on the Python side. The
-//! expected values were computed ONCE with Python `tiktoken` (the
-//! reference implementation) and with the shared estimation formula
-//! `max(1, int(chars / cpt + 0.5))`; each side asserts against the same
-//! constants, so a drift on either side of the FFI fails its suite —
-//! the two counts are transitively pinned to agree.
-//!
-//! Families covered (the ones that SHOULD agree — see the divergence
-//! notes in `src/tokenizer/registry.rs` for the ones that don't):
-//! - OpenAI tiktoken: `gpt-4o` (o200k_base) and `gpt-4` (cl100k_base).
-//! - Anthropic tiktoken: `claude-*` (o200k_base) — byte-identical to
-//!   gpt-4o counts (Q1, same encoding on both sides).
-//! - Gemini/Cohere estimation at 4.0 chars/token.
+//! TEST-8 (ARCH-6) cross-language tokenizer parity pins. The expected values were computed ONCE with Python
+//! `tiktoken` (the reference implementation) and with the shared estimation formula `max(1, int(chars / cpt + 0.5))`.
 
 use furl_core::tokenizer::get_tokenizer;
 
@@ -45,9 +31,8 @@ fn blob_100kb() -> String {
     blob
 }
 
-/// (corpus item, gpt-4o/o200k count, gpt-4/cl100k count, est@3.5, est@4.0)
-/// — reference counts computed with Python tiktoken 0.x / the estimation
-/// formula; pinned verbatim in the Python twin test.
+/// (corpus item, gpt-4o/o200k count, gpt-4/cl100k count, est@3.5, est@4.0) — reference counts computed
+/// with Python tiktoken 0.x / the estimation formula; pinned verbatim in the Python twin test.
 fn corpus() -> Vec<(&'static str, String, usize, usize, usize, usize)> {
     vec![
         ("ascii", ASCII.to_string(), 19, 19, 19, 16),
@@ -82,11 +67,7 @@ fn tiktoken_counts_match_python_reference() {
 
 #[test]
 fn estimation_counts_match_python_formula() {
-    // Gemini/Cohere → 4.0 chars/token. Python's fixed-ratio
-    // EstimatingTokenCounter computes `max(1, int(chars / cpt + 0.5))` —
-    // same constants pinned there.
-    // (claude-* now uses tiktoken o200k_base (Q1) and is covered by
-    // tiktoken_counts_match_python_reference above.)
+    // Gemini/Cohere → 4.0 chars/token.
     let gemini = get_tokenizer("gemini-1.5-pro");
     let cohere = get_tokenizer("command-r-plus");
     for (name, text, _, _, _, want_40) in corpus() {

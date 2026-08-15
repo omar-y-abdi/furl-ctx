@@ -35,10 +35,7 @@ updates:
     schedule:
       interval: weekly
     commit-message:
-      # "deps" for BOTH ecosystems (TEST-29): commitlint's type-enum now
-      # includes "deps" (.commitlintrc.json), release-please already maps
-      # it to a "Dependencies" changelog section, and release_version.py
-      # classifies it as a patch bump — one convention, three configs.
+      # "deps" for BOTH ecosystems (TEST-29): commitlint accepts `deps`, release automation maps it to Dependencies, and version classification treats it as a patch bump.
       prefix: "deps"
     open-pull-requests-limit: 5
     groups:

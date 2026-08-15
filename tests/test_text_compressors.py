@@ -402,9 +402,8 @@ class TestSmartCrusherTextIntegration:
 
         result = crusher.apply(messages, tokenizer)
 
-        # TEST-11: the old asserts (`len <= original + 100`, `len(parsed) > 0`)
-        # passed on a byte-identical no-op. Compression must ACTUALLY happen:
-        # strictly fewer bytes AND strictly fewer visible rows.
+        # TEST-11: the old asserts (`len <= original + 100`, `len(parsed) > 0`) passed on a byte-identical
+        # no-op. Compression must ACTUALLY happen: strictly fewer bytes AND strictly fewer visible rows.
         tool_content = result.messages[1]["content"]
         assert len(tool_content) < len(json_content), "output must actually shrink"
 

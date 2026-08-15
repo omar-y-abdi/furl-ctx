@@ -298,9 +298,7 @@ WARN: Über important
         # Should not crash
         result = compressor.compress(content)
         assert result.compressed is not None
-        # Content is the real contract for a log compressor: the ERROR line must
-        # survive regardless of which line ending precedes it. `is not None`
-        # alone would pass output that silently dropped it.
+        # Content is the real contract for a log compressor: the ERROR line must survive regardless of which line ending precedes it.
         assert "ERROR: line 2" in result.compressed
 
     def test_binary_like_content(self):
@@ -583,12 +581,8 @@ class TestUniqueLogRegressionGuards:
         """
         reset_compression_store()
         try:
-            # 40 identical heartbeats + 15 rare long INFO lines with DISTINCT
-            # word stems. Distinct stems (not a varying digit) matter: they do
-            # NOT collapse under template normalization, so they are kept as
-            # unique lines and INFLATE the compressed body past ratio 0.5.
-            # That is the exact bug region — pre-fix, ratio >= 0.5 suppressed
-            # the recovery marker even though lines were still dropped.
+            # 40 identical heartbeats + 15 rare long INFO lines with DISTINCT word stems. That is the exact bug
+            # region — pre-fix, ratio >= 0.5 suppressed the recovery marker even though lines were still dropped.
             stems = [
                 "quokka",
                 "narwhal",
@@ -626,9 +620,7 @@ class TestUniqueLogRegressionGuards:
                 "region where pre-fix code suppressed the recovery marker"
             )
             assert result.compressed_line_count < result.original_line_count
-            # Fix 1: despite ratio > 0.5, a recovery key is emitted because
-            # lines were dropped, and it round-trips the FULL original — zero
-            # silent loss. Pre-fix this returned None (silent loss).
+            # Fix 1: despite ratio > 0.5, a recovery key is emitted because lines were dropped, and it round-trips the FULL original — zero silent loss.
             assert result.cache_key is not None, (
                 "dropped lines require a recovery key even when ratio > 0.5"
             )

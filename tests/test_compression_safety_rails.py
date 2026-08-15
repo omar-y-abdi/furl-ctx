@@ -32,8 +32,7 @@ from furl_ctx.transforms.base import Transform
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 from furl_ctx.transforms.pipeline import TransformPipeline
 
-# ``furl_ctx.compress`` the submodule is shadowed by the function of the
-# same name re-exported in ``furl_ctx/__init__.py``.
+# The package re-exports a `compress` function that shadows the `furl_ctx.compress` submodule attribute.
 compress_module = importlib.import_module("furl_ctx.compress")
 
 
@@ -65,9 +64,8 @@ _NEUTRAL_TOOL_OUTPUT = (
 )
 
 
-# Benign outputs that merely MENTION errors — exactly one distinct
-# indicator keyword ("error"). A lax substring gate would exempt these
-# from compression (savings regression); the strong gate must not.
+# Benign outputs that merely MENTION errors — exactly one distinct indicator keyword ("error"). A lax
+# substring gate would exempt these from compression (savings regression); the strong gate must not.
 _BENIGN_GREP_OUTPUT = (
     "src/error_handler.py:12:def handle_error(code):\n"
     "src/error_handler.py:48:    log_error(code, context)\n"

@@ -45,19 +45,14 @@ from .base import Transform
 logger = logging.getLogger(__name__)
 
 
-# Length profile for hex hash detection. Kept as named constants — no magic
-# numbers in production code (build constraint #2). MD5 = 32 hex chars,
-# SHA1 = 40, SHA256 = 64.
+# Length profile for hex hash detection. Kept as named constants — no magic numbers in
+# production code (build constraint #2). MD5 = 32 hex chars, SHA1 = 40, SHA256 = 64.
 _HEX_HASH_LENGTHS = frozenset({32, 40, 64})
 
-# Canonical UUID (RFC 4122) with dashes is 36 chars. We deliberately do NOT
-# accept the 32-char dashless form since it is structurally identical to an
-# MD5 hex digest and would mis-classify a hash as a UUID.
+# Canonical UUID (RFC 4122) with dashes is 36 chars.
 _UUID_CANONICAL_LEN = 36
 
-# JWT shape constraints. A JWT is exactly three base64url-encoded segments
-# joined by ``.``. We do NOT verify the signature (we don't have the key,
-# and we're only doing detection); we only check the shape.
+# JWT shape constraints.
 _JWT_SEGMENT_COUNT = 3
 _JWT_MIN_SEGMENT_BYTES = 4
 
@@ -271,21 +266,15 @@ class CacheAligner(Transform):
         omitted (the pipeline default) they are ``False`` / ``None`` — the
         aligner keeps no cross-call state of its own.
         """
-        # Count ONCE (PERF-1): the aligner never mutates messages, so
-        # ``tokens_after`` is ``tokens_before`` by construction — the second
-        # full-conversation count and the isolation deep copy were pure
-        # overhead on the hottest fixed path.
+        # Count ONCE (PERF-1): the aligner never mutates messages, so ``tokens_after`` is ``tokens_before`` by construction
+        # — the second full-conversation count and the isolation deep copy were pure overhead on the hottest fixed path.
         tokens_before = tokenizer.count_messages(messages)
         result_messages = messages
         warnings: list[str] = []
         frozen_message_count = kwargs.get("frozen_message_count", 0)
 
-        # islice skips the frozen prefix the old ``i < frozen_message_count``
-        # guard did. The ``max(..., 0)`` is load-bearing: islice REJECTS a
-        # negative start with ValueError, whereas the old guard silently skipped
-        # nothing — clamping keeps that no-op for caller-supplied negatives.
-        # Block-format prompts are inspected via their concatenated text parts;
-        # plain-string prompts pass through unchanged (COR-53).
+        # islice skips the frozen prefix the old ``i < frozen_message_count`` guard did. The ``max(..., 0)`` is load-bearing: islice REJECTS a
+        # negative start with ValueError, whereas the old guard silently skipped nothing — clamping keeps that no-op for caller-supplied negatives.
         all_findings: list[VolatileFinding] = [
             finding
             for msg in islice(result_messages, max(frozen_message_count, 0), None)
@@ -305,15 +294,8 @@ class CacheAligner(Transform):
             warnings.append(msg_text)
             logger.warning(msg_text)
 
-        # Compute a stable hash of all system messages for observability.
-        # Plain-string content is hashed byte-identically to before;
-        # block-format content contributes its concatenated text parts so two
-        # different block prompts no longer collide on the empty hash (COR-53).
-        #
-        # Frame each message with its byte length so the serialization is
-        # injective: a bare delimiter join lets one message containing the
-        # delimiter collide with two separate messages (#5). Length-prefixing
-        # makes the hash uniquely identify the ordered system-prompt set.
+        # Compute a stable hash of all system messages for observability. Plain-string content is hashed byte-identically to before; block-format content contributes its concatenated
+        # text parts so two different block prompts no longer collide on the empty hash (COR-53). Length-prefixing makes the hash uniquely identify the ordered system-prompt set.
         system_contents = [
             concat_text_parts(m.get("content"))
             for m in result_messages
@@ -326,11 +308,8 @@ class CacheAligner(Transform):
         stable_hash = compute_short_hash(framed)
         prefix_bytes = len(system_text.encode("utf-8"))
         prefix_tokens_est = tokenizer.count_text(system_text)
-        # Cross-call prefix tracking is threaded by the caller, not latched on
-        # this instance: the aligner is a shared singleton, so an instance latch
-        # would compare unrelated requests' prompts and race under concurrency.
-        # Callers wanting turn-to-turn tracking pass the prior turn's
-        # ``stable_prefix_hash`` back in as ``previous_prefix_hash``.
+        # Cross-call prefix tracking is threaded by the caller, not latched on this instance: the aligner is a shared
+        # singleton, so an instance latch would compare unrelated requests' prompts and race under concurrency.
         previous_hash = kwargs.get("previous_prefix_hash")
         prefix_changed = previous_hash is not None and previous_hash != stable_hash
 

@@ -27,10 +27,8 @@ def test_workspace_dir_resolves_under_pytest_temp_not_real_home(
         f"~/.furl (F-E1); got {resolved}"
     )
 
-    # `tmp_path_factory` is itself session-scoped, so its base temp dir is the
-    # same directory the `_furl_workspace_dir_sandbox` fixture derived
-    # `FURL_WORKSPACE_DIR` from — asserting containment (rather than equality)
-    # proves this is that sandbox and not merely some other unrelated tmp dir.
+    # `tmp_path_factory` is itself session-scoped, so its base temp dir is the same directory the `_furl_workspace_dir_sandbox` fixture derived
+    # `FURL_WORKSPACE_DIR` from — asserting containment (rather than equality) proves this is that sandbox and not merely some other unrelated tmp dir.
     base_temp = tmp_path_factory.getbasetemp()
     assert base_temp in resolved.parents, (
         "the active workspace must resolve under pytest's own temp base "

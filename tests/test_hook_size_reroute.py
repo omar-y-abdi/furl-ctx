@@ -179,9 +179,7 @@ def test_over_threshold_output_reroutes_to_offload_and_records_counter(tmp_path)
     proc = _run_hook(payload, proj, extra={"FURL_HOOK_MAX_COMPRESS_BYTES": "3000"})
     assert proc.returncode == 0
     assert "updatedToolOutput" in proc.stdout
-    # The rerouted output is the reversible CCR offload: a queryable summary plus
-    # the retrieval marker (NOT the columnar table). The mirrored Bash shape wraps
-    # the compressed text back into ``{"content": <str>}``, so serialize to assert.
+    # The rerouted output is the reversible CCR offload: a queryable summary plus the retrieval marker (NOT the columnar table).
     out = json.loads(proc.stdout)["hookSpecificOutput"]["updatedToolOutput"]
     out_text = json.dumps(out)
     assert "<<ccr:" in out_text and "_ccr_summary" in out_text

@@ -111,20 +111,8 @@ from furl_ctx.transforms.cross_message_dedup import (
 )
 from furl_ctx.transforms.read_lifecycle import ReadState
 
-# --------------------------------------------------------------------------- #
-# FROZEN before-image — the ORIGINAL ``_marker_patterns`` literals, copied
-# verbatim from tool_injection.py PRIOR to the marker_grammar consolidation.
-# These are intentionally NOT imported from marker_grammar (that would make the
-# equivalence proof circular). They are the immutable reference the spec-built
-# patterns must reproduce byte-for-byte at the BEHAVIORAL (union) level.
-#
-# Note the FOUR entries: the third (`compressed\. hash=`) is the now-RETIRED
-# dead pattern #2. We keep it in the reference set on purpose: removing it from
-# the production list must NOT change which hashes get surfaced, because the
-# generic fallback (entry 4 here / GENERIC_BRACKET in the spec) already
-# subsumes it. The equivalence corpus includes a string only the dead pattern
-# could have matched, and asserts the hash still surfaces after removal.
-# --------------------------------------------------------------------------- #
+# . removing it from the production list must NOT change which hashes get surfaced The equivalence corpus
+# includes a string only the dead pattern could have matched, and asserts the hash still surfaces after removal.
 _OLD_MARKER_PATTERNS: list[re.Pattern] = [
     re.compile(r"\[(\d+) \w+ compressed to (\d+)\. Retrieve more: hash=([a-f0-9]{24})\]"),
     re.compile(r"\[(\d+) \w+ compressed\. hash=([a-f0-9]{24})\]"),  # retired dead #2
@@ -215,8 +203,7 @@ class Case:
 
 
 def _build_A(store: CompressionStore) -> tuple[str, str, str]:
-    # crusher.rs:1239 -> format!("<<ccr:{hash} {dropped_count}_rows_offloaded>>")
-    # hash = hash_canonical = sha256[:12].  Stored under that 12-hex key.
+    # the Rust module:1239 -> format!("<<ccr:{hash} {dropped_count}_rows_offloaded>>") hash = hash_canonical = sha256[:12]. Stored under that 12-hex key.
     original = json.dumps([{"id": i, "v": f"row-{i}"} for i in range(42)])
     h = _sha256_12(original)
     store.store(original=original, compressed=f"<<ccr:{h}>>", explicit_hash=h)
@@ -225,14 +212,8 @@ def _build_A(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_B(store: CompressionStore) -> tuple[str, str, str]:
-    # Shape B (``<<ccr:{hash}#rows {n}_chunks>>``) is RETIRED: its producer
-    # (marker_for_row_index / the granular per-row offload) was removed (F8/#168),
-    # so nothing emits it any more. The CONSUMER still tolerates the shape
-    # defensively (a stale marker could surface from Tier-2-cached content); this
-    # pins that handling. The pattern-4 delimiter class [ ,#>] stops the hash
-    # capture at '#', so the EXTRACTED hash is the bare 12-hex blob hash (not
-    # "{hash}#rows"). That bare hash is the whole-blob recovery key, so we store
-    # the original under it (matching the crusher's unconditional whole-blob persist).
+    # Shape B (``<<ccr:{hash}#rows {n}_chunks>>``) is RETIRED: its producer (marker_for_row_index / the granular per-row offload) was removed (F8/#168), so nothing
+    # emits it any more. The CONSUMER still tolerates the shape defensively (a stale marker could surface from Tier-2-cached content); this pins that handling.
     original = json.dumps([{"k": i, "blob": "x" * 20} for i in range(7)])
     h = _sha256_12(original)
     store.store(original=original, compressed=f"<<ccr:{h}>>", explicit_hash=h)
@@ -241,8 +222,7 @@ def _build_B(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_C(store: CompressionStore) -> tuple[str, str, str]:
-    # walker.rs:193 / formatter.rs:568 -> "<<ccr:{},{},{}>>".format(hash, kind, size)
-    # 12-hex opaque-blob sentinel (lossless:table substitution).
+    # Opaque-blob sentinel format: `<<ccr:{hash},{kind},{size}>>` with a 12-hex hash.
     original = "BASE64BLOBPAYLOAD" * 64
     h = _sha256_12(original)
     store.store(original=original, compressed=f"<<ccr:{h}>>", explicit_hash=h)
@@ -251,9 +231,8 @@ def _build_C(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_D(store: CompressionStore) -> tuple[str, str, str]:
-    # smart_crusher.py:871 -> compressed=f"<<ccr:{ccr_hash}>>", explicit_hash at :875.
-    # ccr_hash here is the canonical 24-hex key (the bare marker carries the full
-    # 24-hex; the Python mirror stores under explicit_hash=ccr_hash).
+    # Whole-blob compression emits `<<ccr:{ccr_hash}>>`; the hash is the canonical
+    # 24-hex key (the bare marker carries the full 24-hex; the Python mirror stores under explicit_hash=ccr_hash).
     original = json.dumps({"detail": "bare-sentinel payload", "n": 99})
     h = _sha256_24(original)
     store.store(original=original, compressed=f"<<ccr:{h}>>", explicit_hash=h)
@@ -262,9 +241,8 @@ def _build_D(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_E(store: CompressionStore) -> tuple[str, str, str]:
-    # PRODUCER-DRIVEN: cross_message_dedup.duplicate_sentinel (:155) emits the
-    # real JSON note containing `<<ccr:{hash} {n_bytes}_bytes_duplicate>>`
-    # (:164). 24-hex canonical key.  We feed the WHOLE note to the consumer.
+    # PRODUCER-DRIVEN: cross_message_dedup.duplicate_sentinel (:155) emits the real JSON note containing
+    # `<<ccr:{hash} {n_bytes}_bytes_duplicate>>` (:164). 24-hex canonical key. We feed the WHOLE note to the consumer.
     original = json.dumps([{"row": i, "data": f"dup-{i}"} for i in range(5)])
     h = _sha256_24(original)
     store.store(original=original, compressed="", explicit_hash=h)
@@ -275,9 +253,8 @@ def _build_E(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_F(store: CompressionStore) -> tuple[str, str, str]:
-    # PRODUCER-DRIVEN: cross_message_dedup.near_duplicate_rendering (:173) emits
-    # the real JSON array note containing
-    # `<<ccr:{hash} {n_bytes}_bytes_near_duplicate>>` (:188). 24-hex key.
+    # PRODUCER-DRIVEN: cross_message_dedup.near_duplicate_rendering (:173) emits the real JSON
+    # array note containing `<<ccr:{hash} {n_bytes}_bytes_near_duplicate>>` (:188). 24-hex key.
     original = json.dumps([{"row": i, "data": f"near-{i}"} for i in range(8)])
     h = _sha256_24(original)
     store.store(original=original, compressed="", explicit_hash=h)
@@ -295,12 +272,7 @@ def _build_F(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_G(store: CompressionStore) -> tuple[str, str, str]:
-    # diff_compressor.rs:479 ->
-    #   "[{} lines compressed to {}. Retrieve full diff: hash={}]"
-    # key = md5_hex_24(content) (diff_compressor.rs:1140, lowercase, truncate 24).
-    # Consumer pattern 1 needs "Retrieve more:" (no match), so this resolves via
-    # the GENERIC fallback pattern 3 (`\[.*?compressed.*?hash=([a-f0-9]{24})\]`,
-    # IGNORECASE) — pin that it DOES extract.
+    # Diff markers use a lowercase 24-hex content hash and `Retrieve full diff:` wording, so they resolve through the generic fallback grammar.
     original = "diff --git a/x b/x\n" + "\n".join(f"+line {i}" for i in range(120))
     h = _md5_24(original)
     store.store(original=original, compressed="<compressed diff>", explicit_hash=h)
@@ -309,14 +281,8 @@ def _build_G(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_H(store: CompressionStore) -> tuple[str, str, str]:
-    # FORMAT-CONSTRUCTED from markers.rs marker_for_retrieve_more ->
-    #   f"\n[{n_words} items compressed to {compressed_count}. Retrieve more: hash={cache_key}]"
-    # cache_key = store-default 24-hex (CompressionStore.store SHA-256[:24]) — we
-    # call store.store() the same way the producers do, but build the marker
-    # text ourselves rather than driving the Rust log/search emitters E2E.
-    # This is the canonical "Retrieve more:" form shared by the log/search
-    # compressors. Resolves via consumer pattern 1 (standard "Retrieve more:"
-    # form).
+    # FORMAT-CONSTRUCTED from the Rust module marker_for_retrieve_more -> f"\n[{n_words} items compressed to {compressed_count}. Retrieve more: hash={cache_key}]" cache_key = store-default 24-hex
+    # (CompressionStore.store SHA-256[:24]) — we call store.store() the same way the producers do, but build the marker text ourselves rather than driving the Rust log/search emitters E2E.
     original = " ".join(f"word{i}" for i in range(400))
     h = store.store(original=original, compressed="<compressed text>")
     marker = f"\n[400 items compressed to 40. Retrieve more: hash={h}]"
@@ -324,12 +290,8 @@ def _build_H(store: CompressionStore) -> tuple[str, str, str]:
 
 
 def _build_I(store: CompressionStore) -> tuple[str, str, str]:
-    # FORMAT-CONSTRUCTED from read_lifecycle.py:491 (STALE branch) ->
-    #   f"[Read content stale: {file_display} was modified after this read. "
-    #   f"Retrieve original: hash={ccr_hash}]"
-    # The original is stored via self.store.store(...) (read_lifecycle.py:480) under
-    # the store-default 24-hex key.  This marker matches NO consumer pattern (no
-    # "compressed" token, no "<<ccr:") — recovery is DIRECT store lookup only.
+    # The stale-read marker carries a 24-hex store key but intentionally matches no
+    # generic CCR consumer grammar. Recover this shape by direct store lookup only.
     original = "the quick brown fox\n" * 50
     h = store.store(
         original=original,
@@ -537,10 +499,8 @@ def test_24hex_space_separator_extracts_full_width() -> None:
     assert len(detected[0]) == 24
 
 
-# --------------------------------------------------------------------------- #
-# EQUIVALENCE PROOF — the spec-built patterns reproduce the original literals'
-# behavior byte-for-byte. (STEP C ★)
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # EQUIVALENCE PROOF — the spec-built patterns reproduce
+# the original literals' behavior byte-for-byte. (STEP C ★) --------------------------------------------------------------------------- #
 
 
 def _equivalence_corpus() -> list[str]:
@@ -560,20 +520,15 @@ def _equivalence_corpus() -> list[str]:
         emitted, _h, _orig = case.build(CompressionStore(max_entries=100))
         corpus.append(emitted)
 
-    # Dead-pattern #2 string: ONLY the retired `[N \w+ compressed. hash=H]`
-    # literal could match this — yet the generic fallback already subsumes it
-    # (it contains "compressed" and "hash=<24hex>" inside brackets). Removing
-    # the dead pattern must NOT drop this hash.
+    # Dead-pattern #2 string: ONLY the retired `[N \w+ compressed. hash=H]` literal could match this — yet the generic fallback already
+    # subsumes it (it contains "compressed" and "hash=<24hex>" inside brackets). Removing the dead pattern must NOT drop this hash.
     corpus.append(f"[5 items compressed. hash={h24}]")
 
     # Generic-fallback-only string ("Retrieve full diff:" — shape G's form).
     corpus.append(f"[120 lines compressed to 12. Retrieve full diff: hash={h24}]")
 
-    # Shape G with an INNOCENT bracketed prefix on the same line — the
-    # span-safety shape (the generic fallback's interior is bracket-free so a
-    # match cannot start at the earlier "["). The extracted-hash UNION must be
-    # identical to the frozen lazy-dot literals here: the span fix changes
-    # match.group(0) (a substitution concern), never which hash surfaces.
+    # Shape G with an INNOCENT bracketed prefix on the same line — the span-safety shape (the
+    # generic fallback's interior is bracket-free so a match cannot start at the earlier "[").
     corpus.append(
         f"See [ticket-42] for context [120 lines compressed to 12. Retrieve full diff: hash={h24}]"
     )
@@ -654,11 +609,7 @@ def test_dead_pattern_retired_but_hash_still_surfaces() -> None:
     )
 
 
-# --------------------------------------------------------------------------- #
-# PRODUCER ↔ CONSUMER BINDING — the format strings the format-constructed
-# fixtures use are sourced from / verified against the OWNED grammar, so a
-# producer that emits an un-enumerated width or separator FAILS here. (STEP E)
-# --------------------------------------------------------------------------- #
+# .
 
 
 def test_format_constructed_fixtures_use_owned_grammar_pieces() -> None:
@@ -721,19 +672,8 @@ def test_double_angle_separators_are_exactly_the_owned_set() -> None:
         assert _scan(bad) == [], f"an un-enumerated separator unexpectedly surfaced a hash: {bad!r}"
 
 
-# --------------------------------------------------------------------------- #
-# PRODUCER-DRIVEN E2E BINDING — drive the REAL producer through the engine,
-# extract via the REAL owned consumer patterns (NOT a local
-# regex), recover byte-exact from the store. THIS is the drift guard the
-# objective asks for: if a Rust/Python producer changes a separator or width,
-# the production consumer stops surfacing the hash and these FAIL — naming the
-# shape. (STEP E — genuine producer→consumer binding for shapes A, C, G.)
-#
-# These are standalone (not ``Case`` entries) because the E2E path persists to
-# the engine's own store (Rust process store / request-scoped Python store),
-# not the per-case isolated ``CompressionStore`` the format-constructed table
-# uses.
-# --------------------------------------------------------------------------- #
+# . drive the REAL producer through the engine, extract via the REAL owned consumer patterns (NOT a local regex), recover byte-exact from
+# the store. if a Rust/Python producer changes a separator or width, the production consumer stops surfacing the hash and these FAIL
 
 
 def test_producer_driven_A_rows_offloaded_binds_to_production_consumer() -> None:
@@ -761,9 +701,7 @@ def test_producer_driven_A_rows_offloaded_binds_to_production_consumer() -> None
     crusher = router._get_smart_crusher()
     recovered = [crusher.ccr_get(h) for h in detected if crusher.ccr_get(h) is not None]
     assert recovered, "scanned row-drop hash did not resolve in the Rust store"
-    # Robust recovery check: every distinct input item is either still visible
-    # in the output OR present in a CCR blob the consumer's hash resolves.
-    # (Avoids depending on which specific items survivor-selection kept.)
+    # Robust recovery check: every distinct input item is either still visible in the output OR present in a CCR blob the consumer's hash resolves.
     blob = "\n".join(r or "" for r in recovered)
     lost = [it for it in items if it not in output and it not in blob]
     assert not lost, (

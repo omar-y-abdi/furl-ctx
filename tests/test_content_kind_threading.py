@@ -72,13 +72,8 @@ def test_compress_labels_entries_with_tool_name() -> None:
 def test_multi_message_parallel_compress_preserves_content_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Review F3: the router compresses multiple cache-miss messages in a
-    # ThreadPoolExecutor (FURL_COMPRESS_WORKERS, default 4). A plain
-    # executor.submit does NOT carry ContextVars into the worker thread, so the
-    # request-scoped tool name bound by compress() was lost — every entry from
-    # a multi-message call stored content_kind=None while single-message (the
-    # plugin path, compressed inline on the calling thread) worked. Submissions
-    # now run under contextvars.copy_context(), so the binding propagates.
+    # the router compresses multiple cache-miss messages in a ThreadPoolExecutor (FURL_COMPRESS_WORKERS, default 4). A plain executor.submit does NOT carry ContextVars into
+    # the worker thread every entry from a multi-message call stored content_kind=None while single-message (the plugin path, compressed inline on the calling thread) worked.
     from furl_ctx import compress
     from furl_ctx.cache.compression_store import get_compression_store
 
