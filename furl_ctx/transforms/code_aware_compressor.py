@@ -282,9 +282,8 @@ _LANG_CONFIGS: dict[CodeLanguage, LangConfig] = {
 
 # ─── Language detection ──────────────────────────────────────────────────────
 
-# Lightweight pre-filter patterns for language detection. These are ONLY a
-# quick check to avoid parsing with every language; actual detection is done
-# by tree-sitter (fewest parse errors wins).
+# Lightweight pre-filter patterns for language detection. These are ONLY a quick check to avoid
+# parsing with every language; actual detection is done by tree-sitter (fewest parse errors wins).
 _LANGUAGE_PREFILTER: dict[CodeLanguage, list[re.Pattern[str]]] = {
     CodeLanguage.PYTHON: [
         re.compile(r"^\s*(def|class|import|from|async def)\s+\w+", re.MULTILINE),
@@ -1078,9 +1077,8 @@ class CodeAwareCompressor:
 
         visit(root)
 
-        # Capture top-level code that wasn't handled by any of the above.
-        # This preserves global variables, constants, if __name__ blocks,
-        # module-level assignments, etc.
+        # Capture top-level code that wasn't handled by any of the above. This preserves
+        # global variables, constants, if __name__ blocks, module-level assignments, etc.
         for child in root.children:
             child_range = (child.start_byte, child.end_byte)
             if child_range not in captured_byte_ranges:
