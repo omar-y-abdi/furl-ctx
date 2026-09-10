@@ -184,9 +184,8 @@ def _decoded_sigs(output_text: str):
     rows = decode_csv_schema_rows(text)
     if rows is None:
         return set()
-    # COR-14: decoded rows carry dotted keys where the encoder flattened
-    # uniform nesting; the originals in recheck() are canonicalized the
-    # same way, so the comparison is value-exact under dotted keys.
+    # COR-14: decoded rows carry dotted keys where the encoder flattened uniform nesting; the originals
+    # in recheck() are canonicalized the same way, so the comparison is value-exact under dotted keys.
     return {_canonical(_unflatten_dotted(r)) for r in rows}
 
 

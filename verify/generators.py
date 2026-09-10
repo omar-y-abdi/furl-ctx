@@ -78,11 +78,7 @@ class Case:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Seed material loaded ONCE from the real captures. We extract vocabulary and
-# shapes, then SYNTHESIZE fresh rows — we never replay the real rows verbatim
-# as the test payload (that would not be out-of-sample).
-# ---------------------------------------------------------------------------
+# Seed material loaded ONCE from the real captures.
 
 
 def _load_text(name: str) -> str:
@@ -180,9 +176,8 @@ def _iso_z(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# ---------------------------------------------------------------------------
-# LOGS — git-log-shaped rows (the dev claim: logs@90 93.0%, repeated_logs@90 97.1%)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- LOGS — git-log-shaped rows (the dev claim:
+# logs@90 93.0%, repeated_logs@90 97.1%) ---------------------------------------------------------------------------
 
 
 def gen_logs(seed: int, n: int, tier: str, *, repeated: bool = False) -> Case:
@@ -358,9 +353,8 @@ def gen_code(seed: int, n: int, tier: str) -> Case:
         items.append(blob)
 
     query = "Review this code for correctness"
-    # Each source blob is its own tool message (mirrors a coding agent that
-    # read N files). Default config skips user messages; tool/assistant
-    # content is the compression target.
+    # Each source blob is its own tool message (mirrors a coding agent that read N files).
+    # Default config skips user messages; tool/assistant content is the compression target.
     messages = [{"role": "user", "content": query}]
     for _i, blob in enumerate(items):
         messages.append({"role": "tool", "content": blob})
@@ -375,9 +369,8 @@ def gen_code(seed: int, n: int, tier: str) -> Case:
     )
 
 
-# ---------------------------------------------------------------------------
-# MULTITURN — conversation with a cached prefix (dev claim: multiturn@135 70.8%)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- MULTITURN — conversation with a cached
+# prefix (dev claim: multiturn@135 70.8%) ---------------------------------------------------------------------------
 
 
 def gen_multiturn(seed: int, n: int, tier: str) -> Case:
@@ -466,9 +459,8 @@ def gen_multiturn(seed: int, n: int, tier: str) -> Case:
     )
 
 
-# ---------------------------------------------------------------------------
-# DISK — large structured "ls -la / du"-shaped rows (dev claim: disk@9 50% lossless)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- DISK — large structured "ls -la / du"-shaped
+# rows (dev claim: disk@9 50% lossless) ---------------------------------------------------------------------------
 
 
 def gen_disk(seed: int, n: int, tier: str) -> Case:
@@ -542,27 +534,11 @@ def gen_disk(seed: int, n: int, tier: str) -> Case:
 # OPAQUE — the whole-blob CCR offload path (reached by NO other family).
 # ---------------------------------------------------------------------------
 
-# One document's size in chars. Any N of these clears the router's
-# ``_OFFLOAD_MIN_CHARS`` (4000) many times over; the binding constraint is N,
-# not this.
+# One document's size in chars. Any N of these clears the router's ``_OFFLOAD_MIN_CHARS`` (4000) many times over; the binding constraint is N, not this.
 OPAQUE_DOC_CHARS = 6000
 
-# Row counts that actually REACH ``router_engine._ccr_offload``. The route is
-# only taken inside a BOUNDED regime whose two edges are both
-# ``SmartCrusherConfig`` constants — measured on d02778b6, not assumed:
-#
-#   n <  min_items_to_analyze  (5)  the crusher does not analyse the array and
-#                                   compresses it anyway  -> no offload
-#                                   (measured: n=3, n=4 take smart_crusher)
-#   n >  max_items_after_crush (15) the crusher can drop down to that cap, which
-#                                   beats offloading      -> no offload
-#                                   (measured: n=16,17,18,22,26,30)
-#   5 <= n <= 15                    the crusher correctly declines (unique, huge
-#                                   cells, nothing folds) and the router's
-#                                   last-resort offload runs
-#
-# 7 and 10 sit two and five clear of the lower edge, eight and five clear of the
-# upper. Both verified to take the route in ALL 6 fixed seeds x 3 tiers.
+# Row counts that actually REACH ``router_engine._ccr_offload``. The route is only taken
+# inside a BOUNDED regime whose two edges are both ``SmartCrusherConfig`` constants.
 OPAQUE_SIZES = (7, 10)
 
 
@@ -627,9 +603,8 @@ def gen_opaque(seed: int, n: int, tier: str) -> Case:
     )
 
 
-# ---------------------------------------------------------------------------
-# Needle planting — inject K KNOWN-UNIQUE rows the model would need to retrieve.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Needle planting — inject K KNOWN-UNIQUE
+# rows the model would need to retrieve. ---------------------------------------------------------------------------
 
 
 def plant_needles(case: Case, seed: int, k: int = 3) -> Case:

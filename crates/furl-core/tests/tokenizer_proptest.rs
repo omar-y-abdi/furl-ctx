@@ -1,8 +1,4 @@
-//! Property tests for the tokenizer module.
-//!
-//! Invariants we lean on for downstream callers (cost tracking, compression
-//! decisions, cache keys). These are small enough to also serve as quick
-//! regression catchers if a tokenizer-rs upgrade breaks the surface API.
+//! Property tests for the tokenizer module. Invariants we lean on for downstream callers (cost tracking, compression decisions, cache keys).
 
 use furl_core::tokenizer::{get_tokenizer, EstimatingCounter, TiktokenCounter, Tokenizer};
 use proptest::prelude::*;
@@ -42,17 +38,8 @@ proptest! {
         prop_assert!(est.count_text(&s) >= 1);
     }
 
-    /// Concatenation behaves on the same scale as the parts. We *cannot*
-    /// claim true subadditivity (`count(a+b) <= count(a) + count(b)`): BPE
-    /// runs on top of a regex pre-tokenizer, and pre-tokenization of `a+b`
-    /// can split differently than the union of pre-tokenizations of `a` and
-    /// `b` for some Unicode inputs (e.g. `"𝀀" + "(A𐲀"` produced 9 tokens
-    /// vs 3+5=8 separately during proptest exploration).
-    ///
-    /// The weaker, *true* invariant: concat doesn't blow up the count beyond
-    /// a small constant overhead. We bound it loosely — even with a
-    /// pre-tokenizer disagreement, the boundary can introduce at most a
-    /// handful of extra tokens, never a multiplicative blowup.
+    /// Concatenation is not strictly token-subadditive because BPE pre-tokenization can change at the boundary, especially for
+    /// Unicode. Assert only that concatenation adds a small constant overhead and never causes multiplicative token growth.
     #[test]
     fn concat_does_not_explode(a in any::<String>(), b in any::<String>()) {
         let tt = TiktokenCounter::for_model("gpt-4o-mini").unwrap();

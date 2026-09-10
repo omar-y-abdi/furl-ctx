@@ -64,10 +64,8 @@ def persist_to_python_ccr(
         return False
     try:
         store: Any = get_compression_store()
-        # require_durable: with a durable backend a write that only reached the
-        # volatile fallback (degraded / lost the lock race) raises
-        # DurableWriteError — caught below and vetoed, so a marker never ships
-        # for an original that dies with the process.
+        # require_durable: with a durable backend a write that only reached the volatile fallback (degraded / lost the lock race)
+        # raises DurableWriteError — caught below and vetoed, so a marker never ships for an original that dies with the process.
         store.store(
             original,
             compressed,

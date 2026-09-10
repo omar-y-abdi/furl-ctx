@@ -57,10 +57,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
-# Sliding window and thresholds. 600 s spans a retrieval burst within an
-# agentic session while decaying well before the session ends; 3 retrievals
-# of one shape says "the model keeps needing this back" (hint: keep more);
-# 6 says compression of this shape is actively fighting the model (skip).
+# Sliding window and thresholds. 600 s spans a retrieval burst within an agentic session while decaying well before the session ends.
 DEFAULT_WINDOW_SECONDS = 600.0
 DEFAULT_HINT_MIN_RETRIEVALS = 3
 DEFAULT_SKIP_MIN_RETRIEVALS = 6
@@ -71,12 +68,7 @@ DEFAULT_KEEP_BUDGET_MULTIPLIER = 1.5
 DEFAULT_MAX_EVENTS_PER_SHAPE = 64
 DEFAULT_MAX_SHAPES = 256
 
-# Content-type tags — the ``ContentType`` enum VALUES the router passes at
-# lookup time (``detection.content_type.value``). Kept as local strings so the
-# cache module stays dependency-light (same design note as router_policy:
-# never import across the transforms boundary at module level); the equality
-# is pinned by test_retrieval_feedback.py::
-# test_content_type_tags_pinned_to_detector_enum_values.
+# Content-type tags — the ``ContentType`` enum VALUES the router passes at lookup time (``detection.content_type.value``).
 TAG_UNKNOWN = ""
 TAG_JSON_ARRAY = "json_array"
 TAG_SOURCE_CODE = "source_code"
@@ -85,14 +77,8 @@ TAG_BUILD_OUTPUT = "build"
 TAG_GIT_DIFF = "diff"
 TAG_PLAIN_TEXT = "text"
 
-# Entry ``compression_strategy`` → content-type tag. SmartCrusher mirrors
-# record heterogeneous "smart_crusher*" strings (row_drop, compact_document,
-# Rust strategy_info fallbacks) — all JSON-array compressions, matched by
-# prefix below. The sidecar routes record their CompressionStrategy value.
-# Strategies that don't attribute to one routed shape ("mcp_compress",
-# "ccr_offload", "cross_message_dedup", "read_lifecycle:*") map to
-# TAG_UNKNOWN: their signals stay in the unknown bucket rather than biasing a
-# shape they don't describe.
+# Entry ``compression_strategy`` → content-type tag. SmartCrusher mirrors record heterogeneous "smart_crusher*" strings
+# (row_drop, compact_document, Rust strategy_info fallbacks) — all JSON-array compressions, matched by prefix below.
 _SMART_CRUSHER_STRATEGY_PREFIX = "smart_crusher"
 _STRATEGY_CONTENT_TYPE_TAGS: dict[str, str] = {
     _SMART_CRUSHER_STRATEGY_PREFIX: TAG_JSON_ARRAY,
@@ -328,11 +314,8 @@ class RetrievalFeedback:
         del self._events[stalest]
 
 
-# ---------------------------------------------------------------------------
-# Global accessor — one aggregator per process, mirroring the compression
-# store's lazy singleton so the store (record side) and router (lookup side)
-# meet without explicit plumbing.
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Global accessor — one aggregator per process, mirroring the compression store's lazy
+# singleton so the store (record side) and router (lookup side) meet without explicit plumbing. ---------------------------------------------------------------------------
 
 _retrieval_feedback: RetrievalFeedback | None = None
 _feedback_lock = threading.Lock()

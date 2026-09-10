@@ -69,12 +69,8 @@ class TextCrusherConfig:
     max_pairwise_dedup_segments: int = 2000
     enable_ccr: bool = True
     max_shippable_ratio: float = 0.9
-    # Secret-mask keep rail (input-side defense): segments carrying
-    # secret-shaped tokens (long high-entropy hex/base64 runs, AKIA/ghp_/
-    # sk- prefixed keys, PEM armor, JWTs) join the mandatory keeps so the
-    # lossy selector can never drop them into CCR-only visibility. Drop
-    # protection only — content is never rewritten (store-side redaction
-    # owns log exposure). ``False`` restores pre-rail selection exactly.
+    # When enabled, secret-shaped segments are mandatory keeps so prose selection cannot hide them
+    # behind CCR-only visibility. Actual secret redaction remains a separate store-side responsibility.
     secret_keep_rail: bool = True
 
 
@@ -151,9 +147,8 @@ class TextCrusher:
         if cache_key is not None and not self._persist_to_python_ccr(
             content, rust_result.compressed, cache_key
         ):
-            # Store write failed → marker would dangle, dropped segments
-            # unrecoverable. Serve the original uncompressed prose
-            # instead (mirrors log/search/diff + cross_message_dedup).
+            # Store write failed → marker would dangle, dropped segments unrecoverable. Serve the
+            # original uncompressed prose instead (mirrors log/search/diff + cross_message_dedup).
             return self._passthrough_result(content, rust_result)
 
         return TextCrushResult(

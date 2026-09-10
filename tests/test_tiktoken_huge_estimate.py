@@ -34,9 +34,8 @@ def test_below_threshold_is_exact(counter: TiktokenCounter) -> None:
 
 
 def test_above_threshold_estimate_is_close_and_fast(counter: TiktokenCounter) -> None:
-    # A >= 8 MiB homogeneous JSON payload: the estimate should land within a few
-    # percent of the true count (homogeneous → the prefix is representative) and
-    # complete far faster than a full encode of the whole body.
+    # A >= 8 MiB homogeneous JSON payload: the estimate should land within a few percent of the true count
+    # (homogeneous → the prefix is representative) and complete far faster than a full encode of the whole body.
     unit = '{"row":123,"ph":"X","name":"RunTask","dur":42} '
     text = unit * ((9 * 1024 * 1024) // len(unit) + 1)
     assert len(text) >= counter._ESTIMATE_ABOVE_LEN
@@ -68,19 +67,16 @@ def test_estimate_is_cached(counter: TiktokenCounter) -> None:
 
 
 def test_degenerate_huge_run_does_not_raise(counter: TiktokenCounter) -> None:
-    # A single-class run far above _MAX_SAFE_SAME_CLASS_RUN would make the EXACT
-    # path raise (to dodge catastrophic backtracking). Above the estimate
-    # threshold there is no full encode to protect, so it must NOT raise — the
-    # content simply offloads. A positive, finite count comes back.
+    # A single-class run far above _MAX_SAFE_SAME_CLASS_RUN would make the EXACT path raise (to dodge catastrophic backtracking).
+    # Above the estimate threshold there is no full encode to protect, so it must NOT raise — the content simply offloads.
     text = "a" * (9 * 1024 * 1024)
     n = counter.count_text(text)
     assert n > 0
 
 
 def test_exact_path_still_refuses_pathological_below_threshold(counter: TiktokenCounter) -> None:
-    # Regression guard: the ReDoS refusal is intact for content BELOW the
-    # estimate threshold (a 200 KB single-class run, over _MAX_SAFE_SAME_CLASS_RUN
-    # but under 8 MiB), so the estimate branch did not weaken the exact path.
+    # Regression guard: the ReDoS refusal is intact for content BELOW the estimate threshold (a 200 KB single-class
+    # run, over _MAX_SAFE_SAME_CLASS_RUN but under 8 MiB), so the estimate branch did not weaken the exact path.
     text = "a" * 200_000
     assert len(text) < counter._ESTIMATE_ABOVE_LEN
     with pytest.raises(ValueError, match="same-class run"):

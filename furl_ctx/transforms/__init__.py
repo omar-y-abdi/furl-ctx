@@ -116,10 +116,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "furl_ctx.transforms.content_router",
         "RouterCompressionResult",
     ),
-    # Bind the enum to its 115-line OWNER (router_policy), not the
-    # content_router facade — touching CompressionStrategy must not import
-    # the whole router + Rust chain. content_router re-exports the same
-    # object, so both import paths resolve to one canonical enum.
+    # Bind the enum to its 115-line OWNER (router_policy), not the content_router facade — touching CompressionStrategy must not import
+    # the whole router + Rust chain. content_router re-exports the same object, so both import paths resolve to one canonical enum.
     "CompressionStrategy": ("furl_ctx.transforms.router_policy", "CompressionStrategy"),
     # Other transforms
     "CacheAligner": ("furl_ctx.transforms.cache_aligner", "CacheAligner"),

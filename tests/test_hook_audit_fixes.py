@@ -36,26 +36,13 @@ _HOOKS_JSON = _HOOKS / "hooks.json"
 _PRETOOL = _HOOKS / "pretool_pipe.py"
 _MCP_JSON = _ROOT / "plugins" / "furl" / ".mcp.json"
 
-# Hermetic scope for every hook subprocess: the pretool deny/ask guard reads
-# permission rules from the payload cwd and HOME, and these pins target the
-# zero-rules path, so both must be rule-free fresh dirs.
+# Hermetic scope for every hook subprocess: the pretool deny/ask guard reads permission rules from the
+# payload cwd and HOME, and these pins target the zero-rules path, so both must be rule-free fresh dirs.
 _EMPTY_HOME = tempfile.mkdtemp(prefix="furl-audit-home-")
 _NO_RULES_CWD = tempfile.mkdtemp(prefix="furl-audit-cwd-")
 
-# Hermetic ``uv`` for the F-A2 kill tests. The rewritten wrapper's completion line
-# runs ``uv run --with furl-ctx[mcp]==<pin> python3 <compressor>`` — a LIVE PyPI
-# resolve. That is irrelevant to what F-A2 pins (the INT/TERM trap flushing the
-# captured partial stdout when a piped command is killed) yet couples the test to
-# the network: if the kill path ever falls through to that completion line (the
-# non-interactive SIGINT case can — see docs/audits/IMPROVEMENT-LEDGER.md,
-# 2026-07-21), then an unresolvable pin (drifted ahead of PyPI) or a cold uv cache
-# under a contended network makes ``uv run`` hang, and ``communicate(timeout=20)``
-# times out — a load/network FALSE red that says nothing about the trap. A local
-# stub ``uv`` that exits non-zero makes the wrapper take its own shell-level
-# ``|| cat "$f"`` fail-open path instead: the partial stdout is still delivered,
-# with ZERO network, so the test's verdict depends only on the shell/trap
-# behaviour it pins. On the pass path the trap re-raises and ``uv`` is never
-# reached at all, so this changes nothing there.
+# Stub `uv` in kill-signal tests so network/PyPI resolution cannot create false timeouts. The stub drives
+# the wrapper's shell fail-open path while preserving the partial-output trap behavior under test.
 _UV_STUB_DIR = tempfile.mkdtemp(prefix="furl-audit-uvstub-")
 _uv_stub = Path(_UV_STUB_DIR) / "uv"
 _uv_stub.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
@@ -121,12 +108,7 @@ def _no_ai_tells(text: str) -> bool:
 # --- F-A1: profile-safe invocation ------------------------------------------------
 
 
-# The ``sh -c`` (never ``sh -lc``) invocation and the PATH-append that resolves uv
-# are pinned BYTE-EXACTLY for both functional hooks in test_plugin_hooks_manifest.py
-# (``test_runtime_behavior_preserved`` == _EXPECTED_COMMAND for PostToolUse,
-# ``test_pretool_command_is_env_gated_and_pinned`` == _EXPECTED_PRETOOL_COMMAND for
-# PreToolUse); full-string equality strictly dominates the substring checks that
-# used to live here. What this file adds is the RUNTIME proof below.
+# Pin both hook commands byte-exactly: use `sh -c`, never `sh -lc`, and append the uv lookup path without changing command bytes.
 
 
 def test_faA1_profile_noise_does_not_corrupt_envelope() -> None:

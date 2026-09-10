@@ -49,9 +49,8 @@ def _hash(messages: list[dict]) -> str:
 
 
 def test_delimiter_collision_now_yields_distinct_hashes() -> None:
-    # One message containing the delimiter vs two separate messages: these are
-    # structurally different prompt sets and MUST hash differently. Under the
-    # bare-join bug both produced the same hash.
+    # One message containing the delimiter vs two separate messages: these are structurally different
+    # prompt sets and MUST hash differently. Under the bare-join bug both produced the same hash.
     one_msg = _hash([_sys("a\n---\nb")])
     two_msgs = _hash([_sys("a"), _sys("b")])
     assert one_msg != two_msgs, "non-injective prefix hash collided (#5)"
@@ -89,12 +88,7 @@ def test_identical_set_reports_no_change() -> None:
 
 
 def test_no_cross_request_leak_on_shared_instance() -> None:
-    # The aligner is a process-wide singleton in the pipeline. Two DIFFERENT
-    # prompts through the SAME instance with no threaded hash must NOT latch
-    # one request's prefix into the next: both report prefix_changed=False /
-    # previous_hash=None. (Pre-fix the instance latched _previous_prefix_hash,
-    # so the 2nd call falsely reported prefix_changed=True and leaked the 1st
-    # request's hash — a cross-request observability corruption + data race.)
+    # The aligner is a process-wide singleton in the pipeline.
     aligner = _aligner()
     tok = _tok()
     a = aligner.apply([_sys("prompt A")], tok)

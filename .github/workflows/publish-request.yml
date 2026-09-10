@@ -1,10 +1,6 @@
 name: Publish Recovery Request
 
-# Unprivileged request surface for manual release recovery. This workflow never
-# receives OIDC or write permissions and never publishes. The privileged
-# `Publish to PyPI (manual fallback)` workflow is triggered via workflow_run from
-# the protected default branch and accepts requests only when this run itself was
-# dispatched on main.
+# Unprivileged request surface for manual release recovery.
 on:
   workflow_dispatch:
     inputs:

@@ -68,9 +68,8 @@ def test_surrogate_store_is_deterministic() -> None:
     ],
 )
 def test_valid_utf8_hash_identical_to_strict_encode(original: str) -> None:
-    # The key for every valid-UTF8 original must equal the OLD strict-encode
-    # digest — surrogatepass emits identical bytes for all valid input, so
-    # every existing marker keeps resolving.
+    # The key for every valid-UTF8 original must equal the OLD strict-encode digest — surrogatepass
+    # emits identical bytes for all valid input, so every existing marker keeps resolving.
     store = CompressionStore(max_entries=10)
 
     expected = hashlib.sha256(original.encode()).hexdigest()[:24]

@@ -43,21 +43,8 @@ BENCH_MODEL = "gpt-4o"
 CCR_PREFIX = "<<ccr:"
 CCR_SENTINEL_KEY = "_ccr_dropped"
 
-# Round-trip cost model for effective-savings-under-retrieval, MEASURED against
-# the production `furl_retrieve` surface rather than assumed. A retrieval costs
-# the model three things, and this harness used to charge a fraction of one:
-#
-#   1. the payload AS THE MODEL RECEIVES IT — JSON-escaped inside the response's
-#      `original_content` field, not the raw bytes `CompressionStore.retrieve`
-#      hands a library caller. See `retrieved_blob_tokens`.
-#   2. the response's other fields, plus the tool-result message envelope.
-#   3. the tool call the model must emit to ask for it.
-#
-# Every figure below was measured over 18 offloaded blobs spanning 76..75530
-# content tokens (opaque, logs, repeated_logs, search, multiturn, disk, code) and
-# is pinned against the real handler by
-# `tests/test_retrieval_charge_matches_mcp_surface.py`, which fails if the
-# response shape drifts away from these numbers.
+# Round-trip cost model for effective-savings-under-retrieval, MEASURED against the production `furl_retrieve` surface rather than assumed.
+# JSON-escaped inside the response's `original_content` field, not the raw bytes `CompressionStore.retrieve` hands a library caller.
 RETRIEVE_CALL_OVERHEAD_TOKENS = 31  # {"name":"furl_retrieve","arguments":{"hash":…}}; 28-34
 MCP_RESPONSE_SCAFFOLD_TOKENS = 68  # response minus escaped payload; 64-73 over 40, median 68
 TOOL_RESULT_ENVELOPE_TOKENS = 7  # role/framing of the tool message; 7 in every case
@@ -319,9 +306,8 @@ def hash_compare_structured(
         else:
             missing.append(sig)
 
-    # Ordering check (TEST-16d): only claimable when the ordered surface
-    # alone reproduces the ENTIRE multiset (CCR-retrieved rows carry no
-    # position, so partial surfaces stay multiset-only).
+    # Ordering check (TEST-16d): only claimable when the ordered surface alone reproduces the ENTIRE
+    # multiset (CCR-retrieved rows carry no position, so partial surfaces stay multiset-only).
     ordered = _ordered_surface_sigs(output_text)
     order_checked = ordered is not None and Counter(ordered) == Counter(original_sigs)
     order_exact = order_checked and ordered == original_sigs
@@ -480,17 +466,12 @@ def effective_savings(
     these figures remain an upper bound on savings by one round trip per blob.
     """
     out: dict[str, float] = {}
-    # The WHOLE retrieved payload, priced as the model receives it (JSON-escaped
-    # inside the response) rather than as the library hands it over. The
-    # zero-drop cases this gate exists for (dedup, opaque whole-blob) have no
-    # rows at all.
+    # The WHOLE retrieved payload, priced as the model receives it (JSON-escaped inside the response) rather than as the library hands it over.
     recovered_payload_tokens = sum(retrieved_blob_tokens(b, tok) for b in recovered.values())
     for r in rates:
         if r > 0.0:
             content_cost = recovered_payload_tokens
-            # ONE round trip per offloaded blob. NOT k: a blob sits behind a
-            # single marker with no row index, so a retrieval of any fraction of
-            # it is the same one call returning the same whole payload.
+            # ONE round trip per offloaded blob.
             call_cost = len(recovered) * RETRIEVE_ROUND_TRIP_TOKENS
         else:
             content_cost = 0

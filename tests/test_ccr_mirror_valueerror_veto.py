@@ -28,13 +28,8 @@ from furl_ctx.cache import compression_store as cs
 from furl_ctx.compress import compress
 from furl_ctx.transforms.smart_crusher import CcrMirrorError, SmartCrusher, SmartCrusherConfig
 
-# 1000 distinct homogeneous strings take the lossy row-drop path and emit a
-# <<ccr:>> pointer the mirror must back. A DISTINCT prefix (not the
-# ``log-line-{i}`` the no-silent-loss suite uses) keeps this content unique to
-# this file: the process-wide result cache is content-keyed and the global store
-# is not reset between the main suite's tests, so sharing content would let an
-# earlier successful compress serve a cached, still-backed crush on a cache hit
-# (bypassing this file's injected-failure store entirely).
+# 1000 distinct homogeneous strings take the lossy row-drop path and emit a <<ccr:>> pointer the mirror must back.
+# A DISTINCT prefix (not the ``log-line-{i}`` the no-silent-loss suite uses) keeps this content unique to this file.
 _ROW_DROP_ITEMS = [f"veto10-audit-line-{i}-payload" for i in range(1000)]
 
 

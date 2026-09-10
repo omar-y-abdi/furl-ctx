@@ -92,83 +92,43 @@ if TYPE_CHECKING:
     from .base import CompressionObserver
     from .content_router import ContentRouter, ContentRouterConfig
 
-# CCR-offload fallback shape. Trigger: content at least _OFFLOAD_MIN_CHARS
-# whose final ratio is >= _OFFLOAD_TRIGGER_RATIO (nothing meaningfully
-# compressed). The preview constants are display budgets only — recovery is
-# always the byte-exact original in the CCR store.
+# CCR-offload fallback shape. The preview constants are display budgets only — recovery is always the byte-exact original in the CCR store.
 _OFFLOAD_MIN_CHARS = 4000
 _OFFLOAD_TRIGGER_RATIO = 0.9
 _OFFLOAD_PREVIEW_MAX_ROWS = 20
 _OFFLOAD_PREVIEW_FIELD_CHARS = 120
 _OFFLOAD_PREVIEW_HEAD_LINES = 12
 _OFFLOAD_PREVIEW_TAIL_LINES = 4
-# Error-line preservation for the plain-text head/tail preview (Bug-4 / Med-10):
-# a head+tail preview drops the MIDDLE, so an ERROR/Traceback buried between the
-# first and last lines vanished from the model-visible view (only recoverable if
-# the agent already knew to retrieve). Surface up to _OFFLOAD_ERROR_LINES_MAX
-# severity-matched lines FROM THE OMITTED MIDDLE, each capped at
-# _OFFLOAD_ERROR_LINE_MAX_CHARS so one giant line can't bloat the preview. The
-# pattern is a flat, anchored alternation of severity WORDS — no nested
-# quantifiers, so it is linear (ReDoS-safe) on any line.
+# Error-line preservation for the plain-text head/tail preview (Bug-4 / Med-10): a head+tail preview drops the MIDDLE, so an ERROR/Traceback
+# buried between the first and last lines vanished from the model-visible view (only recoverable if the agent already knew to retrieve).
 _OFFLOAD_ERROR_LINES_MAX = 15
 _OFFLOAD_ERROR_LINE_MAX_CHARS = 240
 _OFFLOAD_SEVERITY_RE = re.compile(
     r"\b(?:ERROR|FATAL|CRITICAL|SEVERE|PANIC|EXCEPTION|TRACEBACK)\b",
     re.IGNORECASE,
 )
-# Object-with-dominant-array preview (e.g. a Chrome trace: {"metadata": {...},
-# "traceEvents": [...]}). Sample the leading/trailing elements of the inner
-# array so the preview reflects the events, not the object's header boilerplate.
+# Object-with-dominant-array preview (e.g. a Chrome trace: {"metadata": {...}, "traceEvents": [...]}). Sample the
+# leading/trailing elements of the inner array so the preview reflects the events, not the object's header boilerplate.
 _OFFLOAD_PREVIEW_ARRAY_HEAD = 8
 _OFFLOAD_PREVIEW_ARRAY_TAIL = 2
-# Signal-aware summary budgets for the two JSON-array-of-dicts offload paths.
-# Two sequential O(n) passes over the rows yield a compact ``_ccr_summary`` that
-# answers aggregate (per-field value histograms) and anomaly (one concrete
-# example row per notable value) questions INLINE, so the agent need not
-# retrieve the full content. All bounds are hard output caps — the summary stays
-# a few KB regardless of row count.
-#
-# A field is CATEGORICAL (gets a histogram + is a candidate for the example
-# field) when its scalar values are low-cardinality: at most
-# _SUMMARY_MAX_CATEGORICAL_DISTINCT distinct values, OR a distinct/row ratio
-# below _SUMMARY_CATEGORICAL_RATIO. An all-unique field (e.g. a monotonic
-# timestamp) fails both and is excluded, so it neither bloats value_counts nor
-# is picked as the example ("type") field.
-#
-# _SUMMARY_TOP_VALUES bounds BOTH the per-field histogram and the example rows
-# (one example per top value of the chosen field).
+# Signal-aware summary budgets for the two JSON-array-of-dicts offload paths. All
+# bounds are hard output caps — the summary stays a few KB regardless of row count.
 _SUMMARY_MAX_CATEGORICAL_DISTINCT = 50
 _SUMMARY_CATEGORICAL_RATIO = 0.02
 _SUMMARY_TOP_VALUES = 20
 _SUMMARY_SAMPLE_ROWS = 6
 
-# Sibling-field preview bounds (review F2). A dominant-array object's OTHER keys
-# (everything besides the array) keep their VALUES, not just their names — a
-# crash report's ``exception``/``termination`` blocks carry the single most
-# important fact (the exception type/signal), and dropping them to bare key
-# names made that fact invisible in the compressed view. Scalars pass through
-# (tiny); small nested objects recurse to _SIBLING_MAX_DEPTH so their scalar
-# leaves survive; a long list (the kind that SHOULD be offloaded) or a deeper
-# structure is elided to a ``[… in CCR]`` note. The whole sibling blob is hard-
-# capped at _SIBLING_FIELDS_MAX_CHARS so the preview stays a few KB.
+# Sibling-field preview bounds (review F2).
 _SIBLING_MAX_DEPTH = 4
 _SIBLING_MAX_KEYS = 40
 _SIBLING_MAX_LIST = 10
 _SIBLING_FIELDS_MAX_CHARS = 4000
-# Bytes held back from the char budget while accumulating (review RF4) so the
-# trailing ``_more_keys`` note fits under _SIBLING_FIELDS_MAX_CHARS even in the
-# worst case (a large omitted-count integer). Comfortably above the note's
-# longest serialized form.
+# Bytes held back from the char budget while accumulating (review RF4) so the trailing ``_more_keys``
+# note fits under _SIBLING_FIELDS_MAX_CHARS even in the worst case (a large omitted-count integer).
 _SIBLING_MORE_KEYS_RESERVE = 64
 
-# Slice guidance carried inside the ``_ccr_summary`` preview: tells the agent how
-# to fetch a NARROW slice of the offloaded rows instead of the whole array back
-# (the ``furl_retrieve`` row-select filters). Domain-agnostic on purpose — it
-# names no field or value, pointing the agent at the fields it can already see in
-# this same summary (``schema``/``value_counts`` for a category, ``ranges`` for a
-# numeric window). The hash is NOT known here (it is minted later in
-# ``_ccr_offload``), so the hint references "the hash in the marker below" rather
-# than threading a value that does not yet exist.
+# Slice guidance carried inside the ``_ccr_summary`` preview The hash is NOT known here (it is minted later in
+# ``_ccr_offload``) so the hint references "the hash in the marker below" rather than threading a value that does not yet exist.
 _CCR_SUMMARY_RETRIEVE_HINT = (
     "To drill into these rows without pulling the whole array back, call "
     "furl_retrieve with the hash in the marker below plus a row-select: "
@@ -179,9 +139,8 @@ _CCR_SUMMARY_RETRIEVE_HINT = (
     "of these to retrieve the full original."
 )
 
-# Byte ceiling above which a content block is offloaded immediately instead of
-# run through the exact mixed/crush path — that path is super-linear (a real
-# 33 MB Chrome trace took ~68 s), while CCR offload is O(n) and reversible.
+# Byte ceiling above which a content block is offloaded immediately instead of run through the exact mixed/crush
+# path — that path is super-linear (a real 33 MB Chrome trace took ~68 s), while CCR offload is O(n) and reversible.
 _HUGE_CONTENT_BYTES_DEFAULT = 8 * 1024 * 1024
 
 
@@ -310,19 +269,11 @@ class ContentCompressionEngine:
     def __init__(self, config: ContentRouterConfig) -> None:
         self.config = config
 
-        # Lazy-loaded compressors.
-        #
-        # The SELF-CONTAINED factories (SmartCrusher, Search, Log, Diff,
-        # TextCrusher, CodeAware) read only ``config`` and cache their
-        # instance — they live in ``CompressorRegistry``. The router's
-        # ``_get_*`` delegators resolve through it.
+        # Lazy-loaded compressors. The SELF-CONTAINED factories (SmartCrusher, Search, Log, Diff, TextCrusher, CodeAware) read only
+        # ``config`` and cache their instance — they live in ``CompressorRegistry``. The router's ``_get_*`` delegators resolve through it.
         self._registry = CompressorRegistry(config)
-        # Per-strategy dispatch + no-savings fallback chain. Holds no router
-        # reference: the compressor getters are passed per-call by the
-        # ``_apply_strategy_to_content`` delegator, so monkeypatching those
-        # router methods still takes effect. Only the lifetime-stable deps
-        # (config + the module-level debug helpers/logger) ride the
-        # constructor — resolved once here.
+        # Per-strategy dispatch + no-savings fallback chain. Only the lifetime-stable deps (config
+        # + the module-level debug helpers/logger) ride the constructor — resolved once here.
         cr = _cr()
         self._dispatcher = StrategyDispatcher(
             config,
@@ -388,15 +339,8 @@ class ContentCompressionEngine:
                 routing_log=[],
             )
         else:
-            # Determine strategy from content analysis. ``_determine_strategy``
-            # already runs ``is_mixed_content`` + ``_detect_content`` (a Rust
-            # FFI round-trip) internally — on the hot path (debug off) we do NOT
-            # recompute them here. With a PRECOMPUTED ``detection`` (PERF-2c)
-            # the engine resolves strategy itself and skips the re-detect; the
-            # ``detection is None`` path is byte-identical to before and keeps
-            # ``hooks._determine_strategy`` monkeypatches biting. The detection
-            # locals below are built only for the debug log, so the per-call
-            # detection cost is paid at most once.
+            # Determine strategy from content analysis. With a PRECOMPUTED ``detection`` (PERF-2c) the engine resolves strategy itself and skips the
+            # re-detect; the ``detection is None`` path is byte-identical to before and keeps ``hooks._determine_strategy`` monkeypatches biting.
             if detection is None:
                 strategy = hooks._determine_strategy(content)
             else:
@@ -416,12 +360,8 @@ class ContentCompressionEngine:
                 )
 
             cfg = self.config
-            # Byte ceiling (Bug-8): the threshold is in BYTES, so compare the
-            # encoded byte length, not the character count — on multibyte content
-            # a char count is up to ~4x short and lets an over-ceiling payload slip
-            # past the guard. Cheap bounds avoid the encode for the common case:
-            # chars are a lower bound on UTF-8 bytes and 4*chars an upper bound, so
-            # only content in the ambiguous middle band is actually encoded.
+            # Byte ceiling (Bug-8): the threshold is in BYTES, so compare the encoded byte length, not the character count
+            # — on multibyte content a char count is up to ~4x short and lets an over-ceiling payload slip past the guard.
             _byte_ceiling = _huge_content_bytes()
             _char_len = len(content)
             _is_huge = _char_len >= _byte_ceiling or (
@@ -434,10 +374,7 @@ class ContentCompressionEngine:
                 and cfg.ccr_inject_marker
                 and not cfg.lossless_only
             ):
-                # Size ceiling: above the threshold the exact mixed/crush path is
-                # super-linear (a 33 MB trace took ~68 s). Offload straight away —
-                # O(n) and reversible (head/tail preview + full original in CCR) —
-                # instead of paying the crush first and offloading afterwards.
+                # Size ceiling: above the threshold the exact mixed/crush path is super-linear (a 33 MB trace took ~68 s).
                 passthrough = RouterCompressionResult(
                     compressed=content,
                     original=content,
@@ -465,11 +402,8 @@ class ContentCompressionEngine:
                     token_counter=token_counter,
                 )
 
-        # Empty-output guard: compression must NEVER blank out non-empty input.
-        # An empty user-message content makes Anthropic reject the whole request
-        # with 400 ("messages.N: user messages must have non-empty content").
-        # If any transform yields empty/whitespace from non-empty input, fall
-        # back to the original content (passthrough) instead of emitting empty.
+        # Empty-output guard: compression must NEVER blank out non-empty input. An empty user-message content makes
+        # Anthropic reject the whole request with 400 ("messages.N: user messages must have non-empty content").
         if (
             content
             and content.strip()
@@ -482,14 +416,8 @@ class ContentCompressionEngine:
                 getattr(result.strategy_used, "value", result.strategy_used),
             )
             result.compressed = content
-            # This is a PASSTHROUGH — the output is the full original.
-            # The metrics (tokens_saved / compression_ratio / savings_percentage)
-            # are computed by summing routing_log[].compressed_tokens, so leaving
-            # the empty-output decisions in place reported phantom savings
-            # (tokens_saved=N, ratio 0.0) for content we did NOT actually shrink.
-            # Rewrite each decision to passthrough (compressed == original) so the
-            # routing_log and every derived metric honestly report saved=0,
-            # ratio=1.0.
+            # The metrics (tokens_saved / compression_ratio / savings_percentage) are computed by summing routing_log[].compressed_tokens, so leaving
+            # the empty-output decisions in place reported phantom savings (tokens_saved=N, ratio 0.0) for content we did NOT actually shrink.
             result.routing_log = [
                 replace(decision, compressed_tokens=decision.original_tokens)
                 for decision in result.routing_log
@@ -503,9 +431,8 @@ class ContentCompressionEngine:
             if offloaded is not None:
                 result = offloaded
 
-        # One observer call per routing decision; the observer is the
-        # forcing function for catching strategy-level regressions.
-        # Empty routing_log (passthrough fast path) → no calls.
+        # One observer call per routing decision; the observer is the forcing function for catching
+        # strategy-level regressions. Empty routing_log (passthrough fast path) → no calls.
         self._observe(result, hooks._observer)
         if debug_enabled:
             cr._log_router_debug(
@@ -602,12 +529,8 @@ class ContentCompressionEngine:
         cr = _cr()
         rows, n_items = self._build_offload_preview(content)
         preview = json.dumps(rows, ensure_ascii=False) if isinstance(rows, list) else rows
-        # Bug-11: record REAL token counts on the stored entry, using the same
-        # tokenizer the routing_log and the rest of the engine use. Storing
-        # ``len(content.split())`` (a whitespace WORD count) as ``original_tokens``
-        # silently mixed word counts with tokenizer counts in furl_stats
-        # aggregation. ``token_counter`` is the model tokenizer on the normal
-        # compress() path; ``cr._word_count`` is the same fallback used elsewhere.
+        # Store token counts using the active model tokenizer or the engine’s normal
+        # fallback, never whitespace word counts. Stats must not mix incompatible units.
         count = token_counter or cr._word_count
         try:
             from ..cache.compression_store import get_compression_store
@@ -621,15 +544,11 @@ class ContentCompressionEngine:
                 original_item_count=n_items,
                 query_context=context or None,
                 compression_strategy=CompressionStrategy.CCR_OFFLOAD.value,
-                # A durable write that fell open to volatile storage raises
-                # DurableWriteError → caught below, keeping the original (audit
-                # #3). The round-trip verify alone cannot catch this: a volatile
-                # write still resolves in-process.
+                # A durable write that fell open to volatile storage raises DurableWriteError → caught below, keeping the original (audit #3).
                 require_durable=True,
             )
-            # Round-trip verification is an ENGINE-INTERNAL read — it must not
-            # feed the retrieval-feedback loop as if the model asked for this
-            # content back (Engine P2-13).
+            # Round-trip verification is an ENGINE-INTERNAL read — it must not feed the
+            # retrieval-feedback loop as if the model asked for this content back (Engine P2-13).
             entry = store.retrieve(ccr_hash, record_feedback_signal=False)
             if entry is None or entry.original_content != content:
                 cr.logger.warning(
@@ -640,9 +559,8 @@ class ContentCompressionEngine:
             cr.logger.warning("ccr_offload: store unavailable; keeping original", exc_info=True)
             return None
 
-        # Both marker grammars: the <<ccr:HASH>> pointer every CCR consumer
-        # walks, and the bracket form tool-injection describes to the LLM —
-        # which also pins this output against recompression on later turns.
+        # Both marker grammars: the <<ccr:HASH>> pointer every CCR consumer walks, and the bracket form
+        # tool-injection describes to the LLM — which also pins this output against recompression on later turns.
         sentinel = {
             "_ccr_dropped": (
                 f"{marker_grammar.CCR_PREFIX}{ccr_hash}>> "
@@ -971,10 +889,8 @@ class ContentCompressionEngine:
         seen: set[Any] = set()
         for row in rows:
             value = row.get(field_name)
-            # Guard membership: a categorical field can still hold an unhashable
-            # value in some rows (str in most, list in a few) — ``value in set``
-            # would raise on it. Only scalars are counted, so only scalars are
-            # wanted example values.
+            # Guard membership: a categorical field can still hold an unhashable value in some rows (str
+            # in most, list in a few) Only scalars are counted, so only scalars are wanted example values.
             if not self._is_hashable_scalar(value) or value in seen or value not in wanted:
                 continue
             seen.add(value)
@@ -1084,9 +1000,8 @@ class ContentCompressionEngine:
         if len(lines) <= head + tail:
             return content, 1
         omitted_count = len(lines) - head - tail
-        # Bug-4 / Med-10: surface ERROR/Traceback/severity lines from the omitted
-        # MIDDLE so a buried error is not invisible in the model-facing preview
-        # (previously only recoverable if the agent already knew to retrieve).
+        # Bug-4 / Med-10: surface ERROR/Traceback/severity lines from the omitted MIDDLE so a buried error is
+        # not invisible in the model-facing preview (only recoverable if the agent already knew to retrieve).
         error_lines = self._extract_error_lines(lines[head:-tail])
         if error_lines:
             capped = (
@@ -1190,13 +1105,7 @@ class ContentCompressionEngine:
             if compressed_content != section.content:
                 any_section_changed = True
 
-            # Preserve code fence markers. The fence bytes SHIP, so they are
-            # counted AFTER wrapping (COR-30) — counting the bare section
-            # undercounted fenced output and overstated savings. A bare
-            # ``` fence carries language="" (never None for a fenced
-            # section — see split_into_sections), so the f-string below
-            # reproduces the original bare fence instead of fabricating a
-            # language tag the input never had.
+            # Preserve code fence markers.
             if section.is_code_fence:
                 compressed_content = f"```{section.language or ''}\n{compressed_content}\n```"
                 compressed_tokens = count(compressed_content)
@@ -1212,11 +1121,7 @@ class ContentCompressionEngine:
                 )
             )
 
-        # No section changed → reassembly would only mutate bytes (join
-        # normalization, re-synthesized fences) at ~zero savings. Return the
-        # original verbatim as PASSTHROUGH, with each decision rewritten to
-        # passthrough metrics so derived savings honestly report 0 (COR-30;
-        # same honesty rewrite as the empty-output guard in ``compress``).
+        # No section changed → reassembly would only mutate bytes (join normalization, re-synthesized fences) at ~zero savings.
         if not any_section_changed:
             return RouterCompressionResult(
                 compressed=content,
@@ -1333,10 +1238,7 @@ def run_router_passes(
             ``protect_recents``) that would otherwise be dropped by the
             ``kwargs.get(...)`` reads below.
     """
-    # Reject unknown kwargs up front so a typo fails loudly instead of
-    # being silently ignored. See _APPLY_ALLOWED_KWARGS for the two
-    # sources of the allow-list (keys read here ∪ keys broadcast by the
-    # pipeline to every transform).
+    # Reject unknown kwargs up front so a typo fails loudly instead of being silently ignored.
     for k in kwargs:
         if k not in _cr()._APPLY_ALLOWED_KWARGS:
             raise TypeError(f"ContentRouter.apply() got an unexpected keyword argument {k!r}")
@@ -1367,19 +1269,13 @@ def run_router_passes(
     skip_system = kwargs.get("compress_system_messages") is not True
     protect_recent = kwargs.get("protect_recent", hooks.config.protect_recent_code)
     protect_analysis = kwargs.get("protect_analysis_context", hooks.config.protect_analysis_context)
-    # Read the per-request min-token floor from the typed CompressRequest
-    # built once at the TransformPipeline boundary. That boundary unifies
-    # the two PUBLIC entry paths — compress() and
-    # TransformPipeline.apply(**kwargs) — to one default (250), fixing the
-    # divergence where direct-pipeline callers silently got 50.
+    # Read the per-request min-token floor from the typed CompressRequest built once at the TransformPipeline boundary.
     compress_request = kwargs.get("compress_request")
     if isinstance(compress_request, CompressRequest):
         min_tokens = compress_request.min_tokens_to_compress
     else:
-        # Raw ContentRouter.apply() (no pipeline boundary, e.g. low-level
-        # tests): preserve the historical direct-caller floor of 50. The
-        # worker-options pinning test compresses 122-token fixtures through
-        # it and depends on the 50 floor letting compression happen.
+        # Raw ContentRouter.apply() (no pipeline boundary, e.g. low-level tests): preserve the historical direct-caller floor of 50. The
+        # worker-options pinning test compresses 122-token fixtures through it and depends on the 50 floor letting compression happen.
         min_tokens = kwargs.get("min_tokens_to_compress", 50)
     # Cache-safety knobs for content-block (Anthropic-format) handling:
     compress_assistant_text_blocks = kwargs.get(
@@ -1391,11 +1287,7 @@ def run_router_passes(
         hooks.config.min_chars_for_block_compression,
     )
 
-    # Real message-shape counting (COR-39): ``count_messages`` handles
-    # block-list content part-by-part (text payloads, image budgets,
-    # tool_result payloads). The old ``count_text(str(content))`` tokenized
-    # the Python repr of block lists — inflated fictions that also skewed
-    # the context_pressure → min_ratio derivation below.
+    # Real message-shape counting (COR-39): ``count_messages`` handles block-list content part-by-part (text payloads, image budgets, tool_result payloads).
     tokens_before = tokenizer.count_messages(messages)
     context = kwargs.get("context", "")
     hook_biases: dict[int, float] = kwargs.get("biases") or {}
@@ -1403,12 +1295,8 @@ def run_router_passes(
     # Build tool name map for exclusion checking
     tool_name_map = hooks._build_tool_name_map(messages)
 
-    # Compute excluded tool IDs based on config. The CCR retrieval tool
-    # is unioned in UNCONDITIONALLY (retrieval-loop guard) — a caller
-    # override, even ``exclude_tools=set()``, must not re-enable
-    # compress→retrieve→compress ping-pong. New frozenset: the caller's
-    # set is never mutated. Matching is case-insensitive with
-    # fnmatch-style glob support (is_tool_excluded).
+    # Compute excluded tool IDs based on config. The CCR retrieval tool is unioned in UNCONDITIONALLY (retrieval-loop guard) — a caller override,
+    # even ``exclude_tools=set()``, must not re-enable compress→retrieve→compress ping-pong. New frozenset: the caller's set is never mutated.
     exclude_tools = (
         frozenset(hooks.config.exclude_tools)
         if hooks.config.exclude_tools is not None
@@ -1422,16 +1310,13 @@ def run_router_passes(
     num_messages = len(messages)
     model_limit = kwargs.get("model_limit", 0)
 
-    # net_mutation_gain (NR2-4): one reversed cumulative sum of
-    # per-message token counts, computed ONLY when the gate is enabled
-    # (zero cost when off). suffix_tokens[i] = tokens AFTER message i —
-    # what loses its provider cache discount if message i's bytes change.
+    # net_mutation_gain (NR2-4): one reversed cumulative sum of per-message token counts, computed ONLY when the gate is enabled (zero
+    # cost when off). suffix_tokens[i] = tokens AFTER message i — what loses its provider cache discount if message i's bytes change.
     suffix_tokens: list[int] | None = None
     if hooks.config.enable_net_mutation_gate:
         per_msg = [tokenizer.count_messages([m]) for m in messages]
-        # accumulate over the reversed list gives suffix sums INCLUDING each
-        # element; `initial=0` prepends the empty suffix and `[-2::-1]` drops the
-        # total and re-reverses, so suffix_tokens[j] == sum(per_msg[j + 1 :]).
+        # accumulate over the reversed list gives suffix sums INCLUDING each element; `initial=0` prepends the
+        # empty suffix and `[-2::-1]` drops the total and re-reverses, so suffix_tokens[j] == sum(per_msg[j + 1 :]).
         suffix_tokens = list(accumulate(reversed(per_msg), initial=0))[-2::-1]
 
     # Adaptive Read protection: protect a fraction of recent messages
@@ -1470,12 +1355,8 @@ def run_router_passes(
     warnings: list[str] = []
     compressor_timing: dict[str, float] = {}  # strategy → cumulative ms
 
-    # Routing reason counters for summary logging (TYPE-4: a
-    # ``Counter[str]`` makes every ``+=`` total — conditionally-booked
-    # keys need no ``setdefault`` seeding). The eight hot lanes stay
-    # PRE-SEEDED at zero: the observer receives this object (a dict
-    # subclass) and the whole-dict route_counts pins depend on the zero
-    # keys being present exactly as before.
+    # Routing reason counters for summary logging (TYPE-4: a ``Counter[str]`` makes
+    # every ``+=`` total — conditionally-booked keys need no ``setdefault`` seeding).
     route_counts: Counter[str] = Counter(
         {
             "excluded_tool": 0,
@@ -1497,37 +1378,19 @@ def run_router_passes(
 
     frozen_message_count = kwargs.get("frozen_message_count", 0)
 
-    # ------------------------------------------------------------------
-    # Two-pass parallel compression.
-    #
-    # Pass 1 (sequential): categorise every message — frozen, protected,
-    #   cached, small, etc. are resolved immediately.  Cache-miss messages
-    #   that need full compression are collected into *pending_tasks*.
-    #
-    # Pass 2 (parallel): all cache-miss compressions run concurrently in
-    #   a thread pool.  Each hooks.compress() call is independent.
-    #
-    # Pass 3 (sequential): results are stitched back into message order,
-    #   caches updated, and counters incremented.
-    # ------------------------------------------------------------------
+    # Two-pass parallel compression. Pass 2 (parallel): all cache-miss compressions run concurrently in a thread pool.
+    # Pass 3 (sequential): results are stitched back into message order, caches updated, and counters incremented.
 
     # Pre-allocate result slots — None means "pending compression".
     result_slots: list[dict[str, Any] | None] = [None] * num_messages
 
-    # Tasks: (slot_index, content, context, bias, content_key, detection)
-    # — ``detection`` is the classify-time DetectionResult when a Pass-1
-    # gate already paid for it, else None (PERF-2c).
+    # Tasks: (slot_index, content, context, bias, content_key, detection) — ``detection`` is the
+    # classify-time DetectionResult when a Pass-1 gate already paid for it, else None (PERF-2c).
     _PendingTask = tuple[int, str, str, float, CacheKey, DetectionResult | None]
     pending_tasks: list[_PendingTask] = []
 
-    # Pass 1 dispatches on the MessageDisposition ADT: WHAT happens to a
-    # message is decided by the pure gate chain in
-    # ``router_message_policy.classify_message`` (order preserved verbatim
-    # — it is behavior); HOW it happens (slot assignment, transform
-    # strings, counters, the cache gate, Pass-2 deferral) stays here.
-    # The injected callables are resolved fresh on every call so the test
-    # suite's monkeypatches — ``content_router_module._detect_content``,
-    # ``router._get_tool_bias`` — keep biting.
+    # Pass 1 dispatches on the MessageDisposition ADT: WHAT happens to a message is decided by the pure
+    # gate chain in ``router_message_policy.classify_message`` (order preserved verbatim — it is behavior).
     for i, message in enumerate(messages):
         content = message.get("content", "")
         disposition = classify_message(
@@ -1594,32 +1457,16 @@ def run_router_passes(
                 result_slots[i] = message
                 route_counts["already_compressed"] += 1
             case Compressible(bias=msg_bias, content_key=content_key, detection=detection):
-                # Two-tier compression cache. The lookup DECISION — Tier-1
-                # skip, Tier-2 ratio-gate, CCR-backing check, plus every
-                # cache mutation and routing-counter bump — is shared with
-                # the content-block path in _lookup_cached_disposition.
-                # Only what genuinely differs stays here: this path formats
-                # a flat ``router:{strategy}:{ratio}`` transform and DEFERS
-                # recompute to the batched ThreadPoolExecutor pass below
-                # (pending_tasks → Pass 2/3), whereas
-                # _compress_content_block threads a
-                # ``router:{label}:{strategy}`` format and recompresses
-                # inline. Outcomes pinned in
-                # test_content_router_cache_lookup_paths.py +
-                # test_result_cache_ccr_divergence.py. The key carries the
-                # per-request bias and a length guard — see
-                # _result_cache_key (COR-18).
+                # Two-tier compression cache. is shared with the content-block path in _lookup_cached_disposition. this path formats a flat ``router:{strategy}:{ratio}`` transform and DEFERS recompute
+                # to the batched ThreadPoolExecutor pass below (pending_tasks → Pass 2/3), whereas _compress_content_block threads a ``router:{label}:{strategy}`` format and recompresses inline.
                 match hooks._lookup_cached_disposition(
                     content_key, context, min_ratio, route_counts
                 ):
                     case ServeOriginal():
                         result_slots[i] = message
                     case ServeCached(compressed=served, strategy=strategy, ratio=ratio):
-                        # net_mutation_gain gate ALSO applies to cache
-                        # hits: the result cache is content-keyed but the
-                        # gate is POSITION-dependent (same bytes, larger
-                        # suffix → different economics), so it must be
-                        # re-evaluated at every serve site.
+                        # net_mutation_gain gate ALSO applies to cache hits: the result cache is content-keyed but the gate is
+                        # POSITION-dependent (same bytes, larger suffix → different economics), so it must be re-evaluated at every serve site.
                         gate_gain = (
                             net_mutation_gain(
                                 tokenizer.count_text(content) - tokenizer.count_text(served),
@@ -1719,11 +1566,7 @@ def run_router_passes(
             ", ".join(parts),
         )
 
-    # Forward route_counts to the observer so `/stats` can surface a
-    # session-level protection breakdown. The observer
-    # may not implement this method on older versions; ignore
-    # AttributeError so a non-conforming observer doesn't poison
-    # routing.
+    # Forward route_counts to the observer so `/stats` can surface a session-level protection breakdown.
     if hooks._observer is not None and route_counts:
         try:
             hooks._observer.record_router_route_counts(route_counts)

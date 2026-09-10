@@ -140,9 +140,8 @@ def test_deleted_hashes_reports_the_full_set_for_readback() -> None:
     assert set(outcome2.deleted_hashes(PARENT_A)) == {PARENT_A, NESTED_HASH}
 
 
-# ---------------------------------------------------------------------------
-# B6 -- the pre-check must fold at least as widely as the grammar
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- B6 -- the pre-check must fold at
+# least as widely as the grammar ---------------------------------------------------------------------------
 
 # U+017F LATIN SMALL LETTER LONG S. `.lower()` leaves it alone; `.casefold()`
 # maps it to "s", and the grammar's re.IGNORECASE matches it against "s".

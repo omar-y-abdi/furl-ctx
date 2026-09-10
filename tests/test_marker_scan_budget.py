@@ -173,11 +173,8 @@ def test_finditer_within_budget_matches_re_finditer_for_generic() -> None:
         exp = [m.group(m.lastindex) for m in GENERIC_BRACKET_PATTERN.finditer(text)]
         assert got == exp, f"RE2 twin diverged from re on {text!r}: {got} != {exp}"
 
-    # Character-offset invariant that sub_within_budget depends on: it splices the
-    # str by match.start and match.end, correct only if the RE2 twin returns
-    # CHARACTER offsets like google-re2, not byte offsets. With non-ASCII before
-    # the marker a byte-offset twin would slice mid-character and silently corrupt
-    # resolve_markers while the group-parity checks above stayed green.
+    # Verify the RE2 twin reports character offsets, not byte offsets. Python string
+    # slicing uses those spans; byte offsets after non-ASCII text would corrupt output.
     multibyte = f"café 🚀 [x compressed y hash={_H24}] 日本"
     twin_spans = [
         (m.start(), m.end()) for m in finditer_within_budget(GENERIC_BRACKET_PATTERN, multibyte)

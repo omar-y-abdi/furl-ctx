@@ -132,9 +132,7 @@ def test_every_pair_scores_in_unit_range_without_error() -> None:
 
 
 def test_cjk_ideographs_produce_no_tokens() -> None:
-    # CJK ideographs are neither ASCII alnum nor decimal digits, so a
-    # CJK-only query tokenizes to nothing and every item scores the
-    # empty-context path.
+    # CJK ideographs are neither ASCII alnum nor decimal digits, so a CJK-only query tokenizes to nothing and every item scores the empty-context path.
     results = BM25Scorer().score_batch(["这是一个测试文档 alpha", "beta"], "这是一个测试文档")
     assert all(result.score == 0.0 for result in results)
     assert all(result.reason == "BM25: empty context" for result in results)
@@ -142,9 +140,8 @@ def test_cjk_ideographs_produce_no_tokens() -> None:
 
 
 def test_fullwidth_unicode_digit_run_is_one_token_and_matches() -> None:
-    # Locks the ``\b\d{4,}\b`` numeric-ID branch: fullwidth decimal digits
-    # match ``\d`` but not ``[a-zA-Z0-9_]``. Removing that branch would drop
-    # this token and change scoring, so this test guards against it.
+    # Locks the ``\b\d{4,}\b`` numeric-ID branch: fullwidth decimal digits match ``\d`` but not ``[a-zA-Z0-9_]``.
+    # Removing that branch would drop this token and change scoring, so this test guards against it.
     results = BM25Scorer().score_batch(
         [f"メッセージ {_FULLWIDTH_12345} 完了", "no digits here"], _FULLWIDTH_12345
     )

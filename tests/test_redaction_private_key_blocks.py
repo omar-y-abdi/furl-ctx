@@ -76,9 +76,7 @@ def test_whole_block_is_redacted_for_every_pem_label(label: str) -> None:
 
 
 def test_pgp_private_key_block_is_redacted() -> None:
-    # Real PGP armor is ``PGP PRIVATE KEY BLOCK``. The old alternation listed a
-    # ``PGP `` label but spelled the tail ``PRIVATE KEY-----``, so it could never
-    # match a PGP export — not even the armor line.
+    # Real PGP armor is ``PGP PRIVATE KEY BLOCK``.
     pgp = (
         "-----BEGIN PGP " + _ARMOR[:-5] + " BLOCK-----\n"
         "Version: GnuPG v2\n\n" + _BODY + "\n"
@@ -105,9 +103,7 @@ def test_crlf_block_is_redacted() -> None:
 
 
 def test_encrypted_traditional_pem_headers_do_not_stop_the_match() -> None:
-    # An encrypted traditional PEM carries RFC-1421 headers between the armor
-    # and the body. They contain hyphens, which the armor-run guard in the block
-    # interior must tolerate (it excludes only 5-hyphen runs).
+    # An encrypted traditional PEM carries RFC-1421 headers between the armor and the body.
     payload = (
         "-----BEGIN RSA " + _ARMOR + "\n"
         "Proc-Type: 4,ENCRYPTED\n"
@@ -120,9 +116,8 @@ def test_encrypted_traditional_pem_headers_do_not_stop_the_match() -> None:
 
 
 def test_marker_length_is_independent_of_key_size() -> None:
-    # The module's stated property — "a FIXED length independent of the secret,
-    # so the redacted span never leaks the secret's length" — only becomes true
-    # once the body is inside the redacted span.
+    # The module's stated property — "a FIXED length independent of the secret, so the redacted span
+    # never leaks the secret's length" — only becomes true once the body is inside the redacted span.
     redactor = _redactor()
     small = "-----BEGIN EC " + _ARMOR + "\n" + _BODY + "\n-----END EC " + _ARMOR
     large = _block("RSA ")
@@ -162,11 +157,8 @@ def test_lone_armor_line_is_still_redacted() -> None:
 def test_truncated_body_is_scrubbed_whatever_separates_it_from_the_armor(
     separator: str,
 ) -> None:
-    # Review F-1: every run used to require a leading NEWLINE, including the
-    # first, so a truncated body abutting the armor with no separator, or with
-    # only a space or a tab, kept its key material in cleartext under the
-    # marker. That shape is real once newlines have been stripped, which is how
-    # a single-line env-var key arrives.
+    # Review F-1: every run used to require a leading NEWLINE, including the first, so a truncated body abutting the
+    # armor with no separator, or with only a space or a tab, kept its key material in cleartext under the marker.
     out = _redactor()("-----BEGIN RSA " + _ARMOR + separator + _BODY)
     assert _BODY not in out
     assert out == _MARKER
@@ -190,28 +182,22 @@ def test_prose_after_a_lone_armor_survives_byte_exact() -> None:
 )
 @pytest.mark.parametrize("separator", ["\n", ""], ids=["newline", "abutting"])
 def test_truncated_tail_base64_floor_boundary(separator: str, run_length: int, eaten: bool) -> None:
-    # Pins the 16-character floor that separates "key material" from "a word",
-    # on BOTH the newline-separated run and the F-1 abutting run. Below it the
-    # run is left alone; at it the run reads as base64 body.
+    # Pins the 16-character floor that separates "key material" from "a word", on BOTH the newline-separated run and the F-1 abutting run.
     text = "-----BEGIN RSA " + _ARMOR + separator + "A" * run_length
     out = _redactor()(text)
     assert out == (_MARKER if eaten else _MARKER + separator + "A" * run_length)
 
 
 def test_prose_abutting_the_armor_survives_byte_exact() -> None:
-    # The precision cost of the F-1 widening is bounded by the 16-character
-    # floor: ordinary prose beside an armor, with or without a separator, is
-    # still left alone because its first word is far short of 16 unbroken
-    # base64 characters.
+    # The precision cost of the F-1 widening is bounded by the 16-character floor: ordinary prose beside an armor, with
+    # or without a separator, is still left alone because its first word is far short of 16 unbroken base64 characters.
     for tail in (" see the docs for details", "see docs", "\tnotes below"):
         text = "-----BEGIN RSA " + _ARMOR + tail
         assert _redactor()(text) == _MARKER + tail
 
 
 def test_abutting_run_at_or_past_the_floor_is_the_disclosed_over_redaction() -> None:
-    # The honest other half of the trade-off, pinned so it stays deliberate: a
-    # 16+ character unbroken alphanumeric word abutting the armor IS eaten. At
-    # most that one run; the rest of the sentence survives.
+    # The honest other half of the trade-off, pinned so it stays deliberate: a 16+ character unbroken alphanumeric word abutting the armor IS eaten.
     text = "-----BEGIN RSA " + _ARMOR + "Supercalifragilistic and the rest survives"
     assert _redactor()(text) == _MARKER + " and the rest survives"
 
@@ -244,9 +230,8 @@ def test_public_material_is_never_redacted(label: str) -> None:
 
 
 def test_truncated_key_before_a_complete_one_does_not_swallow_the_logs_between() -> None:
-    # The block interior stops at the next 5-hyphen armor run, so an unterminated
-    # key cannot reach forward to a LATER key's ``-----END`` and destroy every
-    # retrievable byte in between. Both keys go; the log lines stay.
+    # The block interior stops at the next 5-hyphen armor run, so an unterminated key cannot
+    # reach forward to a LATER key's ``-----END`` and destroy every retrievable byte in between.
     text = (
         _block("RSA ", terminated=False)
         + "\n2026-07-24T10:00:00Z INFO  rotating\n2026-07-24T10:00:01Z INFO  loaded\n"
@@ -262,10 +247,7 @@ def test_truncated_key_before_a_complete_one_does_not_swallow_the_logs_between()
 
 
 def test_mismatched_armor_labels_over_redact_rather_than_leak() -> None:
-    # Deliberate, documented: the END armor's label is not tied to the BEGIN
-    # armor's, so a malformed pair takes the span between them. No real tool
-    # emits mismatched labels, and over-redaction is the safe direction for a
-    # shape that claims to hold a private key.
+    # Deliberate, documented: the END armor's label is not tied to the BEGIN armor's, so a malformed pair takes the span between them.
     text = "-----BEGIN RSA " + _ARMOR + "\nnot really a key\n-----END EC " + _ARMOR
     assert _redactor()(text) == _MARKER
 
@@ -280,10 +262,8 @@ def test_ordinary_content_with_hyphen_rules_is_untouched() -> None:
 
 
 def test_block_body_bound_falls_back_to_truncated_branch() -> None:
-    # ``_PEM_BLOCK_BODY``'s 100k ceiling is ~30x a 4096-bit RSA PEM. A block that
-    # exceeds it cannot match the full-block branch, and the point of this pin is
-    # that the fallback still takes the armor and the body: less than the whole
-    # block (the trailing END armor survives), never nothing.
+    # ``_PEM_BLOCK_BODY``'s 100k ceiling is ~30x a 4096-bit RSA PEM. A block that exceeds it cannot match the full-block branch, and the point of
+    # this pin is that the fallback still takes the armor and the body: less than the whole block (the trailing END armor survives), never nothing.
     oversized = "\n".join([_BODY] * 2000)  # ~126k chars, past the 100k bound
     assert len(oversized) > 100_000
     end_armor = "-----END RSA " + _ARMOR
@@ -293,9 +273,8 @@ def test_block_body_bound_falls_back_to_truncated_branch() -> None:
 
 
 def test_truncated_run_bound_is_2048_runs() -> None:
-    # ``_PEM_TRUNCATED_BODY``'s {0,2048} ceiling. 2048 base64 runs is ~128 KB of
-    # body, far past any real key, but the residual is honest: past the bound the
-    # remaining runs survive. Pinned at both sides of the edge.
+    # ``_PEM_TRUNCATED_BODY``'s {0,2048} ceiling. 2048 base64 runs is ~128 KB of body, far past
+    # any real key, but the residual is honest: past the bound the remaining runs survive.
     redactor = _redactor()
     armor = "-----BEGIN RSA " + _ARMOR
     at_bound = "\n".join([_BODY] * 2048)
@@ -310,14 +289,7 @@ def test_truncated_run_bound_is_2048_runs() -> None:
 
 
 def test_block_scan_stays_bounded_on_packed_armor_runs() -> None:
-    # The block interior is "any char that does not open a 5-hyphen run", so a
-    # scan launched from a BOGUS armor cannot run past the next armor and total
-    # work stays linear in the payload. A naive ``[\s\S]*?`` interior turns this
-    # exact input into 12 s of backtracking; this formulation measures ~5 ms.
-    # The ceiling is ~1000x the measured cost, so it flags a regression to an
-    # unbounded interior without being a timing flake. It matters because the
-    # redactor runs inside the PostToolUse hook, whose 30 s timeout is
-    # fail-OPEN: a hang degrades redaction to raw passthrough.
+    # The block interior is "any char that does not open a 5-hyphen run" A naive ``[\s\S]*?`` interior turns this exact input into 12 s of backtracking;
     payload = ("-----BEGIN RSA " + _ARMOR) * 10_000
     redactor = _redactor()
     start = time.perf_counter()

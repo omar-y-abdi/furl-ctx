@@ -261,11 +261,8 @@ def test_spill_hit_does_not_promote_into_primary(tmp_path) -> None:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Production activation path: FURL_CCR_SPILL through get_compression_store()
-# (markers resolve through the global store, never a hand-built one — so the
-# flag→env-factory→global wiring is the path that actually ships).
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Production activation path: FURL_CCR_SPILL through get_compression_store() (markers resolve through the global
+# store, never a hand-built one — so the flag→env-factory→global wiring is the path that actually ships). --------------------------------------------------------------------------- #
 
 
 def test_env_flag_on_wires_spill_into_global_store(monkeypatch) -> None:

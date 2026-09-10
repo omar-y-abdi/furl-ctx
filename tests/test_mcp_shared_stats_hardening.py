@@ -61,8 +61,7 @@ def test_shared_stats_paths_follow_env_mid_session(tmp_path: Path, monkeypatch) 
     assert mcp_server.shared_stats_dir() == ws_a
     assert mcp_server.shared_stats_file() == ws_a / "session_stats.jsonl"
 
-    # Re-point the workspace mid-session: the very next call must follow —
-    # no import-frozen snapshot (paths.py no-caching contract).
+    # Re-point the workspace mid-session: the very next call must follow — no import-frozen snapshot (the module no-caching contract).
     monkeypatch.setenv("FURL_WORKSPACE_DIR", str(ws_b))
     assert mcp_server.shared_stats_dir() == ws_b
     assert mcp_server.shared_stats_file() == ws_b / "session_stats.jsonl"
@@ -151,9 +150,8 @@ def test_append_landing_at_first_unlock_survives_prune(tmp_path: Path, monkeypat
 
 @_needs_flock
 def test_concurrent_appends_never_lost_during_prune(tmp_path: Path, monkeypatch) -> None:
-    # Real-concurrency property: appender threads (real flock via
-    # _append_shared_event) race reader threads running the prune-rewrite.
-    # Whatever the interleave, every appended event must survive.
+    # Real-concurrency property: appender threads (real flock via _append_shared_event) race reader
+    # threads running the prune-rewrite. Whatever the interleave, every appended event must survive.
     monkeypatch.setenv("FURL_WORKSPACE_DIR", str(tmp_path))
     stats_file = tmp_path / "session_stats.jsonl"
     _seed(stats_file, [_event(f"stale-{i}", age_seconds=99_999) for i in range(5)])

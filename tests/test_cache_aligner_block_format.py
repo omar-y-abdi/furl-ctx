@@ -97,9 +97,8 @@ def test_concat_is_total_on_junk_shapes() -> None:
 
 
 def test_different_block_prompts_hash_differently() -> None:
-    # Two ENTIRELY different block-format system prompts. Under the str-only
-    # bug both were excluded from the framing, hashed identically, and
-    # prefix_changed stayed False.
+    # Two ENTIRELY different block-format system prompts. Under the str-only bug both were
+    # excluded from the framing, hashed identically, and prefix_changed stayed False.
     h_a = _hash([_sys_blocks("You are a pirate.")])
     h_b = _hash([_sys_blocks("You are a tax auditor.")])
     assert h_a != h_b, "block-format prompts are invisible to the prefix hash (COR-53)"
@@ -119,9 +118,8 @@ def test_same_block_prompt_hashes_deterministically() -> None:
 
 
 def test_block_prompt_hash_matches_str_equivalent() -> None:
-    # Concatenation semantics: a block-format prompt hashes as its joined
-    # text parts, so a format-only change (str ↔ blocks) does not flip
-    # prefix_changed. Multi-part blocks join with a newline.
+    # Concatenation semantics: a block-format prompt hashes as its joined text parts, so a format-only
+    # change (str ↔ blocks) does not flip prefix_changed. Multi-part blocks join with a newline.
     assert _hash([_sys_blocks("You are helpful.")]) == _hash([_sys("You are helpful.")])
     assert _hash([_sys_blocks("a", "b")]) == _hash([_sys("a\nb")])
 

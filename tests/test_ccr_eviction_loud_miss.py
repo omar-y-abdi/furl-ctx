@@ -56,9 +56,8 @@ def _model_sees(store: object, hash_key: str) -> tuple[bool, dict]:
     by its absence.
     """
     stub = types.SimpleNamespace(check_proxy=False, _get_local_store=lambda: store)
-    # PERF-16 relocated the retrieve branch logic into the synchronous
-    # ``_retrieve_content_sync`` core (async ``_retrieve_content`` is now a thin
-    # ``asyncio.to_thread`` wrapper); drive the core directly with the stub self.
+    # PERF-16 relocated the retrieve branch logic into the synchronous ``_retrieve_content_sync`` core (async
+    # ``_retrieve_content`` is now a thin ``asyncio.to_thread`` wrapper); drive the core directly with the stub self.
     payload = FurlMCPServer._retrieve_content_sync(stub, hash_key, None)
     return ("error" not in payload), payload
 
@@ -127,16 +126,8 @@ def test_capacity_evicted_bulk_retrieval_is_loud_and_cause_honest() -> None:
 
 
 def test_capacity_evicted_granular_offload_retrieval_is_loud() -> None:
-    # Drive a REAL granular row-drop offload through the engine, then evict it
-    # DETERMINISTICALLY and confirm the model-facing miss is loud. The bare hash
-    # the model retrieves is backed by a single whole-blob entry (all rows), so
-    # eviction is all-or-nothing — never a silent partial subset.
-    #
-    # Every precondition below is an ASSERTION, never a skip. The two facts the
-    # old skips guarded — a sentinel was emitted, and the victim was evicted — are
-    # exactly what a routing or eviction regression perturbs, so skipping on them
-    # is how this test would go green on the very build that silences the loud
-    # miss. If the sentinel is absent or the victim survives, that IS the failure.
+    # Drive a REAL granular row-drop offload through the engine, then evict it DETERMINISTICALLY and confirm the
+    # model-facing miss is loud. The bare hash the model retrieves is backed by a single whole-blob entry (all rows)
     cap = 8
     store = get_compression_store(max_entries=cap)
     router = ContentRouter(ContentRouterConfig())
@@ -144,15 +135,8 @@ def test_capacity_evicted_granular_offload_retrieval_is_loud() -> None:
         {"id": i, "user": f"u{i % 9}", "msg": f"event {i} payload {'x' * 12}", "ok": True}
         for i in range(240)
     ]
-    # Scan with the PRODUCTION grammar (``hashes_in_text``), not a hand-rolled
-    # regex. A local ``[a-f0-9]{6,}(?:[ ,>])`` diverges from DOUBLE_ANGLE_DELIM
-    # in both directions: too tight on '#' (a '#'-delimited shape is
-    # grammar-legal but returns nothing, producing a red that misdiagnoses the
-    # offload path when the real fault is a stale test regex) and too loose on
-    # width (an 18-hex hash would satisfy the "stored under its marker hash"
-    # precondition below while ``resolve_markers`` could never match it, so the
-    # precondition would close "not stored" but not "not resolvable").
-    # ``hashes_in_text`` enforces the strict {12, 24} consumer widths.
+    # Scan with the PRODUCTION grammar (``hashes_in_text``), not a hand-rolled regex. A local ``[a-f0-9]{6,}(?:[ ,>])``
+    # diverges from DOUBLE_ANGLE_DELIM in both directions. ``hashes_in_text`` enforces the strict {12, 24} consumer widths.
     res = router.compress(json.dumps(items, ensure_ascii=False))
     bare = hashes_in_text(res.compressed)
     assert bare, (
@@ -162,32 +146,15 @@ def test_capacity_evicted_granular_offload_retrieval_is_loud() -> None:
     )
     victim = bare[0]
 
-    # The emitted marker MUST be backed by a live entry under its own hash, or the
-    # model could never resolve it. Assert the offload actually stored it BEFORE we
-    # evict — otherwise a never-stored victim would "miss loudly" for the wrong
-    # reason and this test would pass vacuously.
+    # The emitted marker MUST be backed by a live entry under its own hash, or the model could never resolve it.
     assert store.retrieve(victim) is not None, (
         f"granular offload emitted <<ccr:{victim} ...>> but stored no retrievable "
         f"entry under that hash — the marker is a dead pointer (a marker/store-key "
         f"regression)"
     )
 
-    # Drive eviction DETERMINISTICALLY rather than hoping the router's own overflow
-    # happens to evict the victim: fill the cap with strictly-newer entries.
-    # Eviction is oldest-created-first (wall-clock ordered) — the same mechanism the
-    # bulk test above relies on — so the real granular victim, older than every
-    # filler, is guaranteed out.
-    #
-    # The 'f' prefix is load-bearing. The eviction heap holds (created_at, hash_key),
-    # so equal timestamps break the tie LEXICOGRAPHICALLY on the hash. A plain
-    # f"{i:024x}" filler has 21 leading zeros and sorts BELOW any realistic victim
-    # hash, so on a tie the loop would evict the fillers it just inserted and the
-    # victim would SURVIVE — a false red. Proven with a frozen clock: constant
-    # now_fn evicted an all-zero hash while the victim and an all-f hash both
-    # survived. 'f' puts every filler at the TOP of the lexicographic order so the
-    # victim loses the tie-break too, making eviction correct even if the clock's
-    # resolution ever coarsens. (Not currently active: time.time() resolves to ~1us
-    # and the measured victim-to-filler gap is ~26ms, zero ties in 2000 stores.)
+    # Force deterministic oldest-first eviction with newer filler entries. Prefix filler hashes with `f` so equal timestamps
+    # sort after realistic victims; otherwise a timestamp tie can evict fillers and leave the intended victim alive.
     for i in range(2 * cap):
         filler = f"f{i:023x}"
         store.store(
@@ -214,10 +181,7 @@ def test_capacity_evicted_granular_offload_retrieval_is_loud() -> None:
 
 
 def test_mcp_server_retrieve_miss_is_loud_and_cause_honest() -> None:
-    # The model-facing retrieval surface (MCP tool) must report a miss as an
-    # explicit `error`, cause-honest, never a silent empty result. Exercise the
-    # real method without the MCP SDK by binding a duck-typed `self` (the miss
-    # path only needs `_get_local_store` + no proxy).
+    # The model-facing retrieval surface (MCP tool) must report a miss as an explicit `error`, cause-honest, never a silent empty result.
 
     store = get_compression_store(max_entries=4)
     victim = "bbbbbbbbbbbb"

@@ -60,44 +60,25 @@ from furl_ctx.ccr.compress_modes import (
 from furl_ctx.ccr.regex_budget import Boundability, classify_boundability, matches_within_budget
 from furl_ctx.ccr.retrieve_spans import array_element_spans
 
-# Bound the regex context window so a caller cannot request an unboundedly
-# large context expansion. 0..50 is far past any real "show me around this
-# match" need while keeping the projected output bounded.
+# Bound the regex context window so a caller cannot request an unboundedly large context expansion.
+# 0..50 is far past any real "show me around this match" need while keeping the projected output bounded.
 _MAX_CONTEXT_LINES = 50
 
 # ReDoS guards (SEC-2): the bounds + nested-quantifier heuristic are shared with
 # ``compress_modes`` (SEC-1) — see the rationale there; validators stay separate.
 
-# Bound a row-select ("give me the matching rows") so a slice can never dump the
-# whole array back — the very failure sliceable retrieve exists to avoid. 1000
-# rows is far past any "show me the anomalies" need while keeping the projected
-# JSON a few hundred KB at most; a caller wanting more raises ``limit``
-# explicitly. Applied only when a select is requested without its own limit.
+# Bound a row-select ("give me the matching rows") so a slice can never dump the whole array back the very failure sliceable retrieve
+# exists to avoid. 1000 rows is far past any "show me the anomalies" need while keeping the projected JSON a few hundred KB at most;
 _DEFAULT_SELECT_LIMIT = 1000
 
-# Bounds on the F7 absent-field hint. Field names are attacker-influenced STORED
-# data, and echoing them unbounded lets a wide array or a single multi-KB key make
-# the response LARGER than the original the tool exists to shrink. The names surface
-# only in the structured ``known_fields`` array, never the ``note`` prose, and three
-# caps are enforced together on that array, so
-# the hint stays small no matter the input: at most ``_MAX_KNOWN_FIELDS`` names,
-# each truncated to ``_MAX_KNOWN_FIELD_NAME_CHARS`` chars, and the shown set bounded
-# to ``_MAX_KNOWN_FIELDS_TOTAL_CHARS`` chars cumulatively. 50 covers a realistic
-# schema's full key set; 64 chars identifies a long hash/base64 key by its prefix;
-# 512 cumulative chars keeps the whole signal on the order of a kilobyte, far below
-# the size the tool keeps outputs under. Names are sorted before capping, so the
-# shown subset is deterministic and stable, and the remainder counts into ``elided``.
+# Bounds on the F7 absent-field hint. The names surface only in the structured ``known_fields`` array, never the ``note`` prose, and three
+# caps are enforced together on that array so the shown subset is deterministic and stable, and the remainder counts into ``elided``.
 _MAX_KNOWN_FIELDS = 50
 _MAX_KNOWN_FIELD_NAME_CHARS = 64
 _MAX_KNOWN_FIELDS_TOTAL_CHARS = 512
 
-# Distinguishes an ABSENT key from a key PRESENT with a null value in a row-select
-# (F7 correctness). ``dict.get(field)`` returns ``None`` for both, which made
-# ``select_equals=None`` match rows that merely lack the key AND made a criterion-
-# less ``select_field`` on an absent key match every row while the warning claimed
-# the result was empty. Passing ``_MISSING`` for an absent key — and treating it as
-# equal to nothing, not even null — separates the two: ``select_equals=null`` now
-# means "present and null", never "key absent". Never leaves this module.
+# Distinguishes an ABSENT key from a key PRESENT with a null value in a row-select (F7 correctness). Passing ``_MISSING`` for an absent key — and
+# treating it as equal to nothing, not even null — separates the two: ``select_equals=null`` now means "present and null", never "key absent".
 _MISSING: Any = object()
 
 
@@ -132,11 +113,7 @@ class RetrieveFilters:
     select_min: float | None
     select_max: float | None
     limit: int | None
-    # F10: return each matched row's byte-exact source span instead of a
-    # re-serialization. A render modifier on a row-select, not a filter dimension
-    # (``is_empty`` ignores it): the smart constructor rejects ``raw`` without a
-    # ``select_field``, so it never appears on an otherwise-empty spec. Defaults
-    # off, keeping the re-serialized output byte-identical to before.
+    # F10: return each matched row's byte-exact source span instead of a re-serialization.
     raw: bool = False
 
     @property
@@ -349,9 +326,8 @@ def _parse_line_range(
     return start, end, None
 
 
-# The parsed SELECT tuple: (select_field, select_equals, select_min, select_max,
-# limit). ``select_equals`` is ``Any`` because a caller may match any JSON scalar
-# (str/int/float/bool/None); a container is rejected at parse.
+# The parsed SELECT tuple: (select_field, select_equals, select_min, select_max, limit). ``select_equals`` is
+# ``Any`` because a caller may match any JSON scalar (str/int/float/bool/None); a container is rejected at parse.
 _SelectSpec = tuple[str | None, Any | None, float | None, float | None, int | None]
 
 
@@ -581,9 +557,8 @@ def _filter_lines(original_content: str, filters: RetrieveFilters) -> FilteredCo
     # 1-based inclusive window; open bounds default to the full extent.
     start = filters.line_start if filters.line_start is not None else 1
     end = filters.line_end if filters.line_end is not None else total
-    # Clamp to the available lines (an in-range-but-past-EOF end is not an
-    # error — it simply yields whatever exists; the smart constructor already
-    # rejected inverted/<1 ranges).
+    # Clamp to the available lines (an in-range-but-past-EOF end is not an error — it simply
+    # yields whatever exists; the smart constructor already rejected inverted/<1 ranges).
     start = max(1, start)
     end = min(total, end)
     if start > total:
@@ -597,11 +572,8 @@ def _filter_lines(original_content: str, filters: RetrieveFilters) -> FilteredCo
         selected = windowed
     else:
         selected = _select_matching_with_context(windowed, filters.pattern, filters.context_lines)
-        # F-alpha1 honesty signal: a NON-literal pattern is never run on a line
-        # longer than the cap (``_line_matches`` returns no-match there without
-        # searching), so a real match on such a line is unreportable. Count those
-        # lines so the miss is signalled, not a bare zero. A pure literal DOES
-        # search an over-cap line by substring, so it skips nothing.
+        # F-alpha1 honesty signal: a NON-literal pattern is never run on a line longer than the cap (``_line_matches``
+        # returns no-match there without searching), so a real match on such a line is unreportable.
         if _pattern_literal_text(filters.pattern) is None:
             skipped_over_cap = sum(
                 1 for _num, text in windowed if len(text) > _MAX_REGEX_LINE_CHARS
@@ -630,15 +602,7 @@ def _over_cap_note(skipped_count: int) -> str:
     )
 
 
-# The regex metacharacters. A pattern containing NONE of them is a pure
-# LITERAL: it matches by plain substring containment — linear in the input
-# length, with no backtracking — so it is safe to search a line of any length.
-# Every other pattern hands control to the regex engine, whose backtracking CAN
-# be superlinear, so it is confined to lines within the per-line cap. A
-# syntactic quantifier scan is NOT a sound substitute for this literal test
-# (review RF1): a ``?``-chain such as ``a?a?…a?aaa…b`` carries no ``* + {`` yet
-# backtracks exponentially, and a ``(?<!\\)`` look-behind misparses backslash
-# parity so ``\*`` (a real quantifier) reads as "bounded".
+# The regex metacharacters.
 _REGEX_METACHARACTERS = frozenset(".*+?{}[]()|^$\\")
 
 
@@ -693,20 +657,8 @@ def _select_matching_with_context(
     range filter is a hard boundary the context cannot leak past — the two
     filters compose without one silently overriding the other.
     """
-    # SEC-2 / RF1 input bound. A line within the cap is matched by the regex
-    # engine under the RG1 wall-clock budget (the input cap bounds input LENGTH,
-    # NOT backtracking width -- an earlier revision claimed "bounded input →
-    # bounded backtracking", which ``(a|b|ab)+Z`` disproves on an 80-char line).
-    # A line LONGER than the cap
-    # is searched ONLY when the pattern is a pure literal, and then by plain
-    # substring containment — linear in the line length, no regex engine, so no
-    # backtracking is possible however long the line is. A non-literal (regex)
-    # pattern keeps the conservative per-line cap on a long line, so an
-    # adversarial pattern can never backtrack over an unbounded line. This still
-    # finds a literal needle inside a single giant single-line blob — a
-    # minified-JSON crash report stored as ONE line — which is the case review F3
-    # fixed. Realistic multi-line content is unaffected: its lines are far
-    # shorter than the cap and always searched.
+    # Regex-search only lines within the configured cap and wall-clock budget. For longer lines, allow
+    # pure literals via linear substring search; never run a backtracking regex over an unbounded line.
     literal = _pattern_literal_text(pattern)
     match_indices = [
         idx for idx, (_num, text) in enumerate(windowed) if _line_matches(pattern, literal, text)
@@ -786,15 +738,8 @@ def _project_row(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]
     return {key: row[key] for key in fields if key in row}
 
 
-# The explicit marker object appended when a row-select matches more rows than
-# ``limit`` allows — so a truncated slice is never mistaken for the complete set.
-# NON-RAW keeps the historic ``_truncated`` key (its output is byte-identical to
-# before F10). A row genuinely named ``_truncated`` would be indistinguishable from
-# the marker by key, but non-raw output is re-serialized JSON a caller reads, not
-# hashes, so position suffices there. RAW is different: its whole purpose is a
-# byte-exact slice a caller may HASH, where a synthetic element must be
-# identifiable by key — so raw uses a namespaced ``__ccr_truncated__`` a real
-# source key is far less likely to carry, and the raw schema documents stripping it.
+# The explicit marker object appended when a row-select matches more rows than ``limit`` allows so a truncated
+# slice is never mistaken for the complete set. but non-raw output is re-serialized JSON a caller reads, not hashes
 _TRUNCATION_KEY = "_truncated"
 _RAW_TRUNCATION_KEY = "__ccr_truncated__"
 
@@ -986,16 +931,14 @@ def _select_rows(original_content: str, filters: RetrieveFilters) -> FilteredCon
     matched: list[dict[str, Any]] = []
     matched_spans: list[str] = []
     for row, span in paired:
-        # ``_MISSING`` for an absent key, kept distinct from a present ``None``:
-        # an absent key must match neither ``select_equals`` (not even null) nor a
-        # range, so a row lacking the field is never kept.
+        # ``_MISSING`` for an absent key, kept distinct from a present ``None``: an absent key must match
+        # neither ``select_equals`` (not even null) nor a range, so a row lacking the field is never kept.
         value = row.get(field, _MISSING)
         if equals_mode:
             keep = _equals(value, filters.select_equals)
         else:
-            # ``_is_number`` narrows ``value`` to a real int/float before the range
-            # comparison, so ``lo <= value <= hi`` is total (never a None/str/
-            # _MISSING operand); a missing or non-numeric field is skipped.
+            # ``_is_number`` narrows ``value`` to a real int/float before the range comparison, so ``lo <= value
+            # <= hi`` is total (never a None/str/ _MISSING operand); a missing or non-numeric field is skipped.
             keep = _is_number(value) and lo <= value <= hi
         if not keep:
             continue
@@ -1010,10 +953,7 @@ def _select_rows(original_content: str, filters: RetrieveFilters) -> FilteredCon
         else _render_rows(matched, limit, matched_count)
     )
 
-    # F7 rides ONLY a genuinely empty result. With ``_MISSING`` an absent field
-    # matches no row, so an absent-from-every-row select always lands here at
-    # ``matched_count == 0``; the guard also makes the "empty result" wording in
-    # the note true by construction, never attached to a non-empty one.
+    # F7 rides ONLY a genuinely empty result.
     absent = _absent_select_field(field, row_dicts) if matched_count == 0 else None
     return FilteredContent(
         content=content,

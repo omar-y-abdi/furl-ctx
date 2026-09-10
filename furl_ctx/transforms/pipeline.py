@@ -90,10 +90,8 @@ class TransformPipeline:
 
         self.transforms = transforms if transforms is not None else self._build_default_transforms()
 
-        # Circuit breaker: after N consecutive pipeline
-        # failures, pass messages through untouched for a cooldown window
-        # instead of re-running (and re-failing) transforms on every
-        # request. Threshold <= 0 disables the breaker.
+        # Circuit breaker: after N consecutive pipeline failures, pass messages through untouched for a cooldown window
+        # instead of re-running (and re-failing) transforms on every request. Threshold <= 0 disables the breaker.
         self._breaker_threshold = _breaker_env("FURL_PIPELINE_BREAKER_THRESHOLD", 3, int)
         self._breaker_cooldown_s = _breaker_env("FURL_PIPELINE_BREAKER_COOLDOWN_S", 60.0, float)
         self._breaker_lock = threading.Lock()
@@ -110,21 +108,12 @@ class TransformPipeline:
         if self.config.cache_aligner.enabled:
             transforms.append(CacheAligner(self.config.cache_aligner))
 
-        # 1b. Cross-message dedup — elide later byte-identical tool outputs
-        # (recoverable via <<ccr:HASH>>) BEFORE per-message compression so
-        # duplicates don't pay the compression price per copy. Earlier
-        # messages are never modified, so the cached prefix stays stable.
+        # 1b.
         if getattr(self.config, "cross_message_dedup_enabled", True):
             transforms.append(CrossMessageDeduper())
 
-        # 2. Content-aware Compression
-        # ContentRouter handles ALL content types intelligently:
-        # - JSON arrays -> SmartCrusher
-        # - Plain text -> passthrough (reversible CCR offload for large
-        #   uncompressible content)
-        # - Code -> passthrough (ships unmangled)
-        # - Logs -> LogCompressor
-        # - Search results -> SearchCompressor
+        # 2. Content-aware Compression ContentRouter handles ALL content types intelligently: - JSON arrays -> SmartCrusher - Plain text -> passthrough (reversible
+        # CCR offload for large uncompressible content) - Code -> passthrough (ships unmangled) - Logs -> LogCompressor - Search results -> SearchCompressor
         transforms.append(ContentRouter())
         logger.info("Pipeline using ContentRouter for intelligent content-aware compression")
 
@@ -143,9 +132,8 @@ class TransformPipeline:
             token_counter = self._provider.get_token_counter(model)
             return Tokenizer(token_counter, model)
 
-        # No provider — use the tokenizer registry (auto-detects per model)
-        # TokenCounter from tokenizers and providers have the same interface
-        # (count_text, count_messages) but are different Protocol types.
+        # No provider — use the tokenizer registry (auto-detects per model) TokenCounter from tokenizers and
+        # providers have the same interface (count_text, count_messages) but are different Protocol types.
         from furl_ctx.tokenizers import get_tokenizer
 
         return Tokenizer(get_tokenizer(model), model)
@@ -204,22 +192,12 @@ class TransformPipeline:
         Returns:
             Combined TransformResult.
         """
-        # Consume the dry-run marker so it never reaches the transforms.
-        # simulate() calls apply(record_metrics=False); the pop keeps that flag
-        # out of **kwargs (which is forwarded to should_apply / transform.apply
-        # below), so simulate() and apply() drive the transforms identically.
+        # Consume the dry-run marker so it never reaches the transforms. simulate() calls apply(record_metrics=False); the pop keeps that flag out
+        # of **kwargs (which is forwarded to should_apply / transform.apply below), so simulate() and apply() drive the transforms identically.
         kwargs.pop("record_metrics", True)
 
-        # Build the typed per-request seam ONCE, here at the single boundary
-        # every caller crosses — both compress() (which forwards
-        # CompressConfig.min_tokens_to_compress) and direct
-        # TransformPipeline.apply(**kwargs) callers (who omit it). Built from the
-        # loose kwargs bag with ONE unified default (250), so direct callers and
-        # compress() callers agree.
-        # Placed back into kwargs under "compress_request" so the existing
-        # should_apply / transform.apply forwarding threads it explicitly to
-        # transforms (ContentRouter reads min_tokens from it), while the public
-        # **kwargs entry surface stays unchanged.
+        # Build the typed per-request seam ONCE, here at the single boundary every caller crosses Placed back into kwargs under "compress_request"
+        # so the existing should_apply / transform.apply forwarding threads it explicitly to transforms (ContentRouter reads min_tokens from it)
         kwargs["compress_request"] = CompressRequest.from_kwargs(kwargs)
 
         tokenizer = self._get_tokenizer(model)

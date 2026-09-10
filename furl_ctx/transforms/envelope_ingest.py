@@ -26,9 +26,7 @@ from .csv_ingest import raw_recovery_hash
 
 logger = logging.getLogger(__name__)
 
-# lazy: a fixed heuristic set of common wrapper keys. Envelopes using another key
-# (or more than one array-of-dicts key — ambiguous) fall through to raw bytes.
-# Widen this list if a real payload uses a wrapper key not covered here.
+# lazy: a fixed heuristic set of common wrapper keys.
 _COMMON_KEYS: tuple[str, ...] = (
     "data",
     "results",

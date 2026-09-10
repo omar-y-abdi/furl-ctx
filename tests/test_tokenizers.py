@@ -128,9 +128,8 @@ class TestTiktokenCounter:
         ]
 
         count = counter.count_messages(messages)
-        # Counterfactual: dropping the tool_calls block must lower the count —
-        # proves the block's name/arguments/id are actually being counted
-        # (`count > 0` passed even when tool_calls were ignored entirely).
+        # Counterfactual: dropping the tool_calls block must lower the count — proves the block's name/arguments/id
+        # are actually being counted (`count > 0` passed even when tool_calls were ignored entirely).
         assert count > counter.count_messages(without_tool_calls)
         assert count == 36  # o200k_base pin for THESE messages
 
@@ -360,9 +359,8 @@ class TestEstimatorPrefixSampling:
 
         count = counter.count_text(huge)
 
-        # Sanity floor: the JSON ratio (3.2 chars/token) means the count must
-        # exceed a chars/4 floor — a stub returning a token or two would pass
-        # the old `count > 0`.
+        # Sanity floor: the JSON ratio (3.2 chars/token) means the count must exceed a
+        # chars/4 floor — a stub returning a token or two would pass the old `count > 0`.
         assert count >= len(huge) // 4
         assert calls["n"] == 0
 
@@ -616,9 +614,8 @@ class TestTokenizerRegistry:
         assert "4.0 chars-per-token" in FIXED_RATIO_ESTIMATOR_NOTE
         assert "2x" in FIXED_RATIO_ESTIMATOR_NOTE
 
-        # The error band itself, measured against this project's own
-        # o200k_base tokenizer standing in for the real Gemini/Cohere
-        # tokenizers this project cannot access either.
+        # The error band itself, measured against this project's own o200k_base tokenizer
+        # standing in for the real Gemini/Cohere tokenizers this project cannot access either.
         real = TiktokenCounter("claude-sonnet-4-5-20250929")
         fixed = EstimatingTokenCounter(chars_per_token=4.0)
 
@@ -734,9 +731,5 @@ class TestTokenizerRegistry:
         assert second._fixed_ratio == 2.0  # the real (retried) tokenizer
 
 
-# MESSAGE_OVERHEAD / REPLY_OVERHEAD are pinned by the exact per-message totals in
-# TestTiktokenCounter::test_count_messages_single (== 9) and
-# TestEstimatingTokenCounter::test_count_messages (== 18): either constant drifting
-# moves those literals. The former standalone `== 4` / `== 3` asserts, and the two
-# `isinstance(counter, TokenCounter)` checks (runtime_checkable Protocol — a
-# method-name check only, satisfied by any rename-free class), added nothing.
+# MESSAGE_OVERHEAD / REPLY_OVERHEAD are pinned by the exact per-message totals in TestTiktokenCounter::test_count_messages_single
+# (== 9) and TestEstimatingTokenCounter::test_count_messages (== 18): either constant drifting moves those literals.

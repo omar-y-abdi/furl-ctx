@@ -1,31 +1,12 @@
 //! Legacy regex-based query anchor extraction.
-//!
-//! Direct port of `extract_query_anchors` and `item_matches_anchors`
-//! (`smart_crusher.py:99-168`). The Python doc-comment marks both as
-//! DEPRECATED in favor of `RelevanceScorer`, but they're still called
-//! by the live SmartCrusher path on every invocation, so we port them
-//! faithfully.
-//!
-//! # Why regex parity matters
-//!
-//! These regexes drive which array items survive compression. A subtle
-//! difference between Python's `re` engine and Rust's `regex` crate
-//! (e.g. word-boundary behavior on Unicode, or repetition greediness)
-//! would silently change which anchors are detected and which items
-//! survive. The patterns below are pinned to lowercase ASCII inputs
-//! and use only ASCII-safe constructs to keep behavior identical.
 
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-// ---------------------------------------------------------------
-// Pattern definitions — direct ports of the module-level Python regexes
-// at `smart_crusher.py:85-93`. `std::sync::LazyLock` (stable since Rust
-// 1.80) is the modern equivalent of `once_cell::sync::Lazy`, mirroring
-// Python's `re.compile` at module import time.
-// ---------------------------------------------------------------
+// Pattern definitions must stay behaviorally aligned with the Python anchor regexes. `std::sync::LazyLock` (stable
+// since Rust 1.80) is the modern equivalent of `once_cell::sync::Lazy`, mirroring Python's `re.compile` at module import time.
 
 /// `\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`
 static UUID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
@@ -49,25 +30,16 @@ static HOSTNAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 static QUOTED_STRING_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"['"]([^'"]{1,50})['"]"#).expect("QUOTED_STRING_PATTERN"));
 
-/// Email addresses. Python: `r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"`.
-/// (Note Python's `[A-Z|a-z]` includes a literal `|` in the character
-/// class — almost certainly a typo, but we faithfully port it for
-/// parity. Real-world impact is nil since `|` doesn't appear in TLDs.)
+/// Email addresses.
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").expect("EMAIL_PATTERN")
 });
 
-/// Hostname false-positive blocklist. Python uses a set literal at
-/// `smart_crusher.py:137`. We mirror exactly — these strings get
-/// dropped from anchor results.
+/// Hostname false-positive blocklist must match Python exactly; these strings are excluded from anchor results.
 const HOSTNAME_FALSE_POSITIVES: &[&str] = &["e.g", "i.e", "etc."];
 
-/// Extract query anchors from user text. **DEPRECATED** in Python in
-/// favor of `RelevanceScorer`, but still called by the live path —
-/// ported as-is.
-///
-/// Output is a set of lowercased anchor strings. Order is not
-/// significant (Python returns `set[str]`).
+/// Extract query anchors from user text. **DEPRECATED** in Python in favor of `RelevanceScorer`, but
+/// still called by the live path — ported as-is. Order is not significant (Python returns `set[str]`).
 pub fn extract_query_anchors(text: &str) -> HashSet<String> {
     let mut anchors = HashSet::new();
 
@@ -93,13 +65,8 @@ pub fn extract_query_anchors(text: &str) -> HashSet<String> {
         }
     }
 
-    // Quoted strings — capture group 1 (the content between quotes),
-    // require >= 2 CHARACTERS after trim, matching Python's
-    // `if len(match.strip()) >= 2` (Python `len` on `str` counts
-    // characters, never bytes). COR-23: this previously used Rust's
-    // byte-length `.len()`, which accepted single multibyte chars
-    // ('é' = 2 UTF-8 bytes, '日' = 3) that Python rejects — a
-    // keep-pinning divergence on unicode queries.
+    // Quoted strings — capture group 1 (the content between quotes), require >= 2 CHARACTERS after trim,
+    // matching Python's `if len(match.strip()) >= 2` (Python `len` on `str` counts characters, never bytes).
     for caps in QUOTED_STRING_PATTERN.captures_iter(text) {
         if let Some(inner) = caps.get(1) {
             if inner.as_str().trim().chars().count() >= 2 {
@@ -116,31 +83,8 @@ pub fn extract_query_anchors(text: &str) -> HashSet<String> {
     anchors
 }
 
-/// Serialize a `serde_json::Value` to a string matching Python's
-/// `str()` of the equivalent native value.
-///
-/// Used by `item_matches_anchors` because Python compares anchors via
-/// `anchor in str(item).lower()` and `str(dict)` differs from
-/// `json.dumps(dict)` in three ways that affect substring matching:
-///
-/// | Aspect           | Python `str(dict)`           | `serde_json::to_string` |
-/// |------------------|------------------------------|-------------------------|
-/// | String quotes    | single `'`                   | double `"`              |
-/// | Booleans / null  | `True`, `False`, `None`      | `true`, `false`, `null` |
-/// | Spacing          | `key: value`, `a, b`         | `key:value`, `a,b`      |
-///
-/// All three matter for anchor matching:
-/// - An anchor `"name': 'a"` extracted from a user phrase like
-///   `find {'name': 'alice'}` would match Python's serialization but
-///   never the JSON form.
-/// - An anchor `"true"` (lowercased from `"True"`) matches both, but
-///   the unlowercased version `"True"` is in Python output and not
-///   JSON. Lowercasing both sides handles this.
-/// - An anchor `"name: alice"` (with the space) would match Python
-///   but never JSON.
-///
-/// Output is then lowercased upstream (matching Python's `.lower()`)
-/// so True/False/None case is normalized away after that step.
+/// Serialize values like Python `str()` for anchor matching: single quotes, `True`/`False`/`None`,
+/// and Python spacing. JSON serialization differs enough to change substring matches.
 fn python_repr(value: &Value) -> String {
     let mut out = String::new();
     write_python_repr(&mut out, value);
@@ -154,23 +98,10 @@ fn write_python_repr(out: &mut String, value: &Value) {
         Value::Bool(false) => out.push_str("False"),
         Value::Number(n) => {
             // Python `str(int)` and `str(float)` produce minimal forms.
-            // `serde_json::Number`'s `Display` matches Python for ints
-            // (`5`) but for floats it can write `1.0` while Python may
-            // write `1.0` too — close enough for substring matching
-            // since anchor strings rarely contain numeric literals
-            // beyond the digit prefix.
             out.push_str(&n.to_string());
         }
         Value::String(s) => {
-            // Python `repr(s)` chooses single or double quotes
-            // depending on content. Default preference is single
-            // quotes; switches to double if the string contains a
-            // single quote and no double. We emit single quotes
-            // always — this matches the dominant case (no quotes in
-            // the string) and is what Python does for `str(dict)` of
-            // most realistic data. The rare case where Python would
-            // switch to double quotes is documented as a known parity
-            // gap in `python_repr_string_with_single_quote_drift`.
+            // Python `repr(s)` chooses single or double quotes depending on content.
             out.push('\'');
             out.push_str(s);
             out.push('\'');
@@ -187,14 +118,7 @@ fn write_python_repr(out: &mut String, value: &Value) {
         }
         Value::Object(map) => {
             out.push('{');
-            // Python preserves insertion order in `dict.__str__` (since
-            // Python 3.7). We require the workspace `serde_json` to be
-            // built with `preserve_order` so `serde_json::Map` uses
-            // `IndexMap` instead of the default `BTreeMap` — see the
-            // comment on `serde_json` in the workspace `Cargo.toml`.
-            // Without that feature, this iteration is sorted-by-key
-            // and silently diverges from Python on every multi-key
-            // object.
+            // Python dict stringification preserves insertion order; require serde_json `preserve_order` so Rust uses compatible key order instead of `BTreeMap` sorting.
             for (i, (k, v)) in map.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
@@ -211,21 +135,13 @@ fn write_python_repr(out: &mut String, value: &Value) {
 }
 
 /// Check if a JSON value matches any query anchors.
-///
-/// Direct port of `item_matches_anchors` (Python `smart_crusher.py:152-168`).
-/// Python uses `str(item).lower()` which produces Python's repr-like
-/// representation. We mirror that via `python_repr` rather than
-/// `serde_json::to_string` so substring matching has the same surface
-/// as Python (single quotes, `True`/`False`/`None`, spaced commas/colons).
 pub fn item_matches_anchors(item: &Value, anchors: &HashSet<String>) -> bool {
     if anchors.is_empty() {
         return false;
     }
 
-    // Python: `str(item).lower()`. `python_repr` produces the same
-    // single-quoted, space-after-colon, `True`/`False`/`None` form
-    // that Python's `str()` does; lowercase normalizes the bool/null
-    // case to match Python's downstream `.lower()` call.
+    // Python: `str(item).lower()`. `python_repr` produces the same single-quoted, space-after-colon, `True`/`False`/`None`
+    // form that Python's `str()` does; lowercase normalizes the bool/null case to match Python's downstream `.lower()` call.
     let item_str = python_repr(item).to_lowercase();
     anchors.iter().any(|a| item_str.contains(a))
 }
@@ -296,11 +212,7 @@ mod tests {
 
     #[test]
     fn single_multibyte_char_quoted_rejected_like_python() {
-        // COR-23 regression pin: Python's `len('é'.strip()) >= 2` counts
-        // CHARACTERS (1 here) and rejects the anchor. The pre-fix Rust
-        // check used UTF-8 BYTE length ('é' = 2 bytes, '日' = 3 bytes),
-        // so single multibyte chars became anchors in Rust only —
-        // pinning array items on unicode queries where Python kept none.
+        // COR-23 regression pin: Python's `len('é'.strip()) >= 2` counts CHARACTERS (1 here) and rejects the anchor.
         let anchors = extract_query_anchors("the 'é' thing");
         assert!(!anchors.contains("é"));
         let anchors = extract_query_anchors("find '日' now");
@@ -350,9 +262,8 @@ mod tests {
 
     #[test]
     fn hostname_blocklist_drops_e_g() {
-        // S5 in code review: pin that "e.g" in input doesn't surface as
-        // an anchor. Direct match against the regex confirms "e.g" itself
-        // matches before the blocklist filters it.
+        // S5 in code review: pin that "e.g" in input doesn't surface as an anchor. Direct match
+        // against the regex confirms "e.g" itself matches before the blocklist filters it.
         let anchors = extract_query_anchors("see e.g for example");
         assert!(!anchors.contains("e.g"));
         // Sanity: a normal hostname still passes through.
@@ -374,14 +285,8 @@ mod tests {
 
     #[test]
     fn python_repr_matches_python_str_for_dict() {
-        // Python: `str({'name': 'Alice', 'ok': True, 'count': 5, 'val': None})`
-        // = `"{'name': 'Alice', 'ok': True, 'count': 5, 'val': None}"`
-        // (insertion order — Python's dict preserves it since 3.7).
-        //
-        // Workspace `Cargo.toml` enables serde_json's `preserve_order`
-        // feature, so `json!` macro and `serde_json::from_str` both
-        // preserve key insertion order. Without that feature the test
-        // below would fail.
+        // Python: `str({'name': 'Alice', 'ok': True, 'count': 5, 'val': None})` = `"{'name': 'Alice', 'ok': True, 'count': 5, 'val': None}"` (insertion order Python's dict preserves
+        // it since 3.7). The workspace enables serde_json `preserve_order`, so `json!` and `serde_json::from_str` preserve key insertion order.
         let v = json!({"name": "Alice", "ok": true, "count": 5, "val": null});
         let r = python_repr(&v);
         assert_eq!(r, "{'name': 'Alice', 'ok': True, 'count': 5, 'val': None}");
@@ -402,29 +307,24 @@ mod tests {
 
     #[test]
     fn item_matches_anchor_with_python_none_form() {
-        // I3 fix in review: Python `str({'val': None}).lower()` produces
-        // `{'val': none}`. With the old JSON-based matcher, the same
-        // input would serialize as `{"val":null}` and an anchor "none"
-        // would never match. With `python_repr` the serialization is
-        // `{'val': None}` → lowercased to `{'val': none}` → contains "none".
+        // I3 fix in review: Python `str({'val': None}).lower()` produces `{'val': none}`. With the old JSON-based
+        // matcher, the same input would serialize as `{"val":null}` and an anchor "none" would never match.
         let anchors: HashSet<String> = ["none".to_string()].into_iter().collect();
         assert!(item_matches_anchors(&json!({"val": null}), &anchors));
     }
 
     #[test]
     fn item_matches_anchor_avoids_json_null_token() {
-        // Inverse of the above: an anchor "null" must NOT match a Python-
-        // null repr (which writes `none`). Pre-fix code would erroneously
-        // match because of `serde_json::to_string`'s `null` literal.
+        // Inverse of the above: an anchor "null" must NOT match a Python- null repr (which writes `none`).
+        // Pre-fix code would erroneously match because of `serde_json::to_string`'s `null` literal.
         let anchors: HashSet<String> = ["null".to_string()].into_iter().collect();
         assert!(!item_matches_anchors(&json!({"val": null}), &anchors));
     }
 
     #[test]
     fn python_repr_string_with_single_quote_drift() {
-        // Documented parity gap: Python's `repr` switches to double
-        // quotes if the string contains a single quote. We always use
-        // single quotes. Pin the gap so future changes are intentional.
+        // Documented parity gap: Python's `repr` switches to double quotes if the string contains a
+        // single quote. We always use single quotes. Pin the gap so future changes are intentional.
         let v = json!({"k": "it's fine"});
         // Our output: `{'k': 'it's fine'}` (broken Python repr — Python
         // would emit `{'k': "it's fine"}`).

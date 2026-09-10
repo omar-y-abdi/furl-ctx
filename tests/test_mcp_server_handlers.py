@@ -53,18 +53,11 @@ from furl_ctx.ccr.mcp_server import (  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_store(tmp_path, monkeypatch):
-    # The CCR store is a process-singleton; reset around every test so a
-    # round-trip in one test cannot leak entries into another's stats/retrieve.
-    # furl_read is jailed to $FURL_WORKSPACE_DIR (default cwd). Point it
-    # at the per-test sandbox so file-read happy-path tests run inside the jail.
-    # The shared-stats paths follow the same env per call (SEC-7:
-    # shared_stats_file() re-reads FURL_WORKSPACE_DIR), so this single setenv
-    # also keeps record_compression() from ever writing to ~/.furl.
+    # The CCR store is a process-singleton; reset around every test so a round-trip in one test cannot leak
+    # entries into another's stats/retrieve. furl_read is jailed to $FURL_WORKSPACE_DIR (default cwd).
     monkeypatch.setenv("FURL_WORKSPACE_DIR", str(tmp_path))
-    # The session TTL is env-aware now (_mcp_session_ttl): the COR-51 tests
-    # below pin the env-UNSET contract (MCP_SESSION_TTL), so the premise must
-    # be established — earlier suite files (e.g. in-process cli.main() runs)
-    # legitimately leave their own FURL_CCR_TTL_SECONDS setdefault behind.
+    # The session TTL is env-aware now (_mcp_session_ttl): the COR-51 tests below pin the env-UNSET contract (MCP_SESSION_TTL), so the premise must
+    # be established — earlier suite files (e.g. in-process cli.main() runs) legitimately leave their own FURL_CCR_TTL_SECONDS setdefault behind.
     monkeypatch.delenv("FURL_CCR_TTL_SECONDS", raising=False)
     reset_compression_store()
     yield
@@ -128,10 +121,8 @@ async def test_retrieve_missing_hash_returns_error_envelope(server) -> None:
     ],
 )
 async def test_retrieve_malformed_hash_rejected_before_store(server, bad_hash) -> None:
-    # The width+charset spoofing guard (is_valid_ccr_hash) rejects a present but
-    # malformed key with a loud 400, matching the tool-call parse path — the key
-    # never reaches the store. Distinct from the missing-hash and the
-    # valid-but-unknown ("0"*24 → loud miss) envelopes.
+    # The width+charset spoofing guard (is_valid_ccr_hash) rejects a present but malformed key
+    # with a loud 400, matching the tool-call parse path — the key never reaches the store.
     env = _envelope(await server._handle_retrieve({"hash": bad_hash}))
     assert env == {"error": "invalid hash format (expected 12 or 24 lowercase-hex chars)"}
 
@@ -172,9 +163,8 @@ async def test_read_real_file_returns_numbered_content(server, tmp_path: Path) -
 
 
 async def test_read_outside_workspace_is_rejected(server, tmp_path: Path) -> None:
-    # A path outside the workspace jail is rejected BEFORE any existence probe
-    # (works even for a path that doesn't exist — no file-existence oracle), with
-    # a generic message that never echoes the attempted path back to the model.
+    # A path outside the workspace jail is rejected BEFORE any existence probe (works even for a path that doesn't
+    # exist — no file-existence oracle), with a generic message that never echoes the attempted path back to the model.
     escapee = tmp_path.parent / "escapee_outside_jail.txt"
     env = _envelope(await server._handle_read({"file_path": str(escapee)}))
     assert env["error"] == "path outside workspace"
@@ -234,11 +224,8 @@ def _write_shared_events(path: Path, events: list[dict]) -> None:
 
 
 async def test_stats_aggregates_subagent_savings(server, tmp_path) -> None:
-    # Drive the cross-process aggregation branch (:603-623): a sub-agent
-    # (foreign pid) compressed 1000 → 100 tokens. With this session's own
-    # stats at zero, all_input = 1000, all_saved = 900 → 90.0%.
-    # The autouse fixture's FURL_WORKSPACE_DIR=tmp_path makes this exact path
-    # what shared_stats_file() resolves to (SEC-7 live paths).
+    # Drive the cross-process aggregation branch (:603-623): a sub-agent (foreign pid) compressed 1000 → 100 tokens. The autouse
+    # fixture's FURL_WORKSPACE_DIR=tmp_path makes this exact path what shared_stats_file() resolves to (SEC-7 live paths).
     stats_file = tmp_path / "session_stats.jsonl"
     _write_shared_events(
         stats_file,
@@ -256,9 +243,8 @@ async def test_stats_aggregates_subagent_savings(server, tmp_path) -> None:
 
 
 async def test_stats_all_input_zero_boundary_returns_zero(server, tmp_path) -> None:
-    # :621 boundary — a sub-agent event with input_tokens == 0 enters the
-    # aggregation block (other_events non-empty) but yields all_input == 0,
-    # so savings_percent must take the `else 0` branch (no ZeroDivisionError).
+    # :621 boundary — a sub-agent event with input_tokens == 0 enters the aggregation block (other_events non-empty)
+    # but yields all_input == 0, so savings_percent must take the `else 0` branch (no ZeroDivisionError).
     stats_file = tmp_path / "session_stats.jsonl"  # == shared_stats_file() under the fixture env
     _write_shared_events(
         stats_file,
@@ -299,9 +285,8 @@ async def test_call_tool_routes_and_rejects_unknown(server) -> None:
     stats = _envelope(await call_tool(STATS_TOOL_NAME, {}))
     assert "compressions" in stats and "savings_percent" in stats
 
-    # End-to-end through the dispatcher: compress then retrieve round-trips.
-    # F9: "round trip me" is a router no-op, not stored by default; persist=True
-    # forces the store so there is a hash to round-trip through retrieve.
+    # End-to-end through the dispatcher: compress then retrieve round-trips. F9: "round trip me" is a router no-op,
+    # not stored by default; persist=True forces the store so there is a hash to round-trip through retrieve.
     comp = _envelope(
         await call_tool(COMPRESS_TOOL_NAME, {"content": "round trip me", "persist": True})
     )
@@ -310,12 +295,8 @@ async def test_call_tool_routes_and_rejects_unknown(server) -> None:
 
 
 def test_tool_names_are_distinct_constants() -> None:
-    # Every tool-name constant ``call_tool``'s dispatch chain (mcp_server.py:2236+)
-    # compares against must be distinct: the chain is an if/elif on ``name``, so a
-    # copy/paste collision between ANY two silently misroutes the later one to the
-    # earlier one's handler. Only four of the seven were guarded; furl_purge,
-    # furl_search and furl_list have no test driving call_tool by name either, so a
-    # collision among them was invisible.
+    # Require every MCP tool-name constant to be unique. Dispatch uses an `if/elif`
+    # chain, so duplicate names silently route later tools to the wrong handler.
     names = [
         COMPRESS_TOOL_NAME,
         CCR_TOOL_NAME,
@@ -365,16 +346,14 @@ def test_pipeline_marker_rows_carry_session_ttl(server, monkeypatch) -> None:
     while the wrapper hash advertised session persistence. This also
     pins ordering: the singleton must be configured BEFORE compress() runs its
     own config-on-first-init ``get_compression_store()`` call."""
-    # furl_ctx/__init__.py re-exports the compress FUNCTION, shadowing the
-    # submodule attribute — resolve the real module for patching.
+    # the module re-exports the compress FUNCTION, shadowing the submodule attribute — resolve the real module for patching.
     compress_mod = importlib.import_module("furl_ctx.compress")
 
     marker_hash = "abc123def456"
 
     def fake_compress(messages, **kwargs):
-        # Mimic the pipeline: persist dropped rows through the process
-        # singleton with NO explicit ttl (the default-TTL path), then embed
-        # the marker in the compressed text.
+        # Mimic the pipeline: persist dropped rows through the process singleton with NO
+        # explicit ttl (the default-TTL path), then embed the marker in the compressed text.
         get_compression_store().store(
             original='[{"id": 1, "v": "dropped row"}]',
             compressed=f"<<ccr:{marker_hash}>>",
@@ -424,17 +403,8 @@ async def test_query_response_with_infinity_falls_back_to_byte_exact(server, mon
     assert env["original_content"] == raw  # byte-exact no-query fallback
 
 
-# ─── T11: refuse agent-supplied regex filters when RE2 is unavailable ───────
-#
-# furl_retrieve's `pattern` and furl_compress's `include_patterns`/
-# `exclude_patterns` are matched inside run_in_executor / asyncio.to_thread
-# (_compress_content / _retrieve_content), off the event loop, where no
-# SIGALRM watchdog can ever arm (Python signal handlers are main-thread only).
-# Without RE2 a crafted pattern used to fall back to unbounded stdlib `re`
-# there, and CPython's `sre` holds the GIL for the whole match, so a wedged
-# worker thread freezes every session on the process -- not just the caller's
-# own request. These pin the fix (furl_ctx.ccr.mcp_server._refuse_regex_filters):
-# the handler refuses the call outright instead of ever reaching that path.
+# ─── T11: refuse agent-supplied regex filters when RE2 is unavailable ─────── furl_retrieve's `pattern` and furl_compress's `include_patterns`/
+# `exclude_patterns` are matched inside run_in_executor / asyncio.to_thread (_compress_content / _retrieve_content), off the event loop.
 
 
 @pytest.fixture
@@ -457,13 +427,8 @@ def _seed(server: FurlMCPServer, hash_key: str, content: str) -> None:
     server._get_local_store().store(original=content, compressed="c", explicit_hash=hash_key)
 
 
-# Calibrated against this handler directly (see PR description for the run):
-# "ab" * 20 against "(a|b|ab)+Z" costs ~0.5s unbounded -- long enough to prove
-# the guard fires before dispatch (a refusal is microseconds), short enough
-# that even an orphaned worker thread, were the guard somehow bypassed, could
-# not stall the suite. The bounded wait_for below is a second, independent
-# backstop against an actual hang, matching the daemon-thread-join pattern
-# test_regex_budget.py uses for the same class of risk.
+# Calibrated against this handler directly: "ab" * 20 against "(a|b|ab)+Z" costs ~0.5s unbounded -- long enough to prove the guard
+# fires before dispatch, short enough that even an orphaned worker thread, were the guard somehow bypassed, could not stall the suite.
 _CATASTROPHIC_PATTERN = "(a|b|ab)+Z"
 _CATASTROPHIC_TEXT = "ab" * 20
 _REFUSAL_WAIT_FOR_SECONDS = 10.0

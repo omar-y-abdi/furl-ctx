@@ -38,9 +38,8 @@ from furl_ctx.transforms.csv_ingest import (
 )
 from furl_ctx.transforms.router_policy import CompressionStrategy
 
-# Real token counter (COR-17): apply() always threads one in production;
-# whitespace word counts undercount low-whitespace CSV so badly that the
-# tabular savings gate would never pass under the word proxy.
+# Real token counter (COR-17): apply() always threads one in production; whitespace word counts undercount
+# low-whitespace CSV so badly that the tabular savings gate would never pass under the word proxy.
 _COUNT = get_tokenizer("claude-sonnet-4-5-20250929").count_text
 
 
@@ -111,9 +110,7 @@ def test_detection_tab_and_semicolon_delimiters() -> None:
 
 
 def test_detection_ambiguous_delimiter_tie_fails_open() -> None:
-    # Comma and semicolon are equally consistent with equal field counts:
-    # an ambiguous sniff must return None (fail-open). Fixture sits above
-    # the byte floor so the TIE rule (not the floor) is what bites.
+    # Comma and semicolon are equally consistent with equal field counts: an ambiguous sniff must return None (fail-open).
     content = "\n".join(["header-one,header;two"] + ["alpha-value,beta;gamma"] * 12)
     assert len(content) >= csv_ingest.MIN_BYTES
     assert sniff_csv(content) is None
@@ -185,10 +182,8 @@ def test_conversion_round_trip_cell_exact() -> None:
 
 
 def test_conversion_rfc4180_quoted_cells() -> None:
-    # Quoting the naive line-sniff cannot see must stay within the 10%
-    # slack: 18 plain rows, one row with a QUOTED comma, one row with a
-    # QUOTED embedded newline (two aberrant physical lines out of 22).
-    # The real csv parser then reassembles both quoted cells exactly.
+    # Quoting the naive line-sniff cannot see must stay within the 10% slack: 18 plain rows, one row with
+    # a QUOTED comma, one row with a QUOTED embedded newline (two aberrant physical lines out of 22).
     lines = ["name,note"]
     for i in range(18):
         lines.append(f"user{i},plain note {i}")
@@ -225,10 +220,7 @@ def test_coercion_exact_round_trip_rule(cell: str, expected: object) -> None:
 
 
 def test_raw_recovery_hash_is_pinned_md5_prefix() -> None:
-    # Fixed vector (not recomputed with hashlib in-test): the recovery key is
-    # the first 24 hex chars of md5(content). Pinned against a known-good literal
-    # so a mutation to the slice width, digest, or encoding is caught here — the
-    # store-wiring test recomputes with the same fn and would not see such a bug.
+    # Fixed vector (not recomputed with hashlib in-test): the recovery key is the first 24 hex chars of md5(content).
     assert raw_recovery_hash("the quick brown fox\n") == "73ab1c2afe3a63b8ab4d7da2"
     assert len(raw_recovery_hash("anything")) == 24  # shape-H marker width
 
@@ -237,9 +229,7 @@ def test_raw_recovery_hash_is_pinned_md5_prefix() -> None:
 
 
 def test_min_data_rows_boundary_sniffs_at_exactly_five() -> None:
-    # Complements test_floor_min_rows (4 rows → None): exactly MIN_DATA_ROWS
-    # data rows must sniff, straddling `len(rows) < 1 + MIN_DATA_ROWS`. Rows are
-    # padded so the byte floor is cleared and only the row floor is in play.
+    # Complements test_floor_min_rows (4 rows → None): exactly MIN_DATA_ROWS data rows must sniff, straddling `len(rows) < 1 + MIN_DATA_ROWS`.
     lines = ["id,status,latency_ms,endpoint"]
     for i in range(csv_ingest.MIN_DATA_ROWS):
         lines.append(f"{i + 1},ok,0.{53 + i:03d},api/v1/resource-longname-{i}")
@@ -267,9 +257,7 @@ def _lines_with_match_ratio(total: int, matching: int) -> list[str]:
     ],
 )
 def test_consistency_floor_boundary(matching: int, expected_delim: str | None) -> None:
-    # `ratio < _CONSISTENCY_FLOOR` rejects below the floor; a `<` → `<=` mutation
-    # would drop the exactly-0.90 case. Pinned at the _pick_delimiter seam so the
-    # ratio (not the byte/row floors sniff_csv adds) is the one thing under test.
+    # `ratio < _CONSISTENCY_FLOOR` rejects below the floor; a `<` → `<=` mutation would drop the exactly-0.90 case.
     assert _pick_delimiter(_lines_with_match_ratio(10, matching)) == expected_delim
 
 
@@ -325,11 +313,8 @@ def test_small_csv_below_floors_keeps_old_routing() -> None:
 
 
 def test_uncompressible_csv_fails_open_to_raw_not_log_fallback() -> None:
-    # Converts fine, but the record view cannot beat the raw bytes: the
-    # dispatcher must serve the RAW CSV byte-exact — never the lossy LOG
-    # fallback (no dropped lines, no markers of any shape). Cells are
-    # lexically DISTINCT word pairs (no digit-only variation — that would
-    # be honestly collapsible by SmartCrusher's masked dedup and ship).
+    # Converts fine, but the record view cannot beat the raw bytes: the dispatcher must serve the
+    # RAW CSV byte-exact — never the lossy LOG fallback (no dropped lines, no markers of any shape).
     words_a = ["apricot", "monsoon", "velvet", "granite", "ember", "lagoon"]
     words_b = ["lantern", "drill", "compass", "orchid", "quarry", "saddle"]
     lines = ["left-column-name,right-column-name"]

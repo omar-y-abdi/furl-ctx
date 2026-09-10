@@ -104,11 +104,8 @@ def payload(tool_name: str, tool_response: Any) -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------
-# Subprocess runner — this repo's hook file + the locally-built engine
-# (sys.executable == the venv python that has furl_ctx installed), NOT `uv run
-# --with furl-ctx==<pin>`: the integration tests must exercise the repo's engine.
-# --------------------------------------------------------------------------
+# Subprocess runner — this repo's hook file + the locally-built engine (sys.executable == the venv python that has
+# furl_ctx installed), NOT `uv run --with furl-ctx==<pin>`: the integration tests must exercise the repo's engine.
 
 
 def run_hook(
@@ -171,10 +168,8 @@ def ccr_retrieve(hash_: str) -> str | None:
     return None if proc.stdout == "\x00MISS" else proc.stdout
 
 
-# --------------------------------------------------------------------------
-# Zod-schema replica (evidence: 2.1.212 bundle, Bash outputSchema —
-# required: stdout string, stderr string, interrupted boolean; the rest optional)
-# --------------------------------------------------------------------------
+# -------------------------------------------------------------------------- Zod-schema replica (evidence: 2.1.212 bundle, Bash outputSchema — required:
+# stdout string, stderr string, interrupted boolean; the rest optional) --------------------------------------------------------------------------
 
 
 def assert_passes_bash_zod_replica(value: Any) -> None:
@@ -258,12 +253,7 @@ class TestReinjectUnit:
         assert json.dumps(resp, sort_keys=True) == snapshot
 
 
-# ==========================================================================
-# UNIT — Finding 1 gate predicate (_redaction_changed_visible_output)
-# The non-compressing paths (below-min-chars / no-savings) must emit a scrubbed
-# mirror when redaction changed ANY model-visible field — not only the extracted
-# one — or a secret in a preserved Bash stderr leaks through on passthrough.
-# ==========================================================================
+# ========================================================================== UNIT
 
 
 def _preserved_stderr_redacted(resp) -> str | None:
@@ -560,11 +550,8 @@ class TestHookProcessIntegration:
         assert result is None
 
 
-# ==========================================================================
-# REGRESSION — a bare string is exactly the shape the host rejects
-# (adapted from the upstream stock/.orig pair: the repo ships no `.orig`, so the
-# rejected shape is pinned directly against the zod replica plus a live emit)
-# ==========================================================================
+# ========================================================================== REGRESSION — a bare string is exactly the shape the host rejects (adapted from the upstream stock/.orig pair:
+# the repo ships no `.orig`, so the rejected shape is pinned directly against the zod replica plus a live emit) ==========================================================================
 
 
 class TestBareStringRegression:

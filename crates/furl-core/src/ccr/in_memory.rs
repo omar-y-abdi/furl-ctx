@@ -1,56 +1,5 @@
-//! In-memory CCR backend.
-//!
-//! Process-local store backed by [`DashMap`] (sharded concurrent hash
-//! map). Distinct keys never contend on the read path; capacity-bound
-//! eviction is the only globally-serialized step.
-//!
-//! This is the only CCR backend. The engine constructs one at startup and
-//! shares it across worker threads behind an `Arc` for the process lifetime;
-//! entries are lost on restart (CCR recovery is request-window-scoped — see
-//! `CCR-RETENTION.md`).
-//!
-//! # Eviction scheme: generation-counter FIFO
-//!
-//! Each entry carries a monotonically increasing `generation: u64` stamped
-//! at insert AND re-stamped on overwrite. The order queue holds
-//! `(key, generation)` pairs instead of bare key strings.
-//!
-//! **Why generation counters?** The original FIFO-by-key scheme had three
-//! defects:
-//!
-//! - *ABA stale-token eviction*: overwriting a key refreshed the entry but
-//!   left the OLD order token at the front of the queue. A later eviction
-//!   would pop that stale token and remove the LIVE, recently-refreshed
-//!   entry — silently destroying a still-referenced blob.
-//!
-//! - *Tombstone / stale-order accumulation*: the order queue retained keys
-//!   already removed by TTL or overwrite without bounding its growth. In a
-//!   long-running process the queue could grow to O(total_puts) while the live
-//!   map stayed bounded — a memory leak independent of capacity.
-//!
-//! - *Unbacked sentinel*: with `DEFAULT_CAPACITY = 1000`, a call that
-//!   emits > 1000 `<<ccr:HASH>>` sentinels could self-evict earlier blobs
-//!   mid-call, leaving sentinels that resolve to `None` — silent data loss.
-//!
-//! The generation-counter scheme fixes the first two: eviction pops
-//! `(key, gen)` and only removes the entry if `entry.generation == gen`.
-//! A stale token from before an overwrite will find a higher generation
-//! and be skipped harmlessly. The tombstone-growth defect is tamed by
-//! compacting the order queue whenever it exceeds `capacity * TOMBSTONE_K`
-//! (default 2×): we rebuild it from the live entries sorted by generation,
-//! discarding every stale token in O(capacity) time.
-//!
-//! The third defect (unbacked-sentinel / large-call self-eviction) cannot
-//! be fully eliminated in an in-memory store with a fixed capacity: a single
-//! call dropping more rows than `capacity` cannot keep every sentinel backed.
-//! The generation scheme makes eviction order well-defined and re-insert-safe;
-//! callers relying on the full sentinel window must configure a larger
-//! `capacity`. The SmartCrusher additionally bounds itself at the producer
-//! side (COR-4): it chunks only DROPPED rows and skips granular chunking
-//! entirely when a drop exceeds `capacity() / 4`, so a single document's
-//! persists can no longer evict blobs its own markers still reference.
-//! This is the only CCR backend — recovery is intentionally
-//! request-window-scoped (see `CCR-RETENTION.md`), not a durable store.
+//! Process-local CCR store backed by DashMap. Eviction uses generation-stamped FIFO tokens: stale tokens cannot evict
+//! refreshed entries, and the queue compacts when tombstones exceed 2× capacity. Recovery is not durable across restarts.
 
 use std::collections::VecDeque;
 use std::sync::{
@@ -63,31 +12,15 @@ use dashmap::DashMap;
 
 use crate::ccr::{CcrStore, DEFAULT_CAPACITY, DEFAULT_TTL};
 
-/// Tombstone-compaction multiplier. When `order.len() > capacity *
-/// TOMBSTONE_K` we compact the queue by rebuilding it from live entries.
-/// A value of 2 means the queue is at most 2× the live entry count before
-/// compaction, bounding queue memory proportionally to capacity.
+/// Tombstone-compaction multiplier.
 const TOMBSTONE_K: usize = 2;
 
-/// In-memory CCR store backed by [`DashMap`] for sharded concurrent
-/// access.
-///
-/// - **TTL**: 30 minutes by default (session-scale — see `DEFAULT_TTL`).
-///   Entries past their TTL are dropped on the next `get` (lazy expiry —
-///   no background reaper thread).
-/// - **Capacity**: 1000 entries by default. When `put` would push us
-///   past capacity, the oldest entry (per insertion order) is evicted.
-/// - **Concurrency**: gets and puts on distinct keys do not contend.
-///   The only serialization point is the insertion-order queue used
-///   for capacity eviction; that mutex is held for an O(1) push or a
-///   small sweep.
+/// In-memory CCR store backed by [`DashMap`] for sharded concurrent access. - **TTL**: 30 minutes by default (session-scale — see `DEFAULT_TTL`).
+/// Entries past their TTL are dropped on the next `get` (lazy expiry — no background reaper thread). - **Capacity**: 1000 entries by default.
 pub struct InMemoryCcrStore {
     map: DashMap<String, Entry>,
-    /// FIFO insertion order with generation tokens. Each element is
-    /// `(key, generation)`. Tokens whose `generation` doesn't match the
-    /// live entry's generation are harmless tombstones: the eviction loop
-    /// skips them. When the queue exceeds `capacity * TOMBSTONE_K`, it is
-    /// compacted by rebuilding from live entries sorted by generation.
+    /// FIFO insertion order with generation tokens. Tokens whose `generation` doesn't match
+    /// the live entry's generation are harmless tombstones: the eviction loop skips them.
     order: Mutex<VecDeque<(String, u64)>>,
     ttl: Duration,
     capacity: usize,
@@ -111,12 +44,7 @@ impl InMemoryCcrStore {
         Self::with_capacity_and_ttl(DEFAULT_CAPACITY, DEFAULT_TTL)
     }
 
-    /// # Panics
-    ///
-    /// Panics when `capacity == 0`. The evict-then-insert order in
-    /// [`CcrStore::put`] would still leave the newest entry live, so a
-    /// capacity-0 store silently holds one entry — an invariant
-    /// violation, not a usable configuration (COR-41).
+    /// # Panics Panics when `capacity == 0`.
     pub fn with_capacity_and_ttl(capacity: usize, ttl: Duration) -> Self {
         assert!(
             capacity >= 1,
@@ -131,36 +59,24 @@ impl InMemoryCcrStore {
         }
     }
 
-    /// Sweep the order queue, popping tokens until `map.len() < capacity`.
-    ///
-    /// Tokens whose key is absent (expired) or whose generation doesn't
-    /// match the live entry (ABA stale token) are skipped without changing
-    /// `map.len()`. Only a successful `remove_if` (matching generation,
-    /// live entry) counts as an eviction that shrinks the live set.
-    ///
-    /// LOCK ORDER: caller must hold the `order` mutex (passed in as
-    /// `guard`) BEFORE any DashMap operation. `remove_if` takes a shard
-    /// write lock internally. We never hold a DashMap ref-guard across
-    /// `order.lock()` — that would invert the order and deadlock.
+    /// Sweep the order queue, popping tokens until `map.len() < capacity`. LOCK ORDER: caller must hold the `order` mutex (passed in as `guard`)
+    /// BEFORE any DashMap operation. We never hold a DashMap ref-guard across `order.lock()` — that would invert the order and deadlock.
     fn evict_until_under_capacity(&self, guard: &mut VecDeque<(String, u64)>) {
         while self.map.len() >= self.capacity {
             let Some((oldest_key, oldest_gen)) = guard.pop_front() else {
                 break;
             };
-            // Only remove the entry if the stored generation matches the
-            // token's generation. A generation mismatch means this token
-            // is a stale tombstone from before an overwrite — skip it.
+            // Only remove the entry if the stored generation matches the token's generation. A generation
+            // mismatch means this token is a stale tombstone from before an overwrite — skip it.
             self.map
                 .remove_if(&oldest_key, |_, entry| entry.generation == oldest_gen);
-            // Whether or not we removed: check map.len() again (the while
-            // condition). If we skipped a tombstone the count didn't
-            // change and we'll try the next token.
+            // Whether or not we removed: check map.len() again (the while condition). If
+            // we skipped a tombstone the count didn't change and we'll try the next token.
         }
     }
 
-    /// Compact the order queue by rebuilding it from live entries sorted
-    /// by generation ascending. Called when `order.len() > capacity *
-    /// TOMBSTONE_K`. Must be called with the order mutex already held.
+    /// Compact the order queue by rebuilding it from live entries sorted by generation ascending. Called
+    /// when `order.len() > capacity * TOMBSTONE_K`. Must be called with the order mutex already held.
     fn compact_order_queue(&self, guard: &mut VecDeque<(String, u64)>) {
         // Collect all live (key, generation) pairs from the map.
         let mut live: Vec<(String, u64)> = self
@@ -182,40 +98,12 @@ impl Default for InMemoryCcrStore {
 
 impl CcrStore for InMemoryCcrStore {
     fn put(&self, hash: &str, payload: &str) {
-        // Claim a fresh generation *before* touching either the map or
-        // the order queue. This is a global counter — each put (insert
-        // or refresh) gets a unique, monotonically increasing stamp.
+        // Claim a fresh generation *before* touching either the map or the order queue. This is a
+        // global counter — each put (insert or refresh) gets a unique, monotonically increasing stamp.
         let gen = self.generation.fetch_add(1, Ordering::Relaxed);
 
-        // Existing-key path: the key already holds an entry.
-        //
-        // IMPORTANT — lock order discipline:
-        //   Rule: acquire `order` mutex BEFORE any DashMap shard lock.
-        //   So we MUST NOT hold a DashMap `get_mut` RefMut across an
-        //   `order.lock()`. The RefMut holds a shard write-lock; locking
-        //   `order` while holding it would invert the order (shard→order)
-        //   and deadlock with eviction (order→shard).
-        //
-        //   Solution: use `get_mut` as the TEST, act under its lock, then
-        //   DROP the RefMut, and ONLY THEN lock `order` / touch another
-        //   shard. If `get_mut` returns `None` (key absent, or removed
-        //   between intent and attempt — a concurrent TTL expiry or
-        //   capacity eviction), we fall through to the new-entry path.
-        //
-        // Two outcomes for an existing key — the store is CONTENT-ADDRESSED
-        // (key = hash of payload), so:
-        //   * SAME payload -> content-addressed dedup: an idempotent refresh
-        //     (bump generation + timestamp). Normal, common, always kept.
-        //   * DIFFERENT payload -> a TRUE hash collision (astronomically rare
-        //     at a 24-hex/96-bit key). Two distinct payloads under one key are
-        //     indistinguishable at retrieval; serving EITHER would hand one
-        //     marker the OTHER's bytes — silent corruption (T3). We DROP the
-        //     ambiguous binding: remove the entry and REFUSE the new payload,
-        //     so every marker on the key resolves to a LOUD miss instead of
-        //     foreign content. Mirrors the Python `CompressionStore` guard
-        //     (audit #9). This deliberately relaxes the old "a put always
-        //     stores" contract for the collision case: a loud miss is
-        //     recoverable (recompute), foreign bytes are not.
+        // Acquire the order mutex before any DashMap shard lock; never hold `RefMut` across `order.lock()`. Same-payload puts refresh
+        // generation; conflicting payloads under one hash delete the binding and return a loud miss rather than foreign bytes.
         enum Existing {
             Refreshed,
             Collision,
@@ -235,10 +123,8 @@ impl CcrStore for InMemoryCcrStore {
         };
         match outcome {
             Some(Existing::Refreshed) => {
-                // Push a fresh token for the updated generation so that the
-                // OLD token becomes a harmless tombstone (gen-mismatch skip).
-                // Lock order: shard already released above, so order→shard is
-                // maintained.
+                // Push a fresh token for the updated generation so that the OLD token becomes a harmless tombstone
+                // (gen-mismatch skip). Lock order: shard already released above, so order→shard is maintained.
                 let mut guard = self.order.lock().expect("ccr order mutex poisoned");
                 guard.push_back((hash.to_string(), gen));
                 if guard.len() > self.capacity * TOMBSTONE_K {
@@ -247,12 +133,7 @@ impl CcrStore for InMemoryCcrStore {
                 return;
             }
             Some(Existing::Collision) => {
-                // Drop the ambiguous binding. `remove_if` re-checks under the
-                // shard write-lock that the payload is STILL different (a
-                // concurrent put may have refreshed it to the same content,
-                // which is fine to keep). The removed key's stale order token
-                // becomes a harmless absent-key/gen-mismatch tombstone the
-                // eviction loop skips — so no fresh token is pushed.
+                // Drop the ambiguous binding.
                 self.map
                     .remove_if(hash, |_, entry| entry.payload != payload);
                 tracing::error!(
@@ -265,9 +146,7 @@ impl CcrStore for InMemoryCcrStore {
             }
             None => {}
         }
-        // Fall-through: key was absent (new entry) or was concurrently
-        // removed between our `get_mut` and now. Store the payload as a
-        // fresh entry so a genuine first write is never a no-op.
+        // Fall-through: key was absent (new entry) or was concurrently removed between our `get_mut` and now.
 
         // New entry path. Take the order lock first (lock-order rule),
         // then insert into the map.
@@ -285,9 +164,8 @@ impl CcrStore for InMemoryCcrStore {
             generation: gen,
         };
         self.map.insert(hash.to_string(), entry);
-        // Record in FIFO order. Even if a concurrent insert beat us
-        // (prev.is_some()), our `gen` token is fresher and the stale
-        // concurrent token will be skipped by the gen-mismatch check.
+        // Record in FIFO order. Even if a concurrent insert beat us (prev.is_some()), our `gen`
+        // token is fresher and the stale concurrent token will be skipped by the gen-mismatch check.
         guard.push_back((hash.to_string(), gen));
 
         // Compact if tombstones have accumulated.
@@ -297,19 +175,8 @@ impl CcrStore for InMemoryCcrStore {
     }
 
     fn get(&self, hash: &str) -> Option<String> {
-        // Read path: shard read-lock, check TTL, clone payload out.
-        // No global lock involvement at all — distinct hashes hash to
-        // distinct shards and never contend.
-        //
-        // Lazy expiry uses DashMap's `remove_if` so the check-and-remove
-        // is atomic on the shard. An earlier 2-step (drop read lock,
-        // then `remove`) had a TOCTOU race: between dropping the read
-        // lock and calling `remove`, a concurrent `put()` of the same
-        // hash with a fresh timestamp could land — and our `remove`
-        // would then wipe that fresh entry. Under multi-worker
-        // load this manifested as "I just stored it; why is it gone?"
-        // `remove_if` closes the window because the shard write lock
-        // is held across both the predicate evaluation and the removal.
+        // Read path shard read-lock, check TTL, clone payload out. No global lock involvement at all distinct hashes hash to distinct shards and
+        // never contend. between dropping the read lock and calling `remove`, a concurrent `put()` of the same hash with a fresh timestamp could land.
         if let Some(entry) = self.map.get(hash) {
             if entry.inserted.elapsed() <= self.ttl {
                 return Some(entry.payload.clone());
@@ -317,10 +184,7 @@ impl CcrStore for InMemoryCcrStore {
         } else {
             return None;
         }
-        // Out-of-band path: the entry exists and looks expired. Re-check
-        // under the shard write lock; if it's still expired, evict.
-        // Otherwise (a concurrent `put` refreshed it) leave it alone
-        // and re-fetch its payload.
+        // Out-of-band path: the entry exists and looks expired.
         let was_removed = self
             .map
             .remove_if(hash, |_, entry| entry.inserted.elapsed() > self.ttl)
@@ -334,12 +198,7 @@ impl CcrStore for InMemoryCcrStore {
     }
 
     fn len(&self) -> usize {
-        // Honest live count (COR-41): skip entries past their TTL that
-        // lazy expiry hasn't reaped yet — `get` refuses to serve them,
-        // so counting them would overreport to telemetry. NOTE: the
-        // capacity-eviction math intentionally keeps using the RAW map
-        // size (`self.map.len()`) — expired-but-unreaped entries still
-        // occupy capacity until a `get` or an eviction removes them.
+        // Honest live count (COR-41): skip entries past their TTL that lazy expiry hasn't reaped yet
         self.map
             .iter()
             .filter(|kv| kv.value().inserted.elapsed() <= self.ttl)
@@ -353,12 +212,7 @@ mod tests {
 
     #[test]
     fn default_ttl_is_session_scale() {
-        // Engine P0-3: agentic sessions outlive 5 minutes — an entry that
-        // expires mid-session silently converts "lossless + retrieval"
-        // into lossy. The default is session-scale (30 minutes) and must
-        // agree with Python's `DEFAULT_CCR_TTL_SECONDS`
-        // (furl_ctx/cache/compression_store.py) — the two stores back the
-        // same markers.
+        // Engine P0-3: agentic sessions outlive 5 minutes — an entry that expires mid-session silently converts "lossless + retrieval" into lossy.
         assert_eq!(DEFAULT_TTL, Duration::from_secs(1800));
     }
 
@@ -377,9 +231,8 @@ mod tests {
 
     #[test]
     fn put_same_key_same_payload_refreshes_idempotently() {
-        // Content-addressed dedup: re-storing the SAME payload under the same
-        // key is the normal idempotent path (generation + timestamp refresh
-        // only). It stays resolvable and is NEVER treated as a collision.
+        // Content-addressed dedup: re-storing the SAME payload under the same key is the normal idempotent
+        // path (generation + timestamp refresh only). It stays resolvable and is NEVER treated as a collision.
         let store = InMemoryCcrStore::new();
         store.put("h", "same-content");
         store.put("h", "same-content");
@@ -389,14 +242,8 @@ mod tests {
 
     #[test]
     fn put_collision_different_payload_drops_binding() {
-        // NEW CONTRACT (T3): a same-key / DIFFERENT-payload put is a true hash
-        // collision. The store must NOT silently overwrite — that let a dropped
-        // row recover as ANOTHER row's content (silent corruption). It drops the
-        // ambiguous binding and refuses the new payload, so every marker on the
-        // key resolves to a LOUD miss (None) instead of FOREIGN content. This
-        // mirrors the Python `CompressionStore` guard (audit #9). The prior
-        // `put_overwrites_under_same_hash` test pinned the silent-overwrite
-        // behavior this fix removes.
+        // NEW CONTRACT (T3) a same-key / DIFFERENT-payload put is a true hash collision. The store must NOT
+        // silently overwrite that let a dropped row recover as ANOTHER row's content (silent corruption).
         let store = InMemoryCcrStore::new();
         store.put("h", "first");
         store.put("h", "second"); // same key, different payload = collision
@@ -414,10 +261,7 @@ mod tests {
 
     #[test]
     fn legacy_twelve_hex_key_round_trips_alongside_wide_key() {
-        // Backward compatibility: existing stores hold 12-hex keys emitted
-        // before the recovery key was widened to 24 hex. The store keys on the
-        // raw string, so a 12-hex legacy key round-trips exactly like a 24-hex
-        // current key — legacy `<<ccr:HASH>>` markers still resolve.
+        // Backward compatibility: existing stores hold 12-hex keys emitted before the recovery key was widened to 24 hex.
         let store = InMemoryCcrStore::new();
         store.put("09659eb7ee43", r#"["legacy-row"]"#); // 12-hex legacy
         assert_eq!(
@@ -455,12 +299,8 @@ mod tests {
 
     #[test]
     fn len_skips_expired_entries() {
-        // COR-41: `CcrStore::len` is documented as the number of LIVE
-        // entries, and `get` refuses expired ones — so entries past
-        // their TTL that lazy expiry has not reaped yet must not be
-        // counted. (Capacity eviction deliberately keeps using the raw
-        // stored count — expired-but-unreaped entries still occupy
-        // capacity until removed.)
+        // COR-41: `CcrStore::len` is documented as the number of LIVE entries, and `get` refuses expired
+        // ones — so entries past their TTL that lazy expiry has not reaped yet must not be counted.
         let store = InMemoryCcrStore::with_capacity_and_ttl(10, Duration::from_millis(10));
         store.put("a", "1");
         store.put("b", "2");
@@ -473,10 +313,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "capacity")]
     fn capacity_zero_is_rejected() {
-        // COR-41: capacity-0 used to hold one entry anyway (the
-        // evict-then-insert order leaves the newest put live), silently
-        // violating "capacity bounds the live set". Constructing such a
-        // store is a programming error — fail fast.
+        // COR-41: capacity-0 used to hold one entry anyway (the evict-then-insert order
+        // leaves the newest put live), silently violating "capacity bounds the live set".
         let _ = InMemoryCcrStore::with_capacity_and_ttl(0, DEFAULT_TTL);
     }
 
@@ -493,28 +331,8 @@ mod tests {
         assert_eq!(store.get("h"), Some("v".to_string()));
     }
 
-    /// ABA test: refreshing a key (idempotent same-payload re-put) must NOT
-    /// allow the stale pre-refresh order token to evict the live entry.
-    ///
-    /// Setup: capacity=2. Same-payload re-puts because the store is
-    /// content-addressed — a DIFFERENT payload under one key is a collision
-    /// (dropped), so only a same-payload refresh re-stamps the generation.
-    ///   1. put("a", va) → order: [(a,0)]
-    ///   2. put("b", vb) → order: [(a,0),(b,1)]
-    ///   3. put("a", va) — refresh → order: [(a,0),(b,1),(a,2)]; a's gen is
-    ///      now 2, so the (a,0) token is a stale tombstone.
-    ///   4. put("c", vc) → eviction needed; pops (a,0) — gen mismatch
-    ///      (live gen=2 ≠ 0), skip; pops (b,1) — gen match, evict b.
-    ///      Now map.len()==1 (<2), insert c. Map: {a,c}.
-    ///
-    /// Assertion: a is still live (gen-mismatch protected it), b was the
-    /// genuinely oldest LIVE entry and was correctly evicted.
-    ///
-    /// On the baseline FIFO-by-key implementation:
-    ///   - put("a") inserts order token "a".
-    ///   - put("a") refresh does NOT push another token (returns early).
-    ///   - put("c") triggers eviction; pops "a" (front) → removes live a.
-    ///   - Result: a is None (WRONG), b survives (wrong eviction choice).
+    /// Refreshing `a` must invalidate its stale FIFO token. With capacity 2, inserting
+    /// `c` skips stale `(a, old_gen)`, evicts live `b`, and keeps refreshed `a`.
     #[test]
     fn aba_refresh_does_not_evict_live_reinserted_entry() {
         let store = InMemoryCcrStore::with_capacity_and_ttl(2, DEFAULT_TTL);
@@ -549,17 +367,8 @@ mod tests {
         );
     }
 
-    /// Tombstone-bound test: repeatedly refreshing a small set of keys
-    /// under a larger capacity must keep the order queue bounded.
-    ///
-    /// With capacity=8 and TOMBSTONE_K=2, the queue must never grow
-    /// beyond 8*2=16 entries. We perform 10_000 same-payload refreshes
-    /// across 4 keys (a DIFFERENT payload would be a collision-drop, not a
-    /// refresh — each refresh still pushes an order token, which is what
-    /// stresses the tombstone bound).
-    ///
-    /// On the baseline (no compaction), the queue would grow to 10_000 +
-    /// initial 4 = 10_004 entries — unbounded memory growth.
+    /// Tombstone-bound test repeatedly refreshing a small set of keys under a larger capacity must keep the order queue bounded.
+    /// With capacity=8 and TOMBSTONE_K=2, the queue must never grow beyond 8*2=16 entries. each refresh still pushes an order token
     #[test]
     fn tombstone_accumulation_stays_bounded() {
         let cap = 8usize;
@@ -596,13 +405,8 @@ mod tests {
         );
     }
 
-    /// Recovery-invariant flavour: insert N > capacity distinct payloads,
-    /// then verify that exactly the `capacity` most-recently inserted keys
-    /// are live and all earlier keys have been evicted (no silent live-entry
-    /// loss within the retention window).
-    ///
-    /// This is analogous to the Python `test_ccr_recovery_invariant` check
-    /// that no live sentinel resolves to `None`.
+    /// Recovery-invariant flavour: insert N > capacity distinct payloads, then verify that exactly the `capacity` most-recently
+    /// inserted keys are live and all earlier keys have been evicted (no silent live-entry loss within the retention window).
     #[test]
     fn most_recent_capacity_entries_survive_eviction() {
         let cap = 10usize;
@@ -636,9 +440,7 @@ mod tests {
 
     #[test]
     fn concurrent_puts_and_gets_do_not_corrupt() {
-        // Smoke test for the concurrent design — N threads each do
-        // P puts and P gets against distinct keys. Every key written
-        // must be readable afterwards.
+        // Smoke test for the concurrent design — N threads each do P puts and P gets against distinct keys. Every key written must be readable afterwards.
         use std::sync::Arc;
         use std::thread;
 
@@ -670,17 +472,8 @@ mod tests {
 
     #[test]
     fn expired_get_does_not_wipe_concurrent_refresh() {
-        // Regression for the TOCTOU race fixed in the audit-cleanup PR.
-        // Two threads contend on the SAME key:
-        //   - Thread A: stores fresh value, then `get` it many times.
-        //   - Thread B: keeps re-storing the same key with FRESH
-        //     timestamps in a tight loop (simulating a second worker
-        //     touching the same payload).
-        // With the old 2-step check-then-remove, A's `get` could see
-        // an "expired" entry, drop the read lock, and remove B's
-        // freshly-inserted entry between drop and remove. With
-        // `remove_if`, the predicate runs under the shard write lock,
-        // so the race window is closed.
+        // Regression for the TOCTOU race fixed in the audit-cleanup PR. Two threads
+        // contend on the SAME key: - Thread A stores fresh value, then `get` it many times.
         use std::sync::Arc;
         use std::thread;
 
@@ -721,9 +514,8 @@ mod tests {
         let hits = reader.join().unwrap();
         // The entry must be live at the end (writer's last put won).
         assert_eq!(store.get(key).as_deref(), Some(payload));
-        // Reader should have observed the live entry the vast majority
-        // of the time. Allow some misses on first iterations / TTL
-        // transitions but require strong majority.
+        // Reader should have observed the live entry the vast majority of the time. Allow
+        // some misses on first iterations / TTL transitions but require strong majority.
         assert!(
             hits > 100,
             "reader should mostly observe live entry, hits={hits}"

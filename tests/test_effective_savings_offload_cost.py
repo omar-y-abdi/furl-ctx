@@ -86,9 +86,7 @@ def test_dedup_zero_drop_offload_no_longer_reads_flat() -> None:
     -1.5%). Pre-fix eff@25 == eff@0 (the bug); now eff@25 < eff@0."""
     tok = _tok()
     blob = json.dumps([{"i": i, "body": "line " * 20} for i in range(20)])
-    # The ESCAPED payload: what the model reads out of the retrieve response,
-    # not the raw bytes the library hands back. Strictly larger; pinned against
-    # the real handler in tests/test_retrieval_charge_matches_mcp_surface.py.
+    # The ESCAPED payload: what the model reads out of the retrieve response, not the raw bytes the library hands back.
     payload = retrieved_blob_tokens(blob, tok)
     assert payload > tok.count_text(blob), "escaping is not token-neutral"
     before = 1000
@@ -258,8 +256,7 @@ def test_opaque_whole_blob_emitter_is_sentinelled_and_charged() -> None:
     )
     assert opaque_hashes <= set(off.recovered), "sentinelled offload must resolve from the store"
 
-    # ...so the `recovered`-only charge prices the blob honestly: net-negative,
-    # corroborating the removed harness's -4.1% (see BENCHMARKS.md).
+    # The `recovered`-only charge must price the blob as net-negative after retrieval, rather than counting opaque offload as a real saving.
     eff = off.effective_savings()
     assert eff["0"] > 0.90  # raw marker reduction
     assert eff["25"] == pytest.approx(off.charged_at_nonzero_rate())  # payload + one call/blob
@@ -387,10 +384,7 @@ def test_rust_row_drop_emitter_is_sentinelled_and_charged() -> None:
     unrecoverable = [row for row in dropped if _canonical(row) not in recovered_sigs]
     assert not unrecoverable, f"{len(unrecoverable)} dropped rows are not sentinel-recoverable"
 
-    # ...so the drop is charged — payload plus ONE call per marker, pinned to the
-    # exact figure rather than to an ordering. `dropped` is in the hundreds and
-    # `recovered` holds a handful of blobs, so a per-ROW call term would miss this
-    # by two orders of magnitude and could not pass as rounding.
+    # ...so the drop is charged — payload plus ONE call per marker, pinned to the exact figure rather than to an ordering.
     eff = off.effective_savings()
     assert len(dropped) > 10 * len(off.recovered), (
         f"{len(dropped)} rows behind {len(off.recovered)} marker(s) — the fixture must make "

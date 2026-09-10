@@ -48,10 +48,8 @@ def _store_live_entry(store, h: str) -> None:
 
 
 def _retrieve(store, h, query):
-    # PERF-16 relocated the retrieve branch logic into the synchronous
-    # ``_retrieve_content_sync`` core (async ``_retrieve_content`` is now a thin
-    # ``asyncio.to_thread`` wrapper). Exercise the core directly — identical
-    # branch logic, no event loop needed for this stubbed-store unit test.
+    # PERF-16 relocated the retrieve branch logic into the synchronous ``_retrieve_content_sync``
+    # core (async ``_retrieve_content`` is now a thin ``asyncio.to_thread`` wrapper).
     return FurlMCPServer._retrieve_content_sync(_stub_server(store), h, query)
 
 
@@ -79,8 +77,6 @@ def test_missing_hash_still_reports_loud_miss() -> None:
 
 def test_matching_query_returns_results() -> None:
     # When search DOES return hits, they are surfaced (no error, results present).
-    # Stub the store so this asserts the branch logic deterministically rather
-    # than depending on BM25 scoring of a tiny corpus.
     h = "abcdef123456"
     hit = {"id": 0, "v": "needle"}
     store = types.SimpleNamespace(

@@ -95,10 +95,7 @@ def test_recovery_byte_exact_envelope_through_real_router() -> None:
 
 
 def test_compress_envelope_vetoes_on_persist_failure(monkeypatch) -> None:
-    # persist failure ⇒ compress_envelope returns None so the caller serves the
-    # raw envelope — the envelope marker must never ship dangling. (Tested at the
-    # unit level: through the full router a large raw payload is separately picked
-    # up by the engine's own backed CCR-offload, which would confound the assert.)
+    # persist failure ⇒ compress_envelope returns None so the caller serves the raw envelope — the envelope marker must never ship dangling.
     from types import SimpleNamespace
 
     monkeypatch.setattr(envelope_ingest, "persist_to_python_ccr", lambda *a, **k: False)

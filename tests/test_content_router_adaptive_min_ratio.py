@@ -50,9 +50,8 @@ def test_adaptive_min_ratio_is_monotone_increasing() -> None:
 
 
 def test_low_pressure_no_degradation() -> None:
-    # The no-tradeoff guard: an empty-context request must keep the SAME
-    # acceptance threshold as before the fix (0.85), so nothing that compressed
-    # at low pressure stops compressing.
+    # The no-tradeoff guard: an empty-context request must keep the SAME acceptance threshold
+    # as before the fix (0.85), so nothing that compressed at low pressure stops compressing.
     assert _router()._adaptive_min_ratio(0.0) == pytest.approx(0.85)
 
 
@@ -62,27 +61,21 @@ def test_low_pressure_no_degradation() -> None:
         # 0.90 sits EXACTLY at the band midpoint min_ratio(0.5)=0.90; on its own a
         # boundary fixture can let an operator-flip / interpolation mutation survive.
         (0.90, 0.4),
-        # 0.92 is an OFF-boundary interior point: rejected at mid pressure (0.5 ->
-        # 0.90) but accepted at full (0.95). Pairing it with 0.90 pins both the
-        # boundary AND a strict-interior point, so a collapse-to-endpoint or
-        # inverted-interpolation mutation can no longer pass.
+        # 0.92 is an OFF-boundary interior point: rejected at mid pressure (0.5 -> 0.90) but accepted at full (0.95). Pairing it with 0.90
+        # pins both the boundary AND a strict-interior point, so a collapse-to-endpoint or inverted-interpolation mutation can no longer pass.
         (0.92, 0.5),
     ],
 )
 def test_marginal_compression_accepted_only_at_high_pressure(
     marginal_ratio: float, interior_pressure: float
 ) -> None:
-    # A marginal compression sits BETWEEN the two thresholds [0.85, 0.95):
-    # accepted at high pressure (ratio < 0.95) but rejected at low pressure
-    # (ratio >= 0.85). The accept rule is `ratio < min_ratio`. This is the
-    # behavior the inversion got backwards — pre-fix, high pressure used the
-    # LOWER threshold (0.65) and would have rejected this marginal save.
+    # A ratio in [0.85, 0.95) must pass at high pressure and fail at low pressure because
+    # acceptance is `ratio < min_ratio`. This pins the adaptive-threshold direction.
     r = _router()
     assert marginal_ratio < r._adaptive_min_ratio(1.0), "marginal must be accepted when full"
     assert marginal_ratio >= r._adaptive_min_ratio(0.0), "marginal must be rejected when empty"
-    # Strict-interior pin: at a sub-peak pressure the threshold is still below the
-    # ratio, so the save is rejected. A mutation that flattens the ramp to the
-    # aggressive endpoint (0.95 everywhere) would wrongly ACCEPT here and fail this.
+    # Strict-interior pin: at a sub-peak pressure the threshold is still below the ratio, so the save is rejected. A
+    # mutation that flattens the ramp to the aggressive endpoint (0.95 everywhere) would wrongly ACCEPT here and fail this.
     assert marginal_ratio >= r._adaptive_min_ratio(interior_pressure), (
         "marginal must be rejected at sub-peak pressure (threshold below ratio)"
     )

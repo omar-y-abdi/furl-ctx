@@ -37,15 +37,11 @@ import os
 import sys
 from typing import Any
 
-# Pin the durable, cross-process CCR store BEFORE furl_ctx builds it, and match
-# the plugin's retention — identical to compress_tool_output.py. ``setdefault``
-# keeps the rewrite-baked FURL_CCR_PROJECT_DIR and any user override intact. A
-# non-durable (memory) store would make the emitted ``<<ccr:HASH>>`` marker
-# unretrievable, so sqlite is required for the marker to be honest.
+# Pin the durable, cross-process CCR store BEFORE furl_ctx builds it, and match the plugin's retention — identical to compress_tool_output.py.
+# A non-durable (memory) store would make the emitted ``<<ccr:HASH>>`` marker unretrievable, so sqlite is required for the marker to be honest.
 os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
-# Match the plugin's retention: opt into the per-namespace durable SPILL tier (T6)
-# so an evicted ``<<ccr:HASH>>`` marker stays retrievable past the 1000-entry cap,
-# identical to compress_tool_output.py. ``setdefault`` keeps a user opt-out intact.
+# Match the plugin's retention: opt into the per-namespace durable SPILL tier (T6) so an evicted
+# ``<<ccr:HASH>>`` marker stays retrievable past the 1000-entry cap, identical to compress_tool_output.py.
 os.environ.setdefault("FURL_CCR_SPILL", "1")
 os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")
 

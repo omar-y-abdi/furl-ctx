@@ -47,16 +47,14 @@ from .router_message_policy import (
 )
 
 if TYPE_CHECKING:
-    # Annotation-only: the walker passes compression results through to the
-    # injected store gate and reads their ratio/strategy fields; the class
-    # itself lives in content_router (which imports THIS module at runtime).
+    # Annotation-only: the walker passes compression results through to the injected store gate and reads their
+    # ratio/strategy fields; the class itself lives in content_router (which imports THIS module at runtime).
     from ..cache.retrieval_feedback import FeedbackHints
     from .content_router import ContentRouterConfig, RouterCompressionResult
 
 
-# Injected-callable shapes (keyword-arg precision intentionally elided —
-# ``Callable[...]`` over single-implementer Protocols): the router facade's
-# ``compress`` / ``_lookup_cached_disposition`` / ``_store_disposition``.
+# Injected-callable shapes (keyword-arg precision intentionally elided — ``Callable[...]`` over single-implementer
+# Protocols): the router facade's ``compress`` / ``_lookup_cached_disposition`` / ``_store_disposition``.
 BlockCompressFn = Callable[..., "RouterCompressionResult"]
 LookupDispositionFn = Callable[..., CacheDisposition]
 StoreDispositionFn = Callable[..., bool]
@@ -156,9 +154,8 @@ class ContentBlockWalker:
         any_compressed = False
         role = message.get("role", "")
 
-        # Role-based gate for `text` blocks. Tool/function roles are tool
-        # outputs and compress freely; assistant defaults to skip (cache
-        # safety) with explicit opt-in; unknown roles default to skip.
+        # Role-based gate for `text` blocks. Tool/function roles are tool outputs and compress freely;
+        # assistant defaults to skip (cache safety) with explicit opt-in; unknown roles default to skip.
         if (skip_user and role == "user") or (skip_system and role in {"system", "developer"}):
             protect_text_blocks = True
         elif role == "assistant" and not compress_assistant_text_blocks:
@@ -173,10 +170,8 @@ class ContentBlockWalker:
                 new_blocks.append(block)
                 continue
 
-            # Defense in depth: cache_control marker is the client's
-            # cache breakpoint. Frozen-message-count is a coarse
-            # message-level approximation; this is the per-block
-            # guarantee that we never bust an explicit cache key.
+            # Defense in depth: cache_control marker is the client's cache breakpoint. Frozen-message-count is a coarse
+            # message-level approximation; this is the per-block guarantee that we never bust an explicit cache key.
             if "cache_control" in block:
                 new_blocks.append(block)
                 if route_counts is not None:
@@ -209,14 +204,8 @@ class ContentBlockWalker:
 
                 tool_content = block.get("content", "")
 
-                # Protection: failed tool calls / error outputs stay verbatim.
-                # `is_error` is Anthropic's explicit failure
-                # flag and suffices alone; the indicator scan catches error
-                # text without the flag but requires >=2 distinct keywords
-                # AND an unstructured (non-JSON) shape, so benign row data
-                # mentioning errors doesn't skip compression.
-                # Above the size cap, fall through — LogCompressor preserves
-                # error lines in big logs.
+                # Protection failed tool calls / error outputs stay verbatim. `is_error` is Anthropic's explicit failure flag and suffices alone; the indicator scan catches
+                # error text without the flag but requires >=2 distinct keywords AND an unstructured (non-JSON) shape LogCompressor preserves error lines in big logs.
                 if (
                     self.config.protect_error_outputs
                     and isinstance(tool_content, str)
@@ -243,10 +232,8 @@ class ContentBlockWalker:
                             route_counts["already_compressed"] += 1
                         continue
 
-                    # Retrieval-feedback protection (Engine P2-13, opt-in) —
-                    # mirror of the string path. The helper runs detection
-                    # itself (this frame never detected); flag off never
-                    # reaches it.
+                    # Retrieval-feedback protection (Engine P2-13, opt-in) — mirror of the string path. The
+                    # helper runs detection itself (this frame never detected); flag off never reaches it.
                     if self.config.enable_retrieval_feedback:
                         hints = get_feedback_hints(tool_name, tool_content)
                         if hints.skip_compression:
@@ -282,10 +269,8 @@ class ContentBlockWalker:
                     any_compressed = any_compressed or did
                     continue
                 elif isinstance(tool_content, list):
-                    # Nested parts list — the canonical Anthropic/MCP
-                    # ``content: [{"type":"text","text": …}]`` shape (COR-47).
-                    # Route each inner text part through the same two-tier
-                    # cache; non-text parts (images, …) ship untouched.
+                    # Nested parts list — the canonical Anthropic/MCP ``content: [{"type":"text","text": …}]`` shape (COR-47).
+                    # Route each inner text part through the same two-tier cache; non-text parts (images, …) ship untouched.
                     new_block, did = self._compress_nested_tool_result(
                         block,
                         tool_content,
@@ -313,21 +298,10 @@ class ContentBlockWalker:
                         route_counts["small"] += 1
 
             # Handle text blocks — compress for non-Anthropic clients (e.g.
-            # OpenAI/DeepSeek via Cline) whose SDK normalizes content to
-            # block-list form. Roles are gated above (user/system always
-            # skipped; assistant default-skipped, opt-in via
-            # `compress_assistant_text_blocks`).
             elif block_type == "text" and not protect_text_blocks:
                 text_content = block.get("text", "")
                 if isinstance(text_content, str) and len(text_content) > min_chars:
-                    # Pinning: skip already-compressed content. The loose
-                    # phrase substrings are kept for back-compat;
-                    # _looks_like_ccr_output additionally pins engine-emitted
-                    # ``<<ccr:HASH>>`` sentinels, which the smart-crusher path
-                    # emits WITHOUT either phrase at default config (COR-31) —
-                    # phrase-only pinning re-compressed those after result-cache
-                    # expiry, and sentinel survival through a second crush is
-                    # not contractual.
+                    # Pinning: skip already-compressed content. The loose phrase substrings are kept for back-compat.
                     if (
                         "Retrieve more: hash=" in text_content
                         or "Retrieve original: hash=" in text_content
@@ -420,9 +394,8 @@ class ContentBlockWalker:
                     f"_lookup_cached_disposition returned unexpected CacheDisposition {other!r}"
                 )
 
-        # Recompute (cache miss or evicted stale sentinel). All cache bookkeeping
-        # — skip/stale/miss counters and any eviction — already happened inside
-        # the lookup gate; here we only (re)compress and store.
+        # Recompute (cache miss or evicted stale sentinel). All cache bookkeeping — skip/stale/miss counters
+        # and any eviction — already happened inside the lookup gate; here we only (re)compress and store.
         t0 = time.perf_counter()
         result = compress_fn(text, context=context, bias=bias, token_counter=token_counter)
         compress_ms = (time.perf_counter() - t0) * 1000
@@ -483,9 +456,8 @@ class ContentBlockWalker:
 
         bump("nested_blocks")
 
-        # Anthropic's explicit failure flag protects the whole block — the
-        # string-content branch checks it before reaching compression; the
-        # nested shape must not lose that protection.
+        # Anthropic's explicit failure flag protects the whole block — the string-content branch
+        # checks it before reaching compression; the nested shape must not lose that protection.
         if self.config.protect_error_outputs and block.get("is_error") is True:
             transforms_applied.append("router:protected:error_output")
             bump("error_protected")
@@ -516,9 +488,8 @@ class ContentBlockWalker:
                 new_parts.append(part)
                 bump("already_compressed")
                 continue
-            # Retrieval-feedback protection (Engine P2-13, opt-in) — per
-            # PART: each text part is its own compression unit with its own
-            # detected shape. Flag off never consults.
+            # Retrieval-feedback protection (Engine P2-13, opt-in) — per PART: each text part
+            # is its own compression unit with its own detected shape. Flag off never consults.
             part_bias = bias
             if self.config.enable_retrieval_feedback:
                 hints = get_feedback_hints(tool_name, part_text)

@@ -22,10 +22,7 @@ import time
 from tests._fixtures import log_shaped_rows
 from tests.matrix import _matrix as m
 
-# Generous post-hoc ceiling: my local run compresses each of these in well under a
-# second. This CANNOT fire on a true hang (the call would never return); it is a
-# canary for finite super-linear blowups, generous enough not to flake on a slow
-# CI box.
+# Generous post-hoc ceiling: my local run compresses each of these in well under a second.
 _LATENCY_CEILING_SECONDS = 60.0
 
 

@@ -93,11 +93,8 @@ def _cmd_compress(args: argparse.Namespace) -> int:
                     "compressed": compressed,
                     "tokens_before": result.tokens_before,
                     "tokens_after": result.tokens_after,
-                    # The headline number is VISIBLE-TOKEN reduction (how
-                    # much the model no longer sees), which INCLUDES CCR-offloaded
-                    # content — hidden but byte-retrievable, not lossless byte
-                    # compression. Labeled explicitly so a high number on
-                    # high-entropy input is not mistaken for lossless shrinkage.
+                    # The headline number is VISIBLE-TOKEN reduction (how much the model no longer sees), which
+                    # INCLUDES CCR-offloaded content — hidden but byte-retrievable, not lossless byte compression.
                     "visible_token_reduction": result.compression_ratio,
                     # Deprecated alias kept for compatibility — same value.
                     "compression_ratio": result.compression_ratio,
@@ -249,10 +246,8 @@ def _ccr_store_search_target() -> tuple[str, bool]:
         from furl_ctx.cache.compression_store import _active_ccr_store
 
         backend = _active_ccr_store(None, None)._backend
-        # SqliteBackend exposes its resolved database path as ``_db_path``; the
-        # in-memory backend has none. Report the concrete file so a user knows
-        # exactly which store was searched (and can inspect/point another
-        # process at it).
+        # SqliteBackend exposes its resolved database path as ``_db_path``; the in-memory backend has none. Report the
+        # concrete file so a user knows exactly which store was searched (and can inspect/point another process at it).
         db_path = getattr(backend, "_db_path", None)
         if db_path is not None:
             return (f"backend=sqlite store={db_path}", False)
@@ -266,9 +261,8 @@ def _ccr_store_search_target() -> tuple[str, bool]:
 def _cmd_retrieve(args: argparse.Namespace) -> int:
     from furl_ctx import retrieve
 
-    # Reject a malformed hash up front with the SAME guard/message the MCP
-    # server uses, so "you typed a bad hash" (exit 2, usage error) is
-    # never silently reported as an expired/evicted MISS (exit 1).
+    # Reject a malformed hash up front with the SAME guard/message the MCP server uses, so "you typed
+    # a bad hash" (exit 2, usage error) is never silently reported as an expired/evicted MISS (exit 1).
     hash_error = _invalid_hash_message(args.hash)
     if hash_error is not None:
         sys.stderr.write(f"furl: {hash_error}\n")
@@ -287,13 +281,8 @@ def _cmd_retrieve(args: argparse.Namespace) -> int:
         return 2
 
     if result is None:
-        # Honest miss: name the store that was actually searched (backend +
-        # resolved path for sqlite; "in-memory (process-local)" otherwise) so a
-        # user is never left guessing WHERE the hash was looked for. When the
-        # store is the volatile in-memory backend, say plainly that its entries
-        # do not survive across processes — the exact reason a compress in one
-        # `furl` invocation cannot be retrieved by a later one — and point at the
-        # durable opt-out.
+        # Honest miss: name the store that was actually searched (backend + resolved path for sqlite; "in-memory
+        # (process-local)" otherwise) so a user is never left guessing WHERE the hash was looked for.
         target, volatile = _ccr_store_search_target()
         sys.stderr.write(
             f"furl: hash {args.hash} not found in {target} (never stored, evicted, or expired)\n"
@@ -328,11 +317,8 @@ def _cmd_purge(args: argparse.Namespace) -> int:
     return 1
 
 
-# furl_search preview bounds (mirrors the MCP furl_search tool's slice-before-
-# redact discipline). The credential regexes are O(N^2) on long token runs, so
-# the redactor must never see a whole multi-MB original — only a MARGIN-widened
-# window around the match, so a secret straddling a display edge is masked whole
-# before any truncation.
+# Redact a margin-expanded window around search matches, then truncate the preview.
+# This bounds hostile regex cost while masking secrets that cross display edges.
 _SEARCH_PREVIEW_RADIUS = 60  # chars of context each side of the match
 _SEARCH_PREVIEW_MARGIN = 256  # extra chars redacted (edge-straddling secrets)
 _SEARCH_PREVIEW_MAX = 200  # hard char cap on a displayed preview
@@ -341,9 +327,8 @@ _SEARCH_SCAN_CAP = 5000  # bound the linear scan over live entries
 
 _LIST_PREVIEW_MAX = 80  # hard char cap on a `furl list` preview
 
-# The `furl retrieve` filter flags, all registered with `argparse.SUPPRESS` so an
-# unpassed flag is ABSENT from the namespace rather than None — `_cmd_retrieve`
-# forwards only the ones the user actually typed.
+# The `furl retrieve` filter flags, all registered with `argparse.SUPPRESS` so an unpassed flag is ABSENT
+# from the namespace rather than None `_cmd_retrieve` forwards only the ones the user actually typed.
 _RETRIEVE_FLAGS = (
     "pattern",
     "context_lines",
@@ -679,9 +664,8 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for name, passed, detail in checks:
         sys.stdout.write(f"[{'OK' if passed else 'FAIL'}] {name}: {detail}\n")
 
-    # The resolved CCR profile this install will use, so `doctor` answers
-    # "which backend/TTL/scope am I actually on?" — the surface-specific defaults
-    # that otherwise surprise users.
+    # The resolved CCR profile this install will use, so `doctor` answers "which backend/TTL/scope
+    # am I actually on?" — the surface-specific defaults that otherwise surprise users.
     profile = _resolve_active_profile()
     sys.stdout.write(
         f"[--] profile: backend={profile['backend']} ttl={profile['ttl_seconds']}s "
@@ -707,34 +691,12 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # CLI-vs-library backend split. The `furl` CLI is a command-line tool: its
-    # `compress` and `retrieve` run in SEPARATE processes, so its CCR store must
-    # be durable — the library's in-memory default dies with the process, which
-    # would make every cross-process `retrieve` a false miss (the exact "nothing
-    # is truly lost" contradiction this closes). Default the CLI's store to the
-    # durable sqlite backend BEFORE any engine/store init below.
-    #
-    # This opts in ONLY the CLI entrypoint — the LIBRARY default stays in-memory
-    # on purpose (a library must not write to disk unbidden; callers opt in via
-    # FURL_CCR_BACKEND, and the Claude Code plugin already pins sqlite). setdefault
-    # means an explicit user FURL_CCR_BACKEND (memory, sqlite, a plugin name, ...)
-    # is always respected.
+    # CLI-vs-library backend split. The `furl` CLI is a command-line tool: its `compress` and `retrieve` run in SEPARATE processes,
+    # so its CCR store must be durable. Default the CLI's store to the durable sqlite backend BEFORE any engine/store init below.
     os.environ.setdefault("FURL_CCR_BACKEND", "sqlite")
 
-    # TTL parity with the Claude Code plugin: the
-    # library's 30-minute default made CLI-stored originals die mid-session
-    # while the plugin's hook and MCP tools (FURL_CCR_TTL_SECONDS=86400, set
-    # by hooks/compress_tool_output.py and .mcp.json) kept theirs for 24 h.
-    # Mirror the hook's setdefault so a `furl compress` hash lives as long as
-    # a hook-compressed one; an explicit user FURL_CCR_TTL_SECONDS still wins.
-    #
-    # Store SCOPE stays global (~/.furl/ccr.sqlite3) on purpose. The plugin's
-    # per-project stores are keyed by FURL_CCR_PROJECT_DIR, which the hook and
-    # MCP server derive in-process from CLAUDE_PROJECT_DIR — an env var Claude
-    # Code does not export to Bash-run commands — and inferring a project root
-    # from cwd here would silo data under whatever subdirectory the user ran
-    # from. Users target a project store explicitly:
-    # FURL_CCR_PROJECT_DIR=<project root> furl retrieve <hash>.
+    # TTL parity with the Claude Code plugin the library's 30-minute default made CLI-stored originals die mid-session while
+    # the plugin's hook and MCP tools (FURL_CCR_TTL_SECONDS=86400, set by hooks/the module and .mcp.json) kept theirs for 24 h.
     os.environ.setdefault("FURL_CCR_TTL_SECONDS", "86400")
 
     parser = argparse.ArgumentParser(prog="furl", description="Furl context-compression CLI.")
@@ -774,8 +736,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_retrieve.add_argument("hash")
     # Slice flags — all optional; omitting them all gives a plain full retrieve.
-    # SUPPRESS keeps unset flags off args.* so _cmd_retrieve can distinguish
-    # "not passed" from an explicit value (critical for --select-equals).
     p_retrieve.add_argument(
         "--pattern",
         default=argparse.SUPPRESS,
@@ -893,9 +853,8 @@ def main(argv: list[str] | None = None) -> int:
     p_mcp.set_defaults(func=_cmd_mcp)
 
     args = parser.parse_args(argv)
-    # Surface the active CCR profile (backend/TTL/scope) on every run so
-    # a surface's non-obvious defaults never silently surprise the user. STDERR
-    # only (stdout stays pure compressed output); opt out with FURL_PROFILE_BANNER=0.
+    # Surface the active CCR profile (backend/TTL/scope) on every run so a surface's non-obvious defaults never silently
+    # surprise the user. STDERR only (stdout stays pure compressed output); opt out with FURL_PROFILE_BANNER=0.
     _emit_profile_banner()
     return int(args.func(args))
 

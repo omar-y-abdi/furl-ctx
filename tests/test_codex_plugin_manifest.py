@@ -52,8 +52,7 @@ def test_codex_manifest_uses_supported_components_only() -> None:
     assert "hooks" not in manifest
     assert (_PLUGIN_ROOT / manifest["skills"]).is_dir()
     assert (_PLUGIN_ROOT / manifest["mcpServers"]).is_file()
-    # Codex default-loads hooks/hooks.json when the manifest has no override.
-    # Its package root must therefore stay separate from Claude's hook bundle.
+    # Codex default-loads its hook manifest when no override is present; keep its package root separate from Claude's hook bundle.
     assert not (_PLUGIN_ROOT / "hooks" / "hooks.json").exists()
 
     interface = manifest["interface"]

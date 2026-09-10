@@ -34,9 +34,8 @@ def test_huge_content_offloads_and_recovers_byte_exact(monkeypatch) -> None:
 
 
 def test_below_ceiling_does_not_early_offload(monkeypatch) -> None:
-    # Small content (< the 4 KB post-hoc-offload floor) can offload via NEITHER
-    # the pre-existing fallback NOR this guard, so it isolates that the guard does
-    # not fire below its ceiling.
+    # Small content (< the 4 KB post-hoc-offload floor) can offload via NEITHER the pre-existing
+    # fallback NOR this guard, so it isolates that the guard does not fire below its ceiling.
     monkeypatch.setenv("FURL_MAX_COMPRESS_BYTES", "10000000")  # 10 MB ceiling
     content = "[" + ",".join(f'{{"id":{i}}}' for i in range(100)) + "]"
     assert len(content) < 4000

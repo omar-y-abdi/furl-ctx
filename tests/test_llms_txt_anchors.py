@@ -24,10 +24,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _LLMS_TXT = _ROOT / "llms.txt"
-# The files llms.txt links into by #anchor. Extend this tuple (and the mirrored
-# ci.yml step) if llms.txt ever gains anchored links into another document —
-# _ANCHOR_REF_RE is derived from it, so refs to a new doc cannot be silently
-# skipped by a forgotten regex edit.
+# Documentation targets referenced by anchored agent-orientation links.
 _DOC_NAMES = ("README.md", "LIBRARY.md")
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
@@ -89,11 +86,7 @@ def _anchor_refs_in_llms_txt() -> list[tuple[str, str]]:
 
 
 def test_llms_txt_has_at_least_one_doc_anchor_reference() -> None:
-    # Non-vacuous guard: if every anchored doc link were ever removed from
-    # llms.txt, the resolution test below would trivially pass on an empty list.
-    # Fail loud instead, so removing the last one is a visible, deliberate edit
-    # (update _DOC_NAMES and the mirrored ci.yml step together) rather than a
-    # silent pass.
+    # Require at least one anchored documentation link so resolution cannot pass vacuously over an empty set.
     assert _anchor_refs_in_llms_txt(), (
         "expected at least one README.md#.../LIBRARY.md#... anchor reference in llms.txt"
     )

@@ -38,12 +38,8 @@ def _messages() -> list[dict]:
     return [{"role": "tool", "content": "alpha " + "data point one " * 40}]
 
 
-# The exact kwarg set ``ContentRouter.apply()`` receives on the real
-# production path: ``compress()`` forwards its options to
-# ``TransformPipeline.apply``, which injects ``compress_request`` and then
-# broadcasts ``**kwargs`` to every transform. ``model`` / ``messages`` /
-# ``tokenizer`` bind to positional params and never land in this transform's
-# ``**kwargs``, so they are intentionally absent from the post-pipeline bag.
+# The exact kwarg set ``ContentRouter.apply()`` receives on the real production path: ``compress()`` forwards its options
+# to ``TransformPipeline.apply``, which injects ``compress_request`` and then broadcasts ``**kwargs`` to every transform.
 _POST_PIPELINE_KWARGS: dict = {
     "model_limit": 200000,
     "context": "",
@@ -80,19 +76,8 @@ def test_known_good_call_does_not_raise() -> None:
     _router().apply(_messages(), tokenizer, **_POST_PIPELINE_KWARGS)
 
 
-# Union of EVERY key a real caller passes to ContentRouter.apply(), gathered
-# from grepping every call site in furl_ctx/ AND tests/:
-#   * the production path (``_POST_PIPELINE_KWARGS``, via compress()), plus
-#   * the keys the pipeline's documented public surface broadcasts
-#     (``request_id``, and ``previous_prefix_hash`` — CacheAligner's
-#     documented turn-to-turn kwarg, API-4).
-# ``record_metrics`` is deliberately NOT here: the pipeline pops it before
-# the broadcast (pinned by test_pipeline_record_metrics_contract.py).
-# ``output_buffer`` / ``tool_profiles`` were removed from the pipeline's
-# documented surface with API-16 (zero readers — per-tool profiles are
-# config-level via ``ContentRouterConfig.tool_profiles``), so passing them
-# now fails loudly instead of being silently ignored (pinned by
-# test_api_contract_fixes.py).
+# Union of EVERY key a real caller passes to ContentRouter.apply(), gathered from grepping every call site in furl_ctx/ AND tests/ * the production path (``_POST_PIPELINE_KWARGS``, via
+# compress()), plus * the keys the pipeline's documented public surface broadcasts (``request_id``, and ``previous_prefix_hash`` CacheAligner's documented turn-to-turn kwarg, API-4).
 _REAL_CALLER_KEYS = set(_POST_PIPELINE_KWARGS) | {
     "request_id",
     "previous_prefix_hash",

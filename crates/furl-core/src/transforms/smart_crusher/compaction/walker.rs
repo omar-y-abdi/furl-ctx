@@ -1,33 +1,5 @@
-//! `DocumentCompactor` — recursive walker that finds compactable spots
-//! anywhere in a JSON document and replaces them in place.
-//!
-//! # The whole algorithm in one rule
-//!
-//! ```text
-//! match value {
-//!     Object(m) => recurse into each field's value
-//!     Array(xs) => recurse into each item, then try TabularCompactor on the array
-//!     String(s) => parse-as-JSON-and-recurse / CCR-substitute / leave
-//!     scalar    => unchanged
-//! }
-//! ```
-//!
-//! # Output shape
-//!
-//! Same JSON shape as input. Compacted spots become **strings** holding
-//! the rendered bytes. The wrapping object/array structure is preserved
-//! exactly — only bulky leaves get replaced.
-//!
-//! Example:
-//!
-//! ```text
-//! input:  {"user": "alice", "events": [{...}, {...}, ...]}
-//! output: {"user": "alice", "events": "[50]{id:int,action:string}\n1,click\n..."}
-//! ```
-//!
-//! Nested cases cascade naturally — we recurse into the array's items
-//! BEFORE running TabularCompactor on the array, so inner sub-tables
-//! become strings first and the outer table sees them as cells.
+//! `DocumentCompactor` — recursive walker that finds compactable spots anywhere in a JSON document and replaces
+//! them in place. . The wrapping object/array structure is preserved exactly — only bulky leaves get replaced.
 
 use std::sync::Arc;
 
@@ -41,14 +13,6 @@ use crate::ccr::{marker_for_opaque, CcrStore};
 use crate::transforms::smart_crusher::types::DroppedRef;
 
 /// Walks any JSON value and applies lossless compaction in place.
-///
-/// Reuses the compaction primitives:
-/// - [`compact`](super::compactor::compact) — array → IR
-/// - [`Formatter`] — IR → bytes
-/// - [`classify_string`] + opaque-blob detection
-///
-/// The walker itself owns no compaction logic; it just decides
-/// **where** to apply each primitive in the tree.
 pub struct DocumentCompactor {
     pub config: CompactConfig,
     pub formatter: Box<dyn Formatter>,
@@ -68,39 +32,21 @@ impl DocumentCompactor {
         Self::default()
     }
 
-    /// Wire a CCR store so opaque-blob substitutions — on BOTH the
-    /// `walk_string` path and the `walk_array` → `compact` →
-    /// `cell_from_value` path — stash the original under the marker hash.
-    ///
-    /// The store lives on the single `config.ccr_store` field that
-    /// `compact()` already reads (COR-19). A prior version set a sibling
-    /// `DocumentCompactor::ccr_store` field consumed only by
-    /// `walk_string`, leaving `config.ccr_store = None`, so any opaque
-    /// cell reaching `cell_from_value` under a store-configured compactor
-    /// emitted a dangling marker with no stored original.
+    /// Wire a CCR store so opaque-blob substitutions
     pub fn with_ccr_store(mut self, store: Arc<dyn CcrStore>) -> Self {
         self.config.ccr_store = Some(store);
         self
     }
 
-    /// Walk and compact. Returns a JSON value with the same shape but
-    /// with compactable spots replaced by rendered strings.
-    ///
-    /// Wrapper that discards the typed refs — callers that mirror
-    /// recovery should use [`Self::compact_collecting`] instead of
-    /// re-parsing markers out of the returned value.
+    /// Walk and compact. Wrapper that discards the typed refs — callers that mirror recovery should
+    /// use [`Self::compact_collecting`] instead of re-parsing markers out of the returned value.
     pub fn compact(&self, doc: Value) -> Value {
         let mut sink: Vec<DroppedRef> = Vec::new();
         self.compact_collecting(doc, &mut sink)
     }
 
-    /// Collecting variant of [`Self::compact`] (§4.2 R2): identical
-    /// output value, but every opaque substitution the walk ships — the
-    /// `walk_string` live substitutions AND the `walk_array` → `compact`
-    /// cell substitutions baked into rendered sub-tables — is appended
-    /// to `sink` as a typed [`DroppedRef::Opaque`]. The sink is pure
-    /// side-output: it never influences what gets substituted, so the
-    /// returned value is byte-identical to `compact`'s.
+    /// `compact_collecting` returns the same value as `compact` while appending shipped opaque
+    /// substitutions to `sink` as typed recovery refs. The side-output never changes rendering.
     pub fn compact_collecting(&self, doc: Value, sink: &mut Vec<DroppedRef>) -> Value {
         walk(doc, self, sink)
     }
@@ -128,20 +74,13 @@ fn walk_object(
 }
 
 fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -> Value {
-    // Recurse into items FIRST so inner sub-tables / opaque markers are
-    // already in their compacted form when the outer compact runs. This
-    // is what makes deep nesting cascade — a stringified-JSON cell
-    // becomes a rendered string before the outer table sees it.
+    // Recurse into items FIRST so inner sub-tables / opaque markers are already in their compacted form when the outer compact runs.
     let inner: Vec<Value> = items.into_iter().map(|i| walk(i, ctx, sink)).collect();
 
     // Then try the array as a whole.
     let c = compact(&inner, &ctx.config);
     if c.was_compacted() {
-        // This render SHIPS (it replaces the array) — surface every
-        // opaque cell it baked in, typed. Item-level substitutions were
-        // already collected by the recursion above; `compact` classifies
-        // over the recursed values, so cells it marks opaque here are
-        // exactly the ones whose markers appear in the rendered string.
+        // This render SHIPS (it replaces the array) — surface every opaque cell it baked in, typed.
         c.collect_opaque_refs(sink);
         Value::String(ctx.formatter.format(&c))
     } else {
@@ -152,21 +91,12 @@ fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor, sink: &mut Vec<Dropped
 fn walk_string(s: String, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -> Value {
     // Stringified-JSON: parse, recurse, replace.
     if let Some(parsed) = try_parse_json_container(&s) {
-        // Recurse into a LOCAL sink: the no-op guard below may discard
-        // the recursed value, and refs must be surfaced only for
-        // substitutions that actually SHIP (a discarded recursion's
-        // markers appear nowhere in the output).
+        // Recurse into a LOCAL sink: the no-op guard below may discard the recursed value, and refs must be surfaced
+        // only for substitutions that actually SHIP (a discarded recursion's markers appear nowhere in the output).
         let mut local: Vec<DroppedRef> = Vec::new();
         let recursed = walk(parsed.clone(), ctx, &mut local);
-        // No-op guard (COR-45): when the recursion compacted NOTHING,
-        // return the original string byte-identical. Re-emitting through
-        // serde would silently minify Python `json.dumps`-spaced JSON,
-        // collapse duplicate keys ({"a":1,"a":2} → {"a":2}), decode
-        // \uXXXX escapes and rewrite exponent forms — un-gated mutation
-        // of string-leaf DATA at zero declared savings, contradicting
-        // the module contract above ("only bulky leaves get replaced").
-        // Mirrors the crusher twin's `processed != parsed` check in
-        // `SmartCrusher::process_string_collecting`.
+        // No-op guard (COR-45) Re-emitting through serde would silently minify Python `json.dumps`-spaced JSON,
+        // collapse duplicate keys ({"a":1,"a":2} → {"a":2}), decode \uXXXX escapes and rewrite exponent forms
         if recursed == parsed {
             return Value::String(s);
         }
@@ -179,11 +109,7 @@ fn walk_string(s: String, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -
         };
     }
 
-    // Long opaque blob: substitute with CCR marker (and stash the
-    // original in the store if one is configured, so retrieval works).
-    // The substitution always ships — surface its typed ref directly.
-    // `classify_string` takes the borrowed str — no throwaway
-    // `Value::String` clone just to classify (PERF-5).
+    // Long opaque blob: substitute with CCR marker (and stash the original in the store if one is configured, so retrieval works).
     if let CellClass::Opaque(kind) = classify_string(&s, &ctx.config.classify) {
         let (marker, dropped_ref) =
             emit_opaque_ccr_marker(&s, &kind, ctx.config.ccr_store.as_ref());
@@ -194,30 +120,16 @@ fn walk_string(s: String, ctx: &DocumentCompactor, sink: &mut Vec<DroppedRef>) -
     Value::String(s)
 }
 
-/// Guard against serde_json internal magic keys (COR-44).
-///
-/// With the `arbitrary_precision` + `raw_value` workspace features enabled,
-/// serde_json treats `{"$serde_json::private::Number":"123"}` as the number
-/// literal `123`, and `{"$serde_json::private::RawValue":…}` unwraps to its
-/// payload.  Any parse entry point that calls `serde_json::from_str` on
-/// adversarial or tool-echoed content containing these markers would silently
-/// receive a mutated `Value` — shipping altered data and poisoning CCR
-/// recovery.  Declining to parse is strictly safer than accepting mutated
-/// output: callers fall back to the original bytes unchanged.
+/// Guard against serde_json internal magic keys (COR-44). Any parse entry point that calls `serde_json::from_str` on adversarial or
+/// tool-echoed content containing these markers would silently receive a mutated `Value` — shipping altered data and poisoning CCR recovery.
 pub fn has_serde_private_marker(s: &str) -> bool {
     s.contains("$serde_json::private::")
 }
 
-/// Parse a string as JSON IF it looks like a container (starts with `{`
-/// or `[`) AND parses cleanly to Object/Array. Returns None otherwise —
-/// we don't recurse on bare scalars even if they parse.
-///
-/// Declines (returns `None`) when the input contains a serde_json internal
-/// magic key — see [`has_serde_private_marker`] (COR-44).
+/// Parse a string as JSON IF it looks like a container (starts with `{` or `[`) AND parses cleanly to Object/Array. Declines
+/// (returns `None`) when the input contains a serde_json internal magic key — see [`has_serde_private_marker`] (COR-44).
 pub fn try_parse_json_container(s: &str) -> Option<Value> {
-    // COR-44: decline before calling from_str so the magic-key promotion
-    // never fires.  Fall through to None (same as a parse failure) so the
-    // string leaf is returned unchanged by the caller.
+    // COR-44: decline before calling from_str so the magic-key promotion never fires.
     if has_serde_private_marker(s) {
         return None;
     }
@@ -230,19 +142,8 @@ pub fn try_parse_json_container(s: &str) -> Option<Value> {
         .filter(|v| matches!(v, Value::Object(_) | Value::Array(_)))
 }
 
-/// Emit an opaque-blob CCR marker AND (optionally) stash the original
-/// in the store so retrieval works. The hash is computed identically
-/// regardless of store presence — same input → same marker — so the
-/// runtime contract is stable across configurations.
-///
-/// Marker format: `<<ccr:HASH,KIND,SIZE>>` where HASH is the 12-char
-/// SHA-256 hex prefix of the payload bytes, KIND is `base64` / `string`
-/// / `html` / custom, SIZE is humanized (`123B`, `4.5KB`, `1.2MB`).
-///
-/// Returns the marker text alongside the typed [`DroppedRef::Opaque`]
-/// carrying the SAME hash/kind (plus the EXACT byte size the marker
-/// only humanizes) — §4.2 R2: every emitter surfaces the ref so
-/// recovery mirroring never re-parses the marker.
+/// Emit an opaque-blob CCR marker AND (optionally) stash the original in the store so retrieval works. The hash is computed
+/// identically regardless of store presence — same input → same marker — so the runtime contract is stable across configurations.
 pub fn emit_opaque_ccr_marker(
     payload: &str,
     kind: &OpaqueKind,
@@ -400,10 +301,7 @@ mod tests {
 
     #[test]
     fn cascading_recursion_outer_table_sees_inner_compacted_string() {
-        // Each row has a stringified-JSON `payload`. After the walker
-        // recurses into items, each payload is a rendered sub-table
-        // string. The outer compact then builds a 3-row × 2-col table
-        // where the payload column holds the inner renderings.
+        // Each row has a stringified-JSON `payload`. After the walker recurses into items, each payload is a rendered sub-table string.
         let doc = json!([
             {"id": 1, "payload": r#"[{"x":1},{"x":2},{"x":3}]"#},
             {"id": 2, "payload": r#"[{"x":4},{"x":5}]"#},
@@ -452,12 +350,7 @@ mod tests {
 
     #[test]
     fn noop_stringified_json_leaf_survives_byte_identical() {
-        // COR-45 regression. A string leaf holding Python
-        // `json.dumps`-spaced JSON that the recursion cannot compact
-        // (below every threshold) must come back BYTE-IDENTICAL — the
-        // walker used to re-emit it through serde (minified) at zero
-        // declared savings, mutating data the module's own contract
-        // says it leaves alone ("only bulky leaves get replaced").
+        // A string leaf holding Python `json.dumps`-spaced JSON that the recursion cannot compact (below every threshold) must come back BYTE-IDENTICAL.
         let leaf = r#"{"a": 1, "b": "x"}"#;
         let doc = json!({"payload": leaf});
         let out = dc().compact(doc);
@@ -470,10 +363,8 @@ mod tests {
 
     #[test]
     fn noop_guard_preserves_duplicate_keys_escapes_and_exponents() {
-        // COR-45's worst cases: serde re-serialization collapses
-        // duplicate keys ({"a":1,"a":2} → {"a":2}), decodes \uXXXX
-        // escapes, and rewrites exponent forms — all silent data
-        // mutation when the walk compacted nothing.
+        // COR-45's worst cases: serde re-serialization collapses duplicate keys ({"a":1,"a":2} → {"a":2}), decodes
+        // \uXXXX escapes, and rewrites exponent forms — all silent data mutation when the walk compacted nothing.
         for leaf in [
             r#"{"a":1,"a":2}"#,     // duplicate keys must not collapse
             r#"{"s":"caf\u00e9"}"#, // \uXXXX escapes must not decode
@@ -494,10 +385,8 @@ mod tests {
 
     #[test]
     fn try_parse_json_container_declines_serde_number_magic_key() {
-        // COR-44: with arbitrary_precision enabled, serde_json treats
-        // {"$serde_json::private::Number":"123"} as the number literal 123.
-        // The guard must return None before calling from_str so the promotion
-        // never fires — the string leaf passes through unchanged.
+        // COR-44: with arbitrary_precision enabled, serde_json treats {"$serde_json::private::Number":"123"} as the number literal 123.
+        // The guard must return None before calling from_str so the promotion never fires — the string leaf passes through unchanged.
         let magic = r#"{"$serde_json::private::Number":"123"}"#;
         assert!(
             try_parse_json_container(magic).is_none(),
@@ -507,9 +396,8 @@ mod tests {
 
     #[test]
     fn walk_string_magic_key_leaf_returned_byte_identical() {
-        // COR-44: when a string leaf contains a serde_json magic key, the
-        // walker must return the original string byte-identical rather than
-        // parsing (which would silently mutate it via the promotion).
+        // COR-44: when a string leaf contains a serde_json magic key, the walker must return the original
+        // string byte-identical rather than parsing (which would silently mutate it via the promotion).
         let magic = r#"{"$serde_json::private::Number":"456"}"#;
         let doc = json!({"payload": magic});
         let out = dc().compact(doc);
@@ -534,19 +422,8 @@ mod tests {
 
     #[test]
     fn with_ccr_store_populates_config_store_for_the_array_compaction_path() {
-        // COR-19 regression. `DocumentCompactor::with_ccr_store` used to
-        // set a SIBLING `ccr_store` field consumed only by `walk_string`,
-        // leaving `config.ccr_store = None` — the field that
-        // `walk_array` → `compact` → `cell_from_value` reads. Any opaque
-        // cell reaching that path emitted a `<<ccr:HASH,...>>` marker with
-        // NO stored original (a dangling marker = silent loss). The fix
-        // routes the store onto the single `config.ccr_store`.
-        //
-        // We drive the EXACT repaired path: the array compactor
-        // (`compact` under the compactor's own config) on a row carrying
-        // an opaque blob cell. Pre-fix `config.ccr_store` was `None`, so
-        // the blob was never stored and `get(hash)` MISSES; post-fix it
-        // resolves byte-exact.
+        // Any opaque cell reaching that path emitted a `<<ccr:HASH,...>>` marker with NO stored original (a dangling marker = silent loss).
+        // Pre-fix `config.ccr_store` was `None`, so the blob was never stored and `get(hash)` MISSES; post-fix it resolves byte-exact.
         use crate::ccr::InMemoryCcrStore;
         use crate::transforms::smart_crusher::compaction::compactor::compact;
         use std::sync::Arc;
@@ -571,9 +448,7 @@ mod tests {
             "the opaque blob must render as a CCR marker: {rendered}"
         );
 
-        // The store must now hold the original under the marker hash —
-        // the whole point of COR-19. Pull the hash from the marker and
-        // recover byte-exact.
+        // The store must now hold the original under the marker hash — the whole point of COR-19. Pull the hash from the marker and recover byte-exact.
         let start = rendered.find("<<ccr:").expect("marker present") + "<<ccr:".len();
         let rest = &rendered[start..];
         let end = rest.find(',').expect("opaque marker has a comma");

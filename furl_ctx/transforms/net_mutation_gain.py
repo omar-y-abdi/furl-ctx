@@ -22,12 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Provider cache-read pricing relative to the base input rate. Anthropic
-# bills cache reads at 0.1x base; OpenAI at 0.25-0.5x depending on model.
-# 0.1 is the CONSERVATIVE-toward-compression default: a lower rate means a
-# bigger (1 - rate) re-billing penalty, so if the gate does not fire at 0.1
-# it would not fire at any real provider's rate either. Overridable via
-# ``ContentRouterConfig.cached_token_rate``.
+# Provider cache-read pricing relative to the base input rate. Anthropic bills cache reads at 0.1x base; OpenAI at 0.25-0.5x depending on model.
 CACHED_TOKEN_RATE: float = 0.1
 
 

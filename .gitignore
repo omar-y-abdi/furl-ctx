@@ -3,8 +3,7 @@
 .fastembed_cache/
 **/.fastembed_cache/
 
-# Local Kompress ONNX export artifacts (scripts/export_kompress_v2_onnx.py).
-# Hundreds of MB each — published to HuggingFace, never committed.
+# Local Kompress ONNX exports are hundreds of MB; publish them externally and never commit them.
 /onnx/
 
 # Private scripts (contain credentials). Allowlist checked-in helpers below.
@@ -242,17 +241,12 @@ furl-managed/
 # uv lockfile: regenerated locally; not committed
 uv.lock
 
-# Rust extension `.so` symlinks placed by `scripts/build_rust_extension.sh`
-# into the `furl_ctx/` package dir for local development. The real binary
-# lives in `crates/furl-py/python/furl_ctx/`; this is the dev overlay
-# that lets `import furl_ctx._core` resolve when the source `furl_ctx/`
-# package shadows the maturin overlay on sys.path.
+# Ignore local Rust-extension symlinks used to make the source Python package resolve the compiled `_core` overlay during development.
 /furl_ctx/_core.*.so
 /furl_ctx/_core.so
 
-# Eval/implementation workflow isolation artifacts: per-agent venvs, shared sccache
-# compile cache, throwaway git worktrees. Must be ignored so builder agents' `git add -A`
-# inside a worktree never captures a venv into a commit.
+# Eval/implementation workflow isolation artifacts: per-agent venvs, shared sccache compile cache, throwaway git
+# worktrees. Must be ignored so builder agents' `git add -A` inside a worktree never captures a venv into a commit.
 .venv-eval/
 **/.venv-eval/
 .sccache/
@@ -261,10 +255,8 @@ uv.lock
 # Local working docs — untracked from GitHub, kept on disk only
 /.claude/
 /archive/
-# docs/ holds local scratch by default, BUT docs/audits/ is git-versioned
-# (committed design/audit docs). A blanket "/docs/" ignore silently dropped new
-# committed docs from `git add` and forced -f adds (Bug-16); ignore only the
-# scratch and un-ignore the tracked audits subtree.
+# A blanket "/docs/" ignore silently dropped new committed docs from `git add` and forced
+# -f adds (Bug-16); ignore only the scratch and un-ignore the tracked audits subtree.
 /docs/*
 !/docs/audits/
 /PLAN.md

@@ -352,9 +352,7 @@ def test_db_file_created_0600(tmp_path) -> None:
 
 
 def test_db_create_uses_o_nofollow(tmp_path, monkeypatch) -> None:
-    # SEC-3 (defense-in-depth): the create-path open must carry O_NOFOLLOW so a
-    # pre-planted symlink at the db path cannot redirect the open. Capture the
-    # flags os.open is called with on the create branch.
+    # SEC-3 (defense-in-depth): the create-path open must carry O_NOFOLLOW so a pre-planted symlink at the db path cannot redirect the open.
     captured: dict[str, int] = {}
     real_open = os.open
 
@@ -370,9 +368,8 @@ def test_db_create_uses_o_nofollow(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.skipif(getattr(os, "O_NOFOLLOW", 0) == 0, reason="platform lacks O_NOFOLLOW")
 def test_db_create_refuses_to_follow_planted_symlink(tmp_path) -> None:
-    # A dangling symlink at the db path (so the create branch runs) must NOT be
-    # followed: O_NOFOLLOW makes os.open raise, the backend fails open to the
-    # in-memory fallback, and the symlink's target is never created.
+    # A dangling symlink at the db path (so the create branch runs) must NOT be followed: O_NOFOLLOW makes
+    # os.open raise, the backend fails open to the in-memory fallback, and the symlink's target is never created.
     target = tmp_path / "attacker_target.sqlite3"  # dangling — does not exist yet
     db_link = tmp_path / "db.sqlite3"
     os.symlink(target, db_link)
@@ -537,10 +534,8 @@ def test_cross_process_retrieve_reads_hash_the_parent_wrote(tmp_path) -> None:
     db = tmp_path / "shared.sqlite3"
     original = '{"rows": [1, 2], "weird": "\ud800\x00\ttab", "text": "héllo 😀"}'
     parent_store = CompressionStore(max_entries=10, backend=SqliteBackend(db_path=db))
-    # explicit_hash mirrors production's weird-content shape: the store's
-    # DEFAULT hash path (sha256 over original.encode()) predates this backend
-    # and rejects lone surrogates — producers of non-UTF8-safe content always
-    # supply the marker hash themselves.
+    # explicit_hash mirrors production's weird-content shape: the store's DEFAULT hash path (sha256 over original.encode()) predates
+    # this backend and rejects lone surrogates — producers of non-UTF8-safe content always supply the marker hash themselves.
     hash_key = parent_store.store(original, "<<ccr:abcdef123456>>", explicit_hash="abcdef123456")
 
     reader = tmp_path / "reader.py"

@@ -57,16 +57,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # Core: lightweight compression (SmartCrusher, ContentRouter, CCR)
-    # >=0.7.0: the default gpt-4o/o1 tokenizer needs the o200k_base
-    # encoding, which tiktoken only ships from 0.7.0 — at the 0.5 floor
-    # every count degraded to chars/4 estimation via
-    # "ValueError: Unknown encoding o200k_base" (TEST-32b).
+    # Core: lightweight compression (SmartCrusher, ContentRouter, CCR) >=0.7.0: the default gpt-4o/o1 tokenizer needs the o200k_base encoding, which
+    # tiktoken only ships from 0.7.0 — at the 0.5 floor every count degraded to chars/4 estimation via "ValueError: Unknown encoding o200k_base" (TEST-32b).
     "tiktoken>=0.7.0",            # Tokenizer for all compressors
-    # tomli backport dropped (API-8/PERF-13): it existed solely for
-    # release_version.py's tomllib fallback, which no longer ships in the
-    # wheel (moved to scripts/) and is no longer reached from
-    # `import furl_ctx` (the checkout git-version computation is gone).
+    # Supported Python versions provide `tomllib`; the removed fallback no longer needs the backport.
 ]
 
 [project.urls]
@@ -78,29 +72,18 @@ Issues = "https://github.com/omar-y-abdi/furl-ctx/issues"
 furl = "furl_ctx.cli:main"
 
 [project.optional-dependencies]
-# Linear-time regex engine for AGENT-SUPPLIED filter patterns (RG1).
-# RE2 matches with an automaton, so the catastrophic-backtracking class simply
-# does not exist for it. Optional, with a graceful fallback: absent, matching
-# falls back to stdlib `re` under a SIGALRM budget (see ccr/regex_budget.py).
-# That fallback only works on the MAIN thread, which is why the `mcp` extra
-# pulls this in — the MCP server runs filter matching in worker threads
-# (asyncio.to_thread), where no stdlib watchdog can interrupt a wedged match.
+# Linear-time regex engine for AGENT-SUPPLIED filter patterns (RG1). Optional, with a graceful fallback absent, matching falls back to stdlib `re` under a
+# The SIGALRM regex budget works only on the main thread; MCP filter matching runs in worker threads, so install RE2 for bounded matching.
 re2 = [
     "google-re2>=1.1",
 ]
 # MCP server for Claude Code integration (furl_ctx.ccr.mcp_server).
-# (httpx was dropped from this extra — nothing in the package imports it;
-# it was proxy-era residue. The mcp SDK declares its own transport deps.)
 mcp = [
     "mcp>=1.28.1,<2",
     "furl-ctx[re2]",
 ]
-# Opt-in AST-verified code compression (transforms.code_aware_compressor,
-# Engine P2-12; enable via ContentRouterConfig.enable_code_aware=True).
-# Deliberately NOT a default dependency (lean-core mandate): the grammar
-# pack adds ~50MB. Missing extra → the compressor fails open (passthrough
-# + one WARN). tree-sitter>=0.23 pins the `parser.language =` setter API
-# and the unsendable-parser contract the thread-local cache satisfies.
+# Opt-in AST-verified code compression (transforms.code_aware_compressor, Engine P2-12; enable via ContentRouterConfig.enable_code_aware=True). Missing extra → the compressor
+# fails open (passthrough + one WARN). tree-sitter>=0.23 pins the `parser.language =` setter API and the unsendable-parser contract the thread-local cache satisfies.
 code = [
     "tree-sitter>=0.23.0",
     "tree-sitter-language-pack>=0.7.0",
@@ -113,120 +96,44 @@ dev = [
     "ruff>=0.16.2",
     "mypy>=1.14.1",
     "pre-commit>=3.0.0",
-    # Parses .github/workflows/ci.yml in tests/test_ci_required_checks_guard.py,
-    # the meta-test that keeps the required-check deadlock (#15/#32/#56) from
-    # re-entering the workflow. >=6 for the safe_load-by-default API.
+    # Parses CI configuration for the meta-test that keeps required-check coverage aligned with imported code.
+    # deadlock (#15/#32/#56) from re-entering the workflow. >=6 for the safe_load-by-default API.
     "pyyaml>=6",
-    # The ReDoS / marker-scan security suites (tests/test_regex_budget.py and
-    # tests/test_marker_scan_budget.py) assert the catastrophic-backtracking and
-    # 10 MiB-scan bounds that ONLY hold under RE2's linear-time engine; each of
-    # those 28 tests is gated on re2_available()/_RE2, so with google-re2 absent
-    # they SKIP (not fail) and the security coverage silently leaves a green
-    # suite. re2 is otherwise declared only in the `re2` extra (pulled in by
-    # `mcp`), which made its presence in the test environment incidental to also
-    # installing `[mcp]` or a bare `google-re2` on a CI line. Pull it into `dev`
-    # so every test install carries the engine those tests require by
-    # construction; tests/test_security_suite_requires_re2.py turns its absence
-    # into a hard failure rather than a silent skip.
+    # The ReDoS and marker-scan suites assert catastrophic-backtracking and 10 MiB scan bounds, so edits affecting those paths must run the security tests.
+    # bounds that ONLY hold under RE2's linear-time engine. Pull it into `dev` so every test install carries the engine those tests require by construction;
     "furl-ctx[re2]",
-    # The MCP feature suites — 30 test files, every one gated on
-    # pytest.importorskip("mcp") — only EXECUTE when the `mcp` SDK is importable.
-    # Because that guard fires during COLLECTION, a gated module's tests are not
-    # even counted: measured on an idle machine at base b1eae3ca, dropping the
-    # SDK moves the suite from 2870 passed to 2515 passed / 34 skipped /
-    # 1 failed — 354 tests STOP RUNNING, only 34 surface as skips, the other
-    # 320 vanish from the totals entirely (2870 total − 2550 still collected =
-    # 320; 320 + 34 = the 354). The absolute pair moves whenever tests are
-    # added or removed; the 354/34/320 split is the invariant worth trusting —
-    # measured identical across two independent base moves, one that REMOVED
-    # 2 tests (721a3826 -> fa64bada, pair 2842->2487 then 2840->2485) and one
-    # that ADDED 30 (fa64bada -> b1eae3ca). If the pair looks stale, re-measure
-    # before assuming rot: only the split going means something changed.
-    # The single red is the tripwire below firing by design;
-    # without it nothing would turn red at all. The SDK was previously carried
-    # only by remembering to also install
-    # `[mcp]`. Pull it into `dev` — exactly as re2 was decoupled above — so every
-    # test install carries the whole furl_ctx.ccr.mcp_server contract's coverage
-    # by construction; tests/test_optional_suites_not_silently_disarmed.py turns
-    # its absence into a hard failure rather than a silent skip.
+    # Include the MCP extra in `dev` so collection-gated MCP tests cannot silently disappear when the
+    # SDK is absent. The optional-suite guard turns any missing dependency into a hard CI failure.
     "furl-ctx[mcp]",
-    # The AST code-aware suite (tests/test_code_aware_compressor.py, 15 tests
-    # gated on find_spec("tree_sitter_language_pack")) SILENTLY SKIPS without the
-    # `code` extra. Measured on an idle machine at base b1eae3ca: WITH
-    # tree-sitter 2870 passed / 0 skipped / 0 failed; WITHOUT it 2854 passed /
-    # 15 skipped / 1 failed, that 1 being the tripwire below firing by design.
-    # Reconciles exactly against a constant collection of 2870: 2854+15+1 —
-    # unlike the mcp case above, no test vanishes, because these skips are
-    # decorator-level rather than collection-level. Note this is NOT "0 red" for
-    # the full suite: the tripwire below converts the silent skip into a named
-    # red, which is the whole point of it. "0 red" was only ever true of the
-    # code-aware suite in ISOLATION — i.e. the silent-skip failure mode itself.
-    # Without the pull below, CI's `[dev,mcp]` (see .github/workflows/ci.yml)
-    # would carry no `code` and those tests would skip in CI — a live gap.
-    # Pulling `[code]` into `dev` makes the grammar pack present by construction
-    # in every test install, INCLUDING CI's `[dev,mcp]`, which now transitively
-    # carries tree-sitter (verified: `pip install "wheel[dev,mcp]"` alone
-    # resolves it) so the suite runs there too. This adds the ~50MB pack to
-    # TEST/DEV installs only — core stays lean (end users still opt in via
-    # `[code]`/`[all]`). Same guard file as mcp above.
+    # Include the code/tree-sitter extra in `dev` so AST-aware tests run in normal test/CI installs
+    # instead of silently skipping. Core end-user installs remain lean and opt in separately.
     "furl-ctx[code]",
 ]
-# All optional dependencies (everything the compression library can use).
-# Must reach EVERY feature extra (re2, mcp, code): `mcp` already pulls `re2`,
-# so `mcp` + `code` covers the set. `furl-ctx[all]` previously listed only
-# `mcp`, silently omitting `code` — so `pip install furl-ctx[all]` did NOT get
-# the AST code-aware compressor. Not a hand-list to trust by eye:
-# tests/test_optional_suites_not_silently_disarmed.py derives the extras from
-# this table and fails red if `all` can't reach one, so a new feature extra
-# can't land without a conscious decision about `all`.
+# All optional dependencies (everything the compression library can use). Must reach EVERY
+# feature extra (re2, mcp, code): `mcp` already pulls `re2`, so `mcp` + `code` covers the set.
 all = [
     "furl-ctx[mcp]",
     "furl-ctx[code]",
 ]
 
-# Maturin builds a single wheel containing both the Python source under
-# `furl_ctx/` AND the compiled Rust extension `furl_ctx/_core.so` (cdylib
-# from `crates/furl-py`). One `pip install furl-ctx` ships everything
-# atomically — no separate `furl-core-py` package, no chicken-and-egg,
-# no PIP_FIND_LINKS plumbing. Phase A0's runtime fail-loud check still
-# exists but only fires if someone forces an sdist install on a platform
-# without a wheel and the rust toolchain isn't available to compile it.
-# Pin the project's package index to public PyPI. Without this, `uv lock`
-# inherits the developer's user-level `~/.config/uv/uv.toml` index
-# setting — including private/internal mirrors like
-# `pypi.netflix.net/simple` — and bakes those URLs into uv.lock, which
-# then breaks CI on every public runner that can't reach the mirror.
-# Declaring the index in pyproject.toml makes the project authoritative
-# regardless of who runs `uv lock`.
+# Maturin builds one wheel containing the Python package and compiled `_core` extension; installation is atomic with no companion package.
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple/"
 default = true
 
 [tool.maturin]
-# Where the Python package lives. With `python-source = "."` and the
-# package directory `furl_ctx/` at repo root, maturin includes every file
-# under `furl_ctx/` in the wheel — that picks up the bundled YAML configs.
-# `LICENSE` and `NOTICE` are listed
-# explicitly because maturin sdists do not get the package-directory
-# treatment wheels do, and PEP 639 auto-discovery emits both files into
-# `License-File:` metadata — PyPI rejects sdists whose declared license
-# files are missing from the tarball with `400 License-File X does not
-# exist in distribution file`.
+# Maturin packages `furl_ctx` with bundled configs. Include the required license and notice artifacts because PEP 639 metadata must resolve in published distributions.
 include = [
     { path = "LICENSE", format = "sdist" },
     { path = "NOTICE", format = "sdist" },
 ]
 python-source = "."
 module-name = "furl_ctx._core"
-# The cdylib source lives under `crates/furl-py`. Maturin invokes
-# `cargo build` with this manifest to produce `_core.cdylib`, then injects
-# the resulting `.so` into the wheel at `furl_ctx/_core.so`.
+# Use the Rust cdylib manifest configured below.
 manifest-path = "crates/furl-py/Cargo.toml"
 features = ["extension-module"]
-# Forbid building without the cdylib feature — bare `cargo build` won't
-# produce a usable Python extension. Maturin's default `bindings` is "pyo3"
-# which is correct here (see `crates/furl-py/src/`).
+# Require the cdylib feature so builds produce a usable PyO3 extension.
 bindings = "pyo3"
 
 [tool.ruff]
@@ -273,14 +180,12 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 asyncio_mode = "auto"
 filterwarnings = [
-    # pyo3 Unsendable parsers emit an unraisable warning when GC drops them on a
-    # test-teardown thread; this is a test-harness artifact, not a production issue
-    # (production threads are long-lived and drop their parsers on themselves).
+    # pyo3 Unsendable parsers emit an unraisable warning when GC drops them on a test-teardown thread; this is a test-harness
+    # artifact, not a production issue (production threads are long-lived and drop their parsers on themselves).
     "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
-# `real_llm` / `live` markers removed (TEST-20/TEST-24): the proxy-era network
-# suites they served are gone and no test carries either mark. `slow` stays —
-# test_benchmarks_metrics_honesty.py marks four tests with it.
+# `real_llm` / `live` markers removed (TEST-20/TEST-24): the proxy-era network suites they served are
+# Removed marks have no remaining tests. `slow` stays because four tests still use it.
 markers = [
     "slow: slow tests (model loads, large fixtures)",
 ]

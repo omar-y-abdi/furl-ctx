@@ -137,9 +137,8 @@ def test_dominant_array_summary_answers_aggregate_and_anomaly():
     assert summary["ranges"]["ts"]["min"] < summary["ranges"]["ts"]["max"]
     assert "name" not in summary["ranges"]
 
-    # ANOMALY: examples surface one concrete row per event name WITH its ts —
-    # so the infrequent DroppedFrame is directly readable from the blob (not
-    # crowded out, because examples are keyed by event type, not by rarity).
+    # ANOMALY: examples surface one concrete row per event name WITH its ts — so the infrequent DroppedFrame is
+    # directly readable from the blob (not crowded out, because examples are keyed by event type, not by rarity).
     assert summary["examples"]["field"] == "name"
     by_value = summary["examples"]["by_value"]
     assert "RunTask" in by_value and "DroppedFrame" in by_value
@@ -297,9 +296,8 @@ def test_offload_summary_recovers_original_byte_exact():
 
 
 def test_summary_fail_open_on_pathological_rows():
-    # Heterogeneous rows: missing keys, unhashable field values (list/dict),
-    # a field numeric in some rows + str in others, None/empty fields. The
-    # summary computation must not raise; a preview is always returned.
+    # Heterogeneous rows: missing keys, unhashable field values (list/dict), a field numeric in some rows +
+    # str in others, None/empty fields. The summary computation must not raise; a preview is always returned.
     rows = []
     for i in range(300):
         rows.append(
@@ -325,9 +323,8 @@ def test_summarize_rows_never_raises_on_direct_pathological_input():
     designed to trip a naive implementation and assert it returns, never
     raises. (compress() wraps it in try/except; this pins the core itself.)"""
     engine = _offload_router()._engine
-    # A categorical field ("kind") that is a common string in most rows, an
-    # infrequent string in a few, and an UNHASHABLE list in others: the example
-    # membership test (`value in wanted`) must not choke on the list value.
+    # A categorical field ("kind") that is a common string in most rows, an infrequent string in a few, and an
+    # UNHASHABLE list in others: the example membership test (`value in wanted`) must not choke on the list value.
     mixed_hashability = (
         [{"kind": "RARE", "ts": i} for i in range(5)]
         + [{"kind": ["x", "y"], "ts": 100 + i} for i in range(10)]

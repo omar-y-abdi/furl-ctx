@@ -54,11 +54,8 @@ _SEARCH_RESULT_PATTERN = re.compile(
     r"^[^\s:]+:\d+:"  # file:line: format (grep -n style)
 )
 
-# Bug-fix (2026-04-25): extended to recognize merge-commit headers
-# (`diff --combined <path>`, `diff --cc <path>`) and combined-diff hunk
-# headers (`@@@`+ ranges). Previously only `git diff` shape was detected,
-# so merge-commit diffs from `git log -p` got misrouted away from
-# DiffCompressor entirely.
+# Bug-fix (2026-04-25): extended to recognize merge-commit headers (`diff --combined
+# <path>`, `diff --cc <path>`) and combined-diff hunk headers (`@@@`+ ranges).
 _DIFF_HEADER_PATTERN = re.compile(
     r"^("
     r"diff --git"
@@ -161,11 +158,8 @@ def detect_content_type(content: str) -> DetectionResult:
     if search_result and search_result.confidence >= 0.6:
         return search_result
 
-    # 3.5. Check for delimiter-consistent CSV (tabular ingestion). Runs
-    # BEFORE the log/code detectors: a uniform field count across ≥ 90 %
-    # of lines is a stronger structural signal than per-line keyword
-    # hits, and a timestamp-leading CSV would otherwise be claimed by
-    # the log patterns and routed to a lossy line-dropper.
+    # 3.5. Runs BEFORE the log/code detectors: a uniform field count across ≥ 90 % of lines is a stronger structural signal than per-line
+    # keyword hits, and a timestamp-leading CSV would otherwise be claimed by the log patterns and routed to a lossy line-dropper.
     csv_result = _try_detect_csv(content)
     if csv_result:
         return csv_result

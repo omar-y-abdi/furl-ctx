@@ -32,27 +32,21 @@ _JWT = (
 )
 # Constructed so the literal does not appear verbatim in source (hook-safe).
 _API_KEY = "sk" + "-" + "abcdefghijklmnopqrstuvwx"
-# Non-``sk-`` secrets in JSON quoted-key form: these leaked before the group-2
-# ``["']?`` fix because the key's closing quote broke the ``[:=]`` adjacency and,
-# lacking an ``sk-`` prefix, nothing else caught them. All hook-safe (no verbatim
-# token literal in source).
+# Non-``sk-`` secrets in JSON quoted-key form: these leaked before the group-2 ``["']?`` fix because the
+# key's closing quote broke the ``[:=]`` adjacency and, lacking an ``sk-`` prefix, nothing else caught them.
 _GH_TOKEN = "ghp" + "_" + "A" * 36
 _AWS_KEY_ID = "AKIA" + "IOSFODNN7EXAMPLE"
 _AWS_SECRET = "wJalr" + "XUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"
 _OPAQUE_PW = "hunter2" + "correcthorsebattery"
 
-# ─── SEC-4 shapes ────────────────────────────────────────────────────────────
-# URL-embedded password (``scheme://user:pass@host``). No trigger substring
-# (``secret``/``password``/...) so ONLY the URL-credential rule can catch it.
+# ─── SEC-4 shapes ──────────────────────────────────────────────────────────── URL-embedded password
+# (``scheme://user:pass@host``). No trigger substring (``secret``/``password``/...) so ONLY the URL-credential rule can catch it.
 _URL_PASSWORD = "p4ss-w0rd-9x"
-# A quoted secret whose value spans MULTIPLE words: the leak mode is the tail
-# ("battery staple") surviving after the first word was redacted, so the
-# parametrized ``secret`` below is the TAIL, not the full phrase.
+# A quoted secret whose value spans MULTIPLE words: the leak mode is the tail ("battery staple") surviving
+# after the first word was redacted, so the parametrized ``secret`` below is the TAIL, not the full phrase.
 _MULTI_WORD_SECRET = "correct horse battery staple"
 _MULTI_WORD_TAIL = "battery staple"
-# PEM private-key block. Armor lines constructed so no verbatim PEM header
-# appears in source (hook-safe, same trick as ``_API_KEY``). The body line is
-# the ``secret`` that must never survive into the log preview.
+# PEM private-key block. The body line is the ``secret`` that must never survive into the log preview.
 _PEM_BODY_LINE = "MIIEfakebodyLINEONE"
 
 
@@ -90,9 +84,7 @@ def _pem_block(label: str, newline: str = "\n") -> str:
         ("api_key_json", f'{{"api_key": "{_API_KEY}"}}', _API_KEY),
         # token=<value> key/value form.
         ("token_kv", f"token={_JWT}", _JWT),
-        # JSON quoted-key secrets whose VALUE is not an ``sk-`` key. These are the
-        # primary regression: before the group-2 quote fix the whole key/value
-        # rule missed them (closing key-quote broke ``[:=]`` adjacency).
+        # JSON quoted-key secrets whose VALUE is not an ``sk-`` key.
         ("json_token_ghp", f'{{"token": "{_GH_TOKEN}"}}', _GH_TOKEN),
         ("json_password", f'{{"password": "{_OPAQUE_PW}"}}', _OPAQUE_PW),
         ("json_aws_secret", f'{{"aws_secret_access_key": "{_AWS_SECRET}"}}', _AWS_SECRET),
@@ -131,10 +123,7 @@ def _pem_block(label: str, newline: str = "\n") -> str:
         # ── SEC-4 (c): bare JWTs (no ``Bearer`` prefix, no sensitive key name).
         ("bare_jwt_text", f"cookie {_JWT} tail", _JWT),
         ("bare_jwt_json_value", f'{{"data": "{_JWT}"}}', _JWT),
-        # ── SEC-4 (d): multi-word QUOTED secrets. The old value class
-        # ``[^\"'\s,}]+`` stopped at the first space: "correct" was redacted
-        # while "horse battery staple" leaked. The parametrized secret is the
-        # TAIL so these cases stay red while any part of the tail survives.
+        # ── SEC-4 (d): multi-word QUOTED secrets.
         ("quoted_multiword_json", f'{{"password": "{_MULTI_WORD_SECRET}"}}', _MULTI_WORD_TAIL),
         ("quoted_multiword_plain", f"password = '{_MULTI_WORD_SECRET}'", _MULTI_WORD_TAIL),
         ("quoted_multiword_token", f'client_secret: "{_MULTI_WORD_SECRET}"', _MULTI_WORD_TAIL),
@@ -147,9 +136,8 @@ def test_credential_is_redacted(label: str, payload: str, secret: str) -> None:
 
 
 def test_benign_json_structure_is_untouched() -> None:
-    # Over-redaction guard: ordinary JSON with no credential — and specifically the
-    # store's own SHA-256 hash keys that the retrieval log emits — must survive so
-    # logs stay useful. A generic high-entropy rule would wrongly redact these.
+    # Over-redaction guard: ordinary JSON with no credential — and specifically the store's
+    # own SHA-256 hash keys that the retrieval log emits — must survive so logs stay useful.
     payload = f'{{"hash": "{"a" * 24}", "tool_name": "search", "count": 7}}'
     assert _redact_retrieval_log_payload(payload) == payload
 
@@ -171,9 +159,8 @@ def test_non_credential_text_is_untouched() -> None:
 
 
 def test_url_without_credentials_is_untouched() -> None:
-    # ``host:port`` is not userinfo: a normal URL (no ``user:pass@``) must
-    # survive byte-exact, including ``@`` in the path and a bare username
-    # (no password, no colon) in the authority.
+    # ``host:port`` is not userinfo: a normal URL (no ``user:pass@``) must survive byte-exact,
+    # including ``@`` in the path and a bare username (no password, no colon) in the authority.
     for payload in (
         "connect to https://db.example.com:5432/app?sslmode=require please",
         "https://example.com:8080/path?q=1",

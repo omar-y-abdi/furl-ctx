@@ -169,9 +169,7 @@ class LogCompressor:
 
         cfg = config or LogCompressorConfig()
         self.config = cfg
-        # `min_compression_ratio_for_ccr` was inlined as 0.5 in Python;
-        # the Rust port promoted it to a config field but defaults
-        # match.
+        # `min_compression_ratio_for_ccr` was inlined as 0.5 in Python; the Rust port promoted it to a config field but defaults match.
         self._rust = _RustLogCompressor(
             _RustLogCompressorConfig(
                 max_errors=cfg.max_errors,
@@ -203,9 +201,8 @@ class LogCompressor:
         if cache_key is not None and not self._persist_to_python_ccr(
             content, rust_result.compressed, cache_key
         ):
-            # Store write failed → marker would dangle, dropped lines
-            # unrecoverable. Serve the original uncompressed log instead
-            # (mirrors cross_message_dedup's veto).
+            # Store write failed → marker would dangle, dropped lines unrecoverable. Serve
+            # the original uncompressed log instead (mirrors cross_message_dedup's veto).
             return self._passthrough_result(content, rust_result)
 
         stats_dict = {k: int(v) for k, v in cast("dict[str, int]", rust_result.stats).items()}

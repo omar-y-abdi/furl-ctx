@@ -1,31 +1,5 @@
-//! Field-role classification for the field-aware stable-projection hash
-//! (DESIGN.md Improvement 2).
-//!
-//! The whole-item dedup hash (`compute_item_hash`) hashes every field of a
-//! row. One high-cardinality "identity" column — a per-row timestamp, UUID,
-//! commit hash, or monotone counter — makes every row's hash unique, which
-//! silently defeats dedup, clustering, and fill-diversity (every row looks
-//! distinct even when the value-bearing content is identical).
-//!
-//! This module classifies each field into one of three roles, derived purely
-//! from the existing [`FieldStats`] plus a small value sample (no new analysis
-//! pass):
-//!
-//! - [`FieldRole::Constant`]   — one value across the whole array.
-//! - [`FieldRole::VaryingIdentity`] — high-cardinality AND shape-matches an
-//!   identity pattern (ISO-8601, UUID, hex run, monotone/sequential int, or
-//!   high-entropy id-like string). These are the noise fields that force
-//!   unique hashes.
-//! - [`FieldRole::Content`]    — everything else (value-bearing).
-//!
-//! The **stable-projection hash** (`stable_item_hash`) serializes only
-//! `Constant + Content` fields, excluding `VaryingIdentity`. When no field is
-//! classified `VaryingIdentity` the exclude-set is empty and the stable hash
-//! is byte-identical to `compute_item_hash` — so non-identity data (e.g. real
-//! search results) is completely unaffected and parity is preserved.
-//!
-//! The separate full-item canonical hash used for the CCR retrieve key
-//! (`compute_item_hash`) is **untouched** — see `crusher.rs` / `anchor_selector.rs`.
+//! Classify fields as constant, identity, or content. Stable-projection hashes exclude high-cardinality identity
+//! fields so timestamps/UUIDs do not defeat dedup; full-item hashes used for CCR recovery remain unchanged.
 
 use std::collections::BTreeSet;
 
@@ -35,54 +9,32 @@ use super::analyzer::{is_iso_date, is_iso_datetime};
 use super::statistics::{calculate_string_entropy, detect_sequential_pattern, is_uuid_format};
 use super::types::{FieldStats, FieldType};
 
-/// Unique-ratio at or above which a field is a *candidate* identity column.
-///
-/// Chosen as 0.9 (DESIGN.md): an identity/noise column is near-unique by
-/// definition (timestamps, ids, hashes). 0.9 rather than 1.0 tolerates a
-/// handful of collisions (e.g. two events in the same second) without
-/// reclassifying the column as content. Mirrors the `unique_ratio < 0.9`
-/// hard gate already used by `detect_id_field_statistically`.
+/// Treat fields with >=0.9 unique ratio as identity candidates. The threshold tolerates occasional collisions
+/// while keeping timestamps, IDs, and hashes out of content projections, matching the statistical ID-field gate.
 pub const IDENTITY_RATIO_THRESHOLD: f64 = 0.9;
 
-/// Fraction of the sampled string values that must shape-match an identity
-/// pattern (ISO/UUID/hex) for the field to be ruled VaryingIdentity. 0.8
-/// matches the existing UUID gate in `detect_id_field_statistically` — a
-/// clear majority must fit the pattern, so a content column that merely
-/// contains the odd hash-looking token is not misclassified.
+/// Require at least 80% of sampled strings to match an identity shape before classifying
+/// the field as varying identity. This avoids excluding occasional hash-like values.
 pub const IDENTITY_SHAPE_FRACTION: f64 = 0.8;
 
-/// Average Shannon-entropy (per the project's normalized
-/// `calculate_string_entropy`) above which a high-cardinality string column
-/// is treated as an opaque identity token even without a recognized shape.
-/// 0.7 mirrors the entropy gate in `detect_id_field_statistically`.
+/// Average Shannon-entropy (per the project's normalized `calculate_string_entropy`) above which a
+/// high-cardinality string column is treated as an opaque identity token even without a recognized shape.
 pub const IDENTITY_ENTROPY_THRESHOLD: f64 = 0.7;
 
-/// Vowel ratio below which a whitespace-free token counts as non-linguistic
-/// (see [`looks_non_linguistic`]). Entropy alone can't tell a random token
-/// from a short word — both score near 1.0 — so this corroborates it. Swept
-/// 0.10/0.12/0.15/0.18/0.20 against a repo-filename corpus vs. random
-/// hex/base62 tokens; 0.10 gave the best precision (1/96 false positives)
-/// without losing much recall (285/300 random tokens still caught) — see PR
-/// body. ASCII vowels only: non-Latin-script tokens still misclassify, same
-/// as before this fix (not a new regression).
+/// Vowel ratio below which a whitespace-free token counts as non-linguistic (see [`looks_non_linguistic`]). random hex/base62 tokens;
 pub const IDENTITY_TOKEN_VOWEL_RATIO_THRESHOLD: f64 = 0.10;
 
-/// Fraction of the sample that must look non-linguistic before the entropy
-/// fallback trusts itself. Kept separate from [`IDENTITY_SHAPE_FRACTION`]
-/// (same value today) since they gate unrelated evidence.
+/// Fraction of the sample that must look non-linguistic before the entropy fallback trusts itself. Kept
+/// separate from [`IDENTITY_SHAPE_FRACTION`] (same value today) since they gate unrelated evidence.
 pub const IDENTITY_NONLINGUISTIC_FRACTION: f64 = 0.8;
 
-/// Max values to sample per field when shape-matching. Bounds the cost to a
-/// constant per field regardless of array size. 20 mirrors the existing
-/// `values[:20]` sampling in `field_detect.rs`.
+/// Max values to sample per field when shape-matching. Bounds the cost to a constant per field regardless of array size.
 const SAMPLE_LIMIT: usize = 20;
 
 /// The role a field plays for dedup/cluster/fill grouping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldRole {
-    /// One value across the entire array (`is_constant`). Kept in the stable
-    /// projection — a constant doesn't make rows unique, and keeping it means
-    /// two rows that differ only in an identity field still hash equal.
+    /// One value across the entire array (`is_constant`).
     Constant,
     /// High-cardinality + identity-shaped. EXCLUDED from the stable
     /// projection — this is the noise that defeats dedup.
@@ -92,14 +44,9 @@ pub enum FieldRole {
 }
 
 /// Classify one field from its stats + a value sample.
-///
-/// `sample` is an order-preserving sample of the field's values (typically
-/// the first [`SAMPLE_LIMIT`] across the array). It is only consulted for the
-/// shape/entropy tests on high-cardinality fields.
 pub fn classify_field(stats: &FieldStats, sample: &[&Value]) -> FieldRole {
-    // Constant always wins — a single distinct value can never be identity
-    // noise, and keeping it in the projection is what lets two
-    // differ-only-in-identity rows collapse.
+    // Constant always wins — a single distinct value can never be identity noise, and
+    // keeping it in the projection is what lets two differ-only-in-identity rows collapse.
     if stats.is_constant {
         return FieldRole::Constant;
     }
@@ -121,16 +68,13 @@ fn is_identity_shaped(stats: &FieldStats, sample: &[&Value]) -> bool {
     match stats.field_type {
         FieldType::String => string_is_identity(sample),
         FieldType::Numeric => numeric_is_identity(stats, sample),
-        // Objects/arrays/bools are never identity columns for hashing
-        // purposes (bools can't be high-cardinality; nested containers are
-        // content).
+        // Objects/arrays/bools are never identity columns for hashing purposes (bools can't be high-cardinality; nested containers are content).
         _ => false,
     }
 }
 
-/// String identity: a clear majority of the sample matches ISO-8601,
-/// ISO-date, UUID, or a long hex run; OR the sample is high-entropy
-/// token-like AND non-linguistic (see [`looks_non_linguistic`]).
+/// String identity: a clear majority of the sample matches ISO-8601, ISO-date, UUID, or a long hex
+/// run; OR the sample is high-entropy token-like AND non-linguistic (see [`looks_non_linguistic`]).
 fn string_is_identity(sample: &[&Value]) -> bool {
     let strs: Vec<&str> = sample.iter().filter_map(|v| v.as_str()).collect();
     if strs.is_empty() {
@@ -145,14 +89,8 @@ fn string_is_identity(sample: &[&Value]) -> bool {
         return true;
     }
 
-    // Fallback: opaque high-entropy *tokens* (random-ish ids) with no
-    // recognized shape. Restricted to token-like strings — every sample
-    // value must be a single whitespace-free token. This deliberately
-    // EXCLUDES natural-language content (commit subjects, log messages,
-    // source lines), which also scores high on normalized per-char
-    // entropy but contains spaces and word structure. Without this guard
-    // the entropy test misclassifies unique English text as identity and
-    // wrongly strips it from the dedup projection.
+    // Fallback: opaque high-entropy *tokens* (random-ish ids) with no recognized shape. Restricted
+    // to token-like strings — every sample value must be a single whitespace-free token.
     let all_tokens = strs
         .iter()
         .all(|s| !s.is_empty() && !s.chars().any(|c| c.is_whitespace()));
@@ -169,15 +107,13 @@ fn string_is_identity(sample: &[&Value]) -> bool {
     }
 
     // Entropy alone misreads short words as identity (see IDENTITY_TOKEN_
-    // VOWEL_RATIO_THRESHOLD doc); require most of the sample to also look
-    // non-linguistic.
+    // VOWEL_RATIO_THRESHOLD doc); require most of the sample to also look non-linguistic.
     let non_linguistic = strs.iter().filter(|s| looks_non_linguistic(s)).count();
     (non_linguistic as f64 / strs.len() as f64) >= IDENTITY_NONLINGUISTIC_FRACTION
 }
 
-/// True when a token doesn't look like an ordinary word: it has a digit,
-/// no letters at all, or a vowel ratio below
-/// [`IDENTITY_TOKEN_VOWEL_RATIO_THRESHOLD`].
+/// True when a token doesn't look like an ordinary word: it has a digit, no
+/// letters at all, or a vowel ratio below [`IDENTITY_TOKEN_VOWEL_RATIO_THRESHOLD`].
 fn looks_non_linguistic(s: &str) -> bool {
     if s.bytes().any(|b| b.is_ascii_digit()) {
         return true;
@@ -200,9 +136,7 @@ fn numeric_is_identity(_stats: &FieldStats, sample: &[&Value]) -> bool {
     detect_sequential_pattern(&owned, true)
 }
 
-/// A run of at least 8 hex digits (optionally `0x`-prefixed) — commit hashes,
-/// object ids, request ids. 8 is the shortest length that reliably indicates
-/// an opaque identifier rather than a short content token like a status code.
+/// A run of at least 8 hex digits (optionally `0x`-prefixed) — commit hashes, object ids, request ids.
 fn is_hex_run(s: &str) -> bool {
     let body = s
         .strip_prefix("0x")
@@ -211,12 +145,8 @@ fn is_hex_run(s: &str) -> bool {
     body.len() >= 8 && body.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Build the exclude-set: the names of every field classified as
-/// [`FieldRole::VaryingIdentity`] across `items`.
-///
-/// This is the `exclude_set` threaded into the stable hash for
-/// dedup/cluster/fill grouping. Derived once per array from the analysis +
-/// the items (for value sampling).
+/// Build the exclude-set: the names of every field classified as [`FieldRole::VaryingIdentity`] across
+/// `items`. This is the `exclude_set` threaded into the stable hash for dedup/cluster/fill grouping.
 pub fn compute_exclude_set(
     field_stats: &std::collections::BTreeMap<String, FieldStats>,
     items: &[Value],
@@ -382,9 +312,8 @@ mod tests {
 
     #[test]
     fn opaque_random_tokens_with_digits_are_still_identity() {
-        // Regression guard: genuinely opaque tokens must still classify as
-        // identity. Python random.seed(123), 12-char ascii_letters+digits
-        // x20 — 90% contain a digit.
+        // Regression guard: genuinely opaque tokens must still classify as identity.
+        // Python random.seed(123), 12-char ascii_letters+digits x20 — 90% contain a digit.
         let s = stats(FieldType::String, 1.0, false);
         let sample: Vec<Value> = [
             "drfXArg153cy",
@@ -475,10 +404,7 @@ mod tests {
 
     #[test]
     fn compute_exclude_set_keeps_near_unique_filename_column() {
-        // Audit-log shape: each row names a different file, "status" is
-        // constant. Regression: "file" used to be wrongly excluded, so all
-        // 20 rows collapsed into one representative, hiding which file
-        // each row named.
+        // Audit-log shape: each row names a different file, "status" is constant.
         let items: Vec<Value> = FILENAME_SAMPLE
             .iter()
             .map(|f| json!({"file": f, "status": "OK"}))

@@ -43,9 +43,6 @@ def test_env_ttl_valid_positive_is_honored(monkeypatch) -> None:
 def test_env_ttl_unset_uses_default(monkeypatch) -> None:
     monkeypatch.delenv(_ENV, raising=False)
     assert _get_env_default_ttl_seconds() == DEFAULT_CCR_TTL_SECONDS
-    # Sanity: the module constant is the documented session-scale 1800s
-    # default (Engine P0-3: raised from 300s because agentic sessions
-    # outlive 5 minutes — an expired entry silently converts
-    # "lossless + retrieval" into lossy). Must agree with the Rust
-    # `DEFAULT_TTL` (crates/furl-core/src/ccr/mod.rs).
+    # Sanity: the module constant is the documented session-scale 1800s default (Engine P0-3: raised from 300s because agentic sessions outlive 5 minutes
+    # — an expired entry silently converts "lossless + retrieval" into lossy). Must agree with Rust `DEFAULT_TTL`.
     assert cs.DEFAULT_CCR_TTL_SECONDS == 1800

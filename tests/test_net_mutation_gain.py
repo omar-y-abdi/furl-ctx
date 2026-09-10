@@ -63,11 +63,7 @@ class TestNetMutationGainModel:
         ],
     )
     def test_gain_value_at_zero_crossing(self, saved: int, expected_gain: float) -> None:
-        # Pins the exact gain at and around the net==0 crossing, so an arithmetic
-        # mutation (wrong penalty factor / dropped subtraction) is caught. The
-        # router treats net <= 0 as skip; the exact `<= 0` vs `< 0` decision at
-        # net==0 is a documented residual (see module note) — no realistic
-        # real-token router scenario lands exactly on 0 to exercise it.
+        # Pins the exact gain at and around the net==0 crossing, so an arithmetic mutation (wrong penalty factor / dropped subtraction) is caught.
         assert net_mutation_gain(saved, MutationContext(100), 0.1) == pytest.approx(expected_gain)
 
     def test_unknowable_context_returns_none(self) -> None:
@@ -132,9 +128,8 @@ def _apply(messages: list[dict], **config_kwargs) -> tuple[list[dict], list[str]
 
 
 def _is_compression_transform(t: str) -> bool:
-    # An ACCEPTED compression books "router:{strategy}:{ratio}"; bookkeeping
-    # entries ("router:noop:{reason}", "router:protected:user_message", ...) are
-    # not compressions.
+    # An ACCEPTED compression books "router:{strategy}:{ratio}"; bookkeeping entries
+    # ("router:noop:{reason}", "router:protected:user_message", ...) are not compressions.
     return (
         t.startswith("router:")
         and not t.startswith("router:protected:")

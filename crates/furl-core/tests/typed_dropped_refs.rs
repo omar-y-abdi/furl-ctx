@@ -1,34 +1,5 @@
-//! §4.2 R2 property test: the typed [`DroppedRef`] carrier covers the
-//! text scrape on every fixture — the adversarial proof the Python
-//! scrape can be retired against.
-//!
-//! For each fixture the rendered output is scraped exactly the way the
-//! Python mirror scrapes it (comma-shape opaque markers, space-shape
-//! row-drop markers) and compared against the typed sets carried on
-//! `CrushResult::dropped`. The retirement-safety property is DIRECTIONAL:
-//!
-//! 1. `scraped ∖ planted  ⊆  collected` — nothing the scrape would
-//!    mirror is missing from the typed carrier (retiring the scrape
-//!    loses nothing);
-//! 2. every collected opaque hash appears in the rendered text and
-//!    resolves in the store to a payload of EXACTLY `byte_size` bytes —
-//!    no phantom refs;
-//! 3. payloads containing LITERAL `<<ccr:...>>` text (the scrape's
-//!    false-positive class) are scraped but never collected;
-//! 4. row-drop hashes match EXACTLY in both directions (those markers
-//!    are never encoding-folded).
-//!
-//! Strict `collected == scraped` equality deliberately does NOT hold in
-//! general — and that is a FINDING, not a test weakness: when a
-//! compacted table's marker column shares its `<<ccr:` prefix across
-//! rows, the Affix column-encoding folds the prefix into a one-line
-//! `__affix:` preamble and renders each cell as only the hash middle.
-//! The raw-text scrape finds NO `<<ccr:` marker in that render, so the
-//! Python mirror TODAY silently fails to mirror those opaque originals
-//! (they are recoverable only through the Rust store + affix-aware
-//! decoding). The typed path collects them correctly — typed coverage
-//! is a strict superset of the scrape. `affix_folded_markers_are_typed_
-//! but_invisible_to_the_scrape` pins the discovery.
+//! Typed `DroppedRef` coverage must include every recoverable marker the text scrape sees, with opaque refs
+//! resolving to exact byte sizes. Literal marker-like payload text may be scraped but must never become a typed ref.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -38,11 +9,10 @@ use furl_core::transforms::smart_crusher::compaction::{CompactionStage, Document
 use furl_core::transforms::smart_crusher::{DroppedRef, SmartCrusher, SmartCrusherConfig};
 use serde_json::{json, Value};
 
-// ─── Test-side scrape (mirrors furl_ctx/transforms/smart_crusher.py) ──────
+// ─── Test-side scrape (mirrors the module) ──────
 
-/// Humanized SIZE field, mirroring `ccr::markers::humanize_bytes` (the
-/// marker's lossy rendering the scrape can recover; the typed ref
-/// carries the exact byte count).
+/// Humanized SIZE field, mirroring `ccr::markers::humanize_bytes` (the marker's lossy
+/// rendering the scrape can recover; the typed ref carries the exact byte count).
 fn humanize(n: usize) -> String {
     if n < 1024 {
         return format!("{n}B");
@@ -58,10 +28,8 @@ fn is_hex(c: char) -> bool {
     c.is_ascii_digit() || ('a'..='f').contains(&c)
 }
 
-/// Scrape every OPAQUE marker `<<ccr:HASH,KIND,SIZE>>` out of rendered
-/// text — the comma shape, exactly like Python's
-/// `_collect_opaque_ccr_hashes_from_string` (plus KIND/SIZE capture so
-/// the test can pin them against the typed ref).
+/// Scrape every OPAQUE marker `<<ccr:HASH,KIND,SIZE>>` out of rendered text — the comma shape, exactly like Python's
+/// `_collect_opaque_ccr_hashes_from_string` (plus KIND/SIZE capture so the test can pin them against the typed ref).
 fn scrape_opaque(text: &str) -> BTreeSet<(String, String, String)> {
     let mut out = BTreeSet::new();
     let mut idx = 0;
@@ -149,11 +117,8 @@ fn blob(seed: usize, repeats: usize) -> String {
 
 const PLANTED: &str = "<<ccr:aaaaaaaaaaaa,base64,2.0KB>>";
 
-/// `(name, JSON content)` pairs covering every opaque emission plane:
-/// process_string live substitution, compaction-cell substitution inside
-/// lossless candidates, stringified-JSON recursion, the mixed dict arm,
-/// combined row-drop + opaque outputs — and the literal-marker
-/// false-positive class.
+/// `(name, JSON content)` pairs covering every opaque emission plane: process_string live substitution, compaction-cell substitution inside lossless
+/// candidates, stringified-JSON recursion, the mixed dict arm, combined row-drop + opaque outputs — and the literal-marker false-positive class.
 fn fixtures() -> Vec<(&'static str, String)> {
     let dict_rows: Vec<Value> = (0..60)
         .map(|i| {
@@ -235,9 +200,7 @@ fn assert_typed_covers_scrape(
 ) {
     let scraped_opaque = scrape_opaque(rendered);
     let collected_opaque = typed_opaque(dropped);
-    // The scrape's false positives are markers PLANTED in the payload —
-    // text the engine never emitted. The typed path is immune by
-    // construction.
+    // The scrape's false positives are markers PLANTED in the payload — text the engine never emitted. The typed path is immune by construction.
     let planted: BTreeSet<(String, String, String)> = scraped_opaque
         .iter()
         .filter(|(h, _, _)| h == "aaaaaaaaaaaa")
@@ -257,12 +220,7 @@ fn assert_typed_covers_scrape(
         &rendered[..rendered.len().min(200)]
     );
 
-    // (2) No phantom refs: every collected hash is visible in the
-    // rendered text (verbatim marker, or the bare hash middle of an
-    // encoding-folded cell — every column encoding keeps the original
-    // value bytes somewhere in the render: affix middles, __dict
-    // entries, head/tail splits) and resolves to exactly `byte_size`
-    // bytes.
+    // No phantom refs: every collected hash is visible in the rendered text (verbatim marker, or the bare hash middle of an encoding-folded cell.
     for d in dropped {
         if let DroppedRef::Opaque {
             hash, byte_size, ..
@@ -310,9 +268,7 @@ fn typed_refs_cover_scrape_on_every_fixture() {
             );
         }
 
-        // (4) Row-drop parity, EXACT in both directions (that marker
-        // shape is never encoding-folded: it lives in JSON sentinel
-        // strings / plain sentinel lines).
+        // (4) Row-drop parity, EXACT in both directions (that marker shape is never encoding-folded: it lives in JSON sentinel strings / plain sentinel lines).
         assert_eq!(
             typed_row_drop(&r.dropped),
             scrape_row_drop(&r.compressed),
@@ -323,12 +279,7 @@ fn typed_refs_cover_scrape_on_every_fixture() {
 
 #[test]
 fn verbatim_markers_scrape_equals_typed_exactly() {
-    // A fixture pinned to render markers VERBATIM (each blob is an
-    // object FIELD, so it flows through `process_string`'s live
-    // substitution — no table render, no encoding fold): here the
-    // scrape sees everything and strict equality holds — the historical
-    // `collected == scraped` property, preserved where the render
-    // doesn't fold.
+    // A fixture pinned to render markers VERBATIM (each blob is an object FIELD, so it flows through `process_string`'s live substitution.
     let content = json!({
         "first": blob(1, 8),
         "second": blob(2, 9),
@@ -353,14 +304,8 @@ fn verbatim_markers_scrape_equals_typed_exactly() {
 
 #[test]
 fn affix_folded_markers_are_typed_but_invisible_to_the_scrape() {
-    // ★ The discovery this suite pins: uniform-size blobs produce
-    // same-length markers sharing prefix `<<ccr:` AND suffix
-    // `,base64,523B>>`, so the CSV-schema Affix encoding folds both into
-    // a `__affix:` preamble and renders each cell as the bare hash
-    // middle. The raw-text scrape — the Python mirror's ONLY discovery
-    // mechanism before §4.2 — finds NO opaque marker in that render:
-    // those originals were silently unmirrorable. The typed walk
-    // collects all of them (strictly better coverage).
+    // ★ The discovery this suite pins uniform-size blobs produce same-length markers sharing prefix `<<ccr:` AND suffix `,base64,523B>>` so the CSV-schema Affix
+    // encoding folds both into a `__affix:` preamble and renders each cell as the bare hash middle. the Python mirror's ONLY discovery mechanism before §4.2
     let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
     let dc = DocumentCompactor::new().with_ccr_store(Arc::clone(&store));
     let doc = json!({

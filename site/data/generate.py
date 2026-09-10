@@ -33,10 +33,8 @@ from typing import Any
 
 from furl_ctx import CompressResult, __version__, compress, retrieve
 
-# A neutral, representative prompt: a coding agent dropping a large tool result
-# into context. It deliberately avoids the words analyze / review / debug /
-# investigate, which furl reads as an intent to PROTECT content from
-# compression. This is the honest, out-of-the-box path for a big tool output.
+# A neutral, representative prompt: a coding agent dropping a large tool result into context. It deliberately avoids
+# the words analyze / review / debug / investigate, which furl reads as an intent to PROTECT content from compression.
 NEUTRAL_PROMPT = "Here is the tool output from the last run."
 MODEL = "claude-sonnet-4-5-20250929"
 
@@ -69,10 +67,8 @@ class Sample:
     original: str
 
 
-# ----------------------------------------------------------------------------
-# Sample builders. Content is representative machine output. Anomalies are the
-# one line that matters inside a wall of repetition.
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------- Sample builders. Content is representative machine output.
+# Anomalies are the one line that matters inside a wall of repetition. ----------------------------------------------------------------------------
 def build_logs() -> Sample:
     lines: list[str] = []
     for i in range(1, 161):

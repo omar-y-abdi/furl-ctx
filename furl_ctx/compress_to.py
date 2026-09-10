@@ -15,12 +15,7 @@ from typing import Any
 from .compress import CompressConfig, CompressResult, compress
 from .tokenizers import get_tokenizer
 
-# Fixed escalation ladder over compress()'s existing kwargs, least → most
-# aggressive; each rung layers one more lever onto the previous. We stop at the
-# first rung that fits, so ordering is by expected impact. compress_system_messages
-# is already True by default, so it is not a lever here.
-# lazy: min_tokens_to_compress floors at 50 — messages below that rarely repay the
-# compression/marker overhead. Lower it here if a caller needs sub-50-token turns squeezed.
+# We stop at the first rung that fits so ordering is by expected impact.
 _LADDER: tuple[dict[str, Any], ...] = (
     {},
     {"protect_recent": 0},
@@ -52,9 +47,8 @@ def compress_to(
     """
     counter = get_tokenizer(model)
 
-    # Measure the real output every time — never trust result.tokens_after, which
-    # is 0 on the fail-open path (original messages returned with error set) and
-    # would falsely read as "fits".
+    # Measure the real output every time — never trust result.tokens_after, which is 0 on the
+    # fail-open path (original messages returned with error set) and would falsely read as "fits".
     if counter.count_messages(messages) <= max_tokens:
         return CompressResult(messages=messages)  # already fits — genuine no-op
 

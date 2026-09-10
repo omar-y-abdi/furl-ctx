@@ -246,11 +246,7 @@ def test_parse_rejects_bad_select(arguments: dict) -> None:
 
 
 def test_select_equals_null_is_a_valid_request() -> None:
-    # select_equals=null matches rows whose field is PRESENT and null. An absent
-    # key is NOT a null value (MAJOR-2 fix): {"other": 2} lacks "k" and is NOT
-    # matched, so a caller asking for null-valued rows does not silently also get
-    # rows that merely omit the field. (Pre-fix this conflated absent with null via
-    # dict.get; the _MISSING sentinel in _select_rows/_equals now separates them.)
+    # select_equals=null matches rows whose field is PRESENT and null.
     spec = RetrieveFilters.parse({"select_field": "k", "select_equals": None})
     assert isinstance(spec, RetrieveFilters)
     assert spec.has_select

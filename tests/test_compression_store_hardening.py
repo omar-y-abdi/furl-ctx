@@ -17,8 +17,6 @@ import pytest
 from furl_ctx.cache.compression_store import CompressionStore
 
 # Fixed-width hash literals pinned to the contract (#21: 6 accepted, 5 rejected).
-# Hard-coded (NOT derived from _MIN_EXPLICIT_HASH_LEN) so the test fails loudly if
-# the production floor moves, rather than silently auto-retargeting to the new value.
 _HASH_AT_FLOOR = "aaaaaa"  # 6 chars — the floor; MUST be accepted
 _HASH_ONE_BELOW = "aaaaa"  # 5 chars — one below the floor; MUST be rejected
 

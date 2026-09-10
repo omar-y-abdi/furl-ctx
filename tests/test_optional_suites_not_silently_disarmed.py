@@ -94,9 +94,7 @@ import tomllib
 _PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 _CI_YML = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
 
-# Extras that `all` need NOT ship — dev tooling and the aggregate itself. Add a
-# future dev-only extra here so test_all_extra_reaches_every_feature_extra keeps
-# asserting only the runtime feature extras `all` is meant to bundle.
+# Extras that `all` need NOT ship — dev tooling and the aggregate itself.
 _NON_FEATURE_EXTRAS = frozenset({"dev", "all"})
 
 

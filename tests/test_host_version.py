@@ -64,16 +64,9 @@ def test_parse_version_never_raises_on_odd_input() -> None:
         ((2, 1, 162), False),
         ((2, 0, 999), False),
         ((1, 9, 999), False),
-        # PATCH below the floor's PATCH, MAJOR.MINOR tied: below floor. Verified
-        # trap direction: lexically "2.1.9" > "2.1.163" (the digit '9' outranks
-        # '1' at the first differing character), so a naive string compare would
-        # wrongly call this capable.
+        # PATCH below the floor's PATCH, MAJOR.MINOR tied: below floor.
         ((2, 1, 9), False),
-        # PATCH far above the floor's PATCH, MAJOR.MINOR tied: capable. Verified
-        # trap direction, the opposite of the case above: lexically "2.1.1000" <
-        # "2.1.163" ('0' is the first differing character, from "1000", against
-        # '6' from "163"), so a naive string compare would wrongly call this
-        # below floor.
+        # PATCH far above the floor's PATCH, MAJOR.MINOR tied: capable.
         ((2, 1, 1000), True),
         # MINOR one above the floor's MINOR: capable regardless of PATCH,
         # pinning that MINOR dominates PATCH in the ordering.
@@ -258,7 +251,7 @@ def test_empirical_execpath_and_ai_agent_agree_on_this_machine() -> None:
     assert detected[0] >= 2, f"sanity: Claude Code major version {detected} looks implausible"
 
 
-# --- drift guard: session_start_banner.py's hand-duplicated floor --------------
+# --- drift guard: the module's hand-duplicated floor --------------
 
 
 def _load_session_start_banner_module() -> object:

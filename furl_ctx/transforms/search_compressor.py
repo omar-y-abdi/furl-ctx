@@ -95,11 +95,8 @@ class SearchCompressorConfig:
     boost_errors: bool = True
     enable_ccr: bool = True
     min_matches_for_ccr: int = 10
-    #: Render one ``file:`` header per file with matches nested under it
-    #: (``  line:content``) instead of the flat ``file:line:content`` list.
-    #: Better token economics when many matches concentrate in few files
-    #: (the common rg shape). Selection, caps, and CCR are unchanged.
-    #: Default False — output byte-identical to the flat rendering.
+    # : Render one ``file:`` header per file with matches nested under it : (`` line:content``) instead of the flat
+    # ``file:line:content`` list. : Better token economics when many matches concentrate in few files : (the common rg shape).
     group_by_file: bool = False
 
 
@@ -140,10 +137,7 @@ class SearchCompressor:
     """
 
     def __init__(self, config: SearchCompressorConfig | None = None) -> None:
-        # Hard import — no fallback. If the wheel is missing, the user
-        # must build it (scripts/build_rust_extension.sh) or install a
-        # prebuilt one. Failing loudly here is better than silently
-        # degrading; see feedback memory `feedback_no_silent_fallbacks.md`.
+        # Require the compiled extension; if unavailable, fail loudly instead of silently degrading.
         from furl_ctx._core import (
             SearchCompressor as _RustSearchCompressor,
         )
@@ -153,10 +147,8 @@ class SearchCompressor:
 
         cfg = config or SearchCompressorConfig()
         self.config = cfg
-        # `min_compression_ratio_for_ccr` was inlined as 0.8 in the
-        # Python original; promoted to a config field on the Rust side
-        # but defaulted to 0.8 here so the existing Python config
-        # surface is unchanged.
+        # `min_compression_ratio_for_ccr` was inlined as 0.8 in the Python original; promoted to a config
+        # field on the Rust side but defaulted to 0.8 here so the existing Python config surface is unchanged.
         self._rust = _RustSearchCompressor(
             _RustSearchCompressorConfig(
                 max_matches_per_file=cfg.max_matches_per_file,
@@ -193,18 +185,14 @@ class SearchCompressor:
             and rust_result.compressed != content
             and omitted_content
         ):
-            # Use the Rust sidecar rather than reimplementing its parser
-            # semantics in Python: `lines_unparsed` catches declined lines,
-            # while the parsed-vs-selected counts catch dedup/cap omissions.
-            # With CCR enabled, either requires a full-original key or a
-            # verbatim fail-open result.
+            # Use the Rust sidecar rather than reimplementing its parser semantics in Python: `lines_unparsed` catches declined lines, while the
+            # parsed-vs-selected counts catch dedup/cap omissions. With CCR enabled, either requires a full-original key or a verbatim fail-open result.
             return self._passthrough_result(content, rust_result)
         if cache_key is not None and not self._persist_to_python_ccr(
             content, rust_result.compressed, cache_key
         ):
-            # Store write failed → marker would dangle, dropped matches
-            # unrecoverable. Serve the original uncompressed output instead
-            # (mirrors cross_message_dedup's veto).
+            # Store write failed → marker would dangle, dropped matches unrecoverable. Serve
+            # the original uncompressed output instead (mirrors cross_message_dedup's veto).
             return self._passthrough_result(content, rust_result)
 
         summaries = dict(cast("dict[str, str]", rust_result.summaries))

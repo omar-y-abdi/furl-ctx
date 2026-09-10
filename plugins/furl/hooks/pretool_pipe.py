@@ -117,45 +117,32 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
-# The engine pin MUST match hooks.json's command pins (a test asserts this) so
-# the compressor resolves the SAME furl-ctx the rest of the plugin uses.
-# Supply-chain posture: version-pinned, NOT hash-pinned, and `uv run --no-project`
-# bypasses any lockfile so transitive deps float (audit High-6). The honest
-# posture and the hardening path (pre-install a hash-verified engine on PATH) are
-# documented in SECURITY.md → "Supply chain".
+# The engine pin must match the plugin command pins so every hook resolves the same `furl-ctx` version.
 _FURL_CTX_PIN = "furl-ctx[mcp]==1.4.0"
 
 # Transparency marker: prepended to the rewritten command (visible in the
 # transcript). Names the OPT-OUT since the pipe is on by default.
 _PIPE_MARKER = "# furl-pipe (FURL_PRETOOL_PIPE=0 to disable)"
 
-# Loop guard: the STABLE PREFIX of every marker version this plugin has ever
-# emitted (old opt-in markers said "(FURL_PRETOOL_PIPE=1)"), so a command
-# wrapped by ANY plugin version is never double-wrapped after an upgrade.
+# Loop guard: the STABLE PREFIX of every marker version this plugin has ever emitted (old opt-in markers said
+# "(FURL_PRETOOL_PIPE=1)"), so a command wrapped by ANY plugin version is never double-wrapped after an upgrade.
 _PIPE_GUARD = "# furl-pipe"
 
 _ENABLE_ENV = "FURL_PRETOOL_PIPE"
 
-# The explicit opt-out set (S1 smart default). Shared semantics with the
-# hooks.json shell gate — a parity test enumerates both.
+# Explicit opt-out values; shell and Python gates must share exactly these semantics.
 _DISABLE_VALUES = frozenset({"0", "false", "off", "no", "disabled"})
 
-# ASCII whitespace removal — the exact character class the shell gate's
-# ``tr -d "[:space:]"`` deletes (POSIX locale), so both gates normalize
-# identically even for values with INTERNAL whitespace (review-84 F1).
+# ASCII whitespace removal — the exact character class the shell gate's ``tr -d "[:space:]"`` deletes (POSIX
+# locale), so both gates normalize identically even for values with INTERNAL whitespace (review-84 F1).
 _WS_REMOVE = str.maketrans("", "", " \t\n\r\f\v")
 
-# CONSCIOUS OVERRIDE (opt-IN, OFF unless explicitly set). A truthy value rewrites
-# Bash EVEN WHEN permission rules exist. No rule-present subset is provably safe
-# (see the module docstring), so this is a documented conscious trade-off, never a
-# default. Truthy-only so a typo cannot silently enable the risky path; the truthy
-# set mirrors the plugin's other truthy flags (compress_tool_output._flag_enabled).
+# CONSCIOUS OVERRIDE (opt-IN, OFF unless explicitly set). A truthy value rewrites Bash EVEN WHEN permission rules exist. No
+# rule-present subset is provably safe (see the module docstring), so this is a documented conscious trade-off, never a default.
 _WITH_RULES_ENV = "FURL_PIPE_WITH_RULES"
 _WITH_RULES_TRUE_VALUES = frozenset({"1", "true", "on", "yes", "enabled"})
 
-# Gating no-op reasons, recorded into furl_stats as ``pipe_noop:<reason>`` (via the
-# shared ``PIPE_NOOP_PREFIX``). Named constants, not scattered string literals, so
-# the tests and the banner reference one source of truth.
+# Gating no-op reasons, recorded into furl_stats as ``pipe_noop:<reason>`` (via the shared ``PIPE_NOOP_PREFIX``).
 _NOOP_DISABLED_ENV = "disabled-env"
 _NOOP_BAD_STDIN = "bad-stdin"
 _NOOP_EMPTY_STDIN = "empty-stdin"
@@ -169,12 +156,8 @@ _NOOP_PERMISSION_RULES = "permission-rules"
 _NOOP_SETTINGS_DOUBT = "settings-doubt"
 _NOOP_EMIT_ERROR = "emit-error"
 
-# STATIC reasons NOT counted per command. Both reflect session-static state that
-# fires on nearly every Bash call: a permission-rule set that is present, or an
-# explicitly disabled pipe. A durable counter there would tax the hot path with a
-# ~0.1s furl_ctx import for no new signal — the SessionStart banner reports that
-# state once and on-demand stats recompute it live. Every OTHER (dynamic, event)
-# reason is counted; those are rare, so their counter cost is negligible.
+# STATIC reasons NOT counted per command. A durable counter there would tax the hot path with a ~0.1s furl_ctx
+# import for no new signal — the SessionStart banner reports that state once and on-demand stats recompute it live.
 _UNCOUNTED_REASONS = frozenset({_NOOP_PERMISSION_RULES, _NOOP_DISABLED_ENV})
 
 
@@ -207,14 +190,7 @@ def _pipe_with_rules_override(raw: str | None) -> bool:
     return raw.translate(_WS_REMOVE).lower() in _WITH_RULES_TRUE_VALUES
 
 
-# --- gating observability (best-effort, fail-open) --------------------------------
-# Every passthrough records WHY into the shared per-project CCR store so ``furl_stats``
-# surfaces a rules-gated pipe instead of the silent nothing the report flagged (F3).
-# The store is resolved LAZILY on the first record, so the rewrite/savings path never
-# imports furl_ctx: the ~0.1s furl_ctx import behind ``resolve_store`` is paid only
-# when the pipe PASSES a command through, never when it rewrites one. In production a
-# falsy ``FURL_PRETOOL_PIPE`` is filtered by the hooks.json shell gate before this
-# script runs, so a disabled pipe pays nothing here either.
+# Best-effort gating observability: record passthrough reasons in the per-project store so `furl_stats` can explain disabled or rules-gated compression.
 _counter_ctx_cache: tuple[Any, Any] | None = None
 _counter_ctx_resolved = False
 
@@ -287,18 +263,11 @@ def _passthrough(reason: str | None = None) -> None:
     sys.exit(0)
 
 
-# --- permission-rule guard (provably-safe redesign) -------------------------------
-# The TOTAL invariant: rewrite a Bash command ONLY when ZERO readable Bash
-# permission rules exist. No per-verb matching, no wrapper denylist, no compound
-# analysis — existence of ANY rule is all we check, because when a rule exists
-# NOTHING is rewritten, so no command shape can mask it. See the module docstring.
+# permission-rule guard (provably-safe redesign) ------------------------------- The TOTAL
+# invariant rewrite a Bash command ONLY when ZERO readable Bash permission rules exist.
 
-# Enterprise managed-settings.json DEFAULT locations, per OS. Paths VERIFIED
-# against code.claude.com/docs/en/settings (reviewer-guard G2) — never guessed.
-# An unrecognized platform maps to nothing (we do not invent a path). WSL shares
-# the Linux path. The location can be relocated via $CLAUDE_CODE_MANAGED_SETTINGS_PATH
-# (honored in ``_managed_settings_paths``), so a Bash rule that lives only in
-# managed settings — wherever they are — must still gate the pipe.
+# Enterprise managed-settings.json DEFAULT locations, per OS. Paths VERIFIED against code.claude.com/docs/en/settings (reviewer-guard G2) — never guessed. The location can be relocated
+# via $CLAUDE_CODE_MANAGED_SETTINGS_PATH (honored in ``_managed_settings_paths``), so a Bash rule that lives only in managed settings — wherever they are — must still gate the pipe.
 _MANAGED_BASE_BY_PLATFORM = {
     "darwin": Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
     "linux": Path("/etc/claude-code/managed-settings.json"),
@@ -350,9 +319,7 @@ def _managed_settings_paths() -> tuple[list[Path], bool]:
     return _managed_dir_paths(base.parent, base.name), False
 
 
-# Human-readable scope labels for the SessionStart banner's OFF message and
-# ``_scan_bash_rules``. Kept short and free of round brackets / dashes because the
-# banner systemMessage they end up in is pinned AI-tell-free (test_hook_audit_fixes).
+# Human-readable scope labels for the SessionStart banner's OFF message and ``_scan_bash_rules``.
 _SCOPE_MANAGED = "enterprise managed settings"
 _SCOPE_PROJECT = "project settings"
 _SCOPE_USER = "user settings"
@@ -440,14 +407,8 @@ def _bash_bodies_from_entries(entries: object) -> tuple[list[str | None], bool]:
             doubt = True
             continue
         rule = entry.strip()
-        # A recognizable Bash rule is EXACTLY ``Bash`` or starts with ``Bash(``.
-        # The open paren disambiguates ``Bash(...)`` from the sibling tool
-        # ``BashOutput`` (which does not govern command execution). Whitespace is
-        # stripped first, so `` Bash(rm:*) `` and ``Bash( rm:*)`` both count. An
-        # UNTERMINATED but recognizable rule (``Bash(rm:*`` — no close paren)
-        # still counts as PRESENT (a ``None`` body) and is never silently
-        # dropped: presence is what gates the rewrite, so a rule we can see but
-        # not fully parse must still force passthrough.
+        # A recognizable Bash rule is EXACTLY ``Bash`` or starts with ``Bash(``. no close
+        # paren) still counts as PRESENT (a ``None`` body) and is never silently dropped
         if rule == "Bash":
             bodies.append(None)
         elif rule.startswith("Bash("):
@@ -599,20 +560,14 @@ def _rewrite_command(original: str, project_dir: str, compressor: str) -> str:
     qcomp = shlex.quote(compressor)
     return (
         f"{_PIPE_MARKER}\n"
-        # F-A3: mktemp ONLY. mktemp makes a unique 0600 file atomically, so no
-        # predictable-name symlink race exists; if mktemp is unavailable the
-        # substitution is empty and the guard below runs the command UNWRAPPED
-        # (clean fail-open), so the 0600 posture holds on every path.
+        # F-A3: mktemp ONLY. mktemp makes a unique 0600 file atomically, so no predictable-name symlink race exists; if mktemp is unavailable
+        # the substitution is empty and the guard below runs the command UNWRAPPED (clean fail-open), so the 0600 posture holds on every path.
         "__furl_f=$(mktemp 2>/dev/null || mktemp -t furlpipe 2>/dev/null)\n"
-        # NOTE: ``2>/dev/null`` BEFORE ``>"$f"`` — redirections process left to
-        # right, so suppression must be in place before the probe redirect can
-        # fail, or the failure message would leak to the live stderr stream.
+        # NOTE: ``2>/dev/null`` BEFORE ``>"$f"`` — redirections process left to right, so suppression must be in
+        # place before the probe redirect can fail, or the failure message would leak to the live stderr stream.
         'if [ -n "$__furl_f" ] && : 2>/dev/null >"$__furl_f"; then\n'
-        # F-A2: on a fatal signal (Claude Code timeout / run_in_background kill)
-        # flush the captured partial stdout so it still reaches the transcript
-        # (bare bash streams live; this capture buffers), remove the tempfile,
-        # then die by the same signal for a faithful 128+signal status. Cleared
-        # right after capture so the compressor path owns its own stdout.
+        # F-A2: on a fatal signal (Claude Code timeout / run_in_background kill) flush the captured partial stdout so it still
+        # reaches the transcript (bare bash streams live. Cleared right after capture so the compressor path owns its own stdout.
         'trap \'cat "$__furl_f" 2>/dev/null; rm -f "$__furl_f" 2>/dev/null; trap - INT; kill -INT $$\' INT\n'
         'trap \'cat "$__furl_f" 2>/dev/null; rm -f "$__furl_f" 2>/dev/null; trap - TERM; kill -TERM $$\' TERM\n'
         f"( {original}\n"
@@ -645,10 +600,7 @@ def _project_dir(payload: dict) -> str:
 
 
 def main() -> None:
-    # Opt-OUT gate FIRST (S1 smart default). In production the hooks.json shell gate
-    # already skips a falsy FURL_PRETOOL_PIPE before this script is even spawned, so
-    # this python mirror is defense-in-depth; when it IS reached (direct invocation)
-    # it records the reason like every other passthrough.
+    # Opt-OUT gate FIRST (S1 smart default).
     if _pipe_disabled(os.environ.get(_ENABLE_ENV)):
         _passthrough(_NOOP_DISABLED_ENV)
 
@@ -665,10 +617,7 @@ def main() -> None:
     if not isinstance(payload, dict):
         _passthrough(_NOOP_NON_DICT_PAYLOAD)
 
-    # Namespace the gating counters to the SAME per-project store the rewrite path
-    # bakes and furl_stats reads: derive it from the payload the way _project_dir and
-    # compress_tool_output.py do (CLAUDE_PROJECT_DIR, else the payload cwd, else
-    # getcwd), NOT the hook's own getcwd, which can differ from the payload cwd (R2).
+    # Namespace the gating counters to the SAME per-project store the rewrite path bakes and furl_stats reads.
     os.environ.setdefault("FURL_CCR_PROJECT_DIR", _project_dir(payload))
 
     # Bash only (the matcher is Bash; double-check so a mis-scoped registration
@@ -688,14 +637,8 @@ def main() -> None:
     if _PIPE_GUARD in command:
         _passthrough(_NOOP_ALREADY_WRAPPED)
 
-    # SECURITY GUARD (provably-safe, total): rewrite ONLY when ZERO readable Bash
-    # permission rules exist and settings are fully readable — UNLESS the user set
-    # the conscious FURL_PIPE_WITH_RULES override (see the module docstring: no
-    # rule-present subset is provably safe). The override short-circuits the scan
-    # entirely, so an opted-in user pays no settings I/O either; without it, ANY
-    # Bash rule (deny/ask/allow) or unreadable settings (doubt) forces passthrough,
-    # so CC's rules apply exactly as native and no command shape can mask a rule. The
-    # concrete-rule reason wins the label over doubt when both hold — more actionable.
+    # SECURITY GUARD (provably-safe, total): rewrite ONLY when ZERO readable Bash permission rules exist and settings are fully readable
+    # UNLESS the user set the conscious FURL_PIPE_WITH_RULES override (see the module docstring: no rule-present subset is provably safe).
     if not _pipe_with_rules_override(os.environ.get(_WITH_RULES_ENV)):
         raw_cwd = payload.get("cwd")
         guard_cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else os.getcwd()
@@ -722,10 +665,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Last-resort guard: no uncaught exception may reach the host — fail open to the
-    # original command (emit nothing, exit 0). Not silent: leave one stderr
-    # breadcrumb (user-visible, never model-visible) so an unexpected failure is
-    # diagnosable, per the repo's no-silent-swallow doctrine.
+    # Last-resort guard: no uncaught exception may reach the host — fail open to the original command (emit nothing, exit 0).
     try:
         main()
     except SystemExit:
