@@ -1,0 +1,124 @@
+name: fix-pr216-comments-once
+
+on:
+  push:
+    branches:
+      - agent/fix-pr216-comments-once
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reapply main comment cleanup without changing PR semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_branch='agent/integrate-context-safety-improvements'
+          expected_head='46846024eaa00b6a57da90c21e60fdb110b75cd9'
+          comment_commit='25fc8d8fed651f8eb3dca1c3d7a0f4156e2ef99c'
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin "$target_branch" main
+          git checkout -B repair "origin/$target_branch"
+
+          before="$(git rev-parse HEAD)"
+          test "$before" = "$expected_head"
+
+          python - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import subprocess
+
+          files = [
+              'furl_ctx/cache/compression_store.py',
+              'furl_ctx/ccr/mcp_server.py',
+              'furl_ctx/tokenizers/base.py',
+              'furl_ctx/transforms/code_aware_compressor.py',
+              'furl_ctx/transforms/cross_message_dedup.py',
+              'furl_ctx/transforms/read_lifecycle.py',
+          ]
+
+          def tree(ref, path):
+              raw = subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
+              return ast.dump(ast.parse(raw), include_attributes=False)
+
+          before = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          fingerprints = {
+              p: hashlib.sha256(tree(before, p).encode()).hexdigest()
+              for p in files
+          }
+          with open('/tmp/pr216-ast-before.json', 'w') as f:
+              json.dump(fingerprints, f, sort_keys=True)
+          PY
+
+          git cherry-pick -X theirs "$comment_commit"
+
+          python - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import subprocess
+          import sys
+
+          allowed = {
+              'furl_ctx/cache/compression_store.py',
+              'furl_ctx/ccr/mcp_server.py',
+              'furl_ctx/tokenizers/base.py',
+              'furl_ctx/transforms/code_aware_compressor.py',
+              'furl_ctx/transforms/cross_message_dedup.py',
+              'furl_ctx/transforms/read_lifecycle.py',
+          }
+
+          def tree(ref, path):
+              raw = subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
+              return ast.dump(ast.parse(raw), include_attributes=False)
+
+          with open('/tmp/pr216-ast-before.json') as f:
+              before = json.load(f)
+
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          after = {
+              p: hashlib.sha256(tree(head, p).encode()).hexdigest()
+              for p in allowed
+          }
+          if before != after:
+              for p in sorted(allowed):
+                  if before[p] != after[p]:
+                      print(f'ERROR: Python AST changed in {p}', file=sys.stderr)
+              sys.exit(1)
+
+          parent = subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip()
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--name-only', parent, 'HEAD'], text=True
+          ).splitlines())
+          unexpected = changed - allowed
+          if unexpected:
+              print('ERROR: comment replay changed unexpected files:', file=sys.stderr)
+              for p in sorted(unexpected):
+                  print(f'  {p}', file=sys.stderr)
+              sys.exit(1)
+          print('AST invariant: PASS')
+          print('Changed files:', *sorted(changed), sep='\n  ')
+          PY
+
+          read additions deletions < <(
+            git diff --numstat origin/main...HEAD |
+            awk '{a+=$1; d+=$2} END {print a+0, d+0}'
+          )
+          echo "PR diffstat after repair: +$additions -$deletions"
+          if (( additions >= 1500 )); then
+            echo "ERROR: PR additions still inflated; refusing push" >&2
+            exit 1
+          fi
+
+          git push --force-with-lease="refs/heads/$target_branch:$expected_head" origin HEAD:"$target_branch"
