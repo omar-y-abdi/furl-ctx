@@ -1,0 +1,139 @@
+name: fix-pr216-comments-once-v3
+
+on:
+  push:
+    branches:
+      - agent/fix-pr216-comments-once
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preserve PR semantics and transplant surviving main comments
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_branch='agent/integrate-context-safety-improvements'
+          expected_head='46846024eaa00b6a57da90c21e60fdb110b75cd9'
+          comment_commit='25fc8d8fed651f8eb3dca1c3d7a0f4156e2ef99c'
+          comment_base='c516caa8867563ea200bfdf1d3d5849ccb022e56'
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin "$target_branch" main
+          git checkout -B repair "origin/$target_branch"
+          before="$(git rev-parse HEAD)"
+          test "$before" = "$expected_head"
+
+          python - "$comment_base" "$comment_commit" "$before" <<'PY'
+          import ast, hashlib, json, subprocess, sys
+          base, main, before = sys.argv[1:]
+          files = [
+              'furl_ctx/cache/compression_store.py',
+              'furl_ctx/ccr/mcp_server.py',
+              'furl_ctx/tokenizers/base.py',
+              'furl_ctx/transforms/code_aware_compressor.py',
+              'furl_ctx/transforms/cross_message_dedup.py',
+              'furl_ctx/transforms/read_lifecycle.py',
+          ]
+          def src(ref, path):
+              return subprocess.check_output(['git','show',f'{ref}:{path}'], text=True)
+          def ah(ref, path):
+              return hashlib.sha256(ast.dump(ast.parse(src(ref,path)), include_attributes=False).encode()).hexdigest()
+          for p in files:
+              if ah(base,p) != ah(main,p):
+                  raise SystemExit(f'#217 is not AST-neutral in {p}')
+          with open('/tmp/ast.json','w') as f:
+              json.dump({p:ah(before,p) for p in files}, f, sort_keys=True)
+          print('#217 AST-neutrality: PASS')
+          PY
+
+          git cherry-pick -X theirs "$comment_commit"
+          candidate="$(git rev-parse HEAD)"
+
+          python - "$before" "$candidate" "$comment_base" "$comment_commit" <<'PY'
+          import ast, difflib, hashlib, json, pathlib, subprocess, sys
+          before_ref, candidate_ref, base_ref, main_ref = sys.argv[1:]
+          files = [
+              'furl_ctx/cache/compression_store.py',
+              'furl_ctx/ccr/mcp_server.py',
+              'furl_ctx/tokenizers/base.py',
+              'furl_ctx/transforms/code_aware_compressor.py',
+              'furl_ctx/transforms/cross_message_dedup.py',
+              'furl_ctx/transforms/read_lifecycle.py',
+          ]
+          def src(ref,p):
+              return subprocess.check_output(['git','show',f'{ref}:{p}'], text=True)
+          def digest(text):
+              return hashlib.sha256(ast.dump(ast.parse(text), include_attributes=False).encode()).hexdigest()
+          with open('/tmp/ast.json') as f:
+              expected=json.load(f)
+
+          bad=[p for p in files if digest(src(candidate_ref,p)) != expected[p]]
+          print('Unsafe whole-hunk files:', *bad, sep='\n  ')
+
+          for p in bad:
+              subprocess.run(['git','checkout',before_ref,'--',p],check=True)
+              base=src(base_ref,p).splitlines(keepends=True)
+              main=src(main_ref,p).splitlines(keepends=True)
+              path=pathlib.Path(p)
+              target=path.read_text().splitlines(keepends=True)
+              sm=difflib.SequenceMatcher(a=base,b=main,autojunk=False)
+              applied=already=missing=0
+
+              def commentish(lines):
+                  return all((not x.strip()) or x.lstrip().startswith('#') for x in lines)
+              def occurrences(hay,needle):
+                  if not needle: return []
+                  n=len(needle)
+                  return [i for i in range(len(hay)-n+1) if hay[i:i+n]==needle]
+
+              for tag,i1,i2,j1,j2 in sm.get_opcodes():
+                  if tag=='equal': continue
+                  old,new=base[i1:i2],main[j1:j2]
+                  if all(not x.strip() for x in old+new): continue
+                  if not commentish(old) or not commentish(new):
+                      raise SystemExit(f'non-comment #217 diff in {p} base {i1+1}:{i2}')
+                  hits=occurrences(target,old)
+                  if len(hits)==1:
+                      k=hits[0]; target[k:k+len(old)]=new; applied+=1
+                  elif new and occurrences(target,new):
+                      already+=1
+                  else:
+                      # #216 changed/deleted this original region. Do not inject a
+                      # main-era comment into new PR code; preserve #216 verbatim.
+                      missing+=1
+
+              path.write_text(''.join(target))
+              print(f'{p}: transplanted={applied} already_short={already} PR-replaced_regions={missing}')
+
+          subprocess.run(['git','add',*bad],check=True)
+          subprocess.run(['git','commit','--amend','--no-edit'],check=True)
+          head=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          for p in files:
+              if digest(src(head,p)) != expected[p]:
+                  raise SystemExit(f'FINAL AST mismatch in {p}')
+          changed=set(subprocess.check_output(['git','diff','--name-only',before_ref,head],text=True).splitlines())
+          extra=changed-set(files)
+          if extra:
+              raise SystemExit('unexpected repair files: '+', '.join(sorted(extra)))
+          print('Final PR Python AST identity: PASS')
+          print('Repair changed only:', *sorted(changed), sep='\n  ')
+          PY
+
+          read additions deletions < <(git diff --numstat origin/main...HEAD | awk '{a+=$1; d+=$2} END {print a+0, d+0}')
+          echo "PR diffstat after repair: +$additions -$deletions"
+          if (( additions >= 1400 )); then
+            echo 'ERROR: additions still show comment-reintroduction inflation' >&2
+            exit 1
+          fi
+
+          git push --force-with-lease="refs/heads/$target_branch:$expected_head" origin HEAD:"$target_branch"
