@@ -16,7 +16,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Reapply main comment cleanup without changing PR semantics
+      - name: Preserve PR semantics and transplant main comments
         shell: bash
         run: |
           set -euo pipefail
@@ -24,6 +24,7 @@ jobs:
           target_branch='agent/integrate-context-safety-improvements'
           expected_head='46846024eaa00b6a57da90c21e60fdb110b75cd9'
           comment_commit='25fc8d8fed651f8eb3dca1c3d7a0f4156e2ef99c'
+          comment_base='c516caa8867563ea200bfdf1d3d5849ccb022e56'
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -33,12 +34,14 @@ jobs:
           before="$(git rev-parse HEAD)"
           test "$before" = "$expected_head"
 
-          python - <<'PY'
+          python - "$comment_base" "$comment_commit" "$before" <<'PY'
           import ast
           import hashlib
           import json
           import subprocess
+          import sys
 
+          base, main, before = sys.argv[1:]
           files = [
               'furl_ctx/cache/compression_store.py',
               'furl_ctx/ccr/mcp_server.py',
@@ -48,67 +51,167 @@ jobs:
               'furl_ctx/transforms/read_lifecycle.py',
           ]
 
-          def tree(ref, path):
-              raw = subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
-              return ast.dump(ast.parse(raw), include_attributes=False)
+          def source(ref, path):
+              return subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
 
-          before = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-          fingerprints = {
-              p: hashlib.sha256(tree(before, p).encode()).hexdigest()
-              for p in files
-          }
+          def ast_hash(ref, path):
+              tree = ast.dump(ast.parse(source(ref, path)), include_attributes=False)
+              return hashlib.sha256(tree.encode()).hexdigest()
+
+          # Prove #217 itself is syntax/semantic-neutral for the overlapping Python files.
+          for path in files:
+              if ast_hash(base, path) != ast_hash(main, path):
+                  raise SystemExit(f'#217 is not AST-neutral in {path}; refusing automated repair')
+
+          fingerprints = {path: ast_hash(before, path) for path in files}
           with open('/tmp/pr216-ast-before.json', 'w') as f:
               json.dump(fingerprints, f, sort_keys=True)
+          print('#217 AST-neutrality: PASS')
           PY
 
+          # First let Git apply every non-conflicting comment cleanup. Some conflict
+          # hunks also overlap PR code; those files are restored and handled below.
           git cherry-pick -X theirs "$comment_commit"
+          candidate="$(git rev-parse HEAD)"
 
-          python - <<'PY'
+          python - "$before" "$candidate" "$comment_base" "$comment_commit" <<'PY'
           import ast
+          import difflib
           import hashlib
           import json
+          import pathlib
           import subprocess
           import sys
 
-          allowed = {
+          before_ref, candidate_ref, base_ref, main_ref = sys.argv[1:]
+          files = [
               'furl_ctx/cache/compression_store.py',
               'furl_ctx/ccr/mcp_server.py',
               'furl_ctx/tokenizers/base.py',
               'furl_ctx/transforms/code_aware_compressor.py',
               'furl_ctx/transforms/cross_message_dedup.py',
               'furl_ctx/transforms/read_lifecycle.py',
-          }
+          ]
 
-          def tree(ref, path):
-              raw = subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
-              return ast.dump(ast.parse(raw), include_attributes=False)
+          def source(ref, path):
+              return subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
+
+          def ast_digest(text):
+              tree = ast.dump(ast.parse(text), include_attributes=False)
+              return hashlib.sha256(tree.encode()).hexdigest()
 
           with open('/tmp/pr216-ast-before.json') as f:
-              before = json.load(f)
+              expected = json.load(f)
+
+          bad = []
+          for path in files:
+              if ast_digest(source(candidate_ref, path)) != expected[path]:
+                  bad.append(path)
+
+          print('Files where whole-hunk theirs would alter PR semantics:')
+          for path in bad:
+              print(f'  {path}')
+
+          # Restore the correct PR code in unsafe files, then transplant only
+          # full-line comment/blank changes from #217 (base -> main).
+          for path in bad:
+              subprocess.run(['git', 'checkout', before_ref, '--', path], check=True)
+
+              base_lines = source(base_ref, path).splitlines(keepends=True)
+              main_lines = source(main_ref, path).splitlines(keepends=True)
+              target_path = pathlib.Path(path)
+              target = target_path.read_text().splitlines(keepends=True)
+
+              matcher = difflib.SequenceMatcher(a=base_lines, b=main_lines, autojunk=False)
+              applied = 0
+              already = 0
+              skipped_deleted = 0
+
+              def commentish(lines):
+                  return all((not line.strip()) or line.lstrip().startswith('#') for line in lines)
+
+              def occurrences(haystack, needle):
+                  if not needle:
+                      return []
+                  n = len(needle)
+                  return [i for i in range(len(haystack) - n + 1) if haystack[i:i+n] == needle]
+
+              def nearest_code(lines, start, step):
+                  i = start
+                  while 0 <= i < len(lines):
+                      s = lines[i].strip()
+                      if s and not lines[i].lstrip().startswith('#'):
+                          return lines[i]
+                      i += step
+                  return None
+
+              for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                  if tag == 'equal':
+                      continue
+                  old = base_lines[i1:i2]
+                  new = main_lines[j1:j2]
+
+                  # Ignore pure blank-line churn; it is not prose and can create
+                  # ambiguous global matches unrelated to the intended cleanup.
+                  if all(not line.strip() for line in old + new):
+                      continue
+                  if not commentish(old) or not commentish(new):
+                      raise SystemExit(
+                          f'#217 diff contains non-comment lines in {path} at base lines {i1+1}:{i2}; refusing'
+                      )
+
+                  matches = occurrences(target, old)
+                  if len(matches) == 1:
+                      idx = matches[0]
+                      target[idx:idx+len(old)] = new
+                      applied += 1
+                      continue
+
+                  # The desired short block may already be present due another
+                  # nearby clean application.
+                  if new and occurrences(target, new):
+                      already += 1
+                      continue
+
+                  # If PR #216 removed the surrounding code entirely, the old
+                  # comment legitimately has no destination and must stay absent.
+                  prev_code = nearest_code(base_lines, i1 - 1, -1)
+                  next_code = nearest_code(base_lines, i2, 1)
+                  prev_present = prev_code is not None and prev_code in target
+                  next_present = next_code is not None and next_code in target
+                  if not prev_present and not next_present:
+                      skipped_deleted += 1
+                      continue
+
+                  raise SystemExit(
+                      f'Could not uniquely transplant #217 comment block in {path} '
+                      f'at base lines {i1+1}:{i2}; matches={len(matches)}'
+                  )
+
+              target_path.write_text(''.join(target))
+              print(
+                  f'{path}: transplanted={applied}, already_short={already}, '
+                  f'skipped_with_deleted_PR_region={skipped_deleted}'
+              )
+
+          subprocess.run(['git', 'add', *bad], check=True)
+          subprocess.run(['git', 'commit', '--amend', '--no-edit'], check=True)
 
           head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-          after = {
-              p: hashlib.sha256(tree(head, p).encode()).hexdigest()
-              for p in allowed
-          }
-          if before != after:
-              for p in sorted(allowed):
-                  if before[p] != after[p]:
-                      print(f'ERROR: Python AST changed in {p}', file=sys.stderr)
-              sys.exit(1)
+          for path in files:
+              actual = ast_digest(source(head, path))
+              if actual != expected[path]:
+                  raise SystemExit(f'FINAL AST mismatch in {path}; refusing push')
 
-          parent = subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip()
           changed = set(subprocess.check_output(
-              ['git', 'diff', '--name-only', parent, 'HEAD'], text=True
+              ['git', 'diff', '--name-only', before_ref, head], text=True
           ).splitlines())
-          unexpected = changed - allowed
+          unexpected = changed - set(files)
           if unexpected:
-              print('ERROR: comment replay changed unexpected files:', file=sys.stderr)
-              for p in sorted(unexpected):
-                  print(f'  {p}', file=sys.stderr)
-              sys.exit(1)
-          print('AST invariant: PASS')
-          print('Changed files:', *sorted(changed), sep='\n  ')
+              raise SystemExit('Unexpected files changed by repair: ' + ', '.join(sorted(unexpected)))
+
+          print('Final PR Python AST identity: PASS')
+          print('Repair changed only:', *sorted(changed), sep='\n  ')
           PY
 
           read additions deletions < <(
