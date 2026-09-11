@@ -16,46 +16,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify exact transport and publish isolated validation branch
+      - name: Apply hosted lint correction to isolated validation branch
         shell: bash
         run: |
           set -euo pipefail
-          test "$(sha256sum .chatgpt-pr216/part00 | awk '{print $1}')" = "4533f625e487a1def67d67ec578579972e17d3ee479bc67971b4ba2703036982"
-          test "$(sha256sum .chatgpt-pr216/part01 | awk '{print $1}')" = "823c826108e665c97d944d62bf29e423cd278482cd9c0878e638b5a7c7a3bc5a"
-          test "$(sha256sum .chatgpt-pr216/part02 | awk '{print $1}')" = "29d5de935477d433560305b4097745af55d5f3abb8966db9aac5957f9a84fad5"
-          test "$(sha256sum .chatgpt-pr216/part03 | awk '{print $1}')" = "725eea103bf7d60ed601392a831f4f57f9946809a8458fb27d858fe506d19550"
-          test "$(sha256sum .chatgpt-pr216/part04 | awk '{print $1}')" = "9544771c00950cf1498690a2ddc9fa2634a23a51ec74c36a02bcee4b62fa11fd"
-          test "$(sha256sum .chatgpt-pr216/part05 | awk '{print $1}')" = "f5b3dfae2d0ee4b0c38f6f9bb4bf278dd2700bbbc8fa243a0fe90cbff92201a9"
-          test "$(sha256sum .chatgpt-pr216/part06 | awk '{print $1}')" = "71ef6cd8571034b38d72b323dea25e85f9d8497c8bab23ac22d8ee5215eeded1"
-          test "$(sha256sum .chatgpt-pr216/part07a | awk '{print $1}')" = "a9db18c7c68d481b0d86397820600e7bbef656edb737a6fc9bb1bde446cb418e"
-          test "$(sha256sum .chatgpt-pr216/part07b | awk '{print $1}')" = "d2e8c77b2c83a2242e033afd334e37825dd47a7d2e004a0bef37abb36fda98d0"
-          test "$(sha256sum .chatgpt-pr216/part07c | awk '{print $1}')" = "ce0078925eb265378be6adf5fed320c65f5ed7473915a5c63a1f165dac6c08ce"
-          test "$(sha256sum .chatgpt-pr216/part07d | awk '{print $1}')" = "5b1e716dde93195a11eed0e3268604e1ea8c1885237ad6af973956e6a439957e"
-          test "$(sha256sum .chatgpt-pr216/part08 | awk '{print $1}')" = "08f551a234ae03c69cadd377a8f4bf2174fd10b2076c00d77586174d8a282959"
+          cat > /tmp/style.b64 <<'EOF'
+          ZGlmZiAtLWdpdCBhL2Z1cmxfY3R4L2NhY2hlL2NvbXByZXNzaW9uX3N0b3JlLnB5IGIvZnVybF9jdHgvY2FjaGUvY29tcHJlc3Npb25fc3RvcmUucHkKaW5kZXggZGMyNGI4MWQuLjcwN2Q2NzY0IDEwMDY0NAotLS0gYS9mdXJsX2N0eC9jYWNoZS9jb21wcmVzc2lvbl9zdG9yZS5weQorKysgYi9mdXJsX2N0eC9jYWNoZS9jb21wcmVzc2lvbl9zdG9yZS5weQpAQCAtMjg4MCwxNCArMjg4MCwxMCBAQCBkZWYgY2NyX2V4cG9ydCgKICAgICB3aXRoIHNvdXJjZS5fbXV0YXRpb25fZ3VhcmQuaG9sZCgpOgogICAgICAgICB3aXRoIHNvdXJjZS5fbG9jazoKICAgICAgICAgICAgIGdyb3VwZWQ6IGRpY3Rbc3RyLCBsaXN0W3R1cGxlW3N0ciwgQ29tcHJlc3Npb25FbnRyeV1dXSA9IHt9Ci0gICAgICAgICAgICBmb3IgaGFzaF9rZXksIGVudHJ5IGluIHNvdXJjZS5fY2hlY2tlZF9pdGVtc19iYWNrZW5kX2xvY2tlZCgKLSAgICAgICAgICAgICAgICBzb3VyY2UuX2JhY2tlbmQsICJwcmltYXJ5IgotICAgICAgICAgICAgKToKKyAgICAgICAgICAgIGZvciBoYXNoX2tleSwgZW50cnkgaW4gc291cmNlLl9jaGVja2VkX2l0ZW1zX2JhY2tlbmRfbG9ja2VkKHNvdXJjZS5fYmFja2VuZCwgInByaW1hcnkiKToKICAgICAgICAgICAgICAgICBncm91cGVkLnNldGRlZmF1bHQoaGFzaF9rZXksIFtdKS5hcHBlbmQoKCJwcmltYXJ5IiwgZW50cnkpKQogICAgICAgICAgICAgaWYgc291cmNlLl9zcGlsbCBpcyBub3QgTm9uZToKLSAgICAgICAgICAgICAgICBmb3IgaGFzaF9rZXksIGVudHJ5IGluIHNvdXJjZS5fY2hlY2tlZF9pdGVtc19iYWNrZW5kX2xvY2tlZCgKLSAgICAgICAgICAgICAgICAgICAgc291cmNlLl9zcGlsbCwgInNwaWxsIgotICAgICAgICAgICAgICAgICk6CisgICAgICAgICAgICAgICAgZm9yIGhhc2hfa2V5LCBlbnRyeSBpbiBzb3VyY2UuX2NoZWNrZWRfaXRlbXNfYmFja2VuZF9sb2NrZWQoc291cmNlLl9zcGlsbCwgInNwaWxsIik6CiAgICAgICAgICAgICAgICAgICAgIGdyb3VwZWQuc2V0ZGVmYXVsdChoYXNoX2tleSwgW10pLmFwcGVuZCgoInNwaWxsIiwgZW50cnkpKQogCiAgICAgICAgICAgICBlbnRyaWVzOiBsaXN0W3R1cGxlW3N0ciwgQ29tcHJlc3Npb25FbnRyeV1dID0gW10KZGlmZiAtLWdpdCBhL3Rlc3RzL3Rlc3RfY2NyX25hbWVzcGFjZV9leHBvcnRfaW1wb3J0LnB5IGIvdGVzdHMvdGVzdF9jY3JfbmFtZXNwYWNlX2V4cG9ydF9pbXBvcnQucHkKaW5kZXggMjdjNmE4OGUuLjU2Njc3YWU3IDEwMDY0NAotLS0gYS90ZXN0cy90ZXN0X2Njcl9uYW1lc3BhY2VfZXhwb3J0X2ltcG9ydC5weQorKysgYi90ZXN0cy90ZXN0X2Njcl9uYW1lc3BhY2VfZXhwb3J0X2ltcG9ydC5weQpAQCAtMzEsOCArMzEsOCBAQCBmcm9tIGZ1cmxfY3R4LmNhY2hlLmNvbXByZXNzaW9uX3N0b3JlIGltcG9ydCAoCiAgICAgX3JlcXVlc3RfY2NyX3N0b3JlLAogICAgIGNsZWFyX3JlcXVlc3RfY29tcHJlc3Npb25fc3RvcmUsCiAgICAgcmVzZXRfY29tcHJlc3Npb25fc3RvcmUsCi0gICAgc2V0X3JlcXVlc3RfY29tcHJlc3Npb25fc3RvcmUsCiAgICAgcmVzb2x2ZV9jY3JfbmFtZXNwYWNlX3N0b3JlLAorICAgIHNldF9yZXF1ZXN0X2NvbXByZXNzaW9uX3N0b3JlLAogKQogCiAKZGlmZiAtLWdpdCBhL3Rlc3RzL3Rlc3RfcHIyMTZfZmluYWxfc3RvcmFnZV9zYWZldHkucHkgYi90ZXN0cy90ZXN0X3ByMjE2X2ZpbmFsX3N0b3JhZ2Vfc2FmZXR5LnB5CmluZGV4IGVhNDczZTNkLi4yNzNjY2M0YSAxMDA2NDQKLS0tIGEvdGVzdHMvdGVzdF9wcjIxNl9maW5hbF9zdG9yYWdlX3NhZmV0eS5weQorKysgYi90ZXN0cy90ZXN0X3ByMjE2X2ZpbmFsX3N0b3JhZ2Vfc2FmZXR5LnB5CkBAIC0xOSw5ICsxOSw3IEBAIEhBU0ggPSAiNyIgKiAyNAogRklMTEVSID0gIjgiICogMjQKIAogCi1kZWYgX2VudHJ5KAotICAgIG9yaWdpbmFsOiBzdHIsICosIGNvbXByZXNzZWQ6IHN0ciA9ICJ2aWV3IiwgaGFzaF9rZXk6IHN0ciA9IEhBU0gKLSkgLT4gQ29tcHJlc3Npb25FbnRyeToKK2RlZiBfZW50cnkob3JpZ2luYWw6IHN0ciwgKiwgY29tcHJlc3NlZDogc3RyID0gInZpZXciLCBoYXNoX2tleTogc3RyID0gSEFTSCkgLT4gQ29tcHJlc3Npb25FbnRyeToKICAgICByZXR1cm4gQ29tcHJlc3Npb25FbnRyeSgKICAgICAgICAgaGFzaD1oYXNoX2tleSwKICAgICAgICAgb3JpZ2luYWxfY29udGVudD1vcmlnaW5hbCwKQEAgLTM4LDcgKzM2LDYgQEAgZGVmIF9lbnRyeSgKICAgICApCiAKIAotCiBkZWYgdGVzdF91bmF2YWlsYWJsZV9iaW5kaW5nX2F1dGhvcml0eV9uZXZlcl9leHBvc2VzX3ZvbGF0aWxlX3JlYmluZCh0bXBfcGF0aDogQW55KSAtPiBOb25lOgogICAgICIiIkFuIGV4cGxpY2l0LWtleSBzYWZldHkgdmV0byBtdXN0IG5vdCBzaGFkb3cgYW4gb2xkZXIgZHVyYWJsZSBiaW5kaW5nIHdpdGggZm9yZWlnbiBieXRlcy4iIiIKICAgICBiYWNrZW5kID0gU3FsaXRlQmFja2VuZChkYl9wYXRoPXRtcF9wYXRoIC8gImF1dGhvcml0eS1vdXRhZ2Uuc3FsaXRlMyIsIG1heF9yb3dzPTEwMCkKQEAgLTY0LDYgKzYxLDcgQEAgZGVmIHRlc3RfdW5hdmFpbGFibGVfYmluZGluZ19hdXRob3JpdHlfbmV2ZXJfZXhwb3Nlc192b2xhdGlsZV9yZWJpbmQodG1wX3BhdGg6IEEKICAgICBmaW5hbGx5OgogICAgICAgICBiYWNrZW5kLmNsb3NlKCkKIAorCiBkZWYgdGVzdF91bmJvdW5kX2xlZ2FjeV9zcGlsbF9vbmx5X2V4cGxpY2l0X2hhc2hfaXNfcXVhcmFudGluZWQodG1wX3BhdGg6IEFueSkgLT4gTm9uZToKICAgICAiIiJVcGdyYWRlIGNhbm5vdCBpbmZlciB3aGljaCBwcmUtUFIgcHJvZHVjZXIgYW4gdW5ib3VuZCBleHBsaWNpdCBrZXkgYmVsb25nZWQgdG8uIiIiCiAgICAgc3BpbGwgPSBTcWxpdGVCYWNrZW5kKGRiX3BhdGg9dG1wX3BhdGggLyAibGVnYWN5LXNwaWxsLnNxbGl0ZTMiLCBtYXhfcm93cz0xMDApCg==
+EOF
+          tr -d '[:space:]' < /tmp/style.b64 > /tmp/style.clean.b64
+          test "$(sha256sum /tmp/style.clean.b64 | awk '{print $1}')" = "b4ca4402bf7fefef66d1a53d6957ace43d35528d33f8c8c37d361c9b770828bc"
+          base64 -d /tmp/style.clean.b64 > /tmp/style.patch
+          test "$(sha256sum /tmp/style.patch | awk '{print $1}')" = "70be084294ad37e7697c2c6a5c4813982f8a05513756d16a4ae33ecdfaf8d81b"
 
-          cat \
-            .chatgpt-pr216/part00 \
-            .chatgpt-pr216/part01 \
-            .chatgpt-pr216/part02 \
-            .chatgpt-pr216/part03 \
-            .chatgpt-pr216/part04 \
-            .chatgpt-pr216/part05 \
-            .chatgpt-pr216/part06 \
-            .chatgpt-pr216/part07a \
-            .chatgpt-pr216/part07b \
-            .chatgpt-pr216/part07c \
-            .chatgpt-pr216/part07d \
-            .chatgpt-pr216/part08 > /tmp/pr216.b64
-          test "$(sha256sum /tmp/pr216.b64 | awk '{print $1}')" = "d0b6020a98db87f6429374c85c639a43670810c8fcc31fa422520ed0a2fc0e53"
-          base64 -d /tmp/pr216.b64 > /tmp/pr216.patch
-          test "$(sha256sum /tmp/pr216.patch | awk '{print $1}')" = "d2771cf90dc5bf2b589e95b909b6f0e202f98ebc8c9b97710172d12318cbaba9"
-
-          git checkout --detach 7345a29da1aae1c874eb021a8b56929c179d17ab
-          git apply --index /tmp/pr216.patch
-          tree="$(git write-tree)"
-          test "$tree" = "2075d70f0a9a92d2af38a720c44838273fe00243"
+          git checkout --detach 108f13b8da5588726dd1cb0cf4ed495b4c15d95a
+          git apply --index /tmp/style.patch
+          test "$(git write-tree)" = "0aa23c84827bf53e03c20c98f42b8de3d845dcfc"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix: close remaining PR 216 storage safety gaps"
-          test "$(git rev-parse HEAD^{tree})" = "2075d70f0a9a92d2af38a720c44838273fe00243"
+          git commit -m "style: satisfy PR 216 lint gate"
+          test "$(git rev-parse HEAD^{tree})" = "0aa23c84827bf53e03c20c98f42b8de3d845dcfc"
           git push origin HEAD:refs/heads/chatgpt/pr216-validate-final-20260911
