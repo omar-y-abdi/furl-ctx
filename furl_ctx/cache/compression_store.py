@@ -40,6 +40,7 @@ from __future__ import annotations
 import decimal
 import hashlib
 import heapq
+import hmac
 import json
 import logging
 import math
@@ -172,15 +173,68 @@ _DURABLE_RETRY_MAX_BACKOFF_SECONDS = 0.20
 # 24}) that the anti-spoofing ingress (the MCP retrieve handler, via ``marker_grammar.is_valid_ccr_hash``) enforces — see the "Two DISTINCT width contracts" note in ``ccr/the module``.
 _MIN_EXPLICIT_HASH_LEN = 6
 
-# Binding records must never be content-derived verifiers: arbitrary explicit
-# hashes get an opaque random provenance id. Internally-computed hashes carry a
-# non-secret mode marker because their key already is the content address.
-_BINDING_ID_PREFIX: Final = "id:v1:"
+# Arbitrary explicit hashes need durable same-content continuity after TTL/delete,
+# but a raw SHA-256(original) tombstone is an offline verifier for low-entropy
+# secrets. Store a salted PBKDF2 proof instead. Live rows carry the exact proof,
+# so normal retrieval/retry is a string comparison; the KDF runs only on first
+# claim, tombstone-only rebind, or legacy migration.
+_BINDING_PROOF_PREFIX: Final = "proof:v1:"
+_RETIRED_BINDING_PREFIX: Final = "retired:v1:"
+_BINDING_PBKDF2_ITERATIONS: Final = 120_000
 _CONTENT_DERIVED_BINDING_ID: Final = "content:v1"
 
 
-def _new_binding_id() -> str:
-    return f"{_BINDING_ID_PREFIX}{secrets.token_hex(16)}"
+def _binding_bytes(content: str) -> bytes:
+    return content.encode("utf-8", "surrogatepass")
+
+
+def _new_binding_id(content: str | None = None) -> str:
+    if content is None:
+        return f"{_RETIRED_BINDING_PREFIX}{secrets.token_hex(16)}"
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        _binding_bytes(content),
+        salt,
+        _BINDING_PBKDF2_ITERATIONS,
+        dklen=32,
+    )
+    return f"{_BINDING_PROOF_PREFIX}{_BINDING_PBKDF2_ITERATIONS}:{salt.hex()}:{digest.hex()}"
+
+
+def _binding_id_matches_content(binding_id: str, content: str) -> bool:
+    if not binding_id.startswith(_BINDING_PROOF_PREFIX):
+        return False
+    try:
+        iterations_text, salt_hex, expected_hex = binding_id[len(_BINDING_PROOF_PREFIX) :].split(
+            ":", 2
+        )
+        iterations = int(iterations_text)
+        if iterations <= 0 or iterations > 10_000_000:
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(expected_hex)
+    except (ValueError, TypeError):
+        return False
+    actual = hashlib.pbkdf2_hmac(
+        "sha256", _binding_bytes(content), salt, iterations, dklen=len(expected)
+    )
+    return hmac.compare_digest(actual, expected)
+
+
+def _content_address_matches(hash_key: str, content: str) -> bool:
+    # Compatibility-only check for pre-binding-id rows/checkpoints. Nothing from
+    # this SHA-256 is persisted as identity metadata; it only recognizes the
+    # already-published SHA-256 prefix that is itself the row key.
+    digest = hashlib.sha256(_binding_bytes(content)).hexdigest()
+    return digest.startswith(hash_key.lower())
+
+
+def _legacy_binding_matches_content(value: str, content: str) -> bool:
+    if not _is_legacy_binding_value(value):
+        return False
+    digest = hashlib.sha256(_binding_bytes(content)).hexdigest()
+    return hmac.compare_digest(value.lower(), digest)
 
 
 def _is_legacy_binding_value(value: str) -> bool:
@@ -751,20 +805,13 @@ class CompressionStore:
             ) from exc
 
     def _migrate_legacy_bindings(self) -> None:
-        """Remove pre-v1 content digests from durable identity metadata.
-
-        A legacy binding stored SHA-256(original), which becomes an offline
-        verifier for low-entropy secrets once its payload is gone. Under the
-        cross-process mutation guard, one unambiguous live legacy row is assigned
-        a random opaque provenance id. Orphaned/divergent legacy tombstones are
-        replaced by a random id and permanently conflicted, preserving the
-        no-foreign-content guarantee without retaining the old verifier.
-        """
+        """Replace legacy fast content verifiers and classify old content-addressed rows."""
         backend = self._binding_backend
         if backend is None:
             return
         lister = getattr(backend, "checked_bindings", None)
         replacer = getattr(backend, "replace_binding", None)
+        release = getattr(backend, "release_binding", None)
         if not callable(lister) or not callable(replacer):
             return
 
@@ -777,11 +824,12 @@ class CompressionStore:
                     return
                 now = self._now()
                 for hash_key, stored_value, conflicted in records:
-                    if not _is_legacy_binding_value(str(stored_value)):
+                    stored_value = str(stored_value)
+                    if not _is_legacy_binding_value(stored_value):
                         continue
-                    replacement_id = _new_binding_id()
+                    retired = _new_binding_id()
                     if conflicted:
-                        replacer(hash_key, replacement_id, True)
+                        replacer(hash_key, retired, True)
                         continue
                     try:
                         rows = self._representations_locked(hash_key)
@@ -791,22 +839,24 @@ class CompressionStore:
                             hash_key,
                             exc,
                         )
-                        replacer(hash_key, replacement_id, True)
+                        replacer(hash_key, retired, True)
                         continue
 
                     live = [(role, entry) for role, entry in rows if not entry.is_expired(now)]
                     originals = {entry.original_content for _role, entry in live}
-                    existing_ids = {
-                        entry.binding_id
-                        for _role, entry in live
-                        if entry.binding_id and entry.binding_id != _CONTENT_DERIVED_BINDING_ID
-                    }
-                    if len(originals) != 1 or len(existing_ids) > 1:
-                        replacer(hash_key, replacement_id, True)
+                    if len(originals) != 1:
+                        replacer(hash_key, retired, True)
                         continue
-                    if existing_ids:
-                        replacement_id = next(iter(existing_ids))
+                    original = next(iter(originals))
+                    if not _legacy_binding_matches_content(stored_value, original):
+                        replacer(hash_key, retired, True)
+                        continue
 
+                    replacement_id = (
+                        _CONTENT_DERIVED_BINDING_ID
+                        if _content_address_matches(hash_key, original)
+                        else _new_binding_id(original)
+                    )
                     try:
                         for role, _entry in live:
                             target = self._backend if role == "primary" else self._spill
@@ -816,7 +866,15 @@ class CompressionStore:
                                 raise StorageUnavailableError(
                                     f"{role} payload disappeared during legacy binding migration"
                                 )
-                        replacer(hash_key, replacement_id, False)
+                        if replacement_id == _CONTENT_DERIVED_BINDING_ID:
+                            if callable(release):
+                                release(hash_key)
+                            else:
+                                raise StorageUnavailableError(
+                                    "binding backend cannot remove migrated content-address record"
+                                )
+                        else:
+                            replacer(hash_key, replacement_id, False)
                     except StorageUnavailableError as exc:
                         logger.warning(
                             "CCR legacy binding %s migration became indeterminate; retiring identity: %s",
@@ -824,6 +882,46 @@ class CompressionStore:
                             exc,
                         )
                         replacer(hash_key, _new_binding_id(), True)
+
+                # Pre-binding-id content-addressed rows legitimately had no
+                # ccr_bindings record at all. Classify only rows whose existing
+                # key is provably their SHA-256 prefix; arbitrary unproven rows
+                # stay quarantined with binding_id=None.
+                for role, tier in (("primary", self._backend), ("spill", self._spill)):
+                    if tier is None:
+                        continue
+                    try:
+                        items = self._checked_items_backend_locked(tier, role)
+                    except StorageUnavailableError as exc:
+                        logger.warning(
+                            "CCR legacy row migration cannot enumerate %s tier: %s", role, exc
+                        )
+                        continue
+                    for hash_key, entry in items:
+                        if (
+                            entry.binding_id is not None
+                            or not self._is_marker_key(hash_key)
+                            or entry.is_expired(now)
+                        ):
+                            continue
+                        try:
+                            record = self._binding_record_locked(hash_key)
+                        except StorageUnavailableError:
+                            continue
+                        if record is not None:
+                            continue
+                        if _content_address_matches(hash_key, entry.original_content):
+                            try:
+                                self._set_entry_binding_id_locked(
+                                    tier, hash_key, _CONTENT_DERIVED_BINDING_ID, role
+                                )
+                            except StorageUnavailableError as exc:
+                                logger.warning(
+                                    "CCR content-address migration failed for %s/%s: %s",
+                                    role,
+                                    hash_key,
+                                    exc,
+                                )
 
     def _binding_record_locked(self, hash_key: str) -> tuple[str, bool] | None:
         backend = self._binding_backend
@@ -886,9 +984,20 @@ class CompressionStore:
             )
         return state == "safe"
 
-    def _claim_binding_locked(self, hash_key: str, binding_id: str) -> str:
+    def _claim_binding_locked(
+        self,
+        hash_key: str,
+        original: str,
+        binding_id: str | None = None,
+    ) -> tuple[str, str]:
+        """Claim or verify one arbitrary explicit-hash identity.
+
+        Live retries pass the already-stored proof and stay O(1). When only a
+        tombstone remains, the salted PBKDF2 proof verifies whether the caller is
+        re-storing the same original without retaining a raw content digest.
+        """
         if not self._is_marker_key(hash_key):
-            return "same"
+            return "same", binding_id or _new_binding_id(original)
         backend = self._binding_backend
         if backend is None:
             raise StorageUnavailableError(
@@ -899,12 +1008,25 @@ class CompressionStore:
             raise StorageUnavailableError(
                 f"binding backend cannot atomically claim explicit hash {hash_key}"
             )
+
+        record = self._binding_record_locked(hash_key)
+        if record is not None:
+            recorded, conflicted = record
+            if conflicted:
+                return "conflict", recorded
+            if binding_id is not None and recorded == binding_id:
+                return "same", recorded
+            if _binding_id_matches_content(recorded, original):
+                return "same", recorded
+
+        proof = binding_id or _new_binding_id(original)
         try:
-            return str(claimer(hash_key, binding_id))
+            result = str(claimer(hash_key, proof))
         except StorageUnavailableError:
             raise
         except Exception as exc:
             raise StorageUnavailableError(f"binding claim failed for {hash_key}") from exc
+        return result, proof
 
     def _poison_binding_locked(
         self, hash_key: str, old_binding_id: str | None, new_binding_id: str | None
@@ -1213,15 +1335,15 @@ class CompressionStore:
                 if len(candidate_binding_ids) > 1:
                     binding_conflict = True
                 else:
-                    entry.binding_id = (
-                        next(iter(candidate_binding_ids))
-                        if candidate_binding_ids
-                        else _new_binding_id()
+                    candidate_binding_id = (
+                        next(iter(candidate_binding_ids)) if candidate_binding_ids else None
                     )
                     try:
-                        binding_conflict = (
-                            self._claim_binding_locked(hash_key, entry.binding_id) == "conflict"
+                        binding_state, resolved_binding_id = self._claim_binding_locked(
+                            hash_key, original, candidate_binding_id
                         )
+                        entry.binding_id = resolved_binding_id
+                        binding_conflict = binding_state == "conflict"
                     except StorageUnavailableError as exc:
                         # Durability fail-open is safe only after identity authority
                         # accepted this key/content pair. Before that proof, writing
@@ -1361,7 +1483,10 @@ class CompressionStore:
             with self._lock:
                 if ensure_binding:
                     try:
-                        binding = self._claim_binding_locked(hash_key, entry.original_content)
+                        binding, resolved_binding_id = self._claim_binding_locked(
+                            hash_key, entry.original_content, entry.binding_id
+                        )
+                        entry.binding_id = resolved_binding_id
                     except StorageUnavailableError:
                         continue
                     if binding == "conflict":
@@ -3081,12 +3206,23 @@ def ccr_import(
                 continue
             if entry.binding_id == _CONTENT_DERIVED_BINDING_ID:
                 continue
+            record = source.get_binding(hash_key)
             if entry.binding_id is None:
+                if record is None and _content_address_matches(hash_key, entry.original_content):
+                    entry.binding_id = _CONTENT_DERIVED_BINDING_ID
+                    continue
+                if (
+                    record is not None
+                    and not record[1]
+                    and _legacy_binding_matches_content(record[0], entry.original_content)
+                ):
+                    entry.binding_id = _new_binding_id(entry.original_content)
+                    bindings[hash_key] = (entry.binding_id, False)
+                    continue
                 raise CollisionSafetyError(
-                    f"Checkpoint entry {hash_key} has no opaque binding id.",
+                    f"Checkpoint entry {hash_key} has no verified binding proof.",
                     hash_key=hash_key,
                 )
-            record = source.get_binding(hash_key)
             if record is None or record[1] or record[0] != entry.binding_id:
                 raise CollisionSafetyError(
                     f"Checkpoint entry {hash_key} has no verified matching identity record.",
