@@ -10,12 +10,14 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 env:
   PY_VERSION: "3.12"
   PR_HEAD: "7345a29da1aae1c874eb021a8b56929c179d17ab"
   EXPECTED_TREE: "216518334cf597da1ee314bc72754d034a1eb5f1"
   PATCH_SHA256: "b5d52e66e74f748b40f3d2ecc79ae85177ebdd87c411513e765fb4747ef5ce7e"
+  BASE_CI_RUN: "34562586936"
 
 jobs:
   validate-and-stage:
@@ -38,14 +40,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ env.PY_VERSION }}
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          toolchain: 1.95.0
-      - name: Build and install exact test payload
+      - name: Install base-head wheel and validation tooling
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python -m pip install --upgrade pip 'maturin>=1.9,<2.0'
-          maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
-          WHEEL="$(ls dist/*.whl)"
+          gh run download "${BASE_CI_RUN}" -n furl-wheel -D /tmp/furl-wheel
+          WHEEL="$(find /tmp/furl-wheel -name '*.whl' -print -quit)"
+          test -n "${WHEEL}"
+          python -m pip install --upgrade pip
           pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2 ruff==0.16.2 mypy==1.14.1
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
           cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
