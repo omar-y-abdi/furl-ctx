@@ -572,8 +572,10 @@ class CompressionStore:
             (b for b in binding_candidates if bool(getattr(b, "durable", False))),
             binding_candidates[0] if binding_candidates else None,
         )
-        # Same-process fallback bindings are evidence only for rows this store
-        # itself wrote while durable identity authority was unavailable.
+        # Same-process provenance for explicit hashes this store instance successfully
+        # wrote. This is deliberately process-local: it can keep a known surviving
+        # row retrievable after an incomplete clear, but disappears on restart so an
+        # unbound legacy row is never canonized merely because it survived.
         self._volatile_bindings: dict[str, str] = {}
 
         # Local retrieval-event tracking
@@ -755,10 +757,13 @@ class CompressionStore:
             return "safe" if not conflicted and recorded == fingerprint else "unsafe"
         if self._volatile_bindings.get(hash_key) == fingerprint:
             return "safe"
-        # Upgrade compatibility: one fully inspected, internally consistent
-        # legacy row is safe to serve. If any tier was unreadable, absence of a
-        # divergent pre-upgrade replica is not proven.
-        return "safe" if complete else "unavailable"
+        # A pre-binding-table row whose key is not derived from its content has
+        # no provenance we can prove. Even a complete single-row snapshot can be
+        # the surviving half of a pre-upgrade divergent primary/spill state after
+        # restart. Quarantine it rather than canonizing whichever replica happened
+        # to survive. Incomplete inspection is operationally unavailable; complete
+        # inspection with missing provenance is deterministically unsafe.
+        return "unsafe" if complete else "unavailable"
 
     def _binding_safe_locked(self, hash_key: str, entries: list[CompressionEntry]) -> bool:
         state = self._binding_state_locked(hash_key, entries, complete=True)
@@ -916,7 +921,27 @@ class CompressionStore:
             )
         if release_binding:
             self._release_binding_locked(hash_key)
+            self._volatile_bindings.pop(hash_key, None)
         return primary_deleted or spill_deleted
+
+    @staticmethod
+    def _record_access_if_present(
+        backend: Any,
+        hash_key: str,
+        expected: CompressionEntry,
+        query: str | None,
+        role: str,
+    ) -> CompressionEntry | None:
+        """Best-effort advisory access update with no content upsert fallback."""
+        updater = getattr(backend, "record_access_if_present", None)
+        if not callable(updater):
+            return None
+        try:
+            updated = updater(hash_key, expected, query)
+        except Exception as exc:  # noqa: BLE001 — bookkeeping stays fail-open
+            logger.warning("CCR %s access update failed (non-fatal): %s", role, exc)
+            return None
+        return updated if isinstance(updated, CompressionEntry) else None
 
     @property
     def default_ttl_seconds(self) -> int:
@@ -1040,7 +1065,6 @@ class CompressionStore:
             # content, so live representations are inspected before any rebind.
             existing = self._backend.get(hash_key)
             spilled: CompressionEntry | None = None
-            expired_spill = False
             if self._spill is not None:
                 if explicit_hash is None:
                     spilled = self._recover_from_spill(hash_key)
@@ -1059,18 +1083,11 @@ class CompressionStore:
                             "could not be inspected for an older same-key binding.",
                             hash_key=hash_key,
                         ) from exc
-                    if spilled is not None and spilled.is_expired(self._now()):
-                        expired_spill = True
-                        spilled = None
-
-            if explicit_hash is not None and existing is None and expired_spill:
-                try:
-                    self._delete_hash_verified_locked(hash_key, release_binding=True)
-                except StorageUnavailableError as exc:
-                    raise CollisionSafetyError(
-                        f"Cannot safely retire expired binding {hash_key}: {exc}",
-                        hash_key=hash_key,
-                    ) from exc
+                    # Expiry ends payload availability, not published hash
+                    # identity. A stale marker can outlive the storage TTL, so an
+                    # expired explicit-key row still participates in collision
+                    # detection and must never be silently replaced by foreign
+                    # bytes under the same key.
 
             conflicting = next(
                 (
@@ -1119,6 +1136,7 @@ class CompressionStore:
                 # has actually been removed. Otherwise a failed cleanup makes
                 # still-valid old content needlessly unretrievable.
                 if conflicting is not None:
+                    self._volatile_bindings.pop(hash_key, None)
                     try:
                         self._poison_binding_locked(
                             hash_key, conflicting.original_content, original
@@ -1137,11 +1155,12 @@ class CompressionStore:
             if not collision_dropped and not volatile_only:
                 durable = self._persist_and_report_durability(hash_key, entry)
                 if explicit_hash is not None:
-                    fingerprint = self._content_fingerprint(original)
-                    if durable:
-                        self._volatile_bindings.pop(hash_key, None)
-                    else:
-                        self._volatile_bindings[hash_key] = fingerprint
+                    # Keep same-process provenance even when the authoritative claim
+                    # is durable. If a later all-tier clear is incomplete and its
+                    # binding authority was cleared before a spill survivor, this
+                    # fingerprint is the proof that survivor belongs to this store's
+                    # own published identity. A restart intentionally loses it.
+                    self._volatile_bindings[hash_key] = self._content_fingerprint(original)
                 heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
 
         # Collision-drop veto (Bug-6): the ambiguous binding was dropped, so NOTHING is retrievable under this key.
@@ -1242,7 +1261,10 @@ class CompressionStore:
                             hash_key=hash_key,
                         )
                 if self._persist_and_report_durability(hash_key, entry):
-                    self._volatile_bindings.pop(hash_key, None)
+                    if ensure_binding:
+                        self._volatile_bindings[hash_key] = self._content_fingerprint(
+                            entry.original_content
+                        )
                     return True
         return False
 
@@ -1265,27 +1287,40 @@ class CompressionStore:
             if read.source == "spill":
                 return entry
 
-            entry.record_access(query)
-            self._backend.set(hash_key, entry)
+            # Access accounting is advisory, but writing the whole entry back is
+            # not: an upsert after a concurrent purge can resurrect deleted
+            # content. Built-in backends expose an update-if-present primitive
+            # that can only touch the same surviving generation. Unsupported
+            # backends simply skip persistent bookkeeping rather than risk data
+            # resurrection.
+            updated = self._record_access_if_present(
+                self._backend, hash_key, entry, query, "primary"
+            )
+            result = (
+                replace(updated, search_queries=list(updated.search_queries))
+                if updated is not None
+                else replace(entry, search_queries=list(entry.search_queries))
+            )
+            if updated is None:
+                result.record_access(query)
             if self._enable_feedback:
                 self._log_retrieval(
                     hash_key=hash_key,
                     query=query,
-                    items_retrieved=entry.original_item_count,
-                    total_items=entry.original_item_count,
-                    tool_name=entry.tool_name,
+                    items_retrieved=result.original_item_count,
+                    total_items=result.original_item_count,
+                    tool_name=result.tool_name,
                     retrieval_type="full",
                 )
             self._log_retrieval_payload(
                 hash_key=hash_key,
                 query=query,
                 retrieval_type="full",
-                payload=entry.original_content,
-                items_retrieved=entry.original_item_count,
-                total_items=entry.original_item_count,
-                entry=entry,
+                payload=result.original_content,
+                items_retrieved=result.original_item_count,
+                total_items=result.original_item_count,
+                entry=result,
             )
-            result = replace(entry, search_queries=list(entry.search_queries))
 
         if record_feedback_signal and self._enable_feedback:
             self._emit_retrieval_signal(result.tool_name, result.compression_strategy)
@@ -1358,7 +1393,7 @@ class CompressionStore:
         )
         results = [item for item, _ in heapq.nlargest(max_results, scored, key=itemgetter(1))]
         if results:
-            self._record_search_access(hash_key, query)
+            self._record_search_access(hash_key, query, entry, read.source)
         if self._enable_feedback:
             with self._lock:
                 self._log_retrieval(
@@ -1754,36 +1789,32 @@ class CompressionStore:
                 return None
             return replace(entry, search_queries=list(entry.search_queries))
 
-    def _record_search_access(self, hash_key: str, query: str | None) -> None:
-        """Record access after a search returned results, including spill hits."""
-        signal_meta: tuple[str | None, str | None] | None = None
+    def _record_search_access(
+        self,
+        hash_key: str,
+        query: str | None,
+        expected: CompressionEntry,
+        source: str | None,
+    ) -> None:
+        """Record search access without allowing bookkeeping to recreate content."""
+        signal_meta: tuple[str | None, str | None] = (
+            expected.tool_name,
+            expected.compression_strategy,
+        )
         with self._lock:
-            entry = self._backend.get(hash_key)
-            in_spill = False
+            backend = self._spill if source == "spill" else self._backend
+            if backend is not None:
+                updated = self._record_access_if_present(
+                    backend,
+                    hash_key,
+                    expected,
+                    query,
+                    "spill" if source == "spill" else "primary",
+                )
+                if updated is not None:
+                    signal_meta = (updated.tool_name, updated.compression_strategy)
 
-            if entry is not None and entry.is_expired(self._now()):
-                self._backend.delete(hash_key)
-                self._stale_heap_entries += 1
-                entry = None
-
-            if entry is None:
-                entry = self._recover_from_spill(hash_key)
-                in_spill = entry is not None
-
-            if entry is None:
-                return
-
-            entry.record_access(query)
-            if in_spill and self._spill is not None:
-                try:
-                    self._spill.set(hash_key, entry)
-                except Exception as exc:  # noqa: BLE001 — bookkeeping is advisory
-                    logger.warning("CCR spill access update failed (non-fatal): %s", exc)
-            else:
-                self._backend.set(hash_key, entry)
-            signal_meta = (entry.tool_name, entry.compression_strategy)
-
-        if self._enable_feedback and signal_meta is not None:
+        if self._enable_feedback:
             self._emit_retrieval_signal(*signal_meta)
 
     def _emit_retrieval_signal(
@@ -1870,7 +1901,7 @@ class CompressionStore:
                 read = self._read_live_entry_locked(hash_key)
                 if clean_expired and read.status.get("status") == "expired":
                     try:
-                        self._delete_hash_verified_locked(hash_key, release_binding=True)
+                        self._delete_hash_verified_locked(hash_key, release_binding=False)
                     except StorageUnavailableError as exc:
                         status = dict(read.status)
                         status["cleanup_unavailable"] = str(exc)
@@ -2172,7 +2203,12 @@ class CompressionStore:
             self._retrieval_events.clear()
             self._eviction_heap.clear()
             self._stale_heap_entries = 0
-            self._volatile_bindings.clear()
+            # Only a proven all-tier wipe is an identity reset. If any row may have
+            # survived, retain same-process provenance so that known content remains
+            # retrievable for an honest purge retry; other processes/restarts lack
+            # this evidence and continue to quarantine unbound survivors.
+            if residual == 0 and not uncertain:
+                self._volatile_bindings.clear()
         return max(residual, 1 if uncertain else 0)
 
     def _clear_spill_residual(self) -> int:

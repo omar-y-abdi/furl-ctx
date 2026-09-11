@@ -324,6 +324,23 @@ class SqliteBackend:
             result.append(volatile)
         return result, True
 
+    def record_access_if_present(
+        self,
+        hash_key: str,
+        expected: CompressionEntry,
+        query: str | None,
+    ) -> CompressionEntry | None:
+        """Persist retrieval bookkeeping without an upsert/resurrection path."""
+        if self._degraded:
+            return self._memory.record_access_if_present(hash_key, expected, query)
+        try:
+            return self._run(
+                "record_access_if_present",
+                lambda conn: self._sqlite_record_access_if_present(conn, hash_key, expected, query),
+            )
+        except _SqliteOpFailed:
+            return self._memory.record_access_if_present(hash_key, expected, query)
+
     def set_volatile(self, hash_key: str, entry: CompressionEntry) -> None:
         """Write only the same-process fallback without touching SQLite."""
         self._memory.set(hash_key, entry)
@@ -464,19 +481,7 @@ class SqliteBackend:
             except _SqliteOpFailed:
                 file_purged = 0
 
-        volatile_expired = [key for key, entry in self._memory.items() if entry.is_expired(now)]
         volatile_purged = self._memory.purge_expired(now)
-        if volatile_expired and not self._degraded:
-            try:
-                self._run(
-                    "purge_expired_fallback_bindings",
-                    lambda conn: self._sqlite_release_orphaned_bindings(conn, volatile_expired),
-                )
-            except _SqliteOpFailed:
-                # Expiry GC remains fail-open. A stale claim can only veto a
-                # later reuse until SQLite becomes writable; it cannot make a
-                # foreign binding retrievable.
-                pass
         return file_purged + volatile_purged
 
     def created_at_index(self) -> list[tuple[float, str]]:
@@ -818,31 +823,61 @@ class SqliteBackend:
                 self._row_count -= 1
         return deleted
 
+    def _sqlite_record_access_if_present(
+        self,
+        conn: sqlite3.Connection,
+        hash_key: str,
+        expected: CompressionEntry,
+        query: str | None,
+    ) -> CompressionEntry | None:
+        """Update access columns only when the exact stored generation survives.
+
+        ``set()`` is an upsert and therefore unsafe for read bookkeeping: a purge
+        can delete the row after retrieval reads it, then a stale access write can
+        insert the full row again. This transaction takes SQLite's writer lock,
+        re-reads the current generation, and updates only metadata. If delete won
+        first the row is absent; if a replacement won first its generation no
+        longer matches. Neither case can recreate or overwrite content.
+        """
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(_SELECT_SQL, (_encode_text(hash_key),)).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            current = _row_to_entry(row)
+            if (
+                current.created_at != expected.created_at
+                or current.original_content != expected.original_content
+                or current.compressed_content != expected.compressed_content
+            ):
+                conn.rollback()
+                return None
+            current.record_access(query)
+            conn.execute(
+                "UPDATE ccr_entries SET retrieval_count = ?, search_queries = ?, "
+                "last_accessed = ? WHERE hash_key = ?",
+                (
+                    current.retrieval_count,
+                    json.dumps(current.search_queries),
+                    current.last_accessed,
+                    _encode_text(hash_key),
+                ),
+            )
+            conn.commit()
+            return current
+        except BaseException:
+            conn.rollback()
+            raise
+
     def _sqlite_purge_expired(self, conn: sqlite3.Connection, now: float) -> int:
-        """Delete expired rows and their binding claims in one transaction."""
+        """Delete expired payload rows while retaining published identities."""
         with conn:
-            expired = conn.execute(
-                "SELECT hash_key FROM ccr_entries WHERE created_at + ttl < ?", (now,)
-            ).fetchall()
-            if expired:
-                conn.executemany("DELETE FROM ccr_bindings WHERE hash_key = ?", expired)
             purged = conn.execute(_PURGE_EXPIRED_SQL, (now,)).rowcount
         if purged:
             with self._state_lock:
                 self._row_count -= purged
         return int(purged)
-
-    def _sqlite_release_orphaned_bindings(
-        self, conn: sqlite3.Connection, hash_keys: list[str]
-    ) -> None:
-        encoded = [(_encode_text(key),) for key in hash_keys]
-        with conn:
-            for (hash_key,) in encoded:
-                conn.execute(
-                    "DELETE FROM ccr_bindings WHERE hash_key = ? "
-                    "AND NOT EXISTS (SELECT 1 FROM ccr_entries WHERE hash_key = ?)",
-                    (hash_key, hash_key),
-                )
 
     def _sqlite_claim_binding(
         self, conn: sqlite3.Connection, hash_key: str, fingerprint: str

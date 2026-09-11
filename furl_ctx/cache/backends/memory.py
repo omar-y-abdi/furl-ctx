@@ -104,6 +104,25 @@ class InMemoryBackend:
         """
         return self._store.get(hash_key)
 
+    def record_access_if_present(
+        self,
+        hash_key: str,
+        expected: CompressionEntry,
+        query: str | None,
+    ) -> CompressionEntry | None:
+        """Update advisory access metadata without ever recreating a deleted row."""
+        current = self._store.get(hash_key)
+        if current is None:
+            return None
+        if (
+            current.created_at != expected.created_at
+            or current.original_content != expected.original_content
+            or current.compressed_content != expected.compressed_content
+        ):
+            return None
+        current.record_access(query)
+        return current
+
     def checked_get_all(self, hash_key: str) -> list[CompressionEntry]:
         """Authoritative representations for proof-requiring store operations."""
         entry = self._store.get(hash_key)
@@ -235,11 +254,10 @@ class InMemoryBackend:
         return list(self._store.items())
 
     def purge_expired(self, now: float) -> int:
-        """Delete expired payloads and their identity claims."""
+        """Delete expired payloads while retaining published identity claims."""
         expired = [key for key, entry in self._store.items() if entry.is_expired(now)]
         for key in expired:
             del self._store[key]
-            self._bindings.pop(key, None)
         return len(expired)
 
     def created_at_index(self) -> list[tuple[float, str]]:

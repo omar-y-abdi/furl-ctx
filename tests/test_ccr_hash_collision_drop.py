@@ -95,13 +95,14 @@ def test_collision_with_require_durable_vetoes_bug6() -> None:
     assert store.retrieve(H) is None
 
 
-def test_expired_first_binding_does_not_wedge_the_key() -> None:
-    # An expired same-key entry is reaped by _evict_if_needed() BEFORE the collision check, so it is not a
-    # collision at all: different content binds cleanly after expiry and resolves normally (the key is not wedged).
+def test_expired_first_binding_retires_key_until_namespace_reset() -> None:
+    # TTL expiry removes the payload, not the published identity. A stale marker
+    # can outlive its backing row in a transcript; rebinding the same explicit
+    # key to different bytes would make that stale marker retrieve foreign
+    # content instead of the required loud miss. Whole-store clear is the
+    # explicit identity-reset boundary (pinned separately).
     store = CompressionStore(max_entries=10)
     store.store(original="first content", compressed=f"<<ccr:{H}>>", explicit_hash=H, ttl=60)
     store._backend.get(H).created_at -= 120.0  # age the entry past its ttl
     store.store(original="SECOND content", compressed=f"<<ccr:{H}>>", explicit_hash=H)
-    entry = store.retrieve(H)
-    assert entry is not None
-    assert entry.original_content == "SECOND content"
+    assert store.retrieve(H) is None
