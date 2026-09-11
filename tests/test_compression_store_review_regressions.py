@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
+import time
+from typing import Any
+
 import pytest
 
 from furl_ctx.cache.backends.memory import InMemoryBackend
+from furl_ctx.cache.backends.sqlite import SqliteBackend
 from furl_ctx.cache.compression_store import (
     CollisionSafetyError,
     CompressionEntry,
@@ -16,6 +22,7 @@ OLD_HASH = "a" * 24
 FILLER_HASH = "b" * 24
 CHILD_HASH = "c" * 24
 PARENT_HASH = "d" * 24
+SECOND_CHILD_HASH = "e" * 24
 
 
 class _DictSpill:
@@ -75,6 +82,70 @@ class _UnreadableNestedSpill:
     def delete(self, hash_key: str) -> bool:
         self.delete_calls.append(hash_key)
         return False
+
+
+class _OneShotVerificationSpill(_DictSpill):
+    """Readable during preflight, then fails exactly one post-delete verification read."""
+
+    def __init__(self, fail_hash: str) -> None:
+        super().__init__()
+        self.fail_hash = fail_hash
+        self._reads: dict[str, int] = {}
+
+    def get(self, hash_key: str) -> CompressionEntry | None:
+        count = self._reads.get(hash_key, 0) + 1
+        self._reads[hash_key] = count
+        if hash_key == self.fail_hash and count == 2:
+            raise RuntimeError("one-shot verification outage")
+        return self.data.get(hash_key)
+
+
+class _UnavailableSpill:
+    """A spill tier whose reads/index are temporarily unavailable."""
+
+    durable = False
+    max_rows = None
+
+    def get(self, hash_key: str) -> CompressionEntry | None:
+        raise RuntimeError("spill unavailable")
+
+    def set(self, hash_key: str, entry: CompressionEntry) -> None:
+        raise RuntimeError("spill unavailable")
+
+    def delete(self, hash_key: str) -> bool:
+        raise RuntimeError("spill unavailable")
+
+    def clear(self) -> None:
+        raise RuntimeError("spill unavailable")
+
+    def count(self) -> int:
+        raise RuntimeError("spill unavailable")
+
+    def items(self) -> list[tuple[str, CompressionEntry]]:
+        raise RuntimeError("spill unavailable")
+
+    def created_at_index(self) -> list[tuple[float, str]]:
+        raise RuntimeError("spill unavailable")
+
+    def set_durable(self, hash_key: str, entry: CompressionEntry) -> bool:
+        raise RuntimeError("spill unavailable")
+
+
+def _entry(hash_key: str, original: str, compressed: str = "view") -> CompressionEntry:
+    return CompressionEntry(
+        hash=hash_key,
+        original_content=original,
+        compressed_content=compressed,
+        original_tokens=1,
+        compressed_tokens=1,
+        original_item_count=1,
+        compressed_item_count=1,
+        tool_name=None,
+        tool_call_id=None,
+        query_context=None,
+        created_at=time.time(),
+        ttl=3600,
+    )
 
 
 def test_store_rejects_different_live_binding_already_in_spill() -> None:
@@ -259,3 +330,234 @@ def test_mcp_query_no_match_on_spill_only_entry_is_empty_success() -> None:
     assert result["results"] == []
     assert result["count"] == 0
     assert "available" in result["note"].lower()
+
+
+def test_sqlite_degraded_clear_cannot_report_verified_empty(tmp_path: Any) -> None:
+    """Fail-open SQLite CRUD must not be accepted as proof that durable rows were erased."""
+    db_path = tmp_path / "primary.sqlite3"
+    backend = SqliteBackend(db_path=db_path, max_rows=100)
+    store = CompressionStore(backend=backend, enable_feedback=False)
+    store.store("durable parent", "view", explicit_hash=PARENT_HASH)
+
+    # Fault injection through the backend's real degraded channel. The durable
+    # file still contains the row, while ordinary clear()/count() fall back to
+    # the empty volatile overlay on the old implementation.
+    backend._degraded = True
+    residual = store.clear()
+
+    with sqlite3.connect(db_path) as conn:
+        durable_rows = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
+    assert durable_rows == 1, "precondition: degradation prevented the durable erase"
+    assert residual > 0, "an unprovably-empty durable primary must fail closed"
+
+
+def test_sqlite_degraded_cascade_preflight_is_indeterminate_not_absent(tmp_path: Any) -> None:
+    """A durable-primary outage cannot be interpreted as an empty marker graph."""
+    db_path = tmp_path / "cascade.sqlite3"
+    backend = SqliteBackend(db_path=db_path, max_rows=100)
+    store = CompressionStore(backend=backend, enable_feedback=False)
+    store.store("child", "child view", explicit_hash=CHILD_HASH)
+    store.store("parent", f"parent <<ccr:{CHILD_HASH}>>", explicit_hash=PARENT_HASH)
+
+    backend._degraded = True
+    outcome = store.delete_cascade_detailed(PARENT_HASH)
+
+    assert outcome.top_deleted is False
+    assert outcome.failed_hashes == (PARENT_HASH,)
+    with sqlite3.connect(db_path) as conn:
+        keys = {
+            bytes(row[0]).decode("utf-8")
+            for row in conn.execute("SELECT hash_key FROM ccr_entries").fetchall()
+        }
+    assert {PARENT_HASH, CHILD_HASH} <= keys
+
+
+def test_one_shot_verification_outage_remains_a_sticky_purge_failure() -> None:
+    """A transient post-delete read failure must not later erase the incomplete-cascade fact."""
+    pytest.importorskip("mcp")
+    from furl_ctx.ccr.mcp_server import FurlMCPServer
+
+    spill = _OneShotVerificationSpill(PARENT_HASH)
+    store = CompressionStore(
+        backend=InMemoryBackend(),
+        spill=spill,  # type: ignore[arg-type]
+        enable_feedback=False,
+    )
+    store.store("child", "child view", explicit_hash=CHILD_HASH)
+    store.store("parent", f"parent <<ccr:{CHILD_HASH}>>", explicit_hash=PARENT_HASH)
+    parent = store._backend.get(PARENT_HASH)
+    assert parent is not None
+    assert store._backend.delete(PARENT_HASH) is True
+    spill.data[PARENT_HASH] = parent
+
+    server = object.__new__(FurlMCPServer)
+    server._local_store = store
+    _deleted, _nested, survivors, _shared = server._purge_one(PARENT_HASH)
+
+    assert PARENT_HASH in survivors, "transient uncertainty must remain sticky to the purge result"
+    assert store.exists_any_tier(CHILD_HASH) is True, "the unvisited child still exists"
+
+
+def test_mcp_query_surfaces_spill_unavailability_instead_of_no_match() -> None:
+    """A query that could not read the spill is not an authoritative zero-match search."""
+    pytest.importorskip("mcp")
+    from furl_ctx.ccr.mcp_server import FurlMCPServer, SessionStats
+
+    store = CompressionStore(
+        backend=InMemoryBackend(),
+        spill=_UnavailableSpill(),  # type: ignore[arg-type]
+        enable_feedback=False,
+    )
+    server = object.__new__(FurlMCPServer)
+    server._local_store = store
+    server._stats = SessionStats()
+
+    result = server._retrieve_content_sync(OLD_HASH, "needle")
+
+    assert result.get("status") == "unavailable"
+    assert "error" in result
+    assert "unavailable" in result["error"].lower()
+
+
+def test_mcp_full_retrieve_surfaces_spill_unavailability() -> None:
+    """A no-query read outage must not be formatted as eviction/absence."""
+    pytest.importorskip("mcp")
+    from furl_ctx.ccr.mcp_server import FurlMCPServer, SessionStats
+
+    store = CompressionStore(
+        backend=InMemoryBackend(),
+        spill=_UnavailableSpill(),  # type: ignore[arg-type]
+        enable_feedback=False,
+    )
+    server = object.__new__(FurlMCPServer)
+    server._local_store = store
+    server._stats = SessionStats()
+
+    result = server._retrieve_content_sync(OLD_HASH, None)
+
+    assert result.get("status") == "unavailable"
+    assert "unavailable" in result["error"].lower()
+    assert "No entry for this hash" not in result["error"]
+
+
+def test_cross_store_search_marks_spill_index_outage_partial() -> None:
+    """Cross-store search must never call an incomplete scan an authoritative no-match."""
+    pytest.importorskip("mcp")
+    from furl_ctx.ccr.mcp_server import FurlMCPServer
+
+    store = CompressionStore(
+        backend=InMemoryBackend(),
+        spill=_UnavailableSpill(),  # type: ignore[arg-type]
+        enable_feedback=False,
+    )
+    server = object.__new__(FurlMCPServer)
+    server._local_store = store
+
+    result = server._search_all_content_sync("needle")
+
+    assert result.get("partial") is True
+    assert "error" in result, "zero hits from an incomplete scan cannot be presented as no-match"
+    assert "incomplete" in result["error"].lower() or "unavailable" in result["error"].lower()
+
+
+def test_legacy_unbound_spill_row_is_never_served_as_foreign_content(tmp_path: Any) -> None:
+    """A pre-upgrade explicit-key spill row without binding provenance is quarantined."""
+    spill = SqliteBackend(db_path=tmp_path / "legacy-spill.sqlite3", max_rows=100)
+    # Direct backend insert intentionally simulates a row written by the old
+    # implementation: no new-version explicit-binding claim accompanies it.
+    spill.set(OLD_HASH, _entry(OLD_HASH, "legacy-A"))
+    store = CompressionStore(
+        backend=InMemoryBackend(),
+        spill=spill,
+        enable_feedback=False,
+    )
+
+    assert store.retrieve(OLD_HASH) is None
+    status = store.get_entry_status(OLD_HASH)
+    assert status["status"] in {"unavailable", "unsafe"}
+
+
+def test_sqlite_binding_claim_is_atomic_across_backend_instances(tmp_path: Any) -> None:
+    """Two processes sharing one DB cannot both claim one explicit key for different bytes."""
+    db_path = tmp_path / "binding.sqlite3"
+    left = SqliteBackend(db_path=db_path, max_rows=100)
+    right = SqliteBackend(db_path=db_path, max_rows=100)
+
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def claim(backend: SqliteBackend, fingerprint: str) -> None:
+        try:
+            barrier.wait(timeout=2)
+            results.append(backend.claim_binding(OLD_HASH, fingerprint))
+        except BaseException as exc:  # pragma: no cover - assertion reports the concrete error
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=claim, args=(left, "1" * 64)),
+        threading.Thread(target=claim, args=(right, "2" * 64)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not errors
+    assert sorted(results) == ["claimed", "conflict"]
+    record = left.get_binding(OLD_HASH)
+    assert record is not None and record[1] is True, "a conflicting reuse poisons the key"
+
+
+def test_cascade_and_duplicate_store_are_linearizable() -> None:
+    """A same-key graph rewrite cannot slip between cascade preflight and apply."""
+    store = CompressionStore(enable_feedback=False)
+    store.store("A", "A", explicit_hash=CHILD_HASH)
+    store.store("B", "B", explicit_hash=SECOND_CHILD_HASH)
+    store.store("P", f"P <<ccr:{CHILD_HASH}>>", explicit_hash=PARENT_HASH)
+
+    preflight_done = threading.Event()
+    allow_apply = threading.Event()
+    original_preflight = store._preflight_cascade_graph
+
+    def paused_preflight(*args: Any, **kwargs: Any) -> Any:
+        graph = original_preflight(*args, **kwargs)
+        preflight_done.set()
+        allow_apply.wait(timeout=2)
+        return graph
+
+    store._preflight_cascade_graph = paused_preflight  # type: ignore[method-assign]
+    purge_outcome: list[Any] = []
+
+    def purge() -> None:
+        purge_outcome.append(store.delete_cascade_detailed(PARENT_HASH))
+
+    writer_finished = threading.Event()
+
+    def rewrite() -> None:
+        store.store(
+            "P",
+            f"P <<ccr:{CHILD_HASH}>> <<ccr:{SECOND_CHILD_HASH}>>",
+            explicit_hash=PARENT_HASH,
+        )
+        writer_finished.set()
+
+    purge_thread = threading.Thread(target=purge)
+    purge_thread.start()
+    assert preflight_done.wait(timeout=2)
+    writer_thread = threading.Thread(target=rewrite)
+    writer_thread.start()
+
+    # Give the old implementation a deterministic window to perform the rewrite
+    # while cascade is paused. A mutation guard makes the writer block instead.
+    writer_finished.wait(timeout=0.25)
+    allow_apply.set()
+    purge_thread.join(timeout=3)
+    writer_thread.join(timeout=3)
+
+    assert purge_outcome
+    parent_present = store.exists_any_tier(PARENT_HASH)
+    second_child_present = store.exists_any_tier(SECOND_CHILD_HASH)
+    assert parent_present or not second_child_present, (
+        "non-linearizable outcome: rewritten parent vanished while its newly referenced child survived"
+    )
