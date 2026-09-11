@@ -4,21 +4,36 @@ on:
   push:
     branches:
       - chatgpt/pr216-bundle-2-20260911
-    paths-ignore:
-      - '.github/pr216-fix.patch.b64.*'
+    paths:
+      - '.github/workflows/chatgpt-pr216-bundle.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PY_VERSION: "3.12"
+  PR_HEAD: "7345a29da1aae1c874eb021a8b56929c179d17ab"
+  EXPECTED_TREE: "216518334cf597da1ee314bc72754d034a1eb5f1"
+  PATCH_SHA256: "b5d52e66e74f748b40f3d2ecc79ae85177ebdd87c411513e765fb4747ef5ce7e"
 
 jobs:
-  validate:
+  validate-and-stage:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Reconstruct exact local patch on PR head
+        run: |
+          cat .github/pr216-fix.patch.b64.* | base64 -d > /tmp/pr216-fix.patch
+          echo "${PATCH_SHA256}  /tmp/pr216-fix.patch" | sha256sum -c -
+          git config user.name "ChatGPT"
+          git config user.email "noreply@openai.com"
+          git checkout --detach "${PR_HEAD}"
+          git am /tmp/pr216-fix.patch
+          test "$(git rev-parse HEAD^{tree})" = "${EXPECTED_TREE}"
+          git diff-tree --check HEAD^
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ env.PY_VERSION }}
@@ -33,11 +48,18 @@ jobs:
           pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2 ruff==0.16.2 mypy==1.14.1
           SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
           cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+          python -c "from furl_ctx._core import DiffCompressor; print('furl_ctx._core OK')"
       - name: Ruff check
         run: ruff check .
       - name: Ruff format
         run: ruff format --check .
       - name: Mypy
         run: mypy furl_ctx --ignore-missing-imports
-      - name: Full pytest
+      - name: Full Python 3.12 pytest
         run: pytest tests --tb=short -q
+      - name: Re-verify exact tree after tests
+        run: |
+          test "$(git rev-parse HEAD^{tree})" = "${EXPECTED_TREE}"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Publish verified staging ref
+        run: git push origin HEAD:refs/heads/chatgpt/pr216-staged-fix
