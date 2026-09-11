@@ -460,21 +460,23 @@ def test_cross_store_search_marks_spill_index_outage_partial() -> None:
     assert "incomplete" in result["error"].lower() or "unavailable" in result["error"].lower()
 
 
-def test_legacy_unbound_spill_row_is_never_served_as_foreign_content(tmp_path: Any) -> None:
-    """A pre-upgrade explicit-key spill row without binding provenance is quarantined."""
+def test_divergent_legacy_unbound_rows_are_never_served_as_foreign_content(
+    tmp_path: Any,
+) -> None:
+    """Pre-upgrade same-key replicas with different bytes are quarantined."""
     spill = SqliteBackend(db_path=tmp_path / "legacy-spill.sqlite3", max_rows=100)
-    # Direct backend insert intentionally simulates a row written by the old
-    # implementation: no new-version explicit-binding claim accompanies it.
     spill.set(OLD_HASH, _entry(OLD_HASH, "legacy-A"))
+    primary = InMemoryBackend()
+    primary.set(OLD_HASH, _entry(OLD_HASH, "legacy-B"))
     store = CompressionStore(
-        backend=InMemoryBackend(),
+        backend=primary,
         spill=spill,
         enable_feedback=False,
     )
 
     assert store.retrieve(OLD_HASH) is None
     status = store.get_entry_status(OLD_HASH)
-    assert status["status"] in {"unavailable", "unsafe"}
+    assert status["status"] == "unsafe"
 
 
 def test_sqlite_binding_claim_is_atomic_across_backend_instances(tmp_path: Any) -> None:

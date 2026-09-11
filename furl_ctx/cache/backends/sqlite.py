@@ -297,6 +297,41 @@ class SqliteBackend:
                     return _row_to_entry(row)
         return self._memory.get(hash_key)
 
+    def read_candidates(self, hash_key: str) -> tuple[list[CompressionEntry], bool]:
+        """Best-effort read plus whether the durable tier was inspected.
+
+        Ordinary retrieval is deliberately availability-first: a healthy
+        volatile fallback remains usable when SQLite is locked/degraded. Safety
+        callers use ``checked_get_all`` instead. Returning completeness keeps a
+        miss from being misreported as authoritative absence when SQLite could
+        not be inspected.
+        """
+        volatile = self._memory.get(hash_key)
+        fallback = [] if volatile is None else [volatile]
+        if self._degraded:
+            return fallback, False
+        try:
+            row = self._run(
+                "read_candidates",
+                lambda conn: conn.execute(_SELECT_SQL, (_encode_text(hash_key),)).fetchone(),
+            )
+        except _SqliteOpFailed:
+            return fallback, False
+        result: list[CompressionEntry] = []
+        if row is not None:
+            result.append(_row_to_entry(row))
+        if volatile is not None:
+            result.append(volatile)
+        return result, True
+
+    def set_volatile(self, hash_key: str, entry: CompressionEntry) -> None:
+        """Write only the same-process fallback without touching SQLite."""
+        self._memory.set(hash_key, entry)
+
+    def delete_volatile(self, hash_key: str) -> bool:
+        """Remove only a same-process fallback row."""
+        return self._memory.delete(hash_key)
+
     def set(self, hash_key: str, entry: CompressionEntry) -> None:
         """Store an entry, overwriting any existing entry with the same key."""
         self.set_durable(hash_key, entry)
@@ -419,15 +454,7 @@ class SqliteBackend:
         return result
 
     def purge_expired(self, now: float) -> int:
-        """Delete rows whose per-row TTL elapsed by ``now`` and return the count
-        purged across both tiers (audit #2).
-
-        This is the store's expiry GC — an indexed range delete
-        (``created_at + ttl < now``) instead of materializing every row into
-        Python to find the expired keys. ``now`` is the STORE's clock (injectable
-        for tests), passed through so expiry stays consistent with the store's
-        TTL checks. Fail-open: the file tier contributes 0 on degrade/lock-loss.
-        """
+        """Delete expired rows and release their now-dead identity claims."""
         file_purged = 0
         if not self._degraded:
             try:
@@ -436,7 +463,21 @@ class SqliteBackend:
                 )
             except _SqliteOpFailed:
                 file_purged = 0
-        return file_purged + self._memory.purge_expired(now)
+
+        volatile_expired = [key for key, entry in self._memory.items() if entry.is_expired(now)]
+        volatile_purged = self._memory.purge_expired(now)
+        if volatile_expired and not self._degraded:
+            try:
+                self._run(
+                    "purge_expired_fallback_bindings",
+                    lambda conn: self._sqlite_release_orphaned_bindings(conn, volatile_expired),
+                )
+            except _SqliteOpFailed:
+                # Expiry GC remains fail-open. A stale claim can only veto a
+                # later reuse until SQLite becomes writable; it cannot make a
+                # foreign binding retrievable.
+                pass
+        return file_purged + volatile_purged
 
     def created_at_index(self) -> list[tuple[float, str]]:
         """``(created_at, hash_key)`` for every entry, WITHOUT decoding content
@@ -778,14 +819,30 @@ class SqliteBackend:
         return deleted
 
     def _sqlite_purge_expired(self, conn: sqlite3.Connection, now: float) -> int:
-        """Indexed delete of rows whose per-row TTL elapsed by ``now`` (uses the
-        ``created_at + ttl`` expression index). Maintains the row counter."""
+        """Delete expired rows and their binding claims in one transaction."""
         with conn:
+            expired = conn.execute(
+                "SELECT hash_key FROM ccr_entries WHERE created_at + ttl < ?", (now,)
+            ).fetchall()
+            if expired:
+                conn.executemany("DELETE FROM ccr_bindings WHERE hash_key = ?", expired)
             purged = conn.execute(_PURGE_EXPIRED_SQL, (now,)).rowcount
         if purged:
             with self._state_lock:
                 self._row_count -= purged
         return int(purged)
+
+    def _sqlite_release_orphaned_bindings(
+        self, conn: sqlite3.Connection, hash_keys: list[str]
+    ) -> None:
+        encoded = [(_encode_text(key),) for key in hash_keys]
+        with conn:
+            for (hash_key,) in encoded:
+                conn.execute(
+                    "DELETE FROM ccr_bindings WHERE hash_key = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM ccr_entries WHERE hash_key = ?)",
+                    (hash_key, hash_key),
+                )
 
     def _sqlite_claim_binding(
         self, conn: sqlite3.Connection, hash_key: str, fingerprint: str

@@ -1407,16 +1407,10 @@ class FurlMCPServer:
     def _search_all_content_sync(self, query: str) -> dict[str, Any]:
         """Blocking body of :meth:`_search_all_content` with completeness metadata."""
         store = self._get_local_store()
-        detailed = getattr(store, "search_all_detailed", None)
-        if callable(detailed):
-            outcome = detailed(query)
-            matches = list(outcome.matches)
-            complete = bool(outcome.complete)
-            unavailable = list(outcome.unavailable)
-        else:
-            matches = store.search_all(query)
-            complete = True
-            unavailable = []
+        details: dict[str, Any] = {}
+        matches = store.search_all(query, _outcome_out=details)
+        complete = bool(details.get("complete", True))
+        unavailable = list(details.get("unavailable", ()))
         result: dict[str, Any] = {
             "source": "cross_store",
             "query": query,
@@ -1488,13 +1482,9 @@ class FurlMCPServer:
     ) -> dict[str, Any]:
         """Blocking retrieve core with same-attempt availability propagation."""
         store = self._get_local_store()
-        miss_status: dict[str, Any] | None = None
+        miss_status: dict[str, Any] = {}
         if query:
-            detailed_search = getattr(store, "search_with_status", None)
-            if callable(detailed_search):
-                results, miss_status = detailed_search(hash_key, query)
-            else:
-                results = store.search(hash_key, query)
+            results = store.search(hash_key, query, _status_out=miss_status)
             if results:
                 self._stats.record_retrieval(hash_key)
                 return {
@@ -1504,16 +1494,13 @@ class FurlMCPServer:
                     "results": results,
                     "count": len(results),
                 }
-            if miss_status is None:
-                if store.exists_any_tier(hash_key):
-                    miss_status = {"hash": hash_key, "status": "available"}
-                else:
-                    getter = getattr(store, "get_entry_status", None)
-                    miss_status = (
-                        getter(hash_key)
-                        if callable(getter)
-                        else {"hash": hash_key, "status": "missing"}
-                    )
+            if not miss_status:
+                getter = getattr(store, "get_entry_status", None)
+                miss_status = (
+                    getter(hash_key)
+                    if callable(getter)
+                    else {"hash": hash_key, "status": "missing"}
+                )
             if miss_status.get("status") == "available":
                 return {
                     "hash": hash_key,
@@ -1527,11 +1514,7 @@ class FurlMCPServer:
                     ),
                 }
         else:
-            detailed_retrieve = getattr(store, "retrieve_with_status", None)
-            if callable(detailed_retrieve):
-                entry, miss_status = detailed_retrieve(hash_key)
-            else:
-                entry = store.retrieve(hash_key)
+            entry = store.retrieve(hash_key, _status_out=miss_status)
             if entry:
                 self._stats.record_retrieval(hash_key)
                 if filters is not None and not filters.is_empty:
@@ -1548,7 +1531,7 @@ class FurlMCPServer:
 
         from furl_ctx.cache.compression_store import format_retrieval_miss_detail
 
-        if miss_status is None:
+        if not miss_status:
             get_status = getattr(store, "get_entry_status", None)
             miss_status = (
                 get_status(hash_key, clean_expired=True)
