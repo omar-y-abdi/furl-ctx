@@ -1,0 +1,32 @@
+name: chatgpt-pr216-publish-final
+
+on:
+  push:
+    branches: ["chatgpt/pr216-publish-final-20260911"]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Apply exact verified patch and publish validation branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .chatgpt-pr216/part* | base64 -d > /tmp/pr216.patch
+          git checkout --detach 7345a29da1aae1c874eb021a8b56929c179d17ab
+          git apply --index /tmp/pr216.patch
+          tree="$(git write-tree)"
+          test "$tree" = "2075d70f0a9a92d2af38a720c44838273fe00243"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: close remaining PR 216 storage safety gaps"
+          test "$(git rev-parse HEAD^{tree})" = "2075d70f0a9a92d2af38a720c44838273fe00243"
+          git push origin HEAD:refs/heads/chatgpt/pr216-validate-final-20260911
