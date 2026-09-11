@@ -1,0 +1,46 @@
+name: PR216 binding identity apply2
+
+on:
+  push:
+    branches:
+      - chatgpt/pr216-binding-id-red-20260911
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: chatgpt/pr216-binding-id-red-20260911
+          fetch-depth: 0
+      - name: Apply corrected opaque provenance implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/pr216-binding-id-apply.yml').read_text()
+          marker = "          python - <<'PY'\n"
+          start = workflow.index(marker) + len(marker)
+          end = workflow.index("\n          PY\n", start)
+          script = textwrap.dedent(workflow[start:end])
+          old = 'end = text.index("    def _release_binding_locked(\\n", start)'
+          new = 'end = text.index("    def _release_binding_locked(", start)'
+          if script.count(old) != 1:
+              raise SystemExit(f'expected one broken anchor, found {script.count(old)}')
+          script = script.replace(old, new, 1)
+          exec(compile(script, '<opaque-provenance-apply>', 'exec'), {})
+          PY
+          python -m compileall -q furl_ctx/cache/compression_store.py furl_ctx/cache/backends/memory.py furl_ctx/cache/backends/sqlite.py tests/test_pr216_binding_identity_security.py
+          git diff --check
+          git rm .github/workflows/pr216-binding-id-apply.yml .github/workflows/pr216-binding-id-apply2.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add furl_ctx/cache/compression_store.py furl_ctx/cache/backends/memory.py furl_ctx/cache/backends/sqlite.py tests/test_pr216_binding_identity_security.py
+          git commit -m "fix: replace binding digests with opaque provenance ids"
+          git push origin HEAD:chatgpt/pr216-binding-id-red-20260911
