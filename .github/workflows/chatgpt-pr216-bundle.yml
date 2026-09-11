@@ -1,4 +1,4 @@
-name: chatgpt-pr216-bundle
+name: chatgpt-pr216-preflight
 
 on:
   push:
@@ -8,20 +8,34 @@ on:
 permissions:
   contents: read
 
+env:
+  PY_VERSION: "3.12"
+
 jobs:
-  bundle:
+  validate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          fetch-depth: 0
-      - name: Build verified repository bundle
+          python-version: ${{ env.PY_VERSION }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+      - name: Build and install exact test payload
         run: |
-          git fetch --all --tags --prune
-          git bundle create repo.bundle --all
-          git bundle verify repo.bundle
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pr216-repo-bundle-2
-          path: repo.bundle
-          retention-days: 1
+          python -m pip install --upgrade pip 'maturin>=1.9,<2.0'
+          maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
+          WHEEL="$(ls dist/*.whl)"
+          pip install "${WHEEL}[dev,mcp,code]" pytest-split google-re2 ruff==0.16.2 mypy==1.14.1
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+      - name: Ruff check
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Mypy
+        run: mypy furl_ctx --ignore-missing-imports
+      - name: Full pytest
+        run: pytest tests --tb=short -q
