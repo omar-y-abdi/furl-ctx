@@ -551,7 +551,7 @@ class CompressionStore:
         backends = tuple(b for b in (self._backend, self._spill) if b is not None)
         coordinated = next((b for b in backends if getattr(b, "coordination_identity", None)), None)
         identity = (
-            str(coordinated.coordination_identity)
+            str(getattr(coordinated, "coordination_identity", None))
             if coordinated is not None
             else f"memory:{id(self)}"
         )
@@ -699,7 +699,10 @@ class CompressionStore:
             raise
         except Exception as exc:
             raise StorageUnavailableError(f"binding read failed for {hash_key}") from exc
-        return record
+        if record is None:
+            return None
+        fingerprint, conflicted = record
+        return str(fingerprint), bool(conflicted)
 
     def _binding_safe_locked(self, hash_key: str, entries: list[CompressionEntry]) -> bool:
         if not entries:
