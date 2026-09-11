@@ -1,0 +1,34 @@
+name: PR216 binding proof diagnose
+
+on:
+  push:
+    branches:
+      - chatgpt/pr216-binding-id-red-20260911
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: chatgpt/pr216-binding-id-red-20260911
+      - name: Print extracted patch source
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/pr216-binding-proof-fix.yml').read_text()
+          marker = "          python - <<'PY'\n"
+          start = workflow.index(marker) + len(marker)
+          end = workflow.index("\n          PY\n", start)
+          script = textwrap.dedent(workflow[start:end])
+          for number, line in enumerate(script.splitlines(), 1):
+              if 35 <= number <= 55:
+                  print(number, repr(line))
+          try:
+              compile(script, '<binding-proof-fix>', 'exec')
+          except IndentationError as exc:
+              print('ERROR', exc.lineno, exc.msg)
+          PY
