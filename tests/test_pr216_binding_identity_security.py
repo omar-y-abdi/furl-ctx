@@ -133,3 +133,25 @@ def test_orphaned_legacy_tombstone_is_retired_without_content_verifier(tmp_path:
         assert binding[1] is True
     finally:
         reopened_backend.close()
+
+
+def test_pre_binding_id_content_addressed_row_remains_retrievable(tmp_path: Any) -> None:
+    db_path = tmp_path / "legacy-content-addressed.sqlite3"
+    original = "legacy-content-addressed-original"
+    hash_key = _legacy_fingerprint(original)[:24]
+
+    backend = SqliteBackend(db_path=db_path, max_rows=100)
+    backend.set(hash_key, _entry(original, hash_key=hash_key))
+    backend.close()
+
+    reopened_backend = SqliteBackend(db_path=db_path, max_rows=100)
+    store = CompressionStore(backend=reopened_backend, enable_feedback=False)
+    try:
+        recovered = store.retrieve(hash_key)
+        migrated = reopened_backend.get(hash_key)
+
+        assert recovered is not None and recovered.original_content == original
+        assert migrated is not None and migrated.binding_id is not None
+        assert reopened_backend.get_binding(hash_key) is None
+    finally:
+        reopened_backend.close()
