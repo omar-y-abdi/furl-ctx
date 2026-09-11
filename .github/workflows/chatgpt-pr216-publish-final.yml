@@ -1,7 +1,8 @@
 name: chatgpt-pr216-publish-final
 
 on:
-  workflow_dispatch:
+  push:
+    branches: ["chatgpt/pr216-publish-final-20260911"]
 
 permissions:
   contents: write
@@ -9,5 +10,24 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - run: echo "staging exact hosted-lint patch"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Apply exact hosted lint correction to validation branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum .chatgpt-pr216/style.patch.b64 | awk '{print $1}')" = "b4ca4402bf7fefef66d1a53d6957ace43d35528d33f8c8c37d361c9b770828bc"
+          base64 -d .chatgpt-pr216/style.patch.b64 > /tmp/style.patch
+          test "$(sha256sum /tmp/style.patch | awk '{print $1}')" = "70be084294ad37e7697c2c6a5c4813982f8a05513756d16a4ae33ecdfaf8d81b"
+          git checkout --detach 108f13b8da5588726dd1cb0cf4ed495b4c15d95a
+          git apply --index /tmp/style.patch
+          test "$(git write-tree)" = "0aa23c84827bf53e03c20c98f42b8de3d845dcfc"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "style: satisfy PR 216 lint gate"
+          test "$(git rev-parse HEAD^{tree})" = "0aa23c84827bf53e03c20c98f42b8de3d845dcfc"
+          git push origin HEAD:refs/heads/chatgpt/pr216-validate-final-20260911
