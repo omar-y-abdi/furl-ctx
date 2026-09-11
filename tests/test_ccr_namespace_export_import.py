@@ -23,12 +23,16 @@ from pathlib import Path
 import pytest
 
 from furl_ctx import ccr_export, ccr_import, compress
+from furl_ctx.cache.backends.memory import InMemoryBackend
 from furl_ctx.cache.compression_store import (
     FURL_CCR_NAMESPACE_ENV,
+    CompressionStore,
     _namespace_key,
     _request_ccr_store,
+    clear_request_compression_store,
     reset_compression_store,
     resolve_ccr_namespace_store,
+    set_request_compression_store,
 )
 
 
@@ -295,3 +299,58 @@ def test_compress_preserves_outer_middleware_store(
         )
     finally:
         _request_ccr_store.reset(token)
+
+
+def test_export_import_preserves_arbitrary_explicit_hash_identity(tmp_path: Path) -> None:
+    """Checkpoint round-trip must preserve the provenance that makes explicit keys safe."""
+    source = resolve_ccr_namespace_store("explicit-export-src", None)
+    assert source is not None
+    explicit_hash = "9" * 24
+    source.store("explicit producer payload", "view", explicit_hash=explicit_hash)
+    before = source.retrieve(explicit_hash)
+    assert before is not None
+
+    checkpoint = tmp_path / "explicit-checkpoint.sqlite3"
+    assert ccr_export(checkpoint, session_id="explicit-export-src") == 1
+    assert ccr_import(checkpoint, session_id="explicit-import-dst") == 1
+
+    destination = resolve_ccr_namespace_store("explicit-import-dst", None)
+    assert destination is not None
+    after, status = destination.retrieve_with_status(explicit_hash)
+    assert status["status"] == "available"
+    assert after is not None
+    assert after.original_content == before.original_content
+    assert after.created_at == before.created_at
+
+
+def test_export_includes_entries_that_are_retrievable_only_from_spill(tmp_path: Path) -> None:
+    """A checkpoint of the store must not drop live entries merely because they were demoted."""
+    source = CompressionStore(
+        max_entries=1,
+        backend=InMemoryBackend(),
+        spill=InMemoryBackend(),
+        enable_feedback=False,
+    )
+    set_request_compression_store(source)
+    try:
+        spilled_hash = source.store("spilled original", "spilled view")
+        source.store("primary filler", "filler view")
+        assert source.exists(spilled_hash) is False
+        assert source.exists_any_tier(spilled_hash) is True
+
+        checkpoint = tmp_path / "spill-checkpoint.sqlite3"
+        exported = ccr_export(checkpoint)
+    finally:
+        clear_request_compression_store()
+
+    assert exported == 2
+
+    destination = CompressionStore(enable_feedback=False)
+    set_request_compression_store(destination)
+    try:
+        assert ccr_import(checkpoint) == 2
+        restored = destination.retrieve(spilled_hash)
+        assert restored is not None
+        assert restored.original_content == "spilled original"
+    finally:
+        clear_request_compression_store()
