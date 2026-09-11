@@ -23,6 +23,7 @@ the bound is reached fast.
 
 from __future__ import annotations
 
+import hashlib
 import multiprocessing as mp
 import sqlite3
 from typing import Any
@@ -241,12 +242,13 @@ def test_exclusive_lock_longer_than_budget_still_vetoes(tmp_path) -> None:
         # The sibling holds the write lock for the whole call → every attempt in
         # the (tiny) budget loses the race → veto, honestly.
         with pytest.raises(DurableWriteError) as excinfo:
-            store.store(
-                original="blocked", compressed="c", explicit_hash="d" * 12, require_durable=True
-            )
-        assert excinfo.value.hash_key == "d" * 12
-        # Retrievable in-process now even though it never reached the shared file.
-        blocked = store.retrieve("d" * 12)
+            store.store(original="blocked", compressed="c", require_durable=True)
+        blocked_hash = hashlib.sha256(b"blocked").hexdigest()[:24]
+        assert excinfo.value.hash_key == blocked_hash
+        # A content-derived key authenticates its own bytes, so durability
+        # fail-open may still keep the payload retrievable in-process. Arbitrary
+        # explicit keys cannot do this safely while identity authority is locked.
+        blocked = store.retrieve(blocked_hash)
         assert blocked is not None and blocked.original_content == "blocked"
     finally:
         release_evt.set()

@@ -464,20 +464,11 @@ class SqliteBackend:
             except _SqliteOpFailed:
                 file_purged = 0
 
-        volatile_expired = [key for key, entry in self._memory.items() if entry.is_expired(now)]
-        volatile_purged = self._memory.purge_expired(now)
-        if volatile_expired and not self._degraded:
-            try:
-                self._run(
-                    "purge_expired_fallback_bindings",
-                    lambda conn: self._sqlite_release_orphaned_bindings(conn, volatile_expired),
-                )
-            except _SqliteOpFailed:
-                # Expiry GC remains fail-open. A stale claim can only veto a
-                # later reuse until SQLite becomes writable; it cannot make a
-                # foreign binding retrievable.
-                pass
-        return file_purged + volatile_purged
+        # Expiry retires payload availability only. Explicit-hash provenance is
+        # retained so a stale published marker can never be rebound to foreign
+        # bytes after its old payload ages out. Full ``checked_clear`` is the
+        # deliberate namespace/identity reset boundary.
+        return file_purged + self._memory.purge_expired(now)
 
     def created_at_index(self) -> list[tuple[float, str]]:
         """``(created_at, hash_key)`` for every entry, WITHOUT decoding content
@@ -666,9 +657,20 @@ class SqliteBackend:
         )
         return self._memory.delete(hash_key) or deleted
 
+    def checked_clear_payloads(self) -> None:
+        """Verified payload/counter clear that deliberately preserves bindings."""
+        self._checked_run("checked_clear_payloads", self._sqlite_clear_payloads)
+        self._memory.checked_clear_payloads()
+
+    def checked_reset_bindings(self) -> None:
+        """Reset identity tombstones only after every payload tier is empty."""
+        self._checked_run("checked_reset_bindings", self._sqlite_reset_bindings)
+        self._memory.checked_reset_bindings()
+
     def checked_clear(self) -> None:
-        self._checked_run("checked_clear", self._sqlite_clear)
-        self._memory.clear()
+        """Backward-compatible full backend reset."""
+        self.checked_clear_payloads()
+        self.checked_reset_bindings()
 
     def claim_binding(self, hash_key: str, fingerprint: str) -> str:
         return self._checked_run(
@@ -819,30 +821,17 @@ class SqliteBackend:
         return deleted
 
     def _sqlite_purge_expired(self, conn: sqlite3.Connection, now: float) -> int:
-        """Delete expired rows and their binding claims in one transaction."""
+        """Delete expired payload rows while retaining explicit-hash identity claims."""
         with conn:
-            expired = conn.execute(
-                "SELECT hash_key FROM ccr_entries WHERE created_at + ttl < ?", (now,)
-            ).fetchall()
-            if expired:
-                conn.executemany("DELETE FROM ccr_bindings WHERE hash_key = ?", expired)
+            # Keep ccr_bindings tombstones across TTL expiry. The payload may
+            # disappear, but a published explicit hash remains owned until an
+            # intentional full-store reset; otherwise stale markers can be made
+            # to resolve to different content.
             purged = conn.execute(_PURGE_EXPIRED_SQL, (now,)).rowcount
         if purged:
             with self._state_lock:
                 self._row_count -= purged
         return int(purged)
-
-    def _sqlite_release_orphaned_bindings(
-        self, conn: sqlite3.Connection, hash_keys: list[str]
-    ) -> None:
-        encoded = [(_encode_text(key),) for key in hash_keys]
-        with conn:
-            for (hash_key,) in encoded:
-                conn.execute(
-                    "DELETE FROM ccr_bindings WHERE hash_key = ? "
-                    "AND NOT EXISTS (SELECT 1 FROM ccr_entries WHERE hash_key = ?)",
-                    (hash_key, hash_key),
-                )
 
     def _sqlite_claim_binding(
         self, conn: sqlite3.Connection, hash_key: str, fingerprint: str
@@ -894,11 +883,21 @@ class SqliteBackend:
             row = conn.execute("SELECT value FROM ccr_counters WHERE name = ?", (name,)).fetchone()
         return int(row[0])
 
-    def _sqlite_clear(self, conn: sqlite3.Connection) -> None:
+    def _sqlite_clear_payloads(self, conn: sqlite3.Connection) -> None:
         with conn:
             conn.execute("DELETE FROM ccr_entries")
-            # A full clear resets counters too (matches the in-memory backend and
-            # keeps test isolation / furl_purge(all) a clean slate).
+            conn.execute("DELETE FROM ccr_counters")
+        with self._state_lock:
+            self._row_count = 0
+
+    def _sqlite_reset_bindings(self, conn: sqlite3.Connection) -> None:
+        with conn:
+            conn.execute("DELETE FROM ccr_bindings")
+
+    def _sqlite_clear(self, conn: sqlite3.Connection) -> None:
+        """Full direct-backend reset (payloads/counters plus identities)."""
+        with conn:
+            conn.execute("DELETE FROM ccr_entries")
             conn.execute("DELETE FROM ccr_counters")
             conn.execute("DELETE FROM ccr_bindings")
         with self._state_lock:

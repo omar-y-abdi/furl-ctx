@@ -118,8 +118,19 @@ class InMemoryBackend:
     def checked_delete(self, hash_key: str) -> bool:
         return self.delete(hash_key)
 
+    def checked_clear_payloads(self) -> None:
+        """Clear data/counters but retain explicit-hash identity tombstones."""
+        self._store.clear()
+        self._counters.clear()
+
+    def checked_reset_bindings(self) -> None:
+        """Reset explicit-hash identities after an all-tier wipe is proven complete."""
+        self._bindings.clear()
+
     def checked_clear(self) -> None:
-        self.clear()
+        """Backward-compatible full backend reset."""
+        self.checked_clear_payloads()
+        self.checked_reset_bindings()
 
     def claim_binding(self, hash_key: str, fingerprint: str) -> str:
         """Atomically claim an explicit key inside this process.
@@ -239,7 +250,10 @@ class InMemoryBackend:
         expired = [key for key, entry in self._store.items() if entry.is_expired(now)]
         for key in expired:
             del self._store[key]
-            self._bindings.pop(key, None)
+        # Do NOT release explicit-hash provenance here. TTL retires payload
+        # availability, not a published marker identity; reusing the key for
+        # different bytes would make a surviving stale marker resolve foreign
+        # content. Full ``clear`` is the intentional identity-reset boundary.
         return len(expired)
 
     def created_at_index(self) -> list[tuple[float, str]]:

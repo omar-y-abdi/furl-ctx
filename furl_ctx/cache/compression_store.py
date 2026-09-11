@@ -755,10 +755,14 @@ class CompressionStore:
             return "safe" if not conflicted and recorded == fingerprint else "unsafe"
         if self._volatile_bindings.get(hash_key) == fingerprint:
             return "safe"
-        # Upgrade compatibility: one fully inspected, internally consistent
-        # legacy row is safe to serve. If any tier was unreadable, absence of a
-        # divergent pre-upgrade replica is not proven.
-        return "safe" if complete else "unavailable"
+        # Pre-provenance explicit hashes are fundamentally ambiguous: an old
+        # process could have published this key for different bytes and left
+        # only this replica behind. Completeness proves there is ONE surviving
+        # row, not that this row is the content the published marker named.
+        # Content-derived keys were handled above by ``fingerprint.startswith``;
+        # every other unbound explicit key is quarantined until rewritten under
+        # an authoritative binding record.
+        return "unsafe" if complete else "unavailable"
 
     def _binding_safe_locked(self, hash_key: str, entries: list[CompressionEntry]) -> bool:
         state = self._binding_state_locked(hash_key, entries, complete=True)
@@ -772,6 +776,12 @@ class CompressionStore:
         if not self._is_marker_key(hash_key):
             return "same"
         fingerprint = self._content_fingerprint(original)
+        # A SHA-256 prefix is self-authenticating; it cannot alias different
+        # content without an actual hash collision, which the live-row collision
+        # check still catches. Do not grow provenance state for these ordinary
+        # content-addressed explicit keys.
+        if fingerprint.startswith(hash_key):
+            return "same"
         backend = self._binding_backend
         if backend is None:
             if fingerprint.startswith(hash_key):
@@ -1065,7 +1075,7 @@ class CompressionStore:
 
             if explicit_hash is not None and existing is None and expired_spill:
                 try:
-                    self._delete_hash_verified_locked(hash_key, release_binding=True)
+                    self._delete_hash_verified_locked(hash_key, release_binding=False)
                 except StorageUnavailableError as exc:
                     raise CollisionSafetyError(
                         f"Cannot safely retire expired binding {hash_key}: {exc}",
@@ -1081,22 +1091,18 @@ class CompressionStore:
                 None,
             )
             binding_conflict = False
-            volatile_only = False
             if explicit_hash is not None and conflicting is None:
                 try:
                     binding_conflict = self._claim_binding_locked(hash_key, original) == "conflict"
                 except StorageUnavailableError as exc:
-                    set_volatile = getattr(self._backend, "set_volatile", None)
-                    if require_durable and callable(set_volatile):
-                        set_volatile(hash_key, entry)
-                        self._volatile_bindings[hash_key] = self._content_fingerprint(original)
-                        heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
-                        volatile_only = True
-                    else:
-                        raise CollisionSafetyError(
-                            f"Cannot safely bind explicit hash {hash_key}: {exc}",
-                            hash_key=hash_key,
-                        ) from exc
+                    # Durability fail-open is safe only after identity authority
+                    # accepted this key/content pair. Before that proof, writing
+                    # a volatile shadow under an explicit key can make an older
+                    # durable marker resolve to the new producer's foreign bytes.
+                    raise CollisionSafetyError(
+                        f"Cannot safely bind explicit hash {hash_key}: {exc}",
+                        hash_key=hash_key,
+                    ) from exc
 
             if conflicting is not None or binding_conflict:
                 existing_len = len(conflicting.original_content) if conflicting is not None else -1
@@ -1134,7 +1140,7 @@ class CompressionStore:
                 logger.debug("Duplicate store for hash=%s, updating entry", hash_key)
                 self._stale_heap_entries += 1
 
-            if not collision_dropped and not volatile_only:
+            if not collision_dropped:
                 durable = self._persist_and_report_durability(hash_key, entry)
                 if explicit_hash is not None:
                     fingerprint = self._content_fingerprint(original)
@@ -1254,7 +1260,14 @@ class CompressionStore:
         record_feedback_signal: bool = True,
         _status_out: dict[str, Any] | None = None,
     ) -> CompressionEntry | None:
-        """Retrieve a live entry while preserving ordinary fail-open availability."""
+        """Retrieve a live entry without letting bookkeeping resurrect a purge.
+
+        The content read itself stays availability-first. Access bookkeeping is
+        a second, guarded mutation: it re-reads the current row while holding the
+        same cross-process mutation guard as store/delete/cascade. If a purge won
+        the race after the content read, bookkeeping observes the miss and does
+        not upsert stale bytes back into durable storage.
+        """
         with self._lock:
             read = self._read_live_entry_locked(hash_key)
             if _status_out is not None:
@@ -1262,11 +1275,7 @@ class CompressionStore:
             if read.entry is None:
                 return None
             entry = read.entry
-            if read.source == "spill":
-                return entry
 
-            entry.record_access(query)
-            self._backend.set(hash_key, entry)
             if self._enable_feedback:
                 self._log_retrieval(
                     hash_key=hash_key,
@@ -1286,6 +1295,14 @@ class CompressionStore:
                 entry=entry,
             )
             result = replace(entry, search_queries=list(entry.search_queries))
+
+        # Preserve the spill tier's read-only/no-promotion contract. Primary
+        # access bookkeeping is guarded because its old full-row writeback could
+        # recreate a row a concurrent process had just verified deleted.
+        if read.source != "spill":
+            updated = self._record_access_if_present(hash_key, query)
+            if updated is not None:
+                result = updated
 
         if record_feedback_signal and self._enable_feedback:
             self._emit_retrieval_signal(result.tool_name, result.compression_strategy)
@@ -1754,37 +1771,41 @@ class CompressionStore:
                 return None
             return replace(entry, search_queries=list(entry.search_queries))
 
+    def _record_access_if_present(
+        self, hash_key: str, query: str | None
+    ) -> CompressionEntry | None:
+        """Bookkeep one access only while the same row is still live.
+
+        Access accounting is logically metadata, but both backends expose it by
+        writing a ``CompressionEntry``. Without serialization, a process can read
+        an entry, another process can purge it, and the stale accounting write can
+        INSERT/REPLACE the entire payload back into SQLite. Re-read under the
+        mutation guard so every outcome is linearizable with store/delete.
+        """
+        with self._mutation_guard.hold():
+            with self._lock:
+                read = self._read_live_entry_locked(hash_key)
+                entry = read.entry
+                if entry is None:
+                    return None
+
+                entry.record_access(query)
+                if read.source == "spill":
+                    if self._spill is None:
+                        return None
+                    try:
+                        self._spill.set(hash_key, entry)
+                    except Exception as exc:  # noqa: BLE001 — bookkeeping is advisory
+                        logger.warning("CCR spill access update failed (non-fatal): %s", exc)
+                else:
+                    self._backend.set(hash_key, entry)
+                return replace(entry, search_queries=list(entry.search_queries))
+
     def _record_search_access(self, hash_key: str, query: str | None) -> None:
-        """Record access after a search returned results, including spill hits."""
-        signal_meta: tuple[str | None, str | None] | None = None
-        with self._lock:
-            entry = self._backend.get(hash_key)
-            in_spill = False
-
-            if entry is not None and entry.is_expired(self._now()):
-                self._backend.delete(hash_key)
-                self._stale_heap_entries += 1
-                entry = None
-
-            if entry is None:
-                entry = self._recover_from_spill(hash_key)
-                in_spill = entry is not None
-
-            if entry is None:
-                return
-
-            entry.record_access(query)
-            if in_spill and self._spill is not None:
-                try:
-                    self._spill.set(hash_key, entry)
-                except Exception as exc:  # noqa: BLE001 — bookkeeping is advisory
-                    logger.warning("CCR spill access update failed (non-fatal): %s", exc)
-            else:
-                self._backend.set(hash_key, entry)
-            signal_meta = (entry.tool_name, entry.compression_strategy)
-
-        if self._enable_feedback and signal_meta is not None:
-            self._emit_retrieval_signal(*signal_meta)
+        """Record access after search results, without stale-row resurrection."""
+        entry = self._record_access_if_present(hash_key, query)
+        if self._enable_feedback and entry is not None:
+            self._emit_retrieval_signal(entry.tool_name, entry.compression_strategy)
 
     def _emit_retrieval_signal(
         self,
@@ -1870,7 +1891,7 @@ class CompressionStore:
                 read = self._read_live_entry_locked(hash_key)
                 if clean_expired and read.status.get("status") == "expired":
                     try:
-                        self._delete_hash_verified_locked(hash_key, release_binding=True)
+                        self._delete_hash_verified_locked(hash_key, release_binding=False)
                     except StorageUnavailableError as exc:
                         status = dict(read.status)
                         status["cleanup_unavailable"] = str(exc)
@@ -2136,14 +2157,29 @@ class CompressionStore:
 
     @_serialized_mutation
     def clear(self) -> int:
-        """Verified all-tier wipe; return nonzero whenever emptiness is unproven."""
+        """Verified all-tier wipe with identity reset only after complete erase.
+
+        Payload deletion and explicit-hash provenance are two phases. Clearing
+        provenance before every tier is proven empty would strand a surviving
+        spill row without the identity evidence needed to retrieve it safely.
+        Conversely, resetting provenance after a partial wipe could let a stale
+        published marker be rebound to foreign bytes.
+        """
         residual = 0
         uncertain = False
+        backends = tuple(
+            (role, backend)
+            for role, backend in (("primary", self._backend), ("spill", self._spill))
+            if backend is not None
+        )
         with self._lock:
-            for role, backend in (("primary", self._backend), ("spill", self._spill)):
-                if backend is None:
-                    continue
-                checked = getattr(backend, "checked_clear", None)
+            for role, backend in backends:
+                payload_clear = getattr(backend, "checked_clear_payloads", None)
+                checked = (
+                    payload_clear
+                    if callable(payload_clear)
+                    else getattr(backend, "checked_clear", None)
+                )
                 if callable(checked):
                     try:
                         checked()
@@ -2169,10 +2205,25 @@ class CompressionStore:
                     logger.warning("CCR %s post-clear count failed: %s", role, exc)
                     uncertain = True
 
+            # Identity reuse is permitted only at a verified namespace-reset
+            # boundary. If any payload tier survived or was unreadable, retain
+            # every binding tombstone so old markers cannot be rebound.
+            if residual == 0 and not uncertain:
+                for role, backend in backends:
+                    reset = getattr(backend, "checked_reset_bindings", None)
+                    if not callable(reset):
+                        continue
+                    try:
+                        reset()
+                    except Exception as exc:
+                        logger.warning("CCR verified %s identity reset failed: %s", role, exc)
+                        uncertain = True
+
             self._retrieval_events.clear()
             self._eviction_heap.clear()
             self._stale_heap_entries = 0
-            self._volatile_bindings.clear()
+            if residual == 0 and not uncertain:
+                self._volatile_bindings.clear()
         return max(residual, 1 if uncertain else 0)
 
     def _clear_spill_residual(self) -> int:
@@ -2783,35 +2834,103 @@ def _active_ccr_store(
     return get_compression_store()
 
 
+def _checkpoint_binding_for_entry_locked(
+    store: CompressionStore, hash_key: str, entry: CompressionEntry
+) -> tuple[str, bool] | None:
+    """Return verified explicit-hash provenance needed to restore *entry*.
+
+    Content-derived 12/24-hex keys authenticate themselves through their
+    SHA-256 prefix and need no side record. Arbitrary explicit keys do: omitting
+    that record from a checkpoint would make a previously safe entry ambiguous
+    on restore. Legacy/unavailable/conflicted provenance therefore aborts export
+    instead of writing a checkpoint that cannot safely reproduce the source.
+    """
+    if not store._is_marker_key(hash_key):
+        return None
+    fingerprint = store._content_fingerprint(entry.original_content)
+    if fingerprint.startswith(hash_key):
+        return None
+    record = store._binding_record_locked(hash_key)
+    if record is None or record[1] or record[0] != fingerprint:
+        raise CollisionSafetyError(
+            f"Cannot checkpoint explicit hash {hash_key}: its content binding is "
+            "missing, conflicted, or does not match the stored payload.",
+            hash_key=hash_key,
+        )
+    return record
+
+
 def ccr_export(
     path: str | os.PathLike[str],
     *,
     session_id: str | None = None,
     agent_id: str | None = None,
 ) -> int:
-    """Checkpoint a CCR store to a durable sqlite file at ``path``.
+    """Checkpoint the primary CCR tier plus explicit-hash provenance.
 
-    Copies entries at the BACKEND level (``items()`` -> ``set()``) so every
-    field round-trips byte-exact: routing through ``store.store()`` would
-    recompute the key and reset ``created_at`` / ``ttl`` / ``retrieval_count``.
-    The destination is a fresh ``SqliteBackend`` on ``path`` — its
-    ``surrogatepass`` BLOB encoding preserves hostile payloads (lone
-    surrogates, NULs, control chars) unchanged.
-
-    ``session_id`` / ``agent_id`` (default ``None``) select the tenant store to
-    export, matching the values passed to ``compress()``; with none set the
-    active/global store is exported.
-
-    Returns the number of entries written.
+    The payload copy remains byte-exact at backend level, preserving timestamps,
+    TTL and retrieval metadata. Arbitrary explicit hashes additionally carry the
+    binding proof introduced by the storage-safety layer; without it a restored
+    row would be quarantined (or, worse, guessed safe) because the hash itself
+    does not authenticate the payload.
     """
     from .backends.sqlite import SqliteBackend
 
     source = _active_ccr_store(session_id, agent_id)
+    with source._mutation_guard.hold():
+        with source._lock:
+            grouped: dict[str, list[tuple[str, CompressionEntry]]] = {}
+            for hash_key, entry in source._checked_items_backend_locked(
+                source._backend, "primary"
+            ):
+                grouped.setdefault(hash_key, []).append(("primary", entry))
+            if source._spill is not None:
+                for hash_key, entry in source._checked_items_backend_locked(
+                    source._spill, "spill"
+                ):
+                    grouped.setdefault(hash_key, []).append(("spill", entry))
+
+            entries: list[tuple[str, CompressionEntry]] = []
+            bindings: dict[str, tuple[str, bool]] = {}
+            now = source._now()
+            for hash_key, rows in grouped.items():
+                candidates = [row for row in rows if not row[1].is_expired(now)] or rows
+                candidate_entries = [entry for _role, entry in candidates]
+                if not source._binding_safe_locked(hash_key, candidate_entries):
+                    raise CollisionSafetyError(
+                        f"Cannot checkpoint hash {hash_key}: its live representations "
+                        "do not have one safe content binding.",
+                        hash_key=hash_key,
+                    )
+                _role, entry = next(
+                    (row for row in candidates if row[0] == "primary"),
+                    candidates[0],
+                )
+                entries.append((hash_key, entry))
+                record = _checkpoint_binding_for_entry_locked(source, hash_key, entry)
+                if record is not None:
+                    bindings[hash_key] = record
+
     destination = SqliteBackend(db_path=path)
     try:
-        entries = source._backend.items()
         for hash_key, entry in entries:
-            destination.set(hash_key, entry)
+            record = bindings.get(hash_key)
+            if record is not None:
+                fingerprint, conflicted = record
+                if conflicted:
+                    raise AssertionError("verified checkpoint binding unexpectedly conflicted")
+                claim = destination.claim_binding(hash_key, fingerprint)
+                if claim == "conflict":
+                    raise CollisionSafetyError(
+                        f"Checkpoint destination already has conflicting identity for {hash_key}.",
+                        hash_key=hash_key,
+                    )
+            if not destination.set_durable(hash_key, entry):
+                raise DurableWriteError(
+                    f"CCR checkpoint export for hash {hash_key} did not reach the "
+                    "checkpoint SQLite file.",
+                    hash_key=hash_key,
+                )
     finally:
         destination.close()
     return len(entries)
@@ -2823,28 +2942,85 @@ def ccr_import(
     session_id: str | None = None,
     agent_id: str | None = None,
 ) -> int:
-    """Restore a CCR checkpoint written by ``ccr_export`` into a store.
+    """Restore a CCR checkpoint without bypassing collision/concurrency safety.
 
-    Reads the sqlite file at ``path`` and copies each entry into the target
-    store's backend (``items()`` -> ``backend.set()``), preserving
-    ``created_at`` / ``ttl`` / ``retrieval_count`` so a restored entry is
-    byte-identical to the one exported. TTL is honored on later ``retrieve()``
-    (an entry that has since expired correctly misses — TTL-on-access promotion
-    is deliberately out of scope for B2).
-
-    ``session_id`` / ``agent_id`` (default ``None``) select the destination
-    tenant store; with none set the active/global store receives the entries.
-
-    Returns the number of entries restored.
+    Import preserves entry metadata exactly, but the write itself participates in
+    the same cross-process mutation guard as store/delete/cascade. Checkpoint
+    provenance is verified before arbitrary explicit hashes are admitted, and a
+    destination collision aborts rather than overwriting a key that existing
+    markers may already name.
     """
     from .backends.sqlite import SqliteBackend
 
     source = SqliteBackend(db_path=path)
     try:
-        entries = source.items()
+        entries = source.checked_items()
+        bindings: dict[str, tuple[str, bool]] = {}
+        for hash_key, entry in entries:
+            if not CompressionStore._is_marker_key(hash_key):
+                continue
+            fingerprint = CompressionStore._content_fingerprint(entry.original_content)
+            if fingerprint.startswith(hash_key):
+                continue
+            record = source.get_binding(hash_key)
+            if record is None or record[1] or record[0] != fingerprint:
+                raise CollisionSafetyError(
+                    f"Checkpoint entry {hash_key} has no verified matching identity record.",
+                    hash_key=hash_key,
+                )
+            bindings[hash_key] = record
     finally:
         source.close()
+
     destination = _active_ccr_store(session_id, agent_id)
-    for hash_key, entry in entries:
-        destination._backend.set(hash_key, entry)
+    with destination._mutation_guard.hold():
+        with destination._lock:
+            # Preflight the whole checkpoint before changing destination state.
+            for hash_key, entry in entries:
+                rows = destination._representations_locked(hash_key)
+                conflict = next(
+                    (
+                        candidate
+                        for _role, candidate in rows
+                        if candidate.original_content != entry.original_content
+                    ),
+                    None,
+                )
+                if conflict is not None:
+                    raise CollisionSafetyError(
+                        f"Cannot import checkpoint hash {hash_key}: destination already "
+                        "contains different content under that key.",
+                        hash_key=hash_key,
+                    )
+                record = bindings.get(hash_key)
+                if record is not None:
+                    existing = destination._binding_record_locked(hash_key)
+                    if existing is not None and (existing[1] or existing[0] != record[0]):
+                        raise CollisionSafetyError(
+                            f"Cannot import checkpoint hash {hash_key}: destination identity "
+                            "already belongs to different content.",
+                            hash_key=hash_key,
+                        )
+
+            for hash_key, entry in entries:
+                record = bindings.get(hash_key)
+                if record is not None:
+                    claim = destination._claim_binding_locked(hash_key, entry.original_content)
+                    if claim == "conflict":  # guarded/preflighted; defensive only
+                        raise CollisionSafetyError(
+                            f"Checkpoint identity for {hash_key} conflicted during import.",
+                            hash_key=hash_key,
+                        )
+                durable = destination._persist_and_report_durability(hash_key, entry)
+                if destination._backend.durable and not durable:
+                    raise DurableWriteError(
+                        f"CCR checkpoint import for hash {hash_key} reached only volatile "
+                        "fallback storage; refusing to report a durable restore.",
+                        hash_key=hash_key,
+                    )
+
+            # Direct backend writes intentionally preserve the old entry metadata;
+            # rebuild the eviction projection once so imported timestamps become
+            # visible to normal capacity management without fabricating new ones.
+            destination._rebuild_heap()
     return len(entries)
