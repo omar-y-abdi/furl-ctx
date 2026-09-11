@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - chatgpt/pr216-bundle-2-20260911
+    paths-ignore:
+      - '.github/pr216-fix.patch.b64.*'
 
 permissions:
   contents: read
