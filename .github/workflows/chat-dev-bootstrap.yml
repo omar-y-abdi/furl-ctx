@@ -37,7 +37,7 @@ jobs:
         with:
           name: chat-dev-repo-bundle
           path: /tmp/furl-ctx.bundle
-          retention-days: 2
+          retention-days: 90
 
   core-devkit:
     runs-on: ubuntu-24.04
@@ -161,7 +161,7 @@ jobs:
             /tmp/devkit/cargo-home.tgz
             /tmp/devkit/rustsec-db.tgz
             /tmp/devkit/manifest.txt
-          retention-days: 2
+          retention-days: 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chat-dev-python312
@@ -170,7 +170,7 @@ jobs:
             /tmp/devkit/python312-prefix.txt
             /tmp/devkit/python-wheelhouse.tgz
             /tmp/devkit/manifest.txt
-          retention-days: 2
+          retention-days: 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chat-dev-runtime-caches
@@ -178,12 +178,12 @@ jobs:
             /tmp/devkit/tiktoken-cache.tgz
             /tmp/devkit/precommit-cache.tgz
             /tmp/devkit/tree-sitter-cache.tgz
-          retention-days: 2
+          retention-days: 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chat-dev-commitlint
           path: /tmp/devkit/commitlint.tgz
-          retention-days: 2
+          retention-days: 90
 
   python-compat:
     runs-on: ubuntu-24.04
@@ -238,4 +238,4 @@ jobs:
         with:
           name: chat-dev-${{ matrix.tag }}
           path: /tmp/out/*
-          retention-days: 2
+          retention-days: 90
