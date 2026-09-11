@@ -794,17 +794,12 @@ class CompressionStore:
                         replacer(hash_key, replacement_id, True)
                         continue
 
-                    live = [
-                        (role, entry)
-                        for role, entry in rows
-                        if not entry.is_expired(now)
-                    ]
+                    live = [(role, entry) for role, entry in rows if not entry.is_expired(now)]
                     originals = {entry.original_content for _role, entry in live}
                     existing_ids = {
                         entry.binding_id
                         for _role, entry in live
-                        if entry.binding_id
-                        and entry.binding_id != _CONTENT_DERIVED_BINDING_ID
+                        if entry.binding_id and entry.binding_id != _CONTENT_DERIVED_BINDING_ID
                     }
                     if len(originals) != 1 or len(existing_ids) > 1:
                         replacer(hash_key, replacement_id, True)
@@ -1153,9 +1148,7 @@ class CompressionStore:
             created_at=self._now(),
             ttl=ttl if ttl is not None else self._default_ttl,
             compression_strategy=compression_strategy,
-            binding_id=(
-                _CONTENT_DERIVED_BINDING_ID if explicit_hash is None else None
-            ),
+            binding_id=(_CONTENT_DERIVED_BINDING_ID if explicit_hash is None else None),
         )
 
         durable = False
@@ -2989,6 +2982,7 @@ def _checkpoint_binding_for_entry_locked(
             hash_key=hash_key,
         )
     return record
+
 
 def ccr_export(
     path: str | os.PathLike[str],
