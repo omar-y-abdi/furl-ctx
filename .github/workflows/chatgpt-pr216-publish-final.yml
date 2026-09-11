@@ -16,14 +16,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply exact verified patch and publish validation branch
+      - name: Verify transport, apply exact patch, publish validation branch
         shell: bash
         run: |
           set -euo pipefail
-          cat .chatgpt-pr216/part* | base64 -d > /tmp/pr216.patch
+          sha256sum .chatgpt-pr216/part*
+          cat .chatgpt-pr216/part* > /tmp/pr216.b64
+          echo "b64=$(sha256sum /tmp/pr216.b64 | awk '{print $1}')"
+          test "$(sha256sum /tmp/pr216.b64 | awk '{print $1}')" = "d0b6020a98db87f6429374c85c639a43670810c8fcc31fa422520ed0a2fc0e53"
+          base64 -d /tmp/pr216.b64 > /tmp/pr216.patch
+          echo "patch=$(sha256sum /tmp/pr216.patch | awk '{print $1}')"
+          test "$(sha256sum /tmp/pr216.patch | awk '{print $1}')" = "d2771cf90dc5bf2b589e95b909b6f0e202f98ebc8c9b97710172d12318cbaba9"
           git checkout --detach 7345a29da1aae1c874eb021a8b56929c179d17ab
           git apply --index /tmp/pr216.patch
           tree="$(git write-tree)"
+          echo "tree=$tree"
           test "$tree" = "2075d70f0a9a92d2af38a720c44838273fe00243"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
