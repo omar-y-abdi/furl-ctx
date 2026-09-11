@@ -17,7 +17,9 @@ env:
   BASE_PATCH_SHA256: "b5d52e66e74f748b40f3d2ecc79ae85177ebdd87c411513e765fb4747ef5ce7e"
   BASE_PATCH_TREE: "216518334cf597da1ee314bc72754d034a1eb5f1"
   FOLLOWUP_SHA256: "b1c16af4e778c5f9d1f4856dba435180fad9139efe28865389c5434245413817"
-  FINAL_TREE: "52943ac058b10c790a41750a8ed3117b5f74ef49"
+  PRE_FORMAT_TREE: "52943ac058b10c790a41750a8ed3117b5f74ef49"
+  FORMAT_SHA256: "98d70968bcc9e22b76d9a8c9407a84a26f6311dea896713dcad397ed908ea350"
+  FINAL_TREE: "8e88e630911d1d846afafd8b29d556bcd569538a"
   BASE_CI_RUN: "34562586936"
 
 jobs:
@@ -34,12 +36,17 @@ jobs:
           echo "${BASE_PATCH_SHA256}  /tmp/pr216-fix.patch" | sha256sum -c -
           cat .github/pr216-followup.patch.b64.* | base64 -d > /tmp/pr216-followup.patch
           echo "${FOLLOWUP_SHA256}  /tmp/pr216-followup.patch" | sha256sum -c -
+          base64 -d .github/pr216-format-final.patch.b64 > /tmp/pr216-format-final.patch
+          echo "${FORMAT_SHA256}  /tmp/pr216-format-final.patch" | sha256sum -c -
           git config user.name "ChatGPT"
           git config user.email "noreply@openai.com"
           git checkout --detach "${PR_HEAD}"
           git am /tmp/pr216-fix.patch
           test "$(git rev-parse HEAD^{tree})" = "${BASE_PATCH_TREE}"
           git apply --index /tmp/pr216-followup.patch
+          git commit --amend --no-edit
+          test "$(git rev-parse HEAD^{tree})" = "${PRE_FORMAT_TREE}"
+          git apply --index /tmp/pr216-format-final.patch
           git commit --amend --no-edit
           test "$(git rev-parse HEAD^{tree})" = "${FINAL_TREE}"
           git diff-tree --check HEAD^
