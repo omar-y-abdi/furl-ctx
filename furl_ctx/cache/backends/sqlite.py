@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS ccr_entries (
     compression_strategy BLOB,
     retrieval_count INTEGER NOT NULL,
     search_queries TEXT NOT NULL,
-    last_accessed REAL
+    last_accessed REAL,
+    binding_id BLOB
 )
 """
 
@@ -131,7 +132,7 @@ _COLUMNS = (
     "hash_key, entry_hash, original_content, compressed_content, original_tokens, "
     "compressed_tokens, original_item_count, compressed_item_count, tool_name, "
     "tool_call_id, query_context, created_at, ttl, compression_strategy, "
-    "retrieval_count, search_queries, last_accessed"
+    "retrieval_count, search_queries, last_accessed, binding_id"
 )
 
 _UPSERT_SQL = (
@@ -672,16 +673,33 @@ class SqliteBackend:
         self.checked_clear_payloads()
         self.checked_reset_bindings()
 
-    def claim_binding(self, hash_key: str, fingerprint: str) -> str:
+    def claim_binding(self, hash_key: str, binding_id: str) -> str:
         return self._checked_run(
             "claim_binding",
-            lambda conn: self._sqlite_claim_binding(conn, hash_key, fingerprint),
+            lambda conn: self._sqlite_claim_binding(conn, hash_key, binding_id),
         )
 
     def get_binding(self, hash_key: str) -> tuple[str, bool] | None:
         return self._checked_run(
             "get_binding",
             lambda conn: self._sqlite_get_binding(conn, hash_key),
+        )
+
+    def checked_bindings(self) -> list[tuple[str, str, bool]]:
+        return self._checked_run("checked_bindings", self._sqlite_bindings)
+
+    def replace_binding(self, hash_key: str, binding_id: str, conflicted: bool) -> None:
+        self._checked_run(
+            "replace_binding",
+            lambda conn: self._sqlite_replace_binding(conn, hash_key, binding_id, conflicted),
+        )
+
+    def checked_set_binding_id(self, hash_key: str, binding_id: str) -> bool:
+        return bool(
+            self._checked_run(
+                "checked_set_binding_id",
+                lambda conn: self._sqlite_set_binding_id(conn, hash_key, binding_id),
+            )
         )
 
     def release_binding(self, hash_key: str) -> None:
@@ -765,6 +783,9 @@ class SqliteBackend:
         seed the maintained row counter from the file."""
         with conn:
             conn.execute(_CREATE_TABLE_SQL)
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(ccr_entries)")}
+            if "binding_id" not in columns:
+                conn.execute("ALTER TABLE ccr_entries ADD COLUMN binding_id BLOB")
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_EXPIRES_INDEX_SQL)
             conn.execute(_CREATE_COUNTERS_TABLE_SQL)
@@ -834,14 +855,14 @@ class SqliteBackend:
         return int(purged)
 
     def _sqlite_claim_binding(
-        self, conn: sqlite3.Connection, hash_key: str, fingerprint: str
+        self, conn: sqlite3.Connection, hash_key: str, binding_id: str
     ) -> str:
         encoded = _encode_text(hash_key)
         with conn:
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO ccr_bindings "
                 "(hash_key, content_fingerprint, conflicted) VALUES (?, ?, 0)",
-                (encoded, fingerprint),
+                (encoded, binding_id),
             )
             row = conn.execute(
                 "SELECT content_fingerprint, conflicted FROM ccr_bindings WHERE hash_key = ?",
@@ -849,7 +870,7 @@ class SqliteBackend:
             ).fetchone()
             assert row is not None
             existing, conflicted = str(row[0]), bool(row[1])
-            if conflicted or existing != fingerprint:
+            if conflicted or existing != binding_id:
                 conn.execute(
                     "UPDATE ccr_bindings SET conflicted = 1 WHERE hash_key = ?", (encoded,)
                 )
@@ -866,6 +887,32 @@ class SqliteBackend:
         if row is None:
             return None
         return (str(row[0]), bool(row[1]))
+
+    def _sqlite_bindings(self, conn: sqlite3.Connection) -> list[tuple[str, str, bool]]:
+        rows = conn.execute(
+            "SELECT hash_key, content_fingerprint, conflicted FROM ccr_bindings"
+        ).fetchall()
+        return [(_decode_text(row[0]), str(row[1]), bool(row[2])) for row in rows]
+
+    def _sqlite_replace_binding(
+        self, conn: sqlite3.Connection, hash_key: str, binding_id: str, conflicted: bool
+    ) -> None:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO ccr_bindings "
+                "(hash_key, content_fingerprint, conflicted) VALUES (?, ?, ?)",
+                (_encode_text(hash_key), binding_id, int(conflicted)),
+            )
+
+    def _sqlite_set_binding_id(
+        self, conn: sqlite3.Connection, hash_key: str, binding_id: str
+    ) -> bool:
+        with conn:
+            cursor = conn.execute(
+                "UPDATE ccr_entries SET binding_id = ? WHERE hash_key = ?",
+                (_encode_text(binding_id), _encode_text(hash_key)),
+            )
+        return cursor.rowcount > 0
 
     def _sqlite_release_binding(self, conn: sqlite3.Connection, hash_key: str) -> None:
         with conn:
@@ -994,6 +1041,7 @@ def _entry_to_row(hash_key: str, entry: CompressionEntry) -> tuple[Any, ...]:
         entry.retrieval_count,
         json.dumps(entry.search_queries),  # ensure_ascii escapes surrogates
         entry.last_accessed,
+        _encode_optional_text(entry.binding_id),
     )
 
 
@@ -1019,4 +1067,5 @@ def _row_to_entry(row: tuple[Any, ...]) -> CompressionEntry:
         retrieval_count=int(row[14]),
         search_queries=list(json.loads(row[15])),
         last_accessed=float(row[16]) if row[16] is not None else None,
+        binding_id=_decode_optional_text(row[17]),
     )

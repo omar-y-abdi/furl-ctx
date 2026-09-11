@@ -132,25 +132,33 @@ class InMemoryBackend:
         self.checked_clear_payloads()
         self.checked_reset_bindings()
 
-    def claim_binding(self, hash_key: str, fingerprint: str) -> str:
-        """Atomically claim an explicit key inside this process.
-
-        Returns ``claimed`` for a new key, ``same`` for the same content, and
-        ``conflict`` for a different claimant. A conflict poisons the key so a
-        later same-fingerprint write cannot silently resurrect one side.
-        """
+    def claim_binding(self, hash_key: str, binding_id: str) -> str:
+        """Atomically claim an explicit key with an opaque provenance id."""
         current = self._bindings.get(hash_key)
         if current is None:
-            self._bindings[hash_key] = (fingerprint, False)
+            self._bindings[hash_key] = (binding_id, False)
             return "claimed"
         existing, conflicted = current
-        if conflicted or existing != fingerprint:
+        if conflicted or existing != binding_id:
             self._bindings[hash_key] = (existing, True)
             return "conflict"
         return "same"
 
     def get_binding(self, hash_key: str) -> tuple[str, bool] | None:
         return self._bindings.get(hash_key)
+
+    def checked_bindings(self) -> list[tuple[str, str, bool]]:
+        return [(key, value, conflicted) for key, (value, conflicted) in self._bindings.items()]
+
+    def replace_binding(self, hash_key: str, binding_id: str, conflicted: bool) -> None:
+        self._bindings[hash_key] = (binding_id, conflicted)
+
+    def checked_set_binding_id(self, hash_key: str, binding_id: str) -> bool:
+        entry = self._store.get(hash_key)
+        if entry is None:
+            return False
+        entry.binding_id = binding_id
+        return True
 
     def release_binding(self, hash_key: str) -> None:
         self._bindings.pop(hash_key, None)
