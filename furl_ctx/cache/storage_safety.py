@@ -19,6 +19,11 @@ try:  # pragma: no cover - platform split
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
+try:  # pragma: no cover - platform split
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
+
 
 class StorageUnavailableError(RuntimeError):
     """A proof-requiring storage operation could not establish its result."""
@@ -35,6 +40,38 @@ def _process_lock(identity: str) -> threading.RLock:
             lock = threading.RLock()
             _guard_registry[identity] = lock
         return lock
+
+
+def _lock_file(fd: int) -> None:
+    """Acquire one blocking advisory byte-range lock on every supported OS."""
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    if msvcrt is not None:
+        # ``msvcrt.locking`` locks bytes starting at the current file position.
+        # Materialize one byte so the same stable range exists for every process.
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+            os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        return
+    raise StorageUnavailableError(
+        "this platform has no supported inter-process file-lock primitive"
+    )
+
+
+def _unlock_file(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    raise StorageUnavailableError(
+        "this platform has no supported inter-process file-lock primitive"
+    )
 
 
 class MutationGuard:
@@ -79,18 +116,19 @@ class MutationGuard:
 
             self._local.depth = 1
             fd: int | None = None
+            locked = False
             try:
                 if self._lock_path is not None:
                     self._lock_path.parent.mkdir(parents=True, exist_ok=True)
                     fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
                     os.chmod(self._lock_path, 0o600)
-                    if fcntl is not None:
-                        fcntl.flock(fd, fcntl.LOCK_EX)
+                    _lock_file(fd)
+                    locked = True
                 yield
             finally:
                 try:
-                    if fd is not None and fcntl is not None:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    if fd is not None and locked:
+                        _unlock_file(fd)
                 finally:
                     if fd is not None:
                         os.close(fd)
