@@ -1405,10 +1405,19 @@ class FurlMCPServer:
         return await asyncio.to_thread(self._search_all_content_sync, query)
 
     def _search_all_content_sync(self, query: str) -> dict[str, Any]:
-        """Blocking body of :meth:`_search_all_content` (runs off the loop)."""
+        """Blocking body of :meth:`_search_all_content` with completeness metadata."""
         store = self._get_local_store()
-        matches = store.search_all(query)
-        return {
+        detailed = getattr(store, "search_all_detailed", None)
+        if callable(detailed):
+            outcome = detailed(query)
+            matches = list(outcome.matches)
+            complete = bool(outcome.complete)
+            unavailable = list(outcome.unavailable)
+        else:
+            matches = store.search_all(query)
+            complete = True
+            unavailable = []
+        result: dict[str, Any] = {
             "source": "cross_store",
             "query": query,
             "count": len(matches),
@@ -1421,16 +1430,30 @@ class FurlMCPServer:
                 }
                 for match in matches
             ],
-            "note": (
-                "Ranked matches across all stored entries. Call furl_retrieve with a "
-                "hash to get its full original content."
+        }
+        if not complete:
+            result["partial"] = True
+            result["unavailable"] = unavailable
+            result["warning"] = (
+                "CCR search was incomplete because at least one storage tier could not be "
+                "read authoritatively; returned matches are safe, but absence is not proven."
             )
+            if not matches:
+                result["error"] = (
+                    "CCR search is incomplete/unavailable; zero safe matches is not an "
+                    "authoritative no-match result. Retry the search."
+                )
+        result["note"] = (
+            "Ranked matches across all stored entries. Call furl_retrieve with a hash to get "
+            "its full original content."
             if matches
             else (
-                "No stored entry matched the query. The store may be empty, or no "
-                "entry contains the query terms."
-            ),
-        }
+                "No stored entry matched the query."
+                if complete
+                else "No safe match could be returned from the incomplete storage scan."
+            )
+        )
+        return result
 
     async def _retrieve_content(
         self,
@@ -1463,10 +1486,15 @@ class FurlMCPServer:
         query: str | None,
         filters: RetrieveFilters | None = None,
     ) -> dict[str, Any]:
-        """Blocking body of :meth:`_retrieve_content` (runs off the loop)."""
+        """Blocking retrieve core with same-attempt availability propagation."""
         store = self._get_local_store()
+        miss_status: dict[str, Any] | None = None
         if query:
-            results = store.search(hash_key, query)
+            detailed_search = getattr(store, "search_with_status", None)
+            if callable(detailed_search):
+                results, miss_status = detailed_search(hash_key, query)
+            else:
+                results = store.search(hash_key, query)
             if results:
                 self._stats.record_retrieval(hash_key)
                 return {
@@ -1476,18 +1504,17 @@ class FurlMCPServer:
                     "results": results,
                     "count": len(results),
                 }
-            # Search returned nothing. That does NOT mean the entry was
-            # evicted — a LIVE entry with no query match must report "no match",
-            # not a false "no longer retrievable" eviction error. Only fall
-            # through to the cause-honest miss path when the entry is genuinely
-            # gone from the store. Use the side-effect-free ``exists_any_tier``
-            # check (not ``retrieve``, which logs a retrieval event + bumps access
-            # stats) so a no-match query does not inflate retrieval metrics —
-            # nothing was actually retrieved. The check must span BOTH tiers:
-            # ``search`` is spill-aware, while ``exists`` is intentionally
-            # primary-only, so using ``exists`` here can turn a spill-only
-            # no-match into a false missing-entry error.
-            if store.exists_any_tier(hash_key):
+            if miss_status is None:
+                if store.exists_any_tier(hash_key):
+                    miss_status = {"hash": hash_key, "status": "available"}
+                else:
+                    getter = getattr(store, "get_entry_status", None)
+                    miss_status = (
+                        getter(hash_key)
+                        if callable(getter)
+                        else {"hash": hash_key, "status": "missing"}
+                    )
+            if miss_status.get("status") == "available":
                 return {
                     "hash": hash_key,
                     "source": "local",
@@ -1495,13 +1522,16 @@ class FurlMCPServer:
                     "results": [],
                     "count": 0,
                     "note": (
-                        "Entry is available but no stored item matched the query. "
-                        "Retry with a different query, or omit the query to retrieve "
-                        "the full original content."
+                        "Entry is available but no stored item matched the query. Retry with "
+                        "a different query, or omit the query to retrieve the full original content."
                     ),
                 }
         else:
-            entry = store.retrieve(hash_key)
+            detailed_retrieve = getattr(store, "retrieve_with_status", None)
+            if callable(detailed_retrieve):
+                entry, miss_status = detailed_retrieve(hash_key)
+            else:
+                entry = store.retrieve(hash_key)
             if entry:
                 self._stats.record_retrieval(hash_key)
                 if filters is not None and not filters.is_empty:
@@ -1509,8 +1539,6 @@ class FurlMCPServer:
                 return {
                     "hash": hash_key,
                     "source": "local",
-                    # Originating tool (content_kind) — surfaced here too, not just in furl_list, so a
-                    # retrieve caller can see where the content came from ("Bash", "mcp:furl_compress", ...).
                     "content_kind": entry.tool_name,
                     "original_content": entry.original_content,
                     "original_item_count": entry.original_item_count,
@@ -1518,22 +1546,20 @@ class FurlMCPServer:
                     "retrieval_count": entry.retrieval_count,
                 }
 
-        # Loud, cause-honest miss: the local store came up empty. Mirror response_handler so every model-facing retrieve surface reports a miss the same
-        # way (explicit error, never a silent empty result) and attributes it to its real cause (eviction/capacity/expiry) rather than vaguely to the TTL.
         from furl_ctx.cache.compression_store import format_retrieval_miss_detail
 
-        get_status = getattr(store, "get_entry_status", None)
-        miss_status = (
-            get_status(hash_key, clean_expired=True)
-            if callable(get_status)
-            else {"hash": hash_key, "status": "missing"}
-        )
+        if miss_status is None:
+            get_status = getattr(store, "get_entry_status", None)
+            miss_status = (
+                get_status(hash_key, clean_expired=True)
+                if callable(get_status)
+                else {"hash": hash_key, "status": "missing"}
+            )
         return {
             "error": format_retrieval_miss_detail(miss_status),
             "hash": hash_key,
             "status": miss_status.get("status", "missing"),
-            "hint": "Content compressed via furl_compress is stored for the "
-            "session using the configured CCR TTL.",
+            "hint": "Content compressed via furl_compress is stored for the session using the configured CCR TTL.",
         }
 
     def _apply_retrieve_filters(
@@ -2654,7 +2680,8 @@ class FurlMCPServer:
         expected_gone = dict.fromkeys(
             (hash_key, *outcome.deleted_hashes(hash_key), *outcome.failed_hashes)
         )
-        survivors = tuple(h for h in expected_gone if store.exists_any_tier(h))
+        readback_survivors = tuple(h for h in expected_gone if store.exists_any_tier(h))
+        survivors = tuple(dict.fromkeys((*outcome.failed_hashes, *readback_survivors)))
         return (
             outcome.top_deleted,
             len(outcome.nested_deleted),

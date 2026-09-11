@@ -45,6 +45,9 @@ class InMemoryBackend:
         self._store: dict[str, CompressionEntry] = {}
         # Named observability counters (hook invocations/compressions, etc.).
         self._counters: Counter[str] = Counter()
+        # Explicit-hash provenance. A poisoned key stays unsafe until a verified
+        # purge/clear releases it; this mirrors the durable SQLite authority.
+        self._bindings: dict[str, tuple[str, bool]] = {}
 
     @property
     def max_rows(self) -> int | None:
@@ -101,6 +104,46 @@ class InMemoryBackend:
         """
         return self._store.get(hash_key)
 
+    def checked_get_all(self, hash_key: str) -> list[CompressionEntry]:
+        """Authoritative representations for proof-requiring store operations."""
+        entry = self._store.get(hash_key)
+        return [] if entry is None else [entry]
+
+    def checked_items(self) -> list[tuple[str, CompressionEntry]]:
+        return list(self._store.items())
+
+    def checked_created_at_index(self) -> list[tuple[float, str]]:
+        return [(entry.created_at, key) for key, entry in self._store.items()]
+
+    def checked_delete(self, hash_key: str) -> bool:
+        return self.delete(hash_key)
+
+    def checked_clear(self) -> None:
+        self.clear()
+
+    def claim_binding(self, hash_key: str, fingerprint: str) -> str:
+        """Atomically claim an explicit key inside this process.
+
+        Returns ``claimed`` for a new key, ``same`` for the same content, and
+        ``conflict`` for a different claimant. A conflict poisons the key so a
+        later same-fingerprint write cannot silently resurrect one side.
+        """
+        current = self._bindings.get(hash_key)
+        if current is None:
+            self._bindings[hash_key] = (fingerprint, False)
+            return "claimed"
+        existing, conflicted = current
+        if conflicted or existing != fingerprint:
+            self._bindings[hash_key] = (existing, True)
+            return "conflict"
+        return "same"
+
+    def get_binding(self, hash_key: str) -> tuple[str, bool] | None:
+        return self._bindings.get(hash_key)
+
+    def release_binding(self, hash_key: str) -> None:
+        self._bindings.pop(hash_key, None)
+
     def set(self, hash_key: str, entry: CompressionEntry) -> None:
         """Store an entry with the given hash key.
 
@@ -142,6 +185,7 @@ class InMemoryBackend:
         # A full reset clears observability counters too, so test isolation
         # (reset_compression_store) and furl_purge(all) start from a clean slate.
         self._counters.clear()
+        self._bindings.clear()
 
     def increment_counter(self, name: str, amount: int = 1) -> int:
         """Add ``amount`` to the named counter and return its new value.

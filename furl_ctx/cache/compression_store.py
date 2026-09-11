@@ -49,12 +49,14 @@ import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from operator import itemgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
 
 from .. import paths as _paths
 from ..relevance.bm25 import BM25Scorer
+from .storage_safety import MutationGuard, StorageUnavailableError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -242,6 +244,20 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
     default_ttl = status.get("default_ttl_seconds", DEFAULT_CCR_TTL_SECONDS)
     ttl_seconds = status.get("ttl_seconds", default_ttl)
 
+    if status.get("status") == "unavailable":
+        return (
+            "CCR storage is temporarily unavailable; this read could not prove the hash "
+            "absent or retrieve its content. Retry the retrieval rather than recomputing "
+            "from a false missing result."
+        )
+
+    if status.get("status") == "unsafe":
+        return (
+            "CCR found data for this hash but could not verify that the hash is bound to "
+            "that content. The entry is quarantined rather than serving potentially "
+            "foreign bytes; recompute the source content."
+        )
+
     if status.get("status") == "available":
         return (
             "Entry is available in the CCR store, but this retrieval attempt returned "
@@ -365,6 +381,34 @@ class CrossStoreMatch:
     score: float
     preview: str
     tool_name: str | None
+
+
+@dataclass(frozen=True)
+class StoreRead:
+    entry: CompressionEntry | None
+    status: dict[str, Any]
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class CrossStoreSearchOutcome:
+    matches: tuple[CrossStoreMatch, ...]
+    complete: bool
+    unavailable: tuple[str, ...] = ()
+
+
+_F = TypeVar("_F", bound=Any)
+
+
+def _serialized_mutation(method: _F) -> _F:
+    """Hold one logical mutation guard across a public store mutation."""
+
+    @wraps(method)
+    def wrapped(self: CompressionStore, *args: Any, **kwargs: Any) -> Any:
+        with self._mutation_guard.hold():
+            return method(self, *args, **kwargs)
+
+    return cast(_F, wrapped)
 
 
 class CompressionStore:
@@ -504,6 +548,25 @@ class CompressionStore:
         self._durable_retry_base_backoff_seconds = durable_retry_base_backoff_seconds
         self._durable_retry_max_backoff_seconds = durable_retry_max_backoff_seconds
 
+        backends = tuple(b for b in (self._backend, self._spill) if b is not None)
+        coordinated = next((b for b in backends if getattr(b, "coordination_identity", None)), None)
+        identity = (
+            str(coordinated.coordination_identity)
+            if coordinated is not None
+            else f"memory:{id(self)}"
+        )
+        self._mutation_guard = MutationGuard(identity)
+        binding_candidates = [
+            b
+            for b in backends
+            if callable(getattr(b, "claim_binding", None))
+            and callable(getattr(b, "get_binding", None))
+        ]
+        self._binding_backend = next(
+            (b for b in binding_candidates if bool(getattr(b, "durable", False))),
+            binding_candidates[0] if binding_candidates else None,
+        )
+
         # Local retrieval-event tracking
         self._retrieval_events: list[RetrievalEvent] = []
         self._max_events = 1000  # Keep last 1000 events
@@ -519,11 +582,277 @@ class CompressionStore:
         # BM25 scorer for search
         self._scorer = BM25Scorer()
 
+    @staticmethod
+    def _content_fingerprint(content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest()
+
+    @staticmethod
+    def _is_marker_key(hash_key: str) -> bool:
+        return len(hash_key) in {12, 24} and all(c in "0123456789abcdef" for c in hash_key)
+
+    def _checked_get_backend_locked(
+        self, backend: Any, hash_key: str, role: str
+    ) -> list[CompressionEntry]:
+        checked = getattr(backend, "checked_get_all", None)
+        try:
+            if callable(checked):
+                return list(checked(hash_key))
+            if bool(getattr(backend, "durable", False)):
+                raise StorageUnavailableError(
+                    f"durable {role} backend has no checked read capability"
+                )
+            entry = backend.get(hash_key)
+            return [] if entry is None else [entry]
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"{role} read failed for {hash_key}") from exc
+
+    def _checked_items_backend_locked(
+        self, backend: Any, role: str
+    ) -> list[tuple[str, CompressionEntry]]:
+        checked = getattr(backend, "checked_items", None)
+        try:
+            if callable(checked):
+                return list(checked())
+            if bool(getattr(backend, "durable", False)):
+                raise StorageUnavailableError(
+                    f"durable {role} backend has no checked enumeration capability"
+                )
+            return list(backend.items())
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"{role} enumeration failed") from exc
+
+    def _checked_index_backend_locked(self, backend: Any, role: str) -> list[tuple[float, str]]:
+        checked = getattr(backend, "checked_created_at_index", None)
+        try:
+            if callable(checked):
+                return list(checked())
+            if bool(getattr(backend, "durable", False)):
+                raise StorageUnavailableError(
+                    f"durable {role} backend has no checked index capability"
+                )
+            index = getattr(backend, "created_at_index", None)
+            if callable(index):
+                return list(index())
+            return [(entry.created_at, key) for key, entry in backend.items()]
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"{role} index read failed") from exc
+
+    def _checked_delete_backend_locked(self, backend: Any, hash_key: str, role: str) -> bool:
+        checked = getattr(backend, "checked_delete", None)
+        try:
+            if callable(checked):
+                return bool(checked(hash_key))
+            if bool(getattr(backend, "durable", False)):
+                raise StorageUnavailableError(
+                    f"durable {role} backend has no checked delete capability"
+                )
+            return bool(backend.delete(hash_key))
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"{role} delete failed for {hash_key}") from exc
+
+    def _checked_clear_backend_locked(self, backend: Any, role: str) -> None:
+        checked = getattr(backend, "checked_clear", None)
+        try:
+            if callable(checked):
+                checked()
+                return
+            if bool(getattr(backend, "durable", False)):
+                raise StorageUnavailableError(
+                    f"durable {role} backend has no checked clear capability"
+                )
+            backend.clear()
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"{role} clear failed") from exc
+
+    def _representations_locked(self, hash_key: str) -> list[tuple[str, CompressionEntry]]:
+        rows = [
+            ("primary", entry)
+            for entry in self._checked_get_backend_locked(self._backend, hash_key, "primary")
+        ]
+        if self._spill is not None:
+            rows.extend(
+                ("spill", entry)
+                for entry in self._checked_get_backend_locked(self._spill, hash_key, "spill")
+            )
+        return rows
+
+    def _binding_record_locked(self, hash_key: str) -> tuple[str, bool] | None:
+        backend = self._binding_backend
+        if backend is None:
+            return None
+        getter = getattr(backend, "get_binding", None)
+        if not callable(getter):
+            return None
+        try:
+            record = getter(hash_key)
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"binding read failed for {hash_key}") from exc
+        return record
+
+    def _binding_safe_locked(self, hash_key: str, entries: list[CompressionEntry]) -> bool:
+        if not entries:
+            return True
+        fingerprints = {self._content_fingerprint(entry.original_content) for entry in entries}
+        if len(fingerprints) != 1:
+            return False
+        fingerprint = next(iter(fingerprints))
+        if not self._is_marker_key(hash_key):
+            return True
+        record = self._binding_record_locked(hash_key)
+        if record is not None:
+            recorded, conflicted = record
+            return not conflicted and recorded == fingerprint
+        # Legacy content-addressed rows are self-authenticating and can be
+        # migrated safely without provenance. Arbitrary old explicit-key rows
+        # cannot: there is no evidence which pre-upgrade producer owns the key.
+        return fingerprint.startswith(hash_key)
+
+    def _claim_binding_locked(self, hash_key: str, original: str) -> str:
+        if not self._is_marker_key(hash_key):
+            return "same"
+        fingerprint = self._content_fingerprint(original)
+        backend = self._binding_backend
+        if backend is None:
+            if fingerprint.startswith(hash_key):
+                return "same"
+            raise StorageUnavailableError(
+                f"no authoritative binding store exists for explicit hash {hash_key}"
+            )
+        claimer = getattr(backend, "claim_binding", None)
+        if not callable(claimer):
+            raise StorageUnavailableError(
+                f"binding backend cannot atomically claim explicit hash {hash_key}"
+            )
+        try:
+            return str(claimer(hash_key, fingerprint))
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"binding claim failed for {hash_key}") from exc
+
+    def _poison_binding_locked(self, hash_key: str, old_original: str, new_original: str) -> None:
+        if not self._is_marker_key(hash_key) or self._binding_backend is None:
+            return
+        old = self._content_fingerprint(old_original)
+        new = self._content_fingerprint(new_original)
+        claimer = getattr(self._binding_backend, "claim_binding", None)
+        if not callable(claimer):
+            raise StorageUnavailableError(f"binding backend cannot poison {hash_key}")
+        try:
+            claimer(hash_key, old)
+            claimer(hash_key, new)
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"binding poison failed for {hash_key}") from exc
+
+    def _release_binding_locked(self, hash_key: str) -> None:
+        backend = self._binding_backend
+        if backend is None:
+            return
+        release = getattr(backend, "release_binding", None)
+        if not callable(release):
+            return
+        try:
+            release(hash_key)
+        except StorageUnavailableError:
+            raise
+        except Exception as exc:
+            raise StorageUnavailableError(f"binding release failed for {hash_key}") from exc
+
+    def _read_live_entry_locked(self, hash_key: str) -> StoreRead:
+        base: dict[str, Any] = {
+            "hash": hash_key,
+            "default_ttl_seconds": self._default_ttl,
+            "max_entries": self._max_entries,
+        }
+        try:
+            rows = self._representations_locked(hash_key)
+        except StorageUnavailableError as exc:
+            return StoreRead(None, {**base, "status": "unavailable", "reason": str(exc)})
+
+        now = self._now()
+        live = [(role, entry) for role, entry in rows if not entry.is_expired(now)]
+        if not live:
+            if rows:
+                entry = rows[0][1]
+                return StoreRead(
+                    None,
+                    {
+                        **base,
+                        "status": "expired",
+                        "ttl_seconds": entry.ttl,
+                        "created_at": entry.created_at,
+                        "expires_at": entry.created_at + entry.ttl,
+                        "age_seconds": now - entry.created_at,
+                    },
+                )
+            return StoreRead(None, {**base, "status": "missing"})
+
+        try:
+            safe = self._binding_safe_locked(hash_key, [entry for _role, entry in live])
+        except StorageUnavailableError as exc:
+            return StoreRead(None, {**base, "status": "unavailable", "reason": str(exc)})
+        if not safe:
+            return StoreRead(
+                None,
+                {
+                    **base,
+                    "status": "unsafe",
+                    "reason": "hash/content binding is ambiguous or unproven",
+                },
+            )
+
+        source, entry = next((row for row in live if row[0] == "primary"), live[0])
+        copied = replace(entry, search_queries=list(entry.search_queries))
+        return StoreRead(
+            copied,
+            {
+                **base,
+                "status": "available",
+                "ttl_seconds": entry.ttl,
+                "created_at": entry.created_at,
+                "expires_at": entry.created_at + entry.ttl,
+                "age_seconds": now - entry.created_at,
+                "source": source,
+            },
+            source,
+        )
+
+    def _delete_hash_verified_locked(self, hash_key: str, *, release_binding: bool) -> bool:
+        primary_deleted = self._checked_delete_backend_locked(self._backend, hash_key, "primary")
+        if primary_deleted:
+            self._stale_heap_entries += 1
+        spill_deleted = False
+        if self._spill is not None:
+            spill_deleted = self._checked_delete_backend_locked(self._spill, hash_key, "spill")
+        residual = self._representations_locked(hash_key)
+        if residual:
+            raise StorageUnavailableError(
+                f"hash {hash_key} remained reachable after verified delete"
+            )
+        if release_binding:
+            self._release_binding_locked(hash_key)
+        return primary_deleted or spill_deleted
+
     @property
     def default_ttl_seconds(self) -> int:
         """Default TTL applied to new entries when callers do not override it."""
         return self._default_ttl
 
+    @_serialized_mutation
     def store(
         self,
         original: str,
@@ -673,45 +1002,41 @@ class CompressionStore:
                 ),
                 None,
             )
-            if conflicting is not None:
+            binding_conflict = False
+            if explicit_hash is not None:
+                try:
+                    if conflicting is not None:
+                        self._poison_binding_locked(
+                            hash_key, conflicting.original_content, original
+                        )
+                        binding_conflict = True
+                    else:
+                        binding_conflict = (
+                            self._claim_binding_locked(hash_key, original) == "conflict"
+                        )
+                except StorageUnavailableError as exc:
+                    raise CollisionSafetyError(
+                        f"Cannot safely bind explicit hash {hash_key}: {exc}",
+                        hash_key=hash_key,
+                    ) from exc
+
+            if conflicting is not None or binding_conflict:
+                existing_len = len(conflicting.original_content) if conflicting is not None else -1
                 logger.error(
-                    "Hash collision detected: hash=%s tool=%s (existing_len=%d, "
-                    "new_len=%d) — dropping the ambiguous binding from every tier; "
-                    "NEITHER content is served (both markers now loud-miss) rather than "
-                    "resolving to foreign content",
+                    "Hash collision detected: hash=%s tool=%s (existing_len=%d, new_len=%d) — "
+                    "dropping the ambiguous binding from every tier; NEITHER content is served",
                     hash_key,
                     tool_name,
-                    len(conflicting.original_content),
+                    existing_len,
                     len(original),
                 )
-                # Collision cleanup is different from ordinary spill maintenance:
-                # uncertainty here would let the same hash resolve to foreign bytes.
-                # Verify the spill row is gone BEFORE dropping primary or accepting
-                # any future binding. A failure vetoes this store() call.
-                if self._spill is not None:
-                    try:
-                        self._spill.delete(hash_key)
-                        residual = self._spill.get(hash_key)
-                    except Exception as exc:
-                        logger.error(
-                            "CCR spill collision cleanup failed for hash %s; refusing the "
-                            "new binding: %s",
-                            hash_key,
-                            exc,
-                        )
-                        raise CollisionSafetyError(
-                            f"Cannot safely resolve collision for hash {hash_key}: spill "
-                            "cleanup could not be verified.",
-                            hash_key=hash_key,
-                        ) from exc
-                    if residual is not None and not residual.is_expired(self._now()):
-                        raise CollisionSafetyError(
-                            f"Cannot safely resolve collision for hash {hash_key}: a live "
-                            "same-key spill binding survived cleanup.",
-                            hash_key=hash_key,
-                        )
-                if self._backend.delete(hash_key):
-                    self._stale_heap_entries += 1
+                try:
+                    self._delete_hash_verified_locked(hash_key, release_binding=False)
+                except StorageUnavailableError as exc:
+                    raise CollisionSafetyError(
+                        f"Cannot safely resolve collision for hash {hash_key}: cleanup could not be verified.",
+                        hash_key=hash_key,
+                    ) from exc
                 collision_dropped = True
             elif existing is not None:
                 # Same content being stored again - this is fine, just update
@@ -821,51 +1146,30 @@ class CompressionStore:
         *,
         record_feedback_signal: bool = True,
     ) -> CompressionEntry | None:
-        """Retrieve original content by hash.
+        """Retrieve a verified live entry; uncertainty is never an absence."""
+        entry, _status = self.retrieve_with_status(
+            hash_key, query, record_feedback_signal=record_feedback_signal
+        )
+        return entry
 
-        Args:
-            hash_key: Hash key returned by store().
-            query: Optional query for retrieval-event tracking.
-            record_feedback_signal: When True (default), a hit feeds one
-                signal into the local retrieval-feedback loop (Engine P2-13)
-                keyed by the entry's compression metadata. Engine-INTERNAL
-                verification reads — the CCR-offload round-trip and the
-                CCR-mirror backing check — pass False so the loop learns only
-                from real (model-driven) retrievals; they otherwise keep the
-                store's pre-existing bookkeeping (retrieval_count, event log)
-                unchanged.
-
-        Returns:
-            CompressionEntry if found and not expired, ``None`` otherwise.
-            ``None`` means the hash missed the in-memory window — it was never
-            stored, was evicted under capacity pressure (oldest-created-first),
-            or its TTL expired and it was deleted. Recovery is window-scoped
-            (<=``max_entries``, <=``default_ttl`` seconds), not unbounded. A
-            ``None`` here is not a silent loss: retrieval callers turn it into an
-            explicit (loud) miss via ``format_retrieval_miss_detail``.
-        """
+    def retrieve_with_status(
+        self,
+        hash_key: str,
+        query: str | None = None,
+        *,
+        record_feedback_signal: bool = True,
+    ) -> tuple[CompressionEntry | None, dict[str, Any]]:
+        """Retrieve plus same-attempt availability/binding status."""
         with self._lock:
-            entry = self._backend.get(hash_key)
+            read = self._read_live_entry_locked(hash_key)
+            if read.entry is None:
+                return None, read.status
+            entry = read.entry
+            if read.source == "spill":
+                return entry, read.status
 
-            if entry is None:
-                # Primary miss: fall through to the durable spill tier (Q10).
-                return self._recover_from_spill(hash_key)
-
-            if entry.is_expired(self._now()):
-                self._backend.delete(hash_key)
-                # CRITICAL FIX: Track stale heap entry
-                self._stale_heap_entries += 1
-                # A newer primary copy can expire while an older spill copy with
-                # the same content hash is still live. Treat that like a primary
-                # miss instead of shadowing the retrievable spill entry.
-                return self._recover_from_spill(hash_key)
-
-            # Track access on the entry
             entry.record_access(query)
-            # Update the backend with the modified entry
             self._backend.set(hash_key, entry)
-
-            # Log retrieval event
             if self._enable_feedback:
                 self._log_retrieval(
                     hash_key=hash_key,
@@ -884,39 +1188,19 @@ class CompressionStore:
                 total_items=entry.original_item_count,
                 entry=entry,
             )
+            result = replace(entry, search_queries=list(entry.search_queries))
 
-            # CRITICAL: Make a deep copy to return (entry could be modified/evicted after lock
-            # release) The entry contains mutable fields (search_queries list) that must be copied
-            result_entry = replace(entry, search_queries=list(entry.search_queries))
-
-        # Engine P2-13: a real hit is the retrieval-feedback signal — the model needed content this entry's compression dropped.
         if record_feedback_signal and self._enable_feedback:
-            self._emit_retrieval_signal(result_entry.tool_name, result_entry.compression_strategy)
+            self._emit_retrieval_signal(result.tool_name, result.compression_strategy)
+        return result, read.status
 
-        return result_entry
-
-    def get_metadata(
-        self,
-        hash_key: str,
-    ) -> dict[str, Any] | None:
-        """Get metadata about a live entry from either storage tier.
-
-        Primary storage takes precedence. A primary miss or expired primary
-        falls through to the spill tier using the same no-promotion semantics
-        as :meth:`retrieve`.
-        """
+    def get_metadata(self, hash_key: str) -> dict[str, Any] | None:
+        """Get metadata only for a verified live entry."""
         with self._lock:
-            entry = self._backend.get(hash_key)
-            if entry is None:
-                entry = self._recover_from_spill(hash_key)
-            elif entry.is_expired(self._now()):
-                self._backend.delete(hash_key)
-                self._stale_heap_entries += 1
-                entry = self._recover_from_spill(hash_key)
-
+            read = self._read_live_entry_locked(hash_key)
+            entry = read.entry
             if entry is None:
                 return None
-
             return {
                 "hash": entry.hash,
                 "tool_name": entry.tool_name,
@@ -938,42 +1222,34 @@ class CompressionStore:
         max_results: int = 20,
         score_threshold: float = 0.3,
     ) -> list[dict[str, Any]]:
-        """Search within cached content using BM25.
+        results, _status = self.search_with_status(
+            hash_key, query, max_results=max_results, score_threshold=score_threshold
+        )
+        return results
 
-        Args:
-            hash_key: Hash key of cached content.
-            query: Search query.
-            max_results: Maximum number of results to return.
-            score_threshold: Minimum BM25 score to include.
-
-        Returns:
-            List of matching items from original content.
-        """
-        # Get entry without logging or access-bumping (results aren't known yet)
-        entry = self._get_entry_for_search(hash_key)
+    def search_with_status(
+        self,
+        hash_key: str,
+        query: str,
+        max_results: int = 20,
+        score_threshold: float = 0.3,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Search one entry while preserving read availability from the same attempt."""
+        with self._lock:
+            read = self._read_live_entry_locked(hash_key)
+        entry = read.entry
         if entry is None:
-            return []
+            return [], read.status
 
         items = self._search_items_from_original(entry.original_content)
-
         if not items:
-            return []
-
-        # Score each item using BM25
+            return [], read.status
         item_strs = [json.dumps(item, default=str) for item in items]
         scores = self._scorer.score_batch(item_strs, query)
-
-        # Filter and take the top max_results by score. nlargest breaks ties
-        # toward the earlier item, exactly as the stable sort-then-slice did.
         scored = ((i, s.score) for i, s in zip(items, scores) if s.score >= score_threshold)
         results = [item for item, _ in heapq.nlargest(max_results, scored, key=itemgetter(1))]
-
-        # COR-37: record the access only AFTER results are known, and only when the search actually returned items. A zero-result probe must not bump retrieval_count —
-        # the MCP retrieve path documents that retrieval metrics reflect ACTUAL retrievals (its no-match branch uses the side-effect-free exists() on the same rationale).
         if results:
             self._record_search_access(hash_key, query)
-
-        # Log retrieval event
         if self._enable_feedback:
             with self._lock:
                 self._log_retrieval(
@@ -993,8 +1269,7 @@ class CompressionStore:
             total_items=len(items),
             entry=entry,
         )
-
-        return results
+        return results, read.status
 
     def search_all(
         self,
@@ -1002,69 +1277,72 @@ class CompressionStore:
         max_results: int = 10,
         score_threshold: float = 0.0,
     ) -> list[CrossStoreMatch]:
-        """Full-text search across all live primary and spill entries.
+        return list(
+            self.search_all_detailed(
+                query, max_results=max_results, score_threshold=score_threshold
+            ).matches
+        )
 
-        Each hash contributes at most one document. A live primary copy wins;
-        when the primary is absent or expired, a live spill copy is searched.
-        Spill reads are best-effort and logged on failure. This remains a pure
-        read: expired rows are filtered but not reaped and spill hits are not
-        promoted or access-bumped.
-        """
+    def search_all_detailed(
+        self,
+        query: str,
+        max_results: int = 10,
+        score_threshold: float = 0.0,
+    ) -> CrossStoreSearchOutcome:
+        """Search every readable tier and report whether the scan was complete."""
         if not query or not query.strip():
-            return []
+            return CrossStoreSearchOutcome((), True)
+
+        backends: list[tuple[str, Any]] = [("primary", self._backend)]
+        if self._spill is not None:
+            backends.append(("spill", self._spill))
+        reasons: list[str] = []
+        keys: dict[str, None] = {}
+        readable_roles: set[str] = set()
+        with self._lock:
+            for role, backend in backends:
+                try:
+                    index = self._checked_index_backend_locked(backend, role)
+                except StorageUnavailableError as exc:
+                    reasons.append(str(exc))
+                    continue
+                readable_roles.add(role)
+                for _created_at, hash_key in index:
+                    keys.setdefault(hash_key, None)
 
         now = self._now()
-        with self._lock:
-            snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
-            spill = self._spill
-            if spill is not None:
-                try:
-                    seen = set(snapshot_keys)
-                    snapshot_keys.extend(
-                        hash_key
-                        for _created_at, hash_key in spill.created_at_index()
-                        if hash_key not in seen
-                    )
-                except Exception as exc:  # noqa: BLE001 — search is fail-open
-                    logger.warning(
-                        "CCR spill index read during search_all failed (non-fatal): %s", exc
-                    )
-
         live_entries: list[tuple[str, CompressionEntry]] = []
-        for hash_key in snapshot_keys:
-            with self._lock:
-                primary = self._backend.get(hash_key)
-
-            # Expiry checks can decode/filter entry metadata and must not hold
-            # the store lock; concurrent stores/retrieves should be able to
-            # interleave while a large search snapshot is evaluated.
-            if primary is not None and not primary.is_expired(now):
-                live_entries.append((hash_key, primary))
+        for hash_key in keys:
+            rows: list[tuple[str, CompressionEntry]] = []
+            for role, backend in backends:
+                if role not in readable_roles:
+                    continue
+                try:
+                    with self._lock:
+                        entries = self._checked_get_backend_locked(backend, hash_key, role)
+                except StorageUnavailableError as exc:
+                    reasons.append(str(exc))
+                    readable_roles.discard(role)
+                    continue
+                rows.extend((role, entry) for entry in entries if not entry.is_expired(now))
+            if not rows:
                 continue
-
-            if spill is None:
-                continue
-
             try:
                 with self._lock:
-                    spilled = spill.get(hash_key)
-            except Exception as exc:  # noqa: BLE001 — search is fail-open
-                logger.warning(
-                    "CCR spill read during search_all failed for %s (non-fatal): %s",
-                    hash_key,
-                    exc,
-                )
+                    safe = self._binding_safe_locked(hash_key, [entry for _role, entry in rows])
+            except StorageUnavailableError as exc:
+                reasons.append(str(exc))
                 continue
-
-            if spilled is not None and not spilled.is_expired(now):
-                live_entries.append((hash_key, spilled))
+            if not safe:
+                reasons.append(f"unsafe hash/content binding for {hash_key}")
+                continue
+            _role, entry = next((row for row in rows if row[0] == "primary"), rows[0])
+            live_entries.append((hash_key, entry))
 
         if not live_entries:
-            return []
-
+            return CrossStoreSearchOutcome((), not reasons, tuple(dict.fromkeys(reasons)))
         documents = [entry.original_content for _hash, entry in live_entries]
         scores = self._scorer.score_batch(documents, query)
-
         ranked = heapq.nlargest(
             max_results,
             (
@@ -1074,7 +1352,7 @@ class CompressionStore:
             ),
             key=itemgetter(2),
         )
-        return [
+        matches = tuple(
             CrossStoreMatch(
                 hash=hash_key,
                 score=score,
@@ -1082,7 +1360,8 @@ class CompressionStore:
                 tool_name=entry.tool_name,
             )
             for hash_key, entry, score in ranked
-        ]
+        )
+        return CrossStoreSearchOutcome(matches, not reasons, tuple(dict.fromkeys(reasons)))
 
     @staticmethod
     def _cross_store_preview(original_content: str) -> str:
@@ -1425,46 +1704,10 @@ class CompressionStore:
             return True
 
     def exists_any_tier(self, hash_key: str) -> bool:
-        """Whether *hash_key* is still retrievable from ANY tier. Never raises.
-
-        :meth:`exists` is primary-tier only, but :meth:`retrieve` falls through to
-        the durable spill tier on a primary miss (Q10). Verifying an erase with
-        ``exists`` therefore interrogates a tier ``retrieve`` can bypass: with
-        ``delete``'s fail-open spill delete, a purge can leave an entry
-        RETRIEVABLE while ``exists`` reports it gone (review B3). This is the
-        predicate a read-back must use — it asks the same question ``retrieve``
-        answers: can a caller still get this content back?
-
-        ``exists``'s primary-only semantics are deliberately left alone; other
-        callers (capacity/liveness checks) depend on them.
-
-        Mirrors ``_recover_from_spill``'s semantics exactly, because agreeing with
-        ``retrieve`` is the entire point: TTL is honored in BOTH tiers (an expired
-        row is not retrievable, so it is not a survivor), and a spill hit is NOT
-        promoted back into the primary — a read-back must observe, never mutate.
-        Unlike ``_recover_from_spill`` it also does not reap the expired spill row,
-        keeping this a pure check like ``exists(clean_expired=False)``.
-
-        Acquires ``self._lock`` and is NOT re-entrant (review F5): never call it
-        while already holding the lock -- take the read-back after the locked
-        mutation returns, as the purge paths do.
-        """
+        """Fail-closed purge predicate: uncertainty/unsafe data counts as present."""
         with self._lock:
-            now = self._now()
-            # Mirror exists(): an expired primary entry is not retrievable. A
-            # miss (or an expired hit) still has to check the spill below.
-            entry = self._backend.get(hash_key)
-            if entry is not None and not entry.is_expired(now):
-                return True
-            if self._spill is None:
-                return False
-            try:
-                spilled = self._spill.get(hash_key)
-            except Exception as exc:  # noqa: BLE001 — a spill that cannot be read
-                # cannot prove the entry is GONE.
-                logger.warning("CCR spill existence check failed (assuming present): %s", exc)
-                return True
-            return spilled is not None and not spilled.is_expired(now)
+            read = self._read_live_entry_locked(hash_key)
+        return read.status.get("status") in {"available", "unavailable", "unsafe"}
 
     def get_entry_status(
         self,
@@ -1472,71 +1715,18 @@ class CompressionStore:
         *,
         clean_expired: bool = False,
     ) -> dict[str, Any]:
-        """Return availability and TTL metadata across primary and spill tiers.
-
-        A live primary copy wins. If the primary is absent or expired, a live
-        spill copy is still available because :meth:`retrieve` can resolve it.
-        When no live copy exists but an expired copy does, ``expired`` is
-        reported. ``clean_expired`` removes expired copies from both tiers.
-        """
-        now = self._now()
-        with self._lock:
-            primary = self._backend.get(hash_key)
-            spill_entry: CompressionEntry | None = None
-            spill_read_failed = False
-            if self._spill is not None:
-                try:
-                    spill_entry = self._spill.get(hash_key)
-                except Exception as exc:  # noqa: BLE001 — diagnostic path, logged
-                    spill_read_failed = True
-                    logger.warning("CCR spill status read failed (non-fatal): %s", exc)
-
-            primary_live = primary is not None and not primary.is_expired(now)
-            spill_live = spill_entry is not None and not spill_entry.is_expired(now)
-            if primary_live:
-                entry = primary
-            elif spill_live:
-                entry = spill_entry
-            else:
-                entry = primary if primary is not None else spill_entry
-
-            if entry is None:
-                status: dict[str, Any] = {
-                    "hash": hash_key,
-                    "status": "missing",
-                    "default_ttl_seconds": self._default_ttl,
-                    "max_entries": self._max_entries,
-                }
-                if spill_read_failed:
-                    status["spill_read_failed"] = True
-                return status
-
-            expired = not (primary_live or spill_live)
-            status = {
-                "hash": hash_key,
-                "status": "expired" if expired else "available",
-                "ttl_seconds": entry.ttl,
-                "default_ttl_seconds": self._default_ttl,
-                "created_at": entry.created_at,
-                "expires_at": entry.created_at + entry.ttl,
-                "age_seconds": now - entry.created_at,
-            }
-
-            if clean_expired:
-                if primary is not None and primary.is_expired(now):
-                    if self._backend.delete(hash_key):
-                        self._stale_heap_entries += 1
-                if (
-                    self._spill is not None
-                    and spill_entry is not None
-                    and spill_entry.is_expired(now)
-                ):
+        """Return a tri-state-plus safety diagnosis from one checked read."""
+        with self._mutation_guard.hold():
+            with self._lock:
+                read = self._read_live_entry_locked(hash_key)
+                if clean_expired and read.status.get("status") == "expired":
                     try:
-                        self._spill.delete(hash_key)
-                    except Exception as exc:  # noqa: BLE001 — cleanup is fail-open
-                        logger.warning("CCR spill expired-row cleanup failed (non-fatal): %s", exc)
-
-            return status
+                        self._delete_hash_verified_locked(hash_key, release_binding=True)
+                    except StorageUnavailableError as exc:
+                        status = dict(read.status)
+                        status["cleanup_unavailable"] = str(exc)
+                        return status
+                return read.status
 
     def get_stats(self) -> dict[str, Any]:
         """Get store statistics for monitoring."""
@@ -1641,30 +1831,15 @@ class CompressionStore:
             self._backend.durable and getattr(self._backend, "increment_counter", None) is not None
         )
 
+    @_serialized_mutation
     def delete(self, hash_key: str) -> bool:
-        """Delete the entry for *hash_key* from the store. Returns whether one went.
-
-        The purge surface (B3): removes a single stored original outright so its
-        content is no longer recoverable via ``retrieve``. Deletes from BOTH the
-        primary backend and the durable spill tier (Q10), so a purge leaves no
-        recoverable copy behind; the spill delete is fail-open (logged, never
-        raises) exactly like the other spill operations. Returns True when an
-        entry was removed from EITHER tier, False when the hash was absent from
-        both. Bumps the stale-heap counter on a primary hit so the eviction heap
-        cleans up the dangling ``(created_at, hash_key)`` tuple, matching every
-        other in-store delete path (expiry reaping, collision replace).
-        """
+        """Verified all-tier delete; uncertainty is a failed deletion, never absence."""
         with self._lock:
-            primary_deleted = self._backend.delete(hash_key)
-            if primary_deleted:
-                self._stale_heap_entries += 1
-            spill_deleted = False
-            if self._spill is not None:
-                try:
-                    spill_deleted = self._spill.delete(hash_key)
-                except Exception as exc:  # noqa: BLE001 — fail-open, logged below
-                    logger.warning("CCR spill delete failed (non-fatal): %s", exc)
-            return primary_deleted or spill_deleted
+            try:
+                return self._delete_hash_verified_locked(hash_key, release_binding=True)
+            except StorageUnavailableError as exc:
+                logger.warning("CCR verified delete failed for %s: %s", hash_key, exc)
+                return False
 
     def _entry_marker_hashes(self, entry: CompressionEntry, *, exclude: str) -> list[str]:
         """Marker hashes referenced by *entry*, minus *exclude*, first-seen order."""
@@ -1678,27 +1853,20 @@ class CompressionStore:
         return [h for h in seen if h != exclude]
 
     def _is_co_referenced(self, nested_hash: str, *, ignoring: set[str]) -> bool:
-        """Whether a live entry outside *ignoring* still references *nested_hash*.
-
-        Both primary and spill representations are scanned. They are not
-        deduplicated by hash because the same content hash can exist in both
-        tiers with different compressed marker graphs. If the spill cannot be
-        enumerated, fail closed and preserve the child rather than risking a
-        dangling marker in an unreadable parent.
-        """
+        """Whether any readable live representation outside *ignoring* references it."""
         now = self._now()
         with self._lock:
-            items = list(self._backend.items())
-            if self._spill is not None:
-                try:
-                    items.extend(self._spill.items())
-                except Exception as exc:  # noqa: BLE001 — destructive check fails closed
-                    logger.warning(
-                        "CCR spill co-reference scan failed; preserving nested hash %s: %s",
-                        nested_hash,
-                        exc,
-                    )
-                    return True
+            try:
+                items = self._checked_items_backend_locked(self._backend, "primary")
+                if self._spill is not None:
+                    items.extend(self._checked_items_backend_locked(self._spill, "spill"))
+            except StorageUnavailableError as exc:
+                logger.warning(
+                    "CCR co-reference proof unavailable; preserving nested hash %s: %s",
+                    nested_hash,
+                    exc,
+                )
+                return True
 
         from furl_ctx.ccr.marker_grammar import hashes_in_text
 
@@ -1725,43 +1893,36 @@ class CompressionStore:
         *,
         already_visited: set[str],
     ) -> dict[str, tuple[str, ...]] | None:
-        """Discover the complete reachable marker graph before any deletion.
-
-        Every backend lookup is serialized by ``self._lock``. If any spill
-        representation cannot be inspected, the whole preflight fails so no
-        ancestor has already been erased when a deeper node becomes unreadable.
-        """
+        """Discover the complete checked marker graph before any mutation."""
         graph: dict[str, tuple[str, ...]] = {}
         seen = set(already_visited)
         pending = [hash_key]
-
         while pending:
             current = pending.pop()
             if current in seen:
                 continue
             seen.add(current)
-
-            with self._lock:
-                entries: list[CompressionEntry] = []
-                primary = self._backend.get(current)
-                if primary is not None:
-                    entries.append(primary)
-                if self._spill is not None:
-                    try:
-                        spilled = self._spill.get(current)
-                    except Exception as exc:
+            try:
+                with self._lock:
+                    rows = self._representations_locked(current)
+                    live_entries = [
+                        entry for _role, entry in rows if not entry.is_expired(self._now())
+                    ]
+                    if live_entries and not self._binding_safe_locked(current, live_entries):
                         logger.warning(
-                            "CCR spill read during delete_cascade preflight failed for %s; "
-                            "aborting the entire cascade before mutation: %s",
-                            current,
-                            exc,
+                            "CCR cascade preflight found unsafe binding for %s; aborting", current
                         )
                         return None
-                    if spilled is not None:
-                        entries.append(spilled)
-
+            except StorageUnavailableError as exc:
+                logger.warning(
+                    "CCR checked read during delete_cascade preflight failed for %s; "
+                    "aborting the entire cascade before mutation: %s",
+                    current,
+                    exc,
+                )
+                return None
             nested_seen: dict[str, None] = {}
-            for entry in entries:
+            for entry in live_entries:
                 for nested_hash in self._entry_marker_hashes(entry, exclude=current):
                     nested_seen.setdefault(nested_hash, None)
             nested = tuple(nested_seen)
@@ -1769,7 +1930,6 @@ class CompressionStore:
             pending.extend(
                 nested_hash for nested_hash in reversed(nested) if nested_hash not in seen
             )
-
         return graph
 
     def _delete_cascade_from_graph(
@@ -1779,18 +1939,14 @@ class CompressionStore:
         graph: dict[str, tuple[str, ...]],
         visited: set[str],
     ) -> CascadeOutcome:
-        """Apply a fully preflighted cascade without further marker discovery."""
+        """Apply a preflighted graph using verified all-tier deletions."""
         if hash_key in visited:
             return CascadeOutcome(top_deleted=False)
-
-        top_deleted = self.delete(hash_key)
-        # ``delete`` intentionally fails open for spill I/O, so its boolean only
-        # means that at least one tier removed a copy. A cascade may ignore this
-        # parent during child co-reference checks ONLY after the hash is proven
-        # unreachable from every tier. ``exists_any_tier`` is fail-closed on an
-        # unreadable spill, which turns mutation-time uncertainty into a stopped
-        # cascade instead of a dangling parent marker.
-        if self.exists_any_tier(hash_key):
+        try:
+            with self._lock:
+                top_deleted = self._delete_hash_verified_locked(hash_key, release_binding=True)
+        except StorageUnavailableError as exc:
+            logger.warning("CCR cascade delete could not verify %s: %s", hash_key, exc)
             return CascadeOutcome(top_deleted=False, failed_hashes=(hash_key,))
         visited.add(hash_key)
 
@@ -1809,7 +1965,6 @@ class CompressionStore:
             deleted.extend(child.nested_deleted)
             skipped.extend(child.nested_shared_skipped)
             failed.extend(child.failed_hashes)
-
         deleted_set = set(deleted)
         return CascadeOutcome(
             top_deleted=top_deleted,
@@ -1818,53 +1973,45 @@ class CompressionStore:
             failed_hashes=tuple(dict.fromkeys(failed)),
         )
 
+    @_serialized_mutation
     def delete_cascade_detailed(
         self, hash_key: str, *, _visited: set[str] | None = None
     ) -> CascadeOutcome:
-        """Delete *hash_key* and nested blobs no other live entry references.
-
-        Marker discovery reads both primary and spill representations. Discovery
-        is a separate preflight phase: no hash is deleted until every reachable
-        node's spill representation has been inspected successfully.
-        """
+        """Delete a marker graph atomically with respect to competing CCR mutations."""
         visited = _visited if _visited is not None else set()
         if hash_key in visited:
             return CascadeOutcome(top_deleted=False)
-
         graph = self._preflight_cascade_graph(hash_key, already_visited=visited)
         if graph is None:
-            return CascadeOutcome(top_deleted=False)
-
+            return CascadeOutcome(top_deleted=False, failed_hashes=(hash_key,))
         return self._delete_cascade_from_graph(hash_key, graph=graph, visited=visited)
 
+    @_serialized_mutation
     def clear(self) -> int:
-        """Clear all entries; return the count STILL reachable after the wipe.
-
-        Mainly for testing, but also the wipe primitive behind ``furl_purge
-        all=true``. Returns how many entries remain reachable via
-        :meth:`retrieve` once the wipe has run (0 on a clean wipe), so the purge
-        path can VERIFY the erase instead of claiming success blindly (review
-        F1). The single-hash path already read-backs each deletion with
-        :meth:`exists_any_tier`; ``--all`` was the one erase that trusted a
-        primary-only count and could report "erased" while spill rows stayed
-        retrievable.
-
-        The primary reset ALWAYS proceeds -- every caller that ignores the
-        return value still gets a working reset. The honesty was lost in the
-        spill clear: it used to swallow its own failure silently (Q10 fail-open),
-        leaving rows RETRIEVABLE through the spill tier while ``get_stats``
-        (primary-only) reported an empty store. An un-cleared spill is now
-        surfaced as residual, fail-CLOSED like :meth:`exists_any_tier`: a spill
-        that cannot be cleared -- or cannot even be counted -- is reported as
-        ``>= 1`` survivor, a loud retryable purge error, never a false all-clear.
-        """
+        """Verified all-tier wipe; return nonzero whenever emptiness is unproven."""
+        uncertain = False
+        residual = 0
         with self._lock:
-            self._backend.clear()
-            spill_residual = self._clear_spill_residual()
+            for role, backend in (("primary", self._backend), ("spill", self._spill)):
+                if backend is None:
+                    continue
+                try:
+                    self._checked_clear_backend_locked(backend, role)
+                except StorageUnavailableError as exc:
+                    logger.warning("CCR verified %s clear failed: %s", role, exc)
+                    uncertain = True
+            for role, backend in (("primary", self._backend), ("spill", self._spill)):
+                if backend is None:
+                    continue
+                try:
+                    residual += len(self._checked_items_backend_locked(backend, role))
+                except StorageUnavailableError as exc:
+                    logger.warning("CCR %s post-clear verification failed: %s", role, exc)
+                    uncertain = True
             self._retrieval_events.clear()
-            self._eviction_heap.clear()  # Clear heap too
-            self._stale_heap_entries = 0  # CRITICAL FIX: Reset stale counter
-            return self._backend.count() + spill_residual
+            self._eviction_heap.clear()
+            self._stale_heap_entries = 0
+        return max(residual, 1 if uncertain else 0)
 
     def _clear_spill_residual(self) -> int:
         """Clear the durable spill; return how many rows survived the attempt.

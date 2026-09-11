@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ... import paths as _paths
+from ..storage_safety import StorageUnavailableError
 from .base import reject_negative_counter_amount
 from .memory import InMemoryBackend
 
@@ -118,6 +119,12 @@ _CREATE_EXPIRES_INDEX_SQL = (
 _CREATE_COUNTERS_TABLE_SQL = (
     "CREATE TABLE IF NOT EXISTS ccr_counters "
     "(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)"
+)
+
+_CREATE_BINDINGS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS ccr_bindings ("
+    "hash_key BLOB PRIMARY KEY, content_fingerprint TEXT NOT NULL, "
+    "conflicted INTEGER NOT NULL DEFAULT 0)"
 )
 
 _COLUMNS = (
@@ -499,6 +506,11 @@ class SqliteBackend:
         return True
 
     @property
+    def coordination_identity(self) -> str:
+        """Cross-process mutation identity for stores sharing this database."""
+        return f"file:{self._db_path.resolve()}"
+
+    @property
     def max_rows(self) -> int:
         """Physical file-level row cap (oldest-first eviction beyond it).
 
@@ -561,6 +573,79 @@ class SqliteBackend:
         for name, value in self._memory.get_counters().items():
             counters[name] = counters.get(name, 0) + value
         return counters
+
+    def _checked_run(self, op_name: str, fn: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Run a proof-requiring SQLite operation without fail-open fallback."""
+        if self._degraded:
+            raise StorageUnavailableError(
+                f"SQLite storage is degraded; cannot verify {op_name} against {self._db_path}"
+            )
+        try:
+            return self._run(op_name, fn)
+        except _SqliteOpFailed as exc:
+            raise StorageUnavailableError(
+                f"SQLite storage could not verify {op_name} against {self._db_path}"
+            ) from exc
+
+    def checked_get_all(self, hash_key: str) -> list[CompressionEntry]:
+        row = self._checked_run(
+            "checked_get",
+            lambda conn: conn.execute(_SELECT_SQL, (_encode_text(hash_key),)).fetchone(),
+        )
+        result: list[CompressionEntry] = []
+        if row is not None:
+            result.append(_row_to_entry(row))
+        volatile = self._memory.get(hash_key)
+        if volatile is not None:
+            result.append(volatile)
+        return result
+
+    def checked_items(self) -> list[tuple[str, CompressionEntry]]:
+        rows = self._checked_run(
+            "checked_items",
+            lambda conn: conn.execute(f"SELECT {_COLUMNS} FROM ccr_entries").fetchall(),
+        )
+        durable = [(_decode_text(row[0]), _row_to_entry(row)) for row in rows]
+        # Do not deduplicate duplicate-key durable/volatile representations: a
+        # divergent overlay is exactly what a safety check needs to see.
+        return durable + self._memory.items()
+
+    def checked_created_at_index(self) -> list[tuple[float, str]]:
+        rows = self._checked_run(
+            "checked_created_at_index",
+            lambda conn: conn.execute("SELECT created_at, hash_key FROM ccr_entries").fetchall(),
+        )
+        return [
+            (float(created_at), _decode_text(hash_key)) for created_at, hash_key in rows
+        ] + self._memory.created_at_index()
+
+    def checked_delete(self, hash_key: str) -> bool:
+        deleted = bool(
+            self._checked_run("checked_delete", lambda conn: self._sqlite_delete(conn, hash_key))
+        )
+        return self._memory.delete(hash_key) or deleted
+
+    def checked_clear(self) -> None:
+        self._checked_run("checked_clear", self._sqlite_clear)
+        self._memory.clear()
+
+    def claim_binding(self, hash_key: str, fingerprint: str) -> str:
+        return self._checked_run(
+            "claim_binding",
+            lambda conn: self._sqlite_claim_binding(conn, hash_key, fingerprint),
+        )
+
+    def get_binding(self, hash_key: str) -> tuple[str, bool] | None:
+        return self._checked_run(
+            "get_binding",
+            lambda conn: self._sqlite_get_binding(conn, hash_key),
+        )
+
+    def release_binding(self, hash_key: str) -> None:
+        self._checked_run(
+            "release_binding",
+            lambda conn: self._sqlite_release_binding(conn, hash_key),
+        )
 
     def close(self) -> None:
         """Close the connections this backend opened, best-effort.
@@ -640,6 +725,7 @@ class SqliteBackend:
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_EXPIRES_INDEX_SQL)
             conn.execute(_CREATE_COUNTERS_TABLE_SQL)
+            conn.execute(_CREATE_BINDINGS_TABLE_SQL)
             purged = conn.execute(_PURGE_EXPIRED_SQL, (time.time(),)).rowcount
             row_count = int(conn.execute("SELECT COUNT(*) FROM ccr_entries").fetchone()[0])
         with self._state_lock:
@@ -701,6 +787,44 @@ class SqliteBackend:
                 self._row_count -= purged
         return int(purged)
 
+    def _sqlite_claim_binding(
+        self, conn: sqlite3.Connection, hash_key: str, fingerprint: str
+    ) -> str:
+        encoded = _encode_text(hash_key)
+        with conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO ccr_bindings "
+                "(hash_key, content_fingerprint, conflicted) VALUES (?, ?, 0)",
+                (encoded, fingerprint),
+            )
+            row = conn.execute(
+                "SELECT content_fingerprint, conflicted FROM ccr_bindings WHERE hash_key = ?",
+                (encoded,),
+            ).fetchone()
+            assert row is not None
+            existing, conflicted = str(row[0]), bool(row[1])
+            if conflicted or existing != fingerprint:
+                conn.execute(
+                    "UPDATE ccr_bindings SET conflicted = 1 WHERE hash_key = ?", (encoded,)
+                )
+                return "conflict"
+            return "claimed" if cursor.rowcount > 0 else "same"
+
+    def _sqlite_get_binding(
+        self, conn: sqlite3.Connection, hash_key: str
+    ) -> tuple[str, bool] | None:
+        row = conn.execute(
+            "SELECT content_fingerprint, conflicted FROM ccr_bindings WHERE hash_key = ?",
+            (_encode_text(hash_key),),
+        ).fetchone()
+        if row is None:
+            return None
+        return (str(row[0]), bool(row[1]))
+
+    def _sqlite_release_binding(self, conn: sqlite3.Connection, hash_key: str) -> None:
+        with conn:
+            conn.execute("DELETE FROM ccr_bindings WHERE hash_key = ?", (_encode_text(hash_key),))
+
     def _sqlite_increment_counter(self, conn: sqlite3.Connection, name: str, amount: int) -> int:
         """Upsert-add ``amount`` to ``name`` and read back the new value in ONE
         transaction. INSERT-OR-IGNORE + UPDATE (not ON CONFLICT) for portability
@@ -719,6 +843,7 @@ class SqliteBackend:
             # A full clear resets counters too (matches the in-memory backend and
             # keeps test isolation / furl_purge(all) a clean slate).
             conn.execute("DELETE FROM ccr_counters")
+            conn.execute("DELETE FROM ccr_bindings")
         with self._state_lock:
             self._row_count = 0
 
