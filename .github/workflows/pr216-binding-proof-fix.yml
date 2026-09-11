@@ -1,0 +1,99 @@
+name: PR216 binding proof fix
+
+on:
+  push:
+    branches:
+      - chatgpt/pr216-binding-id-red-20260911
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: chatgpt/pr216-binding-id-red-20260911
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Apply binding proof fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          path = "furl_ctx/cache/compression_store.py"
+          replace_once(path, "import hashlib\nimport heapq\n", "import hashlib\nimport heapq\nimport hmac\n")
+          replace_once(
+              path,
+              '''# Binding records must never be content-derived verifiers: arbitrary explicit\n# hashes get an opaque random provenance id. Internally-computed hashes carry a\n# non-secret mode marker because their key already is the content address.\n_BINDING_ID_PREFIX: Final = "id:v1:"\n_CONTENT_DERIVED_BINDING_ID: Final = "content:v1"\n\n\ndef _new_binding_id() -> str:\n    return f"{_BINDING_ID_PREFIX}{secrets.token_hex(16)}"\n\n\ndef _is_legacy_binding_value(value: str) -> bool:\n    return len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)\n''',
+              '''# Arbitrary explicit hashes need durable same-content continuity after TTL/delete,\n# but a raw SHA-256(original) tombstone is an offline verifier for low-entropy\n# secrets. Store a salted PBKDF2 proof instead. Live rows carry the exact proof,\n# so normal retrieval/retry is a string comparison; the KDF runs only on first\n# claim, tombstone-only rebind, or legacy migration.\n_BINDING_PROOF_PREFIX: Final = "proof:v1:"\n_RETIRED_BINDING_PREFIX: Final = "retired:v1:"\n_BINDING_PBKDF2_ITERATIONS: Final = 120_000\n_CONTENT_DERIVED_BINDING_ID: Final = "content:v1"\n\n\ndef _binding_bytes(content: str) -> bytes:\n    return content.encode("utf-8", "surrogatepass")\n\n\ndef _new_binding_id(content: str | None = None) -> str:\n    if content is None:\n        return f"{_RETIRED_BINDING_PREFIX}{secrets.token_hex(16)}"\n    salt = secrets.token_bytes(16)\n    digest = hashlib.pbkdf2_hmac(\n        "sha256",\n        _binding_bytes(content),\n        salt,\n        _BINDING_PBKDF2_ITERATIONS,\n        dklen=32,\n    )\n    return (\n        f"{_BINDING_PROOF_PREFIX}{_BINDING_PBKDF2_ITERATIONS}:"\n        f"{salt.hex()}:{digest.hex()}"\n    )\n\n\ndef _binding_id_matches_content(binding_id: str, content: str) -> bool:\n    if not binding_id.startswith(_BINDING_PROOF_PREFIX):\n        return False\n    try:\n        iterations_text, salt_hex, expected_hex = binding_id[len(_BINDING_PROOF_PREFIX) :].split(\n            ":", 2\n        )\n        iterations = int(iterations_text)\n        if iterations <= 0 or iterations > 10_000_000:\n            return False\n        salt = bytes.fromhex(salt_hex)\n        expected = bytes.fromhex(expected_hex)\n    except (ValueError, TypeError):\n        return False\n    actual = hashlib.pbkdf2_hmac(\n        "sha256", _binding_bytes(content), salt, iterations, dklen=len(expected)\n    )\n    return hmac.compare_digest(actual, expected)\n\n\ndef _content_address_matches(hash_key: str, content: str) -> bool:\n    # Compatibility-only check for pre-binding-id rows/checkpoints. Nothing from\n    # this SHA-256 is persisted as identity metadata; it only recognizes the\n    # already-published SHA-256 prefix that is itself the row key.\n    digest = hashlib.sha256(_binding_bytes(content)).hexdigest()\n    return digest.startswith(hash_key.lower())\n\n\ndef _legacy_binding_matches_content(value: str, content: str) -> bool:\n    if not _is_legacy_binding_value(value):\n        return False\n    digest = hashlib.sha256(_binding_bytes(content)).hexdigest()\n    return hmac.compare_digest(value.lower(), digest)\n\n\ndef _is_legacy_binding_value(value: str) -> bool:\n    return len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)\n''',
+          )
+
+          p = Path(path)
+          text = p.read_text()
+          start = text.index("    def _migrate_legacy_bindings(self) -> None:\n")
+          end = text.index("    def _binding_record_locked(", start)
+          replacement = '''    def _migrate_legacy_bindings(self) -> None:\n        """Replace legacy fast content verifiers and classify old content-addressed rows."""\n        backend = self._binding_backend\n        if backend is None:\n            return\n        lister = getattr(backend, "checked_bindings", None)\n        replacer = getattr(backend, "replace_binding", None)\n        release = getattr(backend, "release_binding", None)\n        if not callable(lister) or not callable(replacer):\n            return\n\n        with self._mutation_guard.hold():\n            with self._lock:\n                try:\n                    records = list(lister())\n                except StorageUnavailableError as exc:\n                    logger.warning("CCR legacy binding migration unavailable: %s", exc)\n                    return\n                now = self._now()\n                for hash_key, stored_value, conflicted in records:\n                    stored_value = str(stored_value)\n                    if not _is_legacy_binding_value(stored_value):\n                        continue\n                    retired = _new_binding_id()\n                    if conflicted:\n                        replacer(hash_key, retired, True)\n                        continue\n                    try:\n                        rows = self._representations_locked(hash_key)\n                    except StorageUnavailableError as exc:\n                        logger.warning(\n                            "CCR legacy binding %s cannot inspect payloads; retiring identity: %s",\n                            hash_key,\n                            exc,\n                        )\n                        replacer(hash_key, retired, True)\n                        continue\n\n                    live = [(role, entry) for role, entry in rows if not entry.is_expired(now)]\n                    originals = {entry.original_content for _role, entry in live}\n                    if len(originals) != 1:\n                        replacer(hash_key, retired, True)\n                        continue\n                    original = next(iter(originals))\n                    if not _legacy_binding_matches_content(stored_value, original):\n                        replacer(hash_key, retired, True)\n                        continue\n\n                    replacement_id = (\n                        _CONTENT_DERIVED_BINDING_ID\n                        if _content_address_matches(hash_key, original)\n                        else _new_binding_id(original)\n                    )\n                    try:\n                        for role, _entry in live:\n                            target = self._backend if role == "primary" else self._spill\n                            if target is None or not self._set_entry_binding_id_locked(\n                                target, hash_key, replacement_id, role\n                            ):\n                                raise StorageUnavailableError(\n                                    f"{role} payload disappeared during legacy binding migration"\n                                )\n                        if replacement_id == _CONTENT_DERIVED_BINDING_ID:\n                            if callable(release):\n                                release(hash_key)\n                            else:\n                                raise StorageUnavailableError(\n                                    "binding backend cannot remove migrated content-address record"\n                                )\n                        else:\n                            replacer(hash_key, replacement_id, False)\n                    except StorageUnavailableError as exc:\n                        logger.warning(\n                            "CCR legacy binding %s migration became indeterminate; retiring identity: %s",\n                            hash_key,\n                            exc,\n                        )\n                        replacer(hash_key, _new_binding_id(), True)\n\n                # Pre-binding-id content-addressed rows legitimately had no\n                # ccr_bindings record at all. Classify only rows whose existing\n                # key is provably their SHA-256 prefix; arbitrary unproven rows\n                # stay quarantined with binding_id=None.\n                for role, tier in (("primary", self._backend), ("spill", self._spill)):\n                    if tier is None:\n                        continue\n                    try:\n                        items = self._checked_items_backend_locked(tier, role)\n                    except StorageUnavailableError as exc:\n                        logger.warning(\n                            "CCR legacy row migration cannot enumerate %s tier: %s", role, exc\n                        )\n                        continue\n                    for hash_key, entry in items:\n                        if (\n                            entry.binding_id is not None\n                            or not self._is_marker_key(hash_key)\n                            or entry.is_expired(now)\n                        ):\n                            continue\n                        try:\n                            record = self._binding_record_locked(hash_key)\n                        except StorageUnavailableError:\n                            continue\n                        if record is not None:\n                            continue\n                        if _content_address_matches(hash_key, entry.original_content):\n                            try:\n                                self._set_entry_binding_id_locked(\n                                    tier, hash_key, _CONTENT_DERIVED_BINDING_ID, role\n                                )\n                            except StorageUnavailableError as exc:\n                                logger.warning(\n                                    "CCR content-address migration failed for %s/%s: %s",\n                                    role,\n                                    hash_key,\n                                    exc,\n                                )\n\n'''
+          p.write_text(text[:start] + replacement + text[end:])
+
+          p = Path(path)
+          text = p.read_text()
+          start = text.index("    def _claim_binding_locked(")
+          end = text.index("    def _poison_binding_locked(", start)
+          replacement = '''    def _claim_binding_locked(\n        self,\n        hash_key: str,\n        original: str,\n        binding_id: str | None = None,\n    ) -> tuple[str, str]:\n        """Claim or verify one arbitrary explicit-hash identity.\n\n        Live retries pass the already-stored proof and stay O(1). When only a\n        tombstone remains, the salted PBKDF2 proof verifies whether the caller is\n        re-storing the same original without retaining a raw content digest.\n        """\n        if not self._is_marker_key(hash_key):\n            return "same", binding_id or _new_binding_id(original)\n        backend = self._binding_backend\n        if backend is None:\n            raise StorageUnavailableError(\n                f"no authoritative binding store exists for explicit hash {hash_key}"\n            )\n        claimer = getattr(backend, "claim_binding", None)\n        if not callable(claimer):\n            raise StorageUnavailableError(\n                f"binding backend cannot atomically claim explicit hash {hash_key}"\n            )\n\n        record = self._binding_record_locked(hash_key)\n        if record is not None:\n            recorded, conflicted = record\n            if conflicted:\n                return "conflict", recorded\n            if binding_id is not None and recorded == binding_id:\n                return "same", recorded\n            if _binding_id_matches_content(recorded, original):\n                return "same", recorded\n\n        proof = binding_id or _new_binding_id(original)\n        try:\n            result = str(claimer(hash_key, proof))\n        except StorageUnavailableError:\n            raise\n        except Exception as exc:\n            raise StorageUnavailableError(f"binding claim failed for {hash_key}") from exc\n        return result, proof\n\n'''
+          p.write_text(text[:start] + replacement + text[end:])
+
+          replace_once(
+              path,
+              '''                if len(candidate_binding_ids) > 1:\n                    binding_conflict = True\n                else:\n                    entry.binding_id = (\n                        next(iter(candidate_binding_ids))\n                        if candidate_binding_ids\n                        else _new_binding_id()\n                    )\n                    try:\n                        binding_conflict = (\n                            self._claim_binding_locked(hash_key, entry.binding_id) == "conflict"\n                        )\n                    except StorageUnavailableError as exc:\n''',
+              '''                if len(candidate_binding_ids) > 1:\n                    binding_conflict = True\n                else:\n                    candidate_binding_id = (\n                        next(iter(candidate_binding_ids)) if candidate_binding_ids else None\n                    )\n                    try:\n                        binding_state, resolved_binding_id = self._claim_binding_locked(\n                            hash_key, original, candidate_binding_id\n                        )\n                        entry.binding_id = resolved_binding_id\n                        binding_conflict = binding_state == "conflict"\n                    except StorageUnavailableError as exc:\n''',
+          )
+          replace_once(
+              path,
+              '''                if ensure_binding:\n                    try:\n                        binding = self._claim_binding_locked(hash_key, entry.original_content)\n                    except StorageUnavailableError:\n                        continue\n                    if binding == "conflict":\n''',
+              '''                if ensure_binding:\n                    try:\n                        binding, resolved_binding_id = self._claim_binding_locked(\n                            hash_key, entry.original_content, entry.binding_id\n                        )\n                        entry.binding_id = resolved_binding_id\n                    except StorageUnavailableError:\n                        continue\n                    if binding == "conflict":\n''',
+          )
+
+          # Backward-compatible import: old checkpoints may have either a\n          # content-addressed row with no binding record or a raw SHA-256 binding\n          # record from the previous storage-safety format. Convert both in memory\n          # before destination preflight; the source checkpoint is never rewritten.\n          replace_once(
+              path,
+              '''            if entry.binding_id == _CONTENT_DERIVED_BINDING_ID:\n                continue\n            if entry.binding_id is None:\n                raise CollisionSafetyError(\n                    f"Checkpoint entry {hash_key} has no opaque binding id.",\n                    hash_key=hash_key,\n                )\n            record = source.get_binding(hash_key)\n            if record is None or record[1] or record[0] != entry.binding_id:\n''',
+              '''            if entry.binding_id == _CONTENT_DERIVED_BINDING_ID:\n                continue\n            record = source.get_binding(hash_key)\n            if entry.binding_id is None:\n                if record is None and _content_address_matches(hash_key, entry.original_content):\n                    entry.binding_id = _CONTENT_DERIVED_BINDING_ID\n                    continue\n                if (\n                    record is not None\n                    and not record[1]\n                    and _legacy_binding_matches_content(record[0], entry.original_content)\n                ):\n                    entry.binding_id = _new_binding_id(entry.original_content)\n                    bindings[hash_key] = (entry.binding_id, False)\n                    continue\n                raise CollisionSafetyError(\n                    f"Checkpoint entry {hash_key} has no verified binding proof.",\n                    hash_key=hash_key,\n                )\n            if record is None or record[1] or record[0] != entry.binding_id:\n''',
+          )
+          PY
+
+          python -m pip install --quiet pytest ruff==0.16.2
+          ruff format furl_ctx/cache/compression_store.py
+          ruff check furl_ctx/cache/compression_store.py tests/test_pr216_binding_identity_security.py
+          ruff format --check furl_ctx/cache/compression_store.py tests/test_pr216_binding_identity_security.py
+          python -m compileall -q furl_ctx/cache/compression_store.py
+
+          pytest -q \
+            tests/test_ccr_durable_write_veto.py::test_store_require_durable_raises_on_volatile_fallback \
+            tests/test_ccr_mirror_no_silent_loss.py::test_durable_veto_on_array_path_is_honest_not_unrecoverable \
+            tests/test_store_concurrency.py::test_durable_write_retries_until_contention_clears \
+            tests/test_store_concurrency.py::test_durable_write_vetoes_when_budget_exhausted_before_contention_clears \
+            tests/test_store_concurrency.py::test_durable_write_error_is_honest \
+            tests/test_compression_store_review_regressions.py::test_cascade_and_duplicate_store_are_linearizable \
+            tests/test_pr216_final_storage_safety.py::test_checkpoint_import_cannot_resurrect_concurrent_purge \
+            tests/test_pr216_binding_identity_security.py
+
+          git diff --check
+          git rm .github/workflows/pr216-binding-proof-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add furl_ctx/cache/compression_store.py tests/test_pr216_binding_identity_security.py
+          git commit -m "fix: preserve safe explicit-hash identity continuity"
+          git push origin HEAD:chatgpt/pr216-binding-id-red-20260911
