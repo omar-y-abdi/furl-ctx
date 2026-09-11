@@ -1,0 +1,67 @@
+name: PR216 binding proof publish
+
+on:
+  push:
+    branches:
+      - chatgpt/pr216-binding-id-red-20260911
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: chatgpt/pr216-binding-id-red-20260911
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Publish verified patch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/pr216-binding-proof-fix.yml').read_text()
+          marker = "          python - <<'PY'\n"
+          start = workflow.index(marker) + len(marker)
+          end = workflow.index("\n          PY\n", start)
+          script = textwrap.dedent(workflow[start:end])
+          lines = script.splitlines()
+          assert lines[43].startswith('# Backward-compatible import: old checkpoints')
+          assert lines[44] == '    path,'
+          lines[43:44] = [
+              '# Backward-compatible import: old checkpoints may have either a',
+              '# content-addressed row with no binding record or a raw SHA-256 binding',
+              '# record from the previous storage-safety format. Convert both in memory',
+              '# before destination preflight; the source checkpoint is never rewritten.',
+              'replace_once(',
+          ]
+          script = '\n'.join(lines) + '\n'
+          compile(script, '<binding-proof-fix>', 'exec')
+          exec(script, {})
+          PY
+
+          python -m pip install --quiet ruff==0.16.2
+          ruff format furl_ctx/cache/compression_store.py
+          ruff check furl_ctx/cache/compression_store.py tests/test_pr216_binding_identity_security.py
+          ruff format --check furl_ctx/cache/compression_store.py tests/test_pr216_binding_identity_security.py
+          python -m compileall -q furl_ctx/cache/compression_store.py
+          git diff --check
+
+          git rm \
+            .github/workflows/pr216-binding-proof-fix.yml \
+            .github/workflows/pr216-binding-proof-fix2.yml \
+            .github/workflows/pr216-binding-proof-diagnose.yml \
+            .github/workflows/pr216-binding-proof-fix3.yml \
+            .github/workflows/pr216-binding-proof-publish.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add furl_ctx/cache/compression_store.py tests/test_pr216_binding_identity_security.py
+          git commit -m "fix: preserve safe explicit-hash identity continuity"
+          git push origin HEAD:chatgpt/pr216-binding-id-red-20260911
