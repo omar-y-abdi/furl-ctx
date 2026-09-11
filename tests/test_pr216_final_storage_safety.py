@@ -19,9 +19,7 @@ HASH = "7" * 24
 FILLER = "8" * 24
 
 
-def _entry(
-    original: str, *, compressed: str = "view", hash_key: str = HASH
-) -> CompressionEntry:
+def _entry(original: str, *, compressed: str = "view", hash_key: str = HASH) -> CompressionEntry:
     return CompressionEntry(
         hash=hash_key,
         original_content=original,
@@ -36,7 +34,6 @@ def _entry(
         created_at=time.time(),
         ttl=3600,
     )
-
 
 
 def test_unavailable_binding_authority_never_exposes_volatile_rebind(tmp_path: Any) -> None:
@@ -63,6 +60,7 @@ def test_unavailable_binding_authority_never_exposes_volatile_rebind(tmp_path: A
         assert backend._memory.get(HASH) is None
     finally:
         backend.close()
+
 
 def test_unbound_legacy_spill_only_explicit_hash_is_quarantined(tmp_path: Any) -> None:
     """Upgrade cannot infer which pre-PR producer an unbound explicit key belonged to."""

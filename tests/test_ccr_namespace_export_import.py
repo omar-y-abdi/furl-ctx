@@ -31,8 +31,8 @@ from furl_ctx.cache.compression_store import (
     _request_ccr_store,
     clear_request_compression_store,
     reset_compression_store,
-    set_request_compression_store,
     resolve_ccr_namespace_store,
+    set_request_compression_store,
 )
 
 

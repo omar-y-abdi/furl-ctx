@@ -2880,14 +2880,10 @@ def ccr_export(
     with source._mutation_guard.hold():
         with source._lock:
             grouped: dict[str, list[tuple[str, CompressionEntry]]] = {}
-            for hash_key, entry in source._checked_items_backend_locked(
-                source._backend, "primary"
-            ):
+            for hash_key, entry in source._checked_items_backend_locked(source._backend, "primary"):
                 grouped.setdefault(hash_key, []).append(("primary", entry))
             if source._spill is not None:
-                for hash_key, entry in source._checked_items_backend_locked(
-                    source._spill, "spill"
-                ):
+                for hash_key, entry in source._checked_items_backend_locked(source._spill, "spill"):
                     grouped.setdefault(hash_key, []).append(("spill", entry))
 
             entries: list[tuple[str, CompressionEntry]] = []
