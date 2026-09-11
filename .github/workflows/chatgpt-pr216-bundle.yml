@@ -1,6 +1,5 @@
 name: chatgpt-pr216-preflight
 
-# Re-run only after the patch transport is byte-verified.
 on:
   push:
     branches:
@@ -15,8 +14,10 @@ permissions:
 env:
   PY_VERSION: "3.12"
   PR_HEAD: "7345a29da1aae1c874eb021a8b56929c179d17ab"
-  EXPECTED_TREE: "216518334cf597da1ee314bc72754d034a1eb5f1"
-  PATCH_SHA256: "b5d52e66e74f748b40f3d2ecc79ae85177ebdd87c411513e765fb4747ef5ce7e"
+  BASE_PATCH_SHA256: "b5d52e66e74f748b40f3d2ecc79ae85177ebdd87c411513e765fb4747ef5ce7e"
+  BASE_PATCH_TREE: "216518334cf597da1ee314bc72754d034a1eb5f1"
+  FOLLOWUP_SHA256: "b1c16af4e778c5f9d1f4856dba435180fad9139efe28865389c5434245413817"
+  FINAL_TREE: "52943ac058b10c790a41750a8ed3117b5f74ef49"
   BASE_CI_RUN: "34562586936"
 
 jobs:
@@ -27,15 +28,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - name: Reconstruct exact local patch on PR head
+      - name: Reconstruct exact local commit tree on PR head
         run: |
           cat .github/pr216-fix.patch.b64.* | base64 -d > /tmp/pr216-fix.patch
-          echo "${PATCH_SHA256}  /tmp/pr216-fix.patch" | sha256sum -c -
+          echo "${BASE_PATCH_SHA256}  /tmp/pr216-fix.patch" | sha256sum -c -
+          cat .github/pr216-followup.patch.b64.* | base64 -d > /tmp/pr216-followup.patch
+          echo "${FOLLOWUP_SHA256}  /tmp/pr216-followup.patch" | sha256sum -c -
           git config user.name "ChatGPT"
           git config user.email "noreply@openai.com"
           git checkout --detach "${PR_HEAD}"
           git am /tmp/pr216-fix.patch
-          test "$(git rev-parse HEAD^{tree})" = "${EXPECTED_TREE}"
+          test "$(git rev-parse HEAD^{tree})" = "${BASE_PATCH_TREE}"
+          git apply --index /tmp/pr216-followup.patch
+          git commit --amend --no-edit
+          test "$(git rev-parse HEAD^{tree})" = "${FINAL_TREE}"
           git diff-tree --check HEAD^
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -62,7 +68,7 @@ jobs:
         run: pytest tests --tb=short -q
       - name: Re-verify exact tree after tests
         run: |
-          test "$(git rev-parse HEAD^{tree})" = "${EXPECTED_TREE}"
+          test "$(git rev-parse HEAD^{tree})" = "${FINAL_TREE}"
           test -z "$(git status --porcelain --untracked-files=no)"
       - name: Publish verified staging ref
         run: git push origin HEAD:refs/heads/chatgpt/pr216-staged-fix
