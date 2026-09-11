@@ -1,5 +1,6 @@
 name: chatgpt-pr216-preflight
 
+# Re-run only after the patch transport is byte-verified.
 on:
   push:
     branches:
