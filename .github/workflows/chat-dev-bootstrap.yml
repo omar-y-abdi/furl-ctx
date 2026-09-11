@@ -1,0 +1,241 @@
+name: chat-dev-bootstrap
+
+on:
+  push:
+    branches: [chat-dev]
+    paths:
+      - '.chat-dev/**'
+      - '.github/workflows/chat-dev-bootstrap.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.pre-commit-config.yaml'
+      - '.commitlintrc.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repo-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Build complete Git bundle
+        run: |
+          set -euo pipefail
+          git fetch --all --tags --prune
+          git bundle create /tmp/furl-ctx.bundle --all
+          git bundle verify /tmp/furl-ctx.bundle
+          ls -lh /tmp/furl-ctx.bundle
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-dev-repo-bundle
+          path: /tmp/furl-ctx.bundle
+          retention-days: 2
+
+  core-devkit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.95.0
+          cargo fetch --locked
+          rustc --version
+          cargo --version
+      - name: Install Rust audit tools
+        uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: Resolve Python development environment
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/furl-resolve
+          P=/tmp/furl-resolve/bin/python
+          "$P" -m pip install --upgrade pip
+          "$P" -m pip install 'maturin>=1.9,<2.0'
+          "$P" -m pip install -e '.[dev,mcp,code]' pytest-split google-re2 'twine>=5,<7' \
+            'ruff==0.16.2' 'mypy==1.14.1' 'pre-commit==4.6.2' auditwheel patchelf
+          "$P" -c 'from furl_ctx._core import DiffCompressor; print("native extension OK")'
+          "$P" -m pip freeze --all > /tmp/freeze.txt
+          python - <<'PY'
+          from pathlib import Path
+          out=[]
+          for line in Path('/tmp/freeze.txt').read_text().splitlines():
+              low=line.lower()
+              normalized=low.replace('_', '-')
+              if (
+                  normalized.startswith('furl-ctx @')
+                  or '#egg=furl-ctx' in normalized
+                  or (normalized.startswith('-e ') and 'furl-ctx' in normalized)
+                  or normalized.startswith('# editable install')
+              ):
+                  continue
+              out.append(line)
+          Path('/tmp/requirements-resolved.txt').write_text('\n'.join(out)+'\n')
+          PY
+          mkdir -p /tmp/python-wheelhouse
+          "$P" -m pip wheel --wheel-dir /tmp/python-wheelhouse -r /tmp/requirements-resolved.txt
+          "$P" -m pip wheel --wheel-dir /tmp/python-wheelhouse 'maturin>=1.9,<2.0'
+          cp /tmp/requirements-resolved.txt /tmp/python-wheelhouse/
+      - name: Prime runtime caches
+        run: |
+          set -euo pipefail
+          P=/tmp/furl-resolve/bin/python
+          export TIKTOKEN_CACHE_DIR=/tmp/furl-tiktoken-cache
+          "$P" - <<'PY'
+          import tiktoken
+          for name in ('o200k_base', 'cl100k_base'):
+              enc=tiktoken.get_encoding(name)
+              print(name, len(enc.encode('hello world')))
+          PY
+          "$P" - <<'PY'
+          import tree_sitter_language_pack as p
+          names=['python','javascript','typescript','go','rust','java','c','cpp']
+          print('tree-sitter cache:', p.cache_dir())
+          p.download(names)
+          print('cached:', p.downloaded_languages())
+          for name in names:
+              p.get_parser(name)
+          PY
+          export PRE_COMMIT_HOME=/tmp/furl-precommit
+          /tmp/furl-resolve/bin/pre-commit install-hooks
+          set +e
+          cargo audit
+          audit_status=$?
+          set -e
+          echo "cargo audit initial status=$audit_status"
+          test -d "$HOME/.cargo/advisory-db"
+      - name: Install commitlint bundle
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/furl-commitlint
+          npm install --prefix /tmp/furl-commitlint @commitlint/cli@21.2.2 @commitlint/config-conventional@21.2.0
+          /tmp/furl-commitlint/node_modules/.bin/commitlint --version
+      - name: Package core devkit
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/devkit
+          SYSROOT="$(rustc --print sysroot)"
+          tar -C "$SYSROOT" -czf /tmp/devkit/rust-toolchain.tgz .
+          tar -C "$HOME" -czf /tmp/devkit/cargo-home.tgz .cargo
+          PY_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+          tar -C / -czf /tmp/devkit/python312.tgz "${PY_PREFIX#/}"
+          echo "$PY_PREFIX" > /tmp/devkit/python312-prefix.txt
+          tar -C /tmp -czf /tmp/devkit/python-wheelhouse.tgz python-wheelhouse
+          tar -C /tmp -czf /tmp/devkit/commitlint.tgz furl-commitlint
+          tar -C /tmp -czf /tmp/devkit/tiktoken-cache.tgz furl-tiktoken-cache
+          tar -C /tmp -czf /tmp/devkit/precommit-cache.tgz furl-precommit
+          tar -C "$HOME/.cargo" -czf /tmp/devkit/rustsec-db.tgz advisory-db
+          tar -C "$HOME/.cache" -czf /tmp/devkit/tree-sitter-cache.tgz tree-sitter-language-pack
+          {
+            echo "bootstrap_sha=$(git rev-parse HEAD)"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "python=$(python --version 2>&1)"
+            echo "python_prefix=$PY_PREFIX"
+            echo "cargo_audit=$(cargo audit --version)"
+            echo "cargo_deny=$(cargo deny --version)"
+            echo "commitlint=$(/tmp/furl-commitlint/node_modules/.bin/commitlint --version)"
+          } > /tmp/devkit/manifest.txt
+          ls -lh /tmp/devkit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-dev-rust
+          path: |
+            /tmp/devkit/rust-toolchain.tgz
+            /tmp/devkit/cargo-home.tgz
+            /tmp/devkit/rustsec-db.tgz
+            /tmp/devkit/manifest.txt
+          retention-days: 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-dev-python312
+          path: |
+            /tmp/devkit/python312.tgz
+            /tmp/devkit/python312-prefix.txt
+            /tmp/devkit/python-wheelhouse.tgz
+            /tmp/devkit/manifest.txt
+          retention-days: 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-dev-runtime-caches
+          path: |
+            /tmp/devkit/tiktoken-cache.tgz
+            /tmp/devkit/precommit-cache.tgz
+            /tmp/devkit/tree-sitter-cache.tgz
+          retention-days: 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-dev-commitlint
+          path: /tmp/devkit/commitlint.tgz
+          retention-days: 2
+
+  python-compat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - py: '3.10'
+            tag: py310
+          - py: '3.14'
+            tag: py314
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.py }}
+      - name: Resolve compatibility dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'tomli>=2; python_version < "3.11"'
+          python - <<'PY'
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+          from pathlib import Path
+          cfg=tomllib.loads(Path('pyproject.toml').read_text())
+          reqs=list(cfg['project'].get('dependencies', []))
+          optional=cfg['project'].get('optional-dependencies', {})
+          for group in ('dev','mcp','code'):
+              reqs.extend(optional.get(group, []))
+          reqs.extend(['pytest-split','google-re2'])
+          reqs=[r for r in reqs if not r.lower().startswith('furl-ctx[')]
+          Path('/tmp/requirements.txt').write_text('\n'.join(reqs)+'\n')
+          PY
+          mkdir -p /tmp/wheelhouse
+          python -m pip download --dest /tmp/wheelhouse -r /tmp/requirements.txt
+          cp /tmp/requirements.txt /tmp/wheelhouse/requirements.txt
+      - name: Package runtime and wheelhouse
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          PYROOT="$(python -c 'import sys; print(sys.prefix)')"
+          tar -C "$(dirname "$PYROOT")" -czf "/tmp/out/python-${{ matrix.tag }}.tgz" "$(basename "$PYROOT")"
+          tar -C /tmp -czf "/tmp/out/wheelhouse-${{ matrix.tag }}.tgz" wheelhouse
+          python --version > "/tmp/out/version-${{ matrix.tag }}.txt"
+          echo "$PYROOT" >> "/tmp/out/version-${{ matrix.tag }}.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-dev-${{ matrix.tag }}
+          path: /tmp/out/*
+          retention-days: 2
