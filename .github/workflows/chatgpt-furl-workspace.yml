@@ -1,0 +1,40 @@
+name: chatgpt-furl-workspace
+on:
+  push:
+    branches: [chatgpt/furl-plugin-site-audit-clean]
+    paths: [.github/workflows/chatgpt-furl-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  acquire:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
+        with:
+          python-version: '3.12'
+      - name: Export source and browser test runtime
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/export/wheels /tmp/export/tools
+          git bundle create /tmp/export/repo.bundle --all
+          git bundle verify /tmp/export/repo.bundle
+          git rev-parse HEAD > /tmp/export/source-sha.txt
+          python -m pip download --dest /tmp/export/wheels playwright==1.57.0 pillow==11.3.0 PyJWT==2.10.1 cryptography==45.0.7
+          python -m pip install playwright==1.57.0
+          PLAYWRIGHT_BROWSERS_PATH=/tmp/browsers python -m playwright install chromium --only-shell
+          tar czf /tmp/export/browsers.tgz -C /tmp browsers
+          npm pack axe-core@4.10.3 --pack-destination /tmp/export/tools
+          node --version > /tmp/export/tools/node-version.txt
+          cd /tmp/export
+          sha256sum repo.bundle browsers.tgz wheels/* tools/* > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: furl-site-workspace
+          path: /tmp/export
+          retention-days: 7
