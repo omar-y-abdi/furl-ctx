@@ -1,0 +1,4 @@
+README.md
+**/*.py
+**/*.map
+**/__pycache__/**
