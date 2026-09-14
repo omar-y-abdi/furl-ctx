@@ -80,7 +80,7 @@ except ImportError:
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import TextContent, Tool
+    from mcp.types import TextContent, Tool, ToolAnnotations
 
     MCP_AVAILABLE = True
 except ImportError:
@@ -183,6 +183,21 @@ async def _validate_provided_file_url(url: str) -> None:
         raise _ProvidedFileError("file.download_url must not contain URL credentials")
 
     host = parsed.hostname
+    allowed_hosts = os.environ.get("FURL_MCP_ALLOWED_FILE_HOSTS")
+    if allowed_hosts is not None:
+        patterns = [part.strip().lower() for part in allowed_hosts.split(",") if part.strip()]
+        canonical_host = host.lower().rstrip(".")
+        allowed = any(
+            canonical_host == pattern
+            or (
+                pattern.startswith("*.")
+                and canonical_host.endswith(pattern[1:])
+                and canonical_host != pattern[2:]
+            )
+            for pattern in patterns
+        )
+        if port != 443 or not allowed:
+            raise _ProvidedFileError("provided file destination is not allowed by this server")
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
@@ -2122,7 +2137,17 @@ class FurlMCPServer:
                     )
                 )
 
+            for tool in tools:
+                mutating = tool.name in {COMPRESS_TOOL_NAME, PURGE_TOOL_NAME, READ_TOOL_NAME}
+                tool.annotations = ToolAnnotations(
+                    readOnlyHint=not mutating,
+                    # Compression/cached reads can evict older entries at store capacity.
+                    destructiveHint=mutating,
+                    openWorldHint=tool.name == COMPRESS_TOOL_NAME,
+                )
             return tools
+
+        self.route_list_tools = list_tools
 
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:

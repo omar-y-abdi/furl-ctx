@@ -68,15 +68,16 @@
     var fmt = opts.decimals ? pctFmt : commas;
     var suffix = opts.suffix || "";
     if (REDUCED) { node.textContent = fmt(to) + suffix; return; }
+    if (node._countFrame) cancelAnimationFrame(node._countFrame);
     var start = null;
     function step(ts) {
       if (start == null) start = ts;
       var t = Math.min(1, (ts - start) / dur);
       var e = 1 - Math.pow(1 - t, 3);
       node.textContent = fmt(from + (to - from) * e) + suffix;
-      if (t < 1) requestAnimationFrame(step);
+      if (t < 1) node._countFrame = requestAnimationFrame(step);
     }
-    requestAnimationFrame(step);
+    node._countFrame = requestAnimationFrame(step);
   }
 
   /* ---- build the code viewport (before -> fold) ------------------------ */
@@ -89,6 +90,7 @@
 
   function markerNode(sample) {
     var wrap = el("div", "marker");
+    wrap.setAttribute("aria-hidden", "true");
     var inner = el("div", "marker-inner");
     var corner =
       '<svg class="marker-corner" viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
@@ -173,11 +175,13 @@
 
   function buildRetrieve(sample, getFolded, requestFold) {
     var sec = el("div", "retrieve");
-    sec.appendChild(el("p", "rt-eyebrow", "Nothing was deleted"));
+    sec.appendChild(el("p", "rt-eyebrow", "Recorded retrieval"));
     sec.appendChild(el("p", "rt-caption", esc(sample.retrieval.caption)));
 
     var callRow = el("div", "retrieve-call");
     var code = el("code", "rt-code", highlightCall(sample.retrieval.call));
+    code.tabIndex = 0;
+    code.setAttribute("aria-label", "Recorded retrieval command");
     var btn = el("button", "btn primary retrieve-btn", esc(sample.retrieval.control_label));
     btn.type = "button";
     btn.disabled = true;
@@ -186,11 +190,16 @@
     sec.appendChild(callRow);
 
     var outWrap = el("div", "retrieve-out");
+    outWrap.setAttribute("aria-hidden", "true");
+    outWrap.inert = true;
     var outInner = el("div", "retrieve-out-inner");
     var panel = el("div", "rt-panel");
     var badge = sample.retrieval.kind === "select" ? "exact row" : "exact lines";
     panel.appendChild(el("div", "rt-badge", badge));
-    panel.appendChild(el("pre", "rt-result", renderResult(sample)));
+    var result = el("pre", "rt-result", renderResult(sample));
+    result.tabIndex = 0;
+    result.setAttribute("aria-label", "Recorded retrieved content");
+    panel.appendChild(result);
     panel.appendChild(el("p", "rt-caption", byteExactNote(sample)));
     outInner.appendChild(panel);
     outWrap.appendChild(outInner);
@@ -199,13 +208,16 @@
     btn.addEventListener("click", function () {
       if (!getFolded()) requestFold();
       outWrap.classList.add("open");
+      outWrap.setAttribute("aria-hidden", "false");
+      outWrap.inert = false;
+      outWrap.querySelector(".rt-result").focus();
       btn.textContent = "Retrieved";
       btn.disabled = true;
     });
 
     return { node: sec, enable: function () { sec.classList.add("enabled"); btn.disabled = false; },
              reset: function () { sec.classList.remove("enabled"); btn.disabled = true;
-               outWrap.classList.remove("open"); btn.textContent = sample.retrieval.control_label; } };
+               outWrap.classList.remove("open"); outWrap.setAttribute("aria-hidden", "true"); outWrap.inert = true; btn.textContent = sample.retrieval.control_label; } };
   }
 
   /* ---- one panel ------------------------------------------------------- */
@@ -240,6 +252,9 @@
       ' lines</span><span class="lbl-after">after furl</span>';
     stage.appendChild(labels);
     var viewport = el("div", "viewport");
+    viewport.tabIndex = 0;
+    viewport.setAttribute("role", "region");
+    viewport.setAttribute("aria-label", sample.label + " capture output");
     viewport.appendChild(buildCode(sample));
     stage.appendChild(viewport);
     panel.appendChild(stage);
@@ -257,6 +272,9 @@
     controls.appendChild(meter);
     controls.appendChild(meterPct);
     panel.appendChild(controls);
+    var status = el("p", "sr-status");
+    status.setAttribute("role", "status");
+    panel.appendChild(status);
 
     var folded = false;
     var retrieve = buildRetrieve(sample, function () { return folded; }, doFold);
@@ -265,7 +283,10 @@
     function doFold() {
       if (folded) return;
       folded = true;
+      status.textContent = "Showing prerecorded compressed output. " + pctFmt(sample.percent_saved) + "% fewer tokens.";
+      stage.querySelectorAll(".band").forEach(function (band) { band.setAttribute("aria-hidden", "true"); });
       viewport.scrollTop = 0;
+      stage.querySelector(".marker").setAttribute("aria-hidden", "false");
       stage.classList.add("folded");
       viewport.classList.add("folded");
       meterFill.style.width = pctFmt(sample.percent_saved) + "%";
@@ -277,6 +298,10 @@
     }
     function doReset() {
       folded = false;
+      if (meterPct._countFrame) cancelAnimationFrame(meterPct._countFrame);
+      status.textContent = "Original capture restored.";
+      stage.querySelectorAll(".band").forEach(function (band) { band.removeAttribute("aria-hidden"); });
+      stage.querySelector(".marker").setAttribute("aria-hidden", "true");
       stage.classList.remove("folded");
       viewport.classList.remove("folded");
       viewport.scrollTop = 0;
@@ -286,6 +311,7 @@
       compressBtn.textContent = "Compress";
       resetBtn.hidden = true;
       retrieve.reset();
+      compressBtn.focus();
     }
     compressBtn.addEventListener("click", doFold);
     resetBtn.addEventListener("click", doReset);
