@@ -24,9 +24,10 @@ pytest.importorskip("mcp")
 
 import mcp.types as mt  # noqa: E402
 
+import furl_ctx.ccr.mcp_server as mcp_mod  # noqa: E402
 from furl_ctx import retrieve  # noqa: E402
 from furl_ctx.cache.compression_store import reset_compression_store  # noqa: E402
-from furl_ctx.ccr.mcp_server import FurlMCPServer  # noqa: E402
+from furl_ctx.ccr.mcp_server import COMPRESS_TOOL_NAME, FurlMCPServer  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +52,78 @@ def _envelope(result: list[mt.TextContent]) -> dict:
     item = result[0]
     assert isinstance(item, mt.TextContent)
     return json.loads(item.text)
+
+
+async def _list_tools(server: FurlMCPServer) -> dict:
+    handler = None
+    for req_type, candidate in server.server.request_handlers.items():
+        if req_type.__name__ == "ListToolsRequest":
+            handler = candidate
+            break
+    assert handler is not None, "no ListToolsRequest handler registered"
+    result = await handler(mt.ListToolsRequest(method="tools/list"))
+    return {tool.name: tool for tool in result.root.tools}
+
+
+# ─── ChatGPT / OpenAI host-provided file handoff ───────────────────────────
+
+
+async def test_compress_tool_declares_openai_file_param(server) -> None:
+    tool = (await _list_tools(server))[COMPRESS_TOOL_NAME]
+    wire = tool.model_dump(by_alias=True, exclude_none=True)
+    assert wire["_meta"]["openai/fileParams"] == ["file"]
+
+    file_schema = wire["inputSchema"]["properties"]["file"]
+    assert file_schema["type"] == "object"
+    assert set(file_schema["properties"]) >= {
+        "download_url",
+        "file_id",
+        "mime_type",
+        "file_name",
+    }
+    assert file_schema["required"] == ["download_url", "file_id"]
+    assert file_schema["additionalProperties"] is False
+
+
+async def test_host_provided_file_is_compressed_out_of_band(server, monkeypatch) -> None:
+    body = json.dumps([{"row": i, "name": "RunTask"} for i in range(2000)])
+    provided = {
+        "download_url": "https://files.example.invalid/signed",
+        "file_id": "file_test",
+        "mime_type": "application/json",
+        "file_name": "trace.json",
+    }
+    seen = {}
+
+    async def fake_download(value, max_bytes):
+        seen["value"] = value
+        seen["max_bytes"] = max_bytes
+        return body
+
+    monkeypatch.setattr(mcp_mod, "_download_provided_file", fake_download)
+    env = _envelope(await server._handle_compress({"file": provided, "persist": True}))
+
+    assert "error" not in env, env
+    assert seen["value"] == provided
+    assert seen["max_bytes"] == 40 * 1024 * 1024
+    assert env["hash"]
+    assert retrieve(env["hash"]) == body
+
+
+async def test_host_provided_file_and_other_source_are_rejected(server) -> None:
+    provided = {"download_url": "https://example.com/a", "file_id": "file_test"}
+    env = _envelope(await server._handle_compress({"content": "x", "file": provided}))
+    assert env == {"error": "provide exactly one of 'content', 'file_path', or 'file'"}
+
+
+async def test_host_provided_file_requires_download_url_and_file_id(server) -> None:
+    env = _envelope(await server._handle_compress({"file": {"file_id": "file_test"}}))
+    assert env == {"error": "file.download_url must be a non-empty string"}
+
+
+async def test_host_provided_file_rejects_private_download_target() -> None:
+    with pytest.raises(mcp_mod._ProvidedFileError, match="public addresses"):
+        await mcp_mod._validate_provided_file_url("https://127.0.0.1/secret")
 
 
 # ─── happy paths ────────────────────────────────────────────────────────────
