@@ -1,0 +1,126 @@
+name: chatgpt-furl-site-audit
+
+on:
+  push:
+    branches:
+      - chatgpt/furl-plugin-site-audit-clean
+    paths:
+      - .github/workflows/chatgpt-furl-site-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Static source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from html.parser import HTMLParser
+          import json, re
+          root=Path('site')
+          html=list(root.rglob('*.html'))
+          class P(HTMLParser):
+              def __init__(self):
+                  super().__init__(); self.title=[]; self.meta=[]; self.links=[]; self.img=[]; self.h1=0; self.buttons=[]; self.scripts=[]
+              def handle_starttag(self,tag,attrs):
+                  a=dict(attrs)
+                  if tag=='title': self._intitle=True
+                  if tag=='meta': self.meta.append(a)
+                  if tag=='link': self.links.append(a)
+                  if tag=='img': self.img.append(a)
+                  if tag=='h1': self.h1+=1
+                  if tag=='button': self.buttons.append(a)
+                  if tag=='script': self.scripts.append(a)
+              def handle_data(self,d):
+                  if getattr(self,'_intitle',False): self.title.append(d)
+              def handle_endtag(self,tag):
+                  if tag=='title': self._intitle=False
+          out={'pages':{},'site_files':sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())}
+          for f in html:
+              p=P(); p.feed(f.read_text('utf-8'))
+              metas={}
+              for m in p.meta:
+                  k=m.get('name') or m.get('property')
+                  if k: metas.setdefault(k,[]).append(m.get('content',''))
+              out['pages'][str(f.relative_to(root))]={
+                  'title':' '.join(''.join(p.title).split()),
+                  'description':(metas.get('description') or [''])[0],
+                  'canonical':[x.get('href') for x in p.links if x.get('rel')=='canonical'],
+                  'h1_count':p.h1,
+                  'missing_alt':[x.get('src') for x in p.img if 'alt' not in x],
+                  'source_maps':[x.get('src') for x in p.scripts if '.map' in x.get('src','')],
+              }
+          out['map_files']=[str(x) for x in root.rglob('*.map')]
+          out['placeholder_hits']=[]
+          for f in root.rglob('*'):
+              if not f.is_file() or f.suffix.lower() in {'.png','.woff2'}: continue
+              try: text=f.read_text('utf-8')
+              except: continue
+              if re.search(r'\b(lorem ipsum|create react app|vite|placeholder text)\b',text,re.I): out['placeholder_hits'].append(str(f))
+          out['sizes']={str(f.relative_to(root)):f.stat().st_size for f in root.rglob('*') if f.is_file() and f.suffix in {'.js','.css','.html'}}
+          print(json.dumps(out,indent=2))
+          PY
+
+      - uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # v4
+        with:
+          python-version: '3.12'
+
+      - name: Install browser auditor
+        run: |
+          python -m pip install --disable-pip-version-check playwright==1.57.0
+          python -m playwright install --with-deps chromium >/dev/null
+
+      - name: Audit live Vercel site
+        shell: bash
+        run: |
+          cat >/tmp/audit.py <<'PY'
+          import asyncio,json,ssl,urllib.request,urllib.error
+          from html.parser import HTMLParser
+          from playwright.async_api import async_playwright
+          O='https://furl-ctx.vercel.app'
+          paths=['/','/404.html','/privacy','/privacy.html','/terms','/terms.html','/cookies','/cookies.html','/robots.txt','/sitemap.xml','/llms.txt','/mcp','/.well-known/oauth-authorization-server','/.well-known/oauth-protected-resource','/.well-known/openai-apps-challenge']
+          ctx=ssl.create_default_context()
+          def fetch(p):
+              req=urllib.request.Request(O+p,headers={'User-Agent':'Mozilla/5.0 site-audit'})
+              try:
+                  with urllib.request.urlopen(req,timeout=20,context=ctx) as r:return {'status':r.status,'headers':dict(r.headers),'body':r.read().decode('utf-8','replace')[:5000],'url':r.geturl()}
+              except urllib.error.HTTPError as e:return {'status':e.code,'headers':dict(e.headers),'body':e.read().decode('utf-8','replace')[:5000],'url':e.geturl()}
+              except Exception as e:return {'status':None,'error':repr(e)}
+          report={'http':{p:fetch(p) for p in paths},'browser':{}}
+          async def run():
+              async with async_playwright() as pw:
+                  b=await pw.chromium.launch()
+                  for p in ['/','/this-route-should-not-exist-chatgpt-audit']:
+                      pg=await b.new_page(viewport={'width':1440,'height':1000})
+                      errors=[]; failed=[]
+                      pg.on('console',lambda m,errors=errors:errors.append(m.text) if m.type=='error' else None)
+                      pg.on('pageerror',lambda e,errors=errors:errors.append('PAGEERROR '+str(e)))
+                      pg.on('requestfailed',lambda r,failed=failed:failed.append(r.url))
+                      try:
+                          r=await pg.goto(O+p,wait_until='domcontentloaded',timeout=20000); await pg.wait_for_timeout(1500); status=r.status if r else None
+                      except Exception as e: errors.append('NAV '+repr(e)); status=None
+                      report['browser'][p]={
+                          'status':status,'title':await pg.title(),'console_errors':errors,'request_failures':failed,
+                          'h1_count':await pg.locator('h1').count(),
+                          'unnamed_buttons':await pg.locator('button').evaluate_all("els=>els.filter(e=>!(e.getAttribute('aria-label')||e.innerText.trim()||e.title)).length"),
+                          'unnamed_links':await pg.locator('a[href]').evaluate_all("els=>els.filter(e=>!(e.getAttribute('aria-label')||e.innerText.trim()||e.querySelector('img[alt]'))).length"),
+                          'images_missing_alt':await pg.locator('img:not([alt])').count(),
+                          'form_fields_unlabelled':await pg.locator('input:not([type=hidden]),textarea,select').evaluate_all("els=>els.filter(e=>{let id=e.id;return !(e.getAttribute('aria-label')||e.getAttribute('aria-labelledby')||(id&&document.querySelector('label[for=\"'+CSS.escape(id)+'\"]'))||e.closest('label'))}).length")
+                      }
+                      await pg.close()
+                  await b.close()
+          asyncio.run(run())
+          print(json.dumps(report,indent=2))
+          PY
+          python /tmp/audit.py
