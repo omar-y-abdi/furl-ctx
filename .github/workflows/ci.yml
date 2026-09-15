@@ -237,7 +237,7 @@ jobs:
         with:
           toolchain: 1.95.0  # keep in sync with rust-toolchain.toml
       - if: needs.changes.outputs.code == 'true'
-        uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: ". -> target"
       - name: Build wheel once (fast CI cargo profile)
@@ -422,7 +422,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.95.0  # keep in sync with rust-toolchain.toml (TEST-30)
-      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: ". -> target"
       # Smoke-check the shipped release-profile wheel and sdist; the release matrix performs the actual publication.
