@@ -1,37 +1,5 @@
-//! Formatter trait + the built-in implementations.
-//!
-//! [`Formatter`] walks a [`Compaction`] tree and renders bytes. It's the
-//! pluggable seam where users (or Enterprise plugins) choose how the
-//! compacted output looks.
-//!
-//! # Built-ins
-//!
-//! - [`JsonFormatter`] — single-line / pretty JSON. Easy to parse,
-//!   wider model familiarity, larger byte size. Default for the
-//!   debugging path.
-//! - [`CsvSchemaFormatter`] — `[N]{cols}` row-count-and-shape
-//!   declaration + typed column header + CSV-escaped rows. Steals
-//!   TOON's most useful idea (the `[N]{cols}` declaration) without
-//!   adopting TOON's bespoke escaping rules — every model has seen
-//!   millions of CSV examples in training.
-//! - [`MarkdownKvFormatter`] — the same `[N]{cols}` declaration +
-//!   one Markdown list item per row with `key: value` lines.
-//!   Token-heavier than CSV (field names repeat per row) but
-//!   format-comprehension benchmarks favor KV for read-back accuracy.
-//!
-//! # Nested cells
-//!
-//! The formatters handle [`CellValue::Nested`] by recursively
-//! formatting the sub-compaction and embedding the result. The CSV
-//! formatter wraps nested output in CSV-quoted form; the JSON
-//! formatter embeds it as a structured JSON object.
-//!
-//! # Opaque cells
-//!
-//! [`CellValue::OpaqueRef`] renders as a structured marker the model
-//! can recognize: `<<ccr:HASH,KIND,SIZE>>`. This format is fixed across
-//! all built-in formatters so downstream consumers can pattern-match
-//! markers regardless of which formatter produced them.
+//! Render compaction IR through JSON, CSV-schema, or Markdown-KV formatters. Nested cells recurse;
+//! opaque cells always use the same CCR marker grammar so downstream recovery is formatter-independent.
 
 use serde_json::{json, Value};
 
@@ -39,66 +7,22 @@ use super::encodings;
 use super::ir::{CellValue, ColumnEncoding, Compaction, FieldSpec, OpaqueKind, Row, Schema};
 use crate::ccr::marker_for_opaque;
 
-// ─────────────────── CSV-schema preamble grammar markers ───────────────────
-//
-// Line prefixes for the three preamble lines of the CSV-schema rendering.
-// Each preamble line declares a column encoding once (dictionary values /
-// shared affix / head dictionary) so the rows below stay terse. A plain
-// data cell that happens to START with one of these prefixes is CSV-quoted
-// by `csv_render_str`, keeping the preamble lines unambiguous.
-//
-// CONTRACT: these byte strings are the wire format read back by the Python
-// reference decoder `furl_ctx/transforms/csv_schema_decoder.py` (the
-// `_DICT_PREFIX` / `_AFFIX_PREFIX` / `_HEAD_PREFIX` constants there must be
-// byte-for-byte identical). The round-trip is guarded by the 200-case fuzz
-// test `tests/test_csv_schema_decoder_roundtrip_fuzz.py`, which drives the
-// real formatter → real decoder, so any drift between the two sides fails.
+// ─────────────────── CSV-schema preamble grammar markers ─────────────────── Line prefixes for the three preamble lines of the CSV-schema rendering. CONTRACT: these byte strings
+// are read by the Python reference decoder; `_DICT_PREFIX`, `_AFFIX_PREFIX`, and `_HEAD_PREFIX` must remain byte-identical across implementations.
 const DICT_PREFIX: &str = "__dict:";
 const AFFIX_PREFIX: &str = "__affix:";
 const HEAD_PREFIX: &str = "__head:";
-// Row-drop numeric summary line (F4). Emitted by the router (route.rs) as a
-// trailing `__stats:col=min/max/sum/count,...` metadata line on the survivor
-// render. Reserved here like the preamble prefixes so a plain data cell that
-// would start a line with it is CSV-quoted and never mistaken for the summary
-// by the reference decoder (which skips `__stats:` lines when reconstructing
-// rows). Must stay byte-identical to `csv_schema_decoder._STATS_PREFIX`.
+// Row-drop numeric summary line (F4). Reserved here like the preamble prefixes so a plain data cell that would start a line with it
+// is CSV-quoted and never mistaken for the summary by the reference decoder (which skips `__stats:` lines when reconstructing rows).
 const STATS_PREFIX: &str = "__stats:";
 
-// Exact-match reserved cell sentinels (NOT prefixes, unlike the markers
-// above — matched like the ditto `=`). `NULL_SENTINEL` renders a JSON
-// `null`; `MISSING_SENTINEL` renders an absent key. This keeps `null`,
-// a missing key, and the empty string `""` distinct on the lossless CSV
-// path (all three previously collapsed to an empty cell). A literal
-// STRING cell equal to either sentinel is CSV-quoted by `csv_render_str`,
-// so the bare sentinels stay unambiguous. The Python decoder
-// `csv_schema_decoder.py` (`_NULL_SENTINEL` / `_MISSING_SENTINEL`) must
-// match these byte-for-byte + apply the same escape rule.
+// Exact-match reserved cell sentinels (NOT prefixes, unlike the markers above — matched like the ditto `=`). The Python
+// Python decoding must match `_NULL_SENTINEL` and `_MISSING_SENTINEL` byte-for-byte and apply the same escape rule.
 const NULL_SENTINEL: &str = "__null__";
 const MISSING_SENTINEL: &str = "__missing__";
 
-// ─────────────────── JSON-container cell envelope (F5) ───────────────────
-//
-// A `json`-tagged column whose cell is an Object/Array previously shipped
-// as CSV-quoted compact JSON — every inner `"` doubled to `""`, so the
-// column ended up LARGER than its source (report finding F5, args-heavy
-// Chrome traces). Instead, such a cell ships as a length-prefixed
-// envelope: `\x1f<codepoint_len><raw_compact_json>`. The payload is
-// verbatim `serde_json` output — NO re-escaping — so the cell is the raw
-// JSON plus a small fixed frame, never inflated by quoting.
-//
-// `\x1f` (ASCII Unit Separator) never appears unescaped in `serde_json`
-// output (control chars are `\uXXXX`-escaped), and `needs_csv_quote`
-// quotes any plain cell that contains it, so a bare leading `\x1f`
-// unambiguously opens an envelope. The length is a CODE-POINT count
-// (`chars().count()`), matching Python `len(str)` so non-ASCII payloads
-// decode at the exact boundary.
-//
-// CONTRACT: the Python reference decoder `csv_schema_decoder.py`
-// (`_ENVELOPE`) reads the marker + length and consumes exactly that many
-// code points verbatim. Its `split_unquoted` / `_split_logical_lines`
-// skip an envelope by length so its inner commas/quotes/newlines never
-// perturb the CSV row grammar. Old CSV-quoted-JSON container cells still
-// decode (backward compatible), so previously stored tables are safe.
+// JSON container cells use a Unit-Separator + codepoint-length envelope around raw compact JSON, avoiding
+// CSV quote inflation. The decoder skips envelopes by length; legacy quoted JSON remains accepted.
 const JSON_ENVELOPE_MARK: char = '\u{1f}';
 
 /// Format a `Compaction` tree into bytes.
@@ -191,9 +115,8 @@ fn compaction_to_json(c: &Compaction) -> Value {
             "_size": byte_size,
             "_kind": opaque_kind_str(kind),
         }),
-        // Payload-free (PERF-5). A declined compaction never ships: every
-        // production caller gates on `was_compacted()` before formatting,
-        // so this arm renders only in direct-formatter (debug/test) use.
+        // Payload-free (PERF-5). A declined compaction never ships: every production caller gates on
+        // `was_compacted()` before formatting, so this arm renders only in direct-formatter (debug/test) use.
         Compaction::Untouched => Value::Null,
     }
 }
@@ -249,9 +172,8 @@ fn opaque_kind_str(k: &OpaqueKind) -> String {
 
 // ─────────────────────────── CSV+schema formatter ───────────────────────────
 
-/// Renders a `Compaction` as `[N]{col1:type1,col2:type2}` declaration +
-/// CSV-escaped rows. Nested cells render as JSON inline; opaque cells
-/// render as `<<ccr:...>>` markers.
+/// Renders a `Compaction` as `[N]{col1:type1,col2:type2}` declaration + CSV-escaped rows.
+/// Nested cells render as JSON inline; opaque cells render as `<<ccr:...>>` markers.
 #[derive(Debug, Clone, Default)]
 pub struct CsvSchemaFormatter;
 
@@ -309,25 +231,8 @@ fn write_compaction(out: &mut String, c: &Compaction) {
 }
 
 fn write_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: usize) {
-    // Declaration line: [N]{col:type,col:type,...}
-    //
-    // Constant-column fold: a column with `const_value = Some(v)`
-    // declares `name:type=v` here and is OMITTED from every row below —
-    // the value appears verbatim exactly once. Lossless: rows are
-    // reconstructible from the declaration + remaining cells.
-    //
-    // Arithmetic fold: a column stamped `ArithInt { base, step }` is an
-    // exact progression `base + step*i`; it declares `name:int=BASE+STEP`
-    // here and is OMITTED from every row below. Unambiguous against a
-    // constant declaration: an int constant renders as a bare integer,
-    // never two integers joined by `+`. Lossless: the decoder
-    // regenerates value_i = base + step*i from the row index.
-    // Row-count declaration. `[kept]{...}` when every original row is shown
-    // (the lossless tier — `kept == original_count`, byte-identical to the
-    // pre-change render). `[kept/total]{...}` when rows were dropped under
-    // budget (the survivor render), so a consumer recovers the ORIGINAL total
-    // from the inline text itself instead of only from the offload marker
-    // (report finding F4). The reference decoder reads the optional `/total`.
+    // The declaration records row counts and folded columns. Constants and exact arithmetic progressions are omitted
+    // from rows and reconstructed from the header; survivor output uses `[kept/total]` to preserve original cardinality.
     out.push('[');
     out.push_str(&rows.len().to_string());
     if rows.len() < original_count {
@@ -348,23 +253,17 @@ fn write_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: 
                 Some(ColumnEncoding::ArithInt { base: b, step }) => {
                     return format!("{base}={b}+{step}");
                 }
-                // ISO-delta marker: `name:string~`. The `~` suffix tells
-                // the decoder this column's first materialized cell is a
-                // verbatim ISO timestamp and later cells are
-                // `{±delta_seconds}[/tz]` carry-forwards.
+                // ISO-delta marker: `name:string~`. The `~` suffix tells the decoder this column's first materialized
+                // cell is a verbatim ISO timestamp and later cells are `{±delta_seconds}[/tz]` carry-forwards.
                 Some(ColumnEncoding::IsoDeltaSeconds) => return format!("{base}~"),
                 // Decimal scale marker: `name:float%k` — cells are the
                 // integer value × 10^k.
                 Some(ColumnEncoding::DecimalScaled { scale }) => {
                     return format!("{base}%{scale}");
                 }
-                // Affix-fold marker: `name:string^`. The shared prefix
-                // and suffix live on the `__affix:name=...` preamble line;
-                // rows below carry only the unique middle.
+                // Affix-fold marker: `name:string^`. The shared prefix and suffix live on the `__affix:name=...` preamble line; rows below carry only the unique middle.
                 Some(ColumnEncoding::Affix { .. }) => return format!("{base}^"),
-                // Head-dict marker: `name:string@`. The distinct heads
-                // live on the `__head:name=...` preamble line; rows carry
-                // `<head_index><delim><tail>`.
+                // Head-dict marker: `name:string@`. The distinct heads live on the `__head:name=...` preamble line; rows carry `<head_index><delim><tail>`.
                 Some(ColumnEncoding::HeadDict { .. }) => return format!("{base}@"),
                 // Dictionary columns keep a plain declaration — the
                 // `__dict:name=...` preamble line is their marker.
@@ -380,11 +279,8 @@ fn write_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: 
     out.push('}');
     out.push('\n');
 
-    // Dictionary lines: each `DictString` column declares its distinct
-    // values once (first-appearance order, verbatim, CSV-escaped) on a
-    // `__dict:name=v0,v1,...` line; the rows below carry indexes. A
-    // plain data cell that happens to START with `__dict:` is CSV-quoted
-    // by `csv_render_str`, so these preamble lines stay unambiguous.
+    // Dictionary lines: each `DictString` column declares its distinct values once (first-appearance
+    // order, verbatim, CSV-escaped) on a `__dict:name=v0,v1,...` line; the rows below carry indexes.
     for f in &schema.fields {
         if let Some(ColumnEncoding::DictString { values }) = &f.encoding {
             out.push_str(DICT_PREFIX);
@@ -396,12 +292,8 @@ fn write_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: 
         }
     }
 
-    // Affix preamble: each `Affix` column declares its shared prefix and
-    // suffix once on a `__affix:name=PREFIX,SUFFIX` line (both
-    // CSV-escaped so commas/quotes/newlines in the affix stay
-    // unambiguous against the comma separator and the row grammar). A
-    // plain data cell that happens to START with `__affix:` is CSV-quoted
-    // by `csv_render_str`, so these preamble lines stay unambiguous.
+    // Affix preamble: each `Affix` column declares its shared prefix and suffix once on a `__affix:name=PREFIX,SUFFIX` line
+    // (both CSV-escaped so commas/quotes/newlines in the affix stay unambiguous against the comma separator and the row grammar).
     for f in &schema.fields {
         if let Some(ColumnEncoding::Affix { prefix, suffix }) = &f.encoding {
             out.push_str(AFFIX_PREFIX);
@@ -414,11 +306,8 @@ fn write_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: 
         }
     }
 
-    // Head-dict preamble: `__head:name=<DELIM><h0>,<h1>,...`. The first
-    // char after `=` is the delimiter; the remaining comma-separated
-    // (CSV-escaped) segments are the distinct heads in first-appearance
-    // order, each already carrying its trailing delimiter. A plain data
-    // cell starting with `__head:` is CSV-quoted by `csv_render_str`.
+    // Head-dict preamble: `__head:name=<DELIM><h0>,<h1>,...`. The first char after `=` is the delimiter; the remaining comma-separated
+    // (CSV-escaped) segments are the distinct heads in first-appearance order, each already carrying its trailing delimiter.
     for f in &schema.fields {
         if let Some(ColumnEncoding::HeadDict { delim, heads }) = &f.encoding {
             out.push_str(HEAD_PREFIX);
@@ -431,21 +320,8 @@ fn write_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: 
         }
     }
 
-    // Rows. Constant and arithmetic columns are folded into the
-    // declaration above. ISO-delta columns render through a streaming
-    // per-column encoder (first value verbatim, then second deltas) —
-    // the SAME encoder the compactor used to prove the round-trip at
-    // stamp time. Dictionary columns render their cell's index.
-    //
-    // Ditto marks: a cell whose rendering is identical to the SAME
-    // column's cell in the previous row renders as a bare `=`
-    // (carry-forward). Lossless: the materialized value sits verbatim
-    // in the first row of its run; a literal string cell `"="` is
-    // CSV-quoted by `csv_render_str` so the bare marker is unambiguous.
-    // Cells rendering to 0–1 chars never ditto (no byte saving).
-    // Ditto applies AFTER encoding, so repeated identical deltas /
-    // indexes compress too; the decoder resolves ditto at the
-    // rendered-cell level before decoding.
+    // Rows. Lossless a literal string cell `"="` is CSV-quoted by `csv_render_str` so the bare
+    // marker is unambiguous. the decoder resolves ditto at the rendered-cell level before decoding.
     let visible_specs: Vec<&super::ir::FieldSpec> =
         schema.fields.iter().filter(|f| row_visible(f)).collect();
     let mut iso_states: Vec<Option<encodings::IsoDeltaState>> = visible_specs
@@ -547,10 +423,6 @@ fn row_visible(f: &super::ir::FieldSpec) -> bool {
 }
 
 /// Render a folded constant for the `name:type=value` declaration.
-///
-/// Same scalar rendering as a row cell, with extra CSV-quoting for
-/// strings containing `{` `}` `=` so the declaration's `{...}` grammar
-/// and the `=` separator stay unambiguous for read-back.
 fn const_decl_value(v: &Value) -> String {
     match v {
         Value::String(s) => {
@@ -564,22 +436,16 @@ fn const_decl_value(v: &Value) -> String {
     }
 }
 
-/// Build a head-dict cell `<head_index><delim><tail>` for `value`,
-/// looking the head up in `heads`. `None` when the value lacks the
-/// delimiter or its head is not in the dictionary (only possible when
-/// rendering a row the stamping never saw) — caller degrades verbatim.
+/// Build a head-dict cell `<head_index><delim><tail>` for `value`, looking the head up in `heads`. `None` when the value lacks the
+/// delimiter or its head is not in the dictionary (only possible when rendering a row the stamping never saw) — caller degrades verbatim.
 fn head_cell_for(value: &str, delim: char, heads: &[String]) -> Option<String> {
     let (head, tail) = encodings::split_head(value, delim)?;
     let idx = heads.iter().position(|h| h == head)?;
     Some(encodings::encode_head_cell(idx, delim, tail))
 }
 
-/// Render a plain string cell with the CSV-schema grammar guards: a
-/// literal `=` is quoted (ditto marker), the reserved sentinels and the
-/// `__dict:`/`__affix:`/`__head:` preamble prefixes are quoted, and
-/// CSV-special chars quote as usual. Shared with the compactor's
-/// byte-gate simulation so stamping decisions measure EXACTLY what the
-/// formatter ships.
+/// Render a plain string cell with the CSV-schema grammar guards: a literal `=` is quoted (ditto marker), the reserved sentinels and the `__dict:`/`__affix:`/`__head:` preamble
+/// prefixes are quoted, and CSV-special chars quote as usual. Shared with the compactor's byte-gate simulation so stamping decisions measure EXACTLY what the formatter ships.
 pub(super) fn csv_render_str(s: &str) -> String {
     if s == "="
         || s == NULL_SENTINEL
@@ -596,54 +462,20 @@ pub(super) fn csv_render_str(s: &str) -> String {
     }
 }
 
-/// True when a column name cannot be emitted RAW into the `[N]{...}`
-/// declaration (or referenced from a `__dict:`/`__affix:`/`__head:`
-/// preamble line) without corrupting the wire grammar. Column names are
-/// NEVER quoted on this pre-existing wire format — only cells are — so
-/// the compactor DECLINES compaction for such keys (COR-15, fail-closed
-/// like every stamp gate) instead of shipping a silently mis-keying
-/// table:
-/// - `:` mis-splits the `name:type` header (the reference decoder
-///   splits on the FIRST colon) and desynchronizes the preamble lines
-///   (values lose their affix, arith folds shift by a row);
-/// - `=` mis-splits the `name=payload` preamble lines and the
-///   `name:type=CONST` declaration;
-/// - `,` `{` `}` and CR/LF break the declaration/preamble/row line
-///   structure;
-/// - `"` flips the decoder's CSV quote state mid-header;
-/// - a `__` prefix collides with the reserved marker namespace
-///   (`__dict:` / `__affix:` / `__head:` / `__buckets:` / `__key:` /
-///   `__dropped:` / `__null__` / `__missing__`).
-///
-/// Shared with the compactor's table-compaction decision so the gate
-/// declines EXACTLY the names this formatter cannot ship safely.
+/// Reject column names containing reserved grammar characters or a `__` prefix. Headers are unquoted, so
+/// `:`, `=`, commas, braces, quotes, newlines, or reserved prefixes could silently mis-key decoded data.
 pub(super) fn column_name_breaks_grammar(name: &str) -> bool {
     name.starts_with("__") || name.contains([':', ',', '{', '}', '=', '"', '\n', '\r'])
 }
 
-/// Render a row cell with its column-type context.
-///
-/// Identical to [`format_cell`] EXCEPT in a `json`-tagged (type-mixed)
-/// column, where a `Scalar` string cell is CSV-quoted so the reference
-/// decoder reads it back as the EXACT string. A bare string in a `json`
-/// column is `json.loads`-coerced by the decoder — `"200"` -> `200`,
-/// `"true"` -> `True`, `"null"` -> `None` (T1) — while a quoted cell whose
-/// payload is not a JSON container decodes verbatim as a string. Container-
-/// looking strings that a quoted cell still cannot disambiguate from a real
-/// container are declined upstream by [`Compaction::is_decoder_verifiable`],
-/// so they never reach this renderer on the lossless tier.
+/// Render a row cell with its column-type context. Identical to [`format_cell`] EXCEPT in a `json`-tagged (type-mixed) column where a `Scalar`
+/// string cell is CSV-quoted so the reference decoder reads it back as the EXACT string. so they never reach this renderer on the lossless tier.
 fn format_row_cell(c: &CellValue, f: &FieldSpec) -> String {
     if f.type_tag == "json" {
         match c {
             CellValue::Scalar(Value::String(s)) => return csv_quote(s),
-            // F5: an Object/Array cell whose compact JSON carries a `"` ships as
-            // a length-prefixed envelope (raw JSON, no quote-doubling) instead of
-            // CSV-quoted JSON, so a nested-object column is never inflated by
-            // escaping. A QUOTE-FREE container (e.g. a numeric array) keeps the
-            // plain CSV-quote form: with nothing to un-double, the `\x1f`+length
-            // frame would only ADD bytes (R2). The decoder accepts both, so this
-            // is purely an encoder-side size choice; both read back via
-            // `json.loads`.
+            // F5 an Object/Array cell whose compact JSON carries a `"` ships as a length-prefixed envelope (raw JSON,
+            // no quote-doubling) instead of CSV-quoted JSON so a nested-object column is never inflated by escaping.
             CellValue::Scalar(v @ (Value::Object(_) | Value::Array(_))) => {
                 let payload = serde_json::to_string(v).unwrap_or_default();
                 return if payload.contains('"') {
@@ -658,13 +490,8 @@ fn format_row_cell(c: &CellValue, f: &FieldSpec) -> String {
     format_cell(c)
 }
 
-/// Frame an already-serialized compact-JSON container `payload` as a
-/// length-prefixed envelope `\x1f<codepoint_len><raw_compact_json>` (see
-/// [`JSON_ENVELOPE_MARK`]). The payload is verbatim `serde_json` output —
-/// no quote-doubling — so the cell is the raw JSON plus a small fixed
-/// frame. Length is a CODE-POINT count so the Python decoder consumes the
-/// exact payload on non-ASCII input. Only used when the payload contains a
-/// `"` (otherwise CSV-quoting is smaller — see [`format_row_cell`], R2).
+/// Frame an already-serialized compact-JSON container `payload` as a length-prefixed envelope `\x1f<codepoint_len><raw_compact_json>` (see [`JSON_ENVELOPE_MARK`]). Length is a CODE-POINT
+/// count so the Python decoder consumes the exact payload on non-ASCII input. Only used when the payload contains a `"` (otherwise CSV-quoting is smaller — see [`format_row_cell`], R2).
 fn json_container_envelope(payload: &str) -> String {
     let mut out = String::with_capacity(payload.len() + 8);
     out.push(JSON_ENVELOPE_MARK);
@@ -685,9 +512,8 @@ fn format_cell(c: &CellValue) -> String {
             let nested_fmt = JsonFormatter::new();
             csv_quote(&nested_fmt.format(sub))
         }
-        // Declined sub-array: verbatim compact JSON, CSV-quoted —
-        // byte-identical to the pre-PERF-5 `Nested(Untouched(v))` render
-        // (`JsonFormatter::format(Untouched(v))` was `to_string(v)`).
+        // Declined sub-array: verbatim compact JSON, CSV-quoted — byte-identical to the pre-PERF-5
+        // `Nested(Untouched(v))` render (`JsonFormatter::format(Untouched(v))` was `to_string(v)`).
         CellValue::DeclinedJson(v) => csv_quote(&serde_json::to_string(v).unwrap_or_default()),
         CellValue::OpaqueRef {
             ccr_hash,
@@ -724,39 +550,20 @@ fn needs_csv_quote(s: &str) -> bool {
         || s.contains('"')
         || s.contains('\n')
         || s.contains('\r')
-        // F5: a plain string containing the JSON-envelope marker must be
-        // quoted so a bare `\x1f` unambiguously opens an envelope (never a
-        // literal cell byte) for the decoder's length-skip.
+        // F5: a plain string containing the JSON-envelope marker must be quoted so a bare `\x1f`
+        // unambiguously opens an envelope (never a literal cell byte) for the decoder's length-skip.
         || s.contains(JSON_ENVELOPE_MARK)
 }
 
 fn csv_quote(s: &str) -> String {
-    // `"` is ASCII, so it can never appear inside a multi-byte UTF-8
-    // sequence — `replace` sees exactly the quotes the char walk did.
-    // Byte-identical to the old walk, including on the empty string.
+    // `"` is ASCII, so it can never appear inside a multi-byte UTF-8 sequence `replace` sees exactly the quotes the char walk did.
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 // ─────────────────────────── Markdown-KV formatter ───────────────────────────
 
-/// Renders a `Compaction` as a `[N]{cols}` declaration followed by one
-/// Markdown list item per row, each cell on its own `key: value` line.
-///
-/// Token-heavier than [`CsvSchemaFormatter`] (field names repeat per
-/// row), but format-comprehension benchmarks show models retrieve
-/// values from Markdown-KV substantially more reliably than from CSV.
-/// Offered as an opt-in trade of tokens for read accuracy.
-///
-/// Rendering rules:
-/// - Missing cells are omitted entirely (no `key:` line) — sparse rows
-///   cost nothing, unlike CSV's positional empty cells.
-/// - Strings that would be ambiguous on a line (contain newlines,
-///   leading/trailing whitespace, or are empty) render JSON-quoted;
-///   everything else renders raw.
-/// - Nested cells render as compact inline JSON, matching
-///   [`CsvSchemaFormatter`].
-/// - Opaque cells keep the fixed `<<ccr:HASH,KIND,SIZE>>` marker
-///   contract shared by all formatters.
+/// Renders a `Compaction` as a `[N]{cols}` declaration followed by one Markdown list item per row, each cell on its own `key: value` line. Token-heavier than
+/// [`CsvSchemaFormatter`] (field names repeat per row), but format-comprehension benchmarks show models retrieve values from Markdown-KV substantially more reliably than from CSV.
 #[derive(Debug, Clone, Default)]
 pub struct MarkdownKvFormatter;
 
@@ -813,13 +620,7 @@ fn write_compaction_kv(out: &mut String, c: &Compaction) {
 }
 
 fn write_kv_table(out: &mut String, schema: &Schema, rows: &[Row], original_count: usize) {
-    // Same declaration line as the CSV formatter: keeps row count and
-    // typed shape up front where the model (and telemetry) expect it.
-    // Unlike CSV (pre-existing exposure, kept byte-identical), KV quotes
-    // pathological field names here so the declaration parses the same
-    // way as the row lines below.
-    // Mirror the CSV declaration: `[kept]{...}` normally, `[kept/total]{...}`
-    // when rows were dropped, so the row count carries the original total (F4).
+    // Same declaration line as the CSV formatter: keeps row count and typed shape up front where the model (and telemetry) expect it.
     out.push('[');
     out.push_str(&rows.len().to_string());
     if rows.len() < original_count {
@@ -902,10 +703,7 @@ fn needs_kv_quote(s: &str) -> bool {
         || s.ends_with(char::is_whitespace)
 }
 
-/// Field names are normally bare identifiers, but nothing upstream
-/// enforces that. Quote the pathological ones the same way as values:
-/// an embedded newline would inject fake row lines, and `": "` inside
-/// a key would split the line at the wrong colon on read-back.
+/// Field names are normally bare identifiers, but nothing upstream enforces that.
 fn kv_field_name(name: &str) -> String {
     if needs_kv_quote(name) || name.contains(": ") {
         serde_json::to_string(name).unwrap_or_default()
@@ -927,13 +725,8 @@ mod tests {
 
     // ── JsonFormatter ──
 
-    /// Per-row-UNIQUE filler with NO shared prefix or suffix across rows,
-    /// so an encoding-isolation test's NON-target column triggers neither
-    /// the cross-row affix fold NOR the low-cardinality dictionary (both
-    /// of which would correctly fire on a column with shared structure or
-    /// few distinct values). The leading char rotates through 24 letters
-    /// (distinct prefixes) and a rotating trailing char + the unique index
-    /// keep suffixes distinct; the embedded `i` makes every value unique.
+    /// Per-row-UNIQUE filler with NO shared prefix or suffix across rows, so an encoding-isolation test's NON-target column triggers neither the cross-row
+    /// affix fold NOR the low-cardinality dictionary (both of which would correctly fire on a column with shared structure or few distinct values).
     fn nonaffix(i: usize) -> String {
         let head = (b'a' + (i % 24) as u8) as char;
         let tail = (b'A' + ((i * 5 + 3) % 24) as u8) as char;
@@ -955,9 +748,8 @@ mod tests {
 
     #[test]
     fn json_formatter_renders_untouched_as_null() {
-        // PERF-5: `Untouched` is payload-free — production callers gate
-        // on `was_compacted()` and never format a declined compaction;
-        // direct formatter use renders an explicit JSON null.
+        // PERF-5: `Untouched` is payload-free — production callers gate on `was_compacted()` and
+        // never format a declined compaction; direct formatter use renders an explicit JSON null.
         let c = Compaction::Untouched;
         let out = JsonFormatter::new().format(&c);
         assert_eq!(out, "null");
@@ -1060,11 +852,8 @@ mod tests {
 
     #[test]
     fn csv_formatter_nested_cell_inline_json() {
-        // A GENUINE array-of-objects value (not a string) recurses into a
-        // Nested cell, JSON-rendered then CSV-quoted, so a `_compaction`
-        // substring appears inside quotes. String-origin arrays are kept
-        // verbatim instead (T2 — see
-        // `compactor::tests::stringified_json_array_stays_verbatim_string`).
+        // A GENUINE array-of-objects value (not a string) recurses into a Nested cell,
+        // JSON-rendered then CSV-quoted, so a `_compaction` substring appears inside quotes.
         let items = vec![
             json!({"event": "batch", "payload": [{"x":1},{"x":2},{"x":3}]}),
             json!({"event": "batch", "payload": [{"x":4},{"x":5}]}),
@@ -1106,11 +895,8 @@ mod tests {
 
     #[test]
     fn csv_json_container_cells_envelope_only_when_they_carry_a_quote() {
-        // F5/R2: an Object/Array cell of a json column ships as
-        // `\x1f<len><raw_json>` (raw JSON, no CSV quote-doubling) ONLY when the
-        // compact JSON carries a `"` to un-double. A quote-free container keeps
-        // the smaller plain CSV-quote form — the envelope frame would only ADD
-        // bytes. Both spellings decode back via `json.loads`.
+        // Use the JSON envelope only when quote-doubling would enlarge an object or array
+        // cell. Quote-free containers keep normal CSV quoting; both forms decode identically.
         let c = Compaction::Table {
             schema: Schema {
                 fields: vec![super::super::ir::FieldSpec {
@@ -1194,9 +980,8 @@ mod tests {
         assert!(lines[0].contains("seq:int=0+1"), "got: {}", lines[0]);
         // The float column scale-folds (`%1`): cells are value × 10.
         assert!(lines[0].contains("t:float%1"), "got: {}", lines[0]);
-        // Rows hold ONLY the remaining variable cells (fields sort
-        // alphabetically at equal frequency: bytes,from,seq,t → t after
-        // const + arith folds), scale-encoded.
+        // Rows hold ONLY the remaining variable cells (fields sort alphabetically at
+        // equal frequency: bytes,from,seq,t → t after const + arith folds), scale-encoded.
         assert_eq!(lines[1], "1");
         assert_eq!(lines[2], "2");
         assert_eq!(lines[3], "3");
@@ -1339,10 +1124,8 @@ mod tests {
         let c = compact(&items, &cfg());
         let out = CsvSchemaFormatter::new().format(&c);
         let lines: Vec<&str> = out.trim_end().lines().collect();
-        // `id` arith-folds into the declaration; `op` is the only row
-        // cell. First materialization is the QUOTED literal; the
-        // consecutive repeat dittos the quoted form (carry-forward
-        // yields `"="`).
+        // `id` arith-folds into the declaration; `op` is the only row cell. First materialization is the
+        // QUOTED literal; the consecutive repeat dittos the quoted form (carry-forward yields `"="`).
         assert!(lines[0].contains("id:int=1+1"), "got: {}", lines[0]);
         assert_eq!(lines[1], "\"=\"");
         assert_eq!(lines[2], "=");
@@ -1401,9 +1184,7 @@ mod tests {
 
     #[test]
     fn csv_arith_fold_never_empties_rows() {
-        // bytes/ttl are constants, seq is a perfect progression — but
-        // folding seq too would leave EMPTY row lines (unreconstructible
-        // row count). The last visible column must stay in the rows.
+        // bytes/ttl are constants, seq is a perfect progression — but folding seq too would leave EMPTY row lines (unreconstructible row count).
         let items: Vec<Value> = (0..20)
             .map(|i| json!({"bytes": 64, "seq": i, "ttl": 64}))
             .collect();
@@ -1499,12 +1280,8 @@ mod tests {
 
     #[test]
     fn csv_iso_delta_not_stamped_on_nonconforming_values() {
-        // One fractional-second timestamp poisons the ISO-delta path — the
-        // column must NOT be stamped `string~`. It may still be folded by
-        // the cross-row affix encoding (which is lossless), so we prove the
-        // exact values are recoverable rather than asserting verbatim
-        // presence. The poisoned value uses an unrelated head so the
-        // column shares no affix at all and stays fully plain.
+        // One fractional-second timestamp poisons the ISO-delta path — the column must NOT be stamped `string~`. It may still be folded by the
+        // cross-row affix encoding (which is lossless), so we prove the exact values are recoverable rather than asserting verbatim presence.
         let dates = [
             "2026-06-11T21:02:05+02:00".to_string(),
             "2025-01-02T08:30:00Z".to_string(),
@@ -1619,9 +1396,8 @@ mod tests {
 
     #[test]
     fn csv_json_column_quotes_scalar_string_cells() {
-        // T1: in a `json`-tagged (type-mixed) column a scalar-looking string
-        // must render CSV-QUOTED so the reference decoder reads it back as the
-        // exact string instead of `json.loads`-coercing a bare `200` to an int.
+        // T1: in a `json`-tagged (type-mixed) column a scalar-looking string must render CSV-QUOTED so the reference
+        // decoder reads it back as the exact string instead of `json.loads`-coercing a bare `200` to an int.
         let items: Vec<Value> = (0..6)
             .map(|i| {
                 if i % 2 == 0 {
@@ -1657,9 +1433,8 @@ mod tests {
     #[test]
     fn csv_head_dict_marks_declaration_and_round_trips() {
         use super::super::encodings::{decode_head_cell, decode_head_value};
-        // Paths grouped under a few directories: low-cardinality head,
-        // unique tail. The single common affix is short (only the shared
-        // root), so head-dict is the bigger fold.
+        // Paths grouped under a few directories: low-cardinality head, unique tail. The single
+        // common affix is short (only the shared root), so head-dict is the bigger fold.
         let dirs = [
             "src/transforms/smart_crusher/",
             "src/cache/store/",
@@ -1694,10 +1469,8 @@ mod tests {
         let payload = head_line.strip_prefix("__head:path=").unwrap();
         let delim = payload.chars().next().unwrap();
         let heads: Vec<&str> = payload[delim.len_utf8()..].split(',').collect();
-        // `ln` is an exact arithmetic progression (0,7,14,...) so it folds
-        // into the declaration and is NOT row-visible; `path` is the only
-        // remaining cell per row. Find its position among ROW-VISIBLE
-        // columns (those without a `=` const/arith fold in the decl).
+        // `ln` is an exact arithmetic progression (0,7,14,...) so it folds into the
+        // declaration and is NOT row-visible; `path` is the only remaining cell per row.
         let decl_body = lines[0]
             .strip_prefix("[40]{")
             .and_then(|s| s.strip_suffix('}'))
@@ -1880,14 +1653,7 @@ mod tests {
 
     #[test]
     fn csv_grammar_breaking_column_name_declines_compaction() {
-        // COR-15: the CSV formatter never quotes COLUMN NAMES (only
-        // cells), so the compactor DECLINES these arrays — no `[N]{...}`
-        // declaration may ever ship for them. Since PERF-5 the declined
-        // `Untouched` is payload-free: the verbatim byte-exact
-        // passthrough is the CALLER's contract (every production caller
-        // gates on `was_compacted()` and re-uses its own borrow of the
-        // array — pinned by the walker/route passthrough tests), and a
-        // direct format of a declined compaction renders nothing.
+        // COR-15 the CSV formatter never quotes COLUMN NAMES (only cells)
         for key in ["meta:region", "a,b", "x{y"] {
             let items: Vec<Value> = (0..5)
                 .map(|i| json!({"id": i, key: format!("srv-{i:03}.internal.example.com")}))
@@ -1974,9 +1740,7 @@ mod tests {
         assert_eq!(f.estimate_bytes(&c), f.format(&c).len());
     }
 
-    // ── Cross-formatter property: same input → smaller CSV than JSON ──
-    // This is the headline value prop. If it doesn't hold for "obviously
-    // tabular" input, the formatter is broken or the fixture is wrong.
+    // ── Cross-formatter property: same input → smaller CSV than JSON ── This is the headline value prop.
 
     #[test]
     fn csv_smaller_than_json_for_tabular() {
@@ -1993,9 +1757,8 @@ mod tests {
         let c = compact(&items, &cfg());
         let json_out = JsonFormatter::new().format(&c);
         let csv_out = CsvSchemaFormatter::new().format(&c);
-        // CSV should beat the structured-JSON formatter (both
-        // deduplicate the schema, so the win comes from removing
-        // structural punctuation only — modest, but real).
+        // CSV should beat the structured-JSON formatter (both deduplicate the schema, so
+        // the win comes from removing structural punctuation only — modest, but real).
         assert!(
             csv_out.len() < json_out.len(),
             "csv {} bytes vs json {} bytes",
@@ -2006,9 +1769,7 @@ mod tests {
 
     #[test]
     fn csv_substantially_smaller_than_raw_json() {
-        // The headline value prop: CSV+schema beats naïve JSON
-        // serialization of the same array (where every row repeats
-        // every field name) by a wide margin.
+        // The headline value prop: CSV+schema beats naïve JSON serialization of the same array (where every row repeats every field name) by a wide margin.
         let items: Vec<Value> = (0..50)
             .map(|i| {
                 json!({
@@ -2075,14 +1836,7 @@ mod tests {
 
     #[test]
     fn markdown_kv_quotes_pathological_field_names() {
-        // A newline in a key would inject fake row lines; ": " in a key
-        // would split read-back at the wrong colon. Both get JSON-quoted
-        // in the declaration and in every row line.
-        //
-        // The COR-15 gate makes `compact()` decline such keys upstream,
-        // so this drives the KV formatter directly with a hand-built
-        // Table: `kv_field_name` stays the last line of defense for
-        // producers that construct the IR themselves.
+        // A newline in a key would inject fake row lines; ": " in a key would split read-back at the wrong colon.
         let fields = vec![
             super::super::ir::FieldSpec {
                 name: "bad\nkey".into(),

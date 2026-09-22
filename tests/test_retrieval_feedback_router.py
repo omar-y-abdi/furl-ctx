@@ -180,9 +180,8 @@ def test_skip_hint_serves_original_verbatim_on_string_path() -> None:
 
 
 def test_anonymous_signals_protect_named_tool_routing() -> None:
-    # Live CCR producers mostly store with tool_name=None; their retrieval
-    # signals land in the tool-anonymous bucket and must still protect the
-    # named tool emitting the same content shape.
+    # Live CCR producers mostly store with tool_name=None; their retrieval signals land in the
+    # tool-anonymous bucket and must still protect the named tool emitting the same content shape.
     messages = _string_path_messages()
     original_content = messages[2]["content"]
 

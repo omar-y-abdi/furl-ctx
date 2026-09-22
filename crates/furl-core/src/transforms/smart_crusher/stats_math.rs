@@ -1,20 +1,7 @@
-//! Numeric statistics helpers — port of Python's `statistics` module
-//! semantics used by `SmartAnalyzer`.
-//!
-//! Python's `statistics` module uses **sample** variance/stdev (n-1
-//! denominator), not population (n denominator). Mismatching the
-//! denominator silently shifts every variance-based decision (change
-//! points, anomaly thresholds, crushability cases). These helpers
-//! mirror Python's defaults.
+//! Numeric statistics helpers — port of Python's `statistics` module semantics used by `SmartAnalyzer`.
 
-/// Arithmetic mean. Returns `None` on empty input — Python's
-/// `statistics.mean([])` raises `StatisticsError`; we model that as
-/// "no value to return", and callers must handle it.
-///
-/// Also returns `None` if the result is non-finite (Inf/NaN). Python's
-/// numeric-stats path in `_analyze_field` is wrapped in
-/// `try/except (OverflowError, ValueError)` and resets all stats to
-/// `None` on failure; mirroring that here keeps parity on extreme floats.
+/// Arithmetic mean. Python's `statistics.mean([])` raises `StatisticsError`; we model that as "no value to return", and callers must handle it. Python's numeric-stats path
+/// in `_analyze_field` is wrapped in `try/except (OverflowError, ValueError)` and resets all stats to `None` on failure; mirroring that here keeps parity on extreme floats.
 pub fn mean(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -28,10 +15,8 @@ pub fn mean(values: &[f64]) -> Option<f64> {
     }
 }
 
-/// Sample variance with `n-1` denominator (Python `statistics.variance`).
-/// Requires at least 2 values; returns `None` for fewer (mirrors
-/// Python which raises `StatisticsError` for n < 2). Also returns `None`
-/// on non-finite results — see `mean` for rationale.
+/// Sample variance with `n-1` denominator (Python `statistics.variance`). Requires at least 2
+/// values; returns `None` for fewer (mirrors Python which raises `StatisticsError` for n < 2).
 pub fn sample_variance(values: &[f64]) -> Option<f64> {
     if values.len() < 2 {
         return None;
@@ -46,20 +31,14 @@ pub fn sample_variance(values: &[f64]) -> Option<f64> {
     }
 }
 
-/// Sample standard deviation — sqrt of `sample_variance`. Same n>=2
-/// requirement as the variance helper. `None` propagates from
-/// `sample_variance`, including on non-finite inputs.
+/// Sample standard deviation — sqrt of `sample_variance`. Same n>=2 requirement as the
+/// variance helper. `None` propagates from `sample_variance`, including on non-finite inputs.
 pub fn sample_stdev(values: &[f64]) -> Option<f64> {
     sample_variance(values).map(f64::sqrt)
 }
 
-/// Median (Python `statistics.median`). Returns the middle element for
-/// odd-count input, mean of two middles for even-count. Returns `None`
-/// on empty input — Python raises `StatisticsError`.
-///
-/// Caller must pre-filter NaN/Inf if undesired (Python's median with
-/// NaN gives indeterminate ordering; we sort with `total_cmp` to keep
-/// behavior deterministic).
+/// Median (Python `statistics.median`). Caller must pre-filter NaN/Inf if undesired (Python's median
+/// with NaN gives indeterminate ordering; we sort with `total_cmp` to keep behavior deterministic).
 pub fn median(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -77,24 +56,8 @@ pub fn median(values: &[f64]) -> Option<f64> {
     }
 }
 
-/// Approximation of Python's `f"{x:.4g}"` general-purpose float format.
-///
-/// Rules:
-/// - 4 significant digits.
-/// - Scientific notation when `exponent < -4` OR `exponent >= 4`.
-/// - Trailing zeros stripped (and the `.` if all decimals removed).
-/// - Scientific exponent padded to at least 2 digits with explicit sign
-///   (`1.234e+04`, `1e-05`).
-///
-/// Used for crusher strategy debug strings. Strategy strings are
-/// fixture-locked at the parity stage; if Rust's float formatting drifts
-/// from CPython on some edge case, we'll catch it then. Documented
-/// edge cases:
-///
-/// - **Banker's rounding (round half-to-even)**: Python uses banker's;
-///   Rust's `format!("{:.*}", ...)` also rounds-half-to-even (per the
-///   "round-to-nearest-even" IEEE 754 default). Should match.
-/// - **NaN/Inf**: Python prints `nan`, `inf`, `-inf`. We mirror.
+/// Approximation of Python's `f"{x:.4g}"` general-purpose float format. Rules: - 4 significant digits. - Scientific notation when `exponent < -4` OR `exponent >=
+/// 4`. - Trailing zeros stripped (and the `.` if all decimals removed). - Scientific exponent padded to at least 2 digits with explicit sign (`1.234e+04`, `1e-05`).
 pub fn format_g(x: f64) -> String {
     if x.is_nan() {
         return "nan".to_string();
@@ -203,9 +166,8 @@ mod tests {
 
     #[test]
     fn mean_non_finite_overflow_returns_none() {
-        // Python parity: extreme inputs that overflow during sum cause
-        // `statistics.mean` to raise OverflowError, which `_analyze_field`
-        // treats as "no stats". We mirror by returning None.
+        // Python parity: extreme inputs that overflow during sum cause `statistics.mean` to raise
+        // OverflowError, which `_analyze_field` treats as "no stats". We mirror by returning None.
         let huge = f64::MAX / 2.0;
         let nums = vec![huge, huge, huge, huge];
         // Sum overflows to +Inf, mean = Inf — non-finite, must be None.

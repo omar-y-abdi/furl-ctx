@@ -1,31 +1,8 @@
-//! Reversible column-encoding primitives (pure functions).
-//!
-//! Each encoding here is used twice: the compactor runs the encoder at
-//! STAMP TIME to verify an exact round-trip (encode → decode → compare)
-//! before marking a column, and the CSV-schema formatter runs the same
-//! encoder to render the cells. One implementation, zero drift.
-//!
-//! # ISO-8601 delta encoding
-//!
-//! A column whose every value matches the STRICT shape
-//! `YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)` (no fractional seconds, years
-//! 0001–9999, real calendar dates) encodes as:
-//!
-//! - row 0: the full ISO string, verbatim;
-//! - row i>0: `{±delta_seconds}` vs the previous row, with `/{tz}`
-//!   appended ONLY when the timezone spelling changes
-//!   (e.g. `+3600`, `-4012/-07:00`).
-//!
-//! Decoding reconstructs the exact original strings via pure integer
-//! civil-calendar math (Howard Hinnant's `days_from_civil` /
-//! `civil_from_days`), preserving the timezone spelling (`Z` stays
-//! `Z`). Leap seconds (`:60`) and out-of-range fields fail the strict
-//! parse, so such columns are never stamped — they stay plain.
+//! Reversible column-encoding primitives (pure functions). Each encoding here is used twice: the compactor runs the encoder at STAMP TIME to verify
+//! an exact round-trip (encode → decode → compare) before marking a column, and the CSV-schema formatter runs the same encoder to render the cells.
 
-/// Strictly parse `YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)`.
-///
-/// Returns `(epoch_seconds, tz_spelling)` or `None` when the string
-/// deviates from the shape in any way (the column then stays plain).
+/// Strictly parse `YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)`. Returns `(epoch_seconds, tz_spelling)` or
+/// `None` when the string deviates from the shape in any way (the column then stays plain).
 pub fn parse_iso_strict(s: &str) -> Option<(i64, &str)> {
     let b = s.as_bytes();
     if b.len() != 20 && b.len() != 25 {
@@ -81,10 +58,8 @@ pub fn parse_iso_strict(s: &str) -> Option<(i64, &str)> {
     Some((epoch, tz))
 }
 
-/// Render `(epoch_seconds, tz_spelling)` back to the exact strict-shape
-/// ISO string. `None` when the local civil date falls outside years
-/// 0001–9999 (cannot round-trip the 4-digit year) or the tz spelling is
-/// not one `parse_iso_strict` produced.
+/// Render `(epoch_seconds, tz_spelling)` back to the exact strict-shape ISO string. `None` when the local civil date falls
+/// outside years 0001–9999 (cannot round-trip the 4-digit year) or the tz spelling is not one `parse_iso_strict` produced.
 pub fn render_iso(epoch: i64, tz: &str) -> Option<String> {
     let offset = tz_offset_seconds(tz)?;
     let local = epoch.checked_add(offset)?;
@@ -125,9 +100,8 @@ fn tz_offset_seconds(tz: &str) -> Option<i64> {
     Some(sign * (oh * 3600 + om * 60))
 }
 
-/// Days from civil date (proleptic Gregorian), Hinnant's algorithm.
-/// Valid for years >= 1 (callers enforce), where all divisions operate
-/// on non-negative values — identical semantics in Rust and Python.
+/// Days from civil date (proleptic Gregorian), Hinnant's algorithm. Valid for years >= 1 (callers
+/// enforce), where all divisions operate on non-negative values — identical semantics in Rust and Python.
 fn days_from_civil(mut y: i64, m: u32, d: u32) -> i64 {
     if m <= 2 {
         y -= 1;
@@ -166,9 +140,8 @@ impl IsoDeltaState {
         Self::default()
     }
 
-    /// Render the next cell for `value`. First (and any unparseable)
-    /// value renders verbatim and (re)seeds the state; subsequent
-    /// values render `{±delta}[/tz]`.
+    /// Render the next cell for `value`. First (and any unparseable) value renders
+    /// verbatim and (re)seeds the state; subsequent values render `{±delta}[/tz]`.
     pub fn next_cell(&mut self, value: &str) -> String {
         let parsed = parse_iso_strict(value);
         match (parsed, &self.prev) {
@@ -187,9 +160,8 @@ impl IsoDeltaState {
                 value.to_string()
             }
             (None, _) => {
-                // Not strict-shape (only possible when rendering rows
-                // the stamping never saw): emit verbatim, reset state —
-                // the decoder resets on any full ISO/non-delta cell.
+                // Not strict-shape (only possible when rendering rows the stamping never saw):
+                // emit verbatim, reset state — the decoder resets on any full ISO/non-delta cell.
                 self.prev = None;
                 value.to_string()
             }
@@ -207,9 +179,7 @@ pub fn encode_iso_column(values: &[&str]) -> Option<Vec<String>> {
     Some(values.iter().map(|v| state.next_cell(v)).collect())
 }
 
-/// Decode a whole encoded column back to the original strings. `None`
-/// on any cell that cannot be decoded. Used at stamp time to PROVE the
-/// round-trip before the encoding ships.
+/// Decode a whole encoded column back to the original strings.
 pub fn decode_iso_column(cells: &[String]) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::with_capacity(cells.len());
     let mut prev: Option<(i64, String)> = None;
@@ -251,15 +221,8 @@ fn parse_delta_cell(cell: &str) -> Option<(i64, Option<&str>)> {
     Some((delta, tz))
 }
 
-// ─────────────────────── decimal scale-fold ───────────────────────
-//
-// A float column whose every value renders as a plain decimal
-// (`-?\d+\.\d{1,6}`, no exponent) encodes as the integer value × 10^k
-// (k = the column's max fractional digits), e.g. `0.053` → `53` at
-// k=3. Encoding and decoding are PURE STRING MANIPULATION — no float
-// arithmetic anywhere — so exactness is structural: the digits move,
-// nothing is computed. The compactor still proves the round-trip at
-// stamp time by re-parsing and re-rendering each decoded value.
+// decimal scale-fold ─────────────────────── A float column whose every value renders as a plain decimal
+// (`-?\d+\.\d{1,6}`, no exponent) encodes as the integer value × 10^k (k = the column's max fractional digits), e.g.
 
 /// Fractional digit count of a plain-decimal rendering. `None` for
 /// anything else (exponent form, integers, NaN spellings, ...).
@@ -303,9 +266,8 @@ pub fn encode_decimal_cell(rendered: &str, k: usize) -> Option<String> {
     Some(format!("{sign}{body}"))
 }
 
-/// Inverse of [`encode_decimal_cell`]: digits back to a decimal string
-/// (`90` at k=3 → `0.090` — parses to the same f64 as the original
-/// shortest rendering `0.09`).
+/// Inverse of [`encode_decimal_cell`]: digits back to a decimal string (`90` at k=3
+/// → `0.090` — parses to the same f64 as the original shortest rendering `0.09`).
 pub fn decode_decimal_cell(cell: &str, k: usize) -> Option<String> {
     let (sign, digits) = match cell.strip_prefix('-') {
         Some(r) => ("-", r),
@@ -323,20 +285,8 @@ pub fn decode_decimal_cell(cell: &str, k: usize) -> Option<String> {
     Some(format!("{sign}{}.{}", &padded[..split], &padded[split..]))
 }
 
-// ─────────────────────── cross-row affix fold ───────────────────────
-//
-// A string column whose every cell shares a common BYTE prefix and/or
-// suffix (the structure that repeats even when the middle is unique:
-// shared path roots like `crates/furl-core/src/`, URL roots like
-// `https://api.github.com/repos/owner/proj/`, file extensions `.rs`,
-// fixed key/template heads). The affix is declared ONCE and each row
-// carries only its unique middle. Reconstruction is pure byte
-// concatenation — `prefix + middle + suffix` — so exactness is
-// structural: nothing is computed, the bytes are split and rejoined.
-//
-// The prefix/suffix are computed on UTF-8 BYTE boundaries that are also
-// char boundaries (see `common_affix`), so the middle is always valid
-// UTF-8 and the column never splits a multibyte codepoint.
+// ─────────────────────── cross-row affix fold ─────────────────────── A string column whose every cell shares a common BYTE prefix and/or
+// suffix (the structure that repeats even when the middle is unique. The affix is declared ONCE and each row carries only its unique middle.
 
 /// Longest common prefix of `values`, truncated to a char boundary of
 /// the first value. Empty when the values share no leading byte.
@@ -364,9 +314,7 @@ fn common_prefix_len(values: &[&str]) -> usize {
     n
 }
 
-/// Longest common suffix LENGTH (in bytes) of `values`, truncated to a
-/// char boundary of the first value. Empty when no trailing byte is
-/// shared.
+/// Longest common suffix LENGTH (in bytes) of `values`, truncated to a char boundary of the first value. Empty when no trailing byte is shared.
 fn common_suffix_len(values: &[&str]) -> usize {
     let Some(first) = values.first() else {
         return 0;
@@ -391,13 +339,8 @@ fn common_suffix_len(values: &[&str]) -> usize {
     n
 }
 
-/// Compute the `(prefix, suffix)` an affix-fold would declare for a
-/// column. Returns the two shared byte-strings (either may be empty);
-/// the prefix and suffix never overlap (when the whole column is one
-/// constant, the prefix takes it and the suffix is empty).
-///
-/// Both are guaranteed to be valid UTF-8 substrings of every value and
-/// to split each value cleanly: `value == prefix + middle + suffix`.
+/// Compute the `(prefix, suffix)` an affix-fold would declare for a column. Returns the two shared byte-strings (either may be
+/// empty); the prefix and suffix never overlap (when the whole column is one constant, the prefix takes it and the suffix is empty).
 pub fn common_affix<'a>(values: &[&'a str]) -> (&'a str, &'a str) {
     let Some(first) = values.first() else {
         return ("", "");
@@ -415,9 +358,8 @@ pub fn common_affix<'a>(values: &[&'a str]) -> (&'a str, &'a str) {
     (&first[..plen], &first[first.len() - slen..])
 }
 
-/// Strip a fixed `prefix`/`suffix` from `value`, returning the unique
-/// middle. `None` when `value` does not actually carry both affixes
-/// (only possible when rendering a row the stamping never saw).
+/// Strip a fixed `prefix`/`suffix` from `value`, returning the unique middle. `None` when `value`
+/// does not actually carry both affixes (only possible when rendering a row the stamping never saw).
 pub fn encode_affix_cell<'a>(value: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
     let mid = value.strip_prefix(prefix)?;
     let mid = mid.strip_suffix(suffix)?;
@@ -433,26 +375,11 @@ pub fn decode_affix_cell(middle: &str, prefix: &str, suffix: &str) -> String {
     s
 }
 
-// ─────────────────────── head dictionary fold ───────────────────────
-//
-// A string column whose values split at the LAST occurrence of a
-// delimiter (`/`, `:`, or `.`) into a low-cardinality HEAD (everything
-// up to and including the delimiter) and a unique TAIL. The distinct
-// heads are declared once on a `__head:name=<DELIM><h0>,<h1>,...` line;
-// each row cell renders as `<head_index><DELIM><tail>`. Reconstruction:
-// `head[index] + tail` (the head already carries the trailing delimiter,
-// so the in-cell delimiter after the index is dropped). Exact by
-// construction — the head is a verbatim byte string, the tail is verbatim
-// bytes, concatenation is lossless.
-//
-// This catches the structure cross-row affix folding cannot: paths/keys
-// that fall into a FEW directory/namespace groups whose per-group prefix
-// is NOT shared by the WHOLE column (so the single common affix is short)
-// but repeats across many rows.
+// head dictionary fold ─────────────────────── A string column whose values split at the LAST occurrence of a delimiter (`/`, `:`, or `.`) into
+// a low-cardinality HEAD (everything up to and including the delimiter) and a unique TAIL. so the in-cell delimiter after the index is dropped).
 
-/// The delimiters head-dict considers, in priority order. A column is
-/// split at the LAST occurrence of the FIRST delimiter that yields a
-/// low-cardinality, byte-saving head set.
+/// The delimiters head-dict considers, in priority order. A column is split at the LAST
+/// occurrence of the FIRST delimiter that yields a low-cardinality, byte-saving head set.
 pub const HEAD_DELIMS: [char; 3] = ['/', ':', '.'];
 
 /// Split `value` at the last occurrence of `delim` into
@@ -463,10 +390,8 @@ pub fn split_head(value: &str, delim: char) -> Option<(&str, &str)> {
     Some((&value[..split], &value[split..]))
 }
 
-/// Render a head-dict cell: `<head_index><delim><tail>`. The leading
-/// integer run is the head index; the single `delim` byte after it
-/// separates index from tail and is dropped on decode (the head already
-/// ends with `delim`).
+/// Render a head-dict cell: `<head_index><delim><tail>`. The leading integer run is the head index; the single
+/// `delim` byte after it separates index from tail and is dropped on decode (the head already ends with `delim`).
 pub fn encode_head_cell(head_index: usize, delim: char, tail: &str) -> String {
     let mut s = String::with_capacity(8 + tail.len());
     s.push_str(&head_index.to_string());
@@ -475,10 +400,7 @@ pub fn encode_head_cell(head_index: usize, delim: char, tail: &str) -> String {
     s
 }
 
-/// Decode a head-dict cell back to `(head_index, tail)`. Reads the
-/// maximal leading ASCII-digit run as the index, requires the next byte
-/// to be exactly `delim`, and takes the rest as the tail. `None` on any
-/// deviation (no digits, missing delimiter) — never invents data.
+/// Decode a head-dict cell back to `(head_index, tail)`.
 pub fn decode_head_cell(cell: &str, delim: char) -> Option<(usize, &str)> {
     let bytes = cell.as_bytes();
     let mut k = 0;
@@ -731,10 +653,7 @@ mod tests {
         assert_eq!(t, "Name");
     }
 
-    /// Independent days-in-month table (proleptic Gregorian) — the oracle
-    /// the loop below checks the Hinnant round-trip against. Kept separate
-    /// from the production code on purpose: sharing its leap logic would
-    /// make the test tautological.
+    /// Independent days-in-month table (proleptic Gregorian) — the oracle the loop below checks the Hinnant round-trip against.
     fn days_in_month(y: i64, m: u32) -> u32 {
         let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
         match m {
@@ -748,14 +667,8 @@ mod tests {
 
     #[test]
     fn civil_math_round_trips_every_day_of_leap_and_normal_years() {
-        // TEST-17: the old loop asserted NOTHING per iteration (valid days
-        // `continue`d, invalid days fell through comment-only) — only the 4
-        // spot anchors could fail. Now every (y, m, d) is checked against an
-        // independent calendar oracle: valid dates MUST round-trip, invalid
-        // ones MUST NOT (parse_iso_strict uses exactly that non-round-trip
-        // as its validity check, so both directions are load-bearing).
-        // Years cover leap (2000, 2024), non-leap (1999, 2023) and the
-        // century non-leap 2100.
+        // TEST-17 only the 4 spot anchors could fail. valid dates MUST round-trip, invalid ones
+        // MUST NOT (parse_iso_strict uses exactly that non-round-trip as its validity check
         for y in [1999i64, 2000, 2023, 2024, 2100] {
             for m in 1..=12u32 {
                 for d in 1..=31u32 {

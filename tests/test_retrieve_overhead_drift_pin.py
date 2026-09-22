@@ -51,9 +51,8 @@ def test_library_and_bench_retrieve_overhead_stay_equal() -> None:
 
 
 def test_library_does_not_import_the_bench_harness() -> None:
-    # The equality is held by this pin, not by furl_ctx.compress importing the
-    # verify bench harness. Parse the library module and assert no import, top
-    # level or lazy, pulls in a ``verify`` module.
+    # The equality is held by this pin, not by furl_ctx.compress importing the verify bench harness.
+    # Parse the library module and assert no import, top level or lazy, pulls in a ``verify`` module.
     import furl_ctx.compress as compress_module
 
     tree = ast.parse(inspect.getsource(compress_module))

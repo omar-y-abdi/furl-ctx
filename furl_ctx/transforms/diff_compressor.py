@@ -36,13 +36,7 @@ class DiffCompressorConfig:
     max_files: int = 20
     enable_ccr: bool = True
     min_lines_for_ccr: int = 50
-    #: Elide noise hunks before compression: lockfile churn
-    #: (package-lock.json / Cargo.lock / uv.lock / yarn.lock) and
-    #: whitespace-only hunks, each file summarized with one
-    #: ``[noise hunk elided: <path> (+A/-B)]`` line. The CCR marker (when
-    #: emitted) backs the FULL original diff, so elided hunks stay
-    #: byte-exact recoverable; the store-write veto below still applies.
-    #: Default False — output byte-identical to the previous behavior.
+    # Elide known lockfile churn and whitespace-only hunks before compression; summarize each elided file with one `[noise hunk elided: <path> (+A/-B)]` line.
     drop_noise_hunks: bool = False
 
 
@@ -82,10 +76,7 @@ class DiffCompressor:
     """
 
     def __init__(self, config: DiffCompressorConfig | None = None):
-        # Hard import — no fallback. If the wheel is missing, the user
-        # must build it (scripts/build_rust_extension.sh) or install a
-        # prebuilt one. Failing loudly here is better than silently
-        # degrading; see feedback memory `feedback_no_silent_fallbacks.md`.
+        # Require the compiled extension; if unavailable, fail loudly instead of silently degrading.
         from furl_ctx._core import (
             DiffCompressor as _RustDiffCompressor,
         )
@@ -95,10 +86,8 @@ class DiffCompressor:
 
         cfg = config or DiffCompressorConfig()
         self.config = cfg
-        # `min_compression_ratio_for_ccr` was inlined as 0.8 in the Python
-        # original; promoted to a config field on the Rust side but left at
-        # its 0.8 Rust default here so the existing Python config surface is
-        # unchanged (matches search_compressor.py / log_compressor.py).
+        # `min_compression_ratio_for_ccr` was inlined as 0.8 in the Python original; promoted to a config field on the Rust side but
+        # left at its 0.8 Rust default here so the existing Python config surface is unchanged (matches the module / the module).
         self._rust = _RustDiffCompressor(
             _RustDiffCompressorConfig(
                 max_context_lines=cfg.max_context_lines,
@@ -116,11 +105,7 @@ class DiffCompressor:
         if cache_key is not None and not self._persist_to_python_ccr(
             content, r.compressed, cache_key
         ):
-            # Store write failed → the CCR marker in r.compressed would
-            # dangle (retrieve() can't resolve it) and the dropped hunks
-            # would be unrecoverable. Serve the ORIGINAL uncompressed diff
-            # instead — no replacement without recoverability (mirrors
-            # cross_message_dedup's veto).
+            # Store write failed → the CCR marker in r.compressed would dangle (retrieve() can't resolve it) and the dropped hunks would be unrecoverable.
             return self._passthrough_result(content, r)
         return DiffCompressionResult(
             compressed=r.compressed,

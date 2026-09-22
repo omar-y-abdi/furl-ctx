@@ -38,10 +38,8 @@ def _isolate_store(tmp_path, monkeypatch):
     monkeypatch.delenv("FURL_CCR_BACKEND", raising=False)
     monkeypatch.delenv("FURL_CCR_SQLITE_PATH", raising=False)
     monkeypatch.delenv("FURL_CCR_SQLITE_MAX_ROWS", raising=False)
-    # The session TTL is env-aware now (_mcp_session_ttl): the 3600-second
-    # assertions below pin the env-UNSET contract, so the premise must be
-    # established — earlier suite files (e.g. in-process cli.main() runs)
-    # legitimately leave their own FURL_CCR_TTL_SECONDS setdefault behind.
+    # The session TTL is env-aware now (_mcp_session_ttl): the 3600-second assertions below pin the env-UNSET contract, so the premise must be
+    # established — earlier suite files (e.g. in-process cli.main() runs) legitimately leave their own FURL_CCR_TTL_SECONDS setdefault behind.
     monkeypatch.delenv("FURL_CCR_TTL_SECONDS", raising=False)
     reset_compression_store()
     yield

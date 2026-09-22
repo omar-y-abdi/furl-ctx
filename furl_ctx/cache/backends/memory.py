@@ -44,10 +44,6 @@ class InMemoryBackend:
         """Initialize the in-memory backend."""
         self._store: dict[str, CompressionEntry] = {}
         # Named observability counters (hook invocations/compressions, etc.).
-        # PROCESS-LOCAL here — the in-memory backend is volatile and not shared
-        # across processes, so these count only THIS process's activity. The
-        # durable SqliteBackend persists the same names to the shared file, which
-        # is what lets furl_stats see the hook's cross-process increments.
         self._counters: Counter[str] = Counter()
 
     @property
@@ -218,12 +214,7 @@ class InMemoryBackend:
             Dict with stats including entry_count and memory estimate.
         """
         entry_count = len(self._store)
-        # Rough memory estimate.
-        # ``surrogatepass``: stored content may carry lone surrogates
-        # (the store accepts them — JSON delivers them via \uD800
-        # escapes), and a strict encode would make this stats read
-        # raise UnicodeEncodeError. Identical byte counts for all
-        # valid-UTF8 content.
+        # Rough memory estimate. JSON delivers them via \uD800 escapes), and a strict encode would make this stats read raise UnicodeEncodeError.
         bytes_used = sys.getsizeof(self._store) + sum(
             sys.getsizeof(entry)
             + len(entry.original_content.encode("utf-8", "surrogatepass"))

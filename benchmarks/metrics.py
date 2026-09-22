@@ -55,10 +55,8 @@ from furl_ctx.tokenizer import Tokenizer
 from furl_ctx.tokenizers import get_tokenizer
 from furl_ctx.transforms.csv_schema_decoder import decode_csv_schema_rows
 
-# The model used for token counting. gpt-4o resolves to the real tiktoken
-# BPE tokenizer in the engine's registry (genuine token counts, not an
-# estimate). The compression behaviour under test is model-agnostic for the
-# JSON-array crush path; gpt-4o is chosen purely to get exact BPE counts.
+# The model used for token counting. gpt-4o resolves to the real tiktoken BPE
+# tokenizer in the engine's registry (genuine token counts, not an estimate).
 BENCH_MODEL = "gpt-4o"
 
 
@@ -89,10 +87,8 @@ def _abort_if_fail_open(name: str, result: Any) -> None:
         )
 
 
-# The marker prefix is owned by ``marker_grammar`` (single source of truth);
-# the substring walker below scans for it then a hex run from the same spec's
-# alphabet. Behavior (width-free hex run, like the engine's own walker) is
-# unchanged — only the literals are sourced from the owner.
+# The marker prefix is owned by ``marker_grammar`` (single source of truth); the
+# substring walker below scans for it then a hex run from the same spec's alphabet.
 CCR_PREFIX = marker_grammar.CCR_PREFIX
 CCR_SENTINEL_KEY = "_ccr_dropped"
 
@@ -192,12 +188,8 @@ def _emitted_ccr_hashes(output_text: str) -> set[str]:
             hashes |= collect_ccr_hashes(output_text)
         return hashes
     if isinstance(parsed, str):
-        # Lossy-survivor columnar rendering: the engine ships a JSON
-        # string (CSV-schema table) whose FINAL LINE is the sentinel
-        # object ``{"_ccr_dropped": "<<ccr:HASH ...>>"}``. Collect hashes
-        # only from sentinel-bearing lines that parse to a sentinel
-        # object — the exact same strictness as the array branch below
-        # (input-embedded ``<<ccr:`` strings in row values don't count).
+        # Lossy-survivor columnar rendering: the engine ships a JSON string (CSV-schema table)
+        # whose FINAL LINE is the sentinel object ``{"_ccr_dropped": "<<ccr:HASH ...>>"}``.
         hashes = set()
         for line in parsed.split("\n"):
             if CCR_SENTINEL_KEY not in line:
@@ -404,12 +396,8 @@ def measure_case(
         (tokens_before - tokens_after) / tokens_before if tokens_before > 0 else 0.0
     )
 
-    # Recovery pointers that the ENGINE emitted: the ``{"_ccr_dropped":
-    # "<<ccr:HASH ...>>"}`` sentinel rows plus the raw-text compressors'
-    # bracket ``Retrieve …: hash=H`` marker lines. Markers that merely appear
-    # inside an input row's value (e.g. this repo's own source code documents
-    # the ``<<ccr:HASH>>`` grammar) are NOT drops: the sentinel scan is
-    # key-gated and a non-emitted bracket hash cannot resolve in the store.
+    # Count only recovery pointers emitted by the engine: sentinel rows and resolvable retrieval-marker
+    # hashes. Marker-shaped input text is data, not evidence that content was dropped.
     emitted_hashes = _emitted_recovery_hashes(output_text)
     recovered = _recovered_originals(emitted_hashes, query)
 

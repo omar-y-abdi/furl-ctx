@@ -34,10 +34,8 @@ def _fill(store: CompressionStore, n: int) -> None:
 
 
 def test_store_does_not_decode_all_blobs(tmp_path, monkeypatch) -> None:
-    # Fill a full store, then count full-entry BLOB decodes during ONE more
-    # store(). Pre-fix: ~N (the whole store materialised via items() in
-    # _clean_expired). Post-fix: O(1) — a collision-check get plus at most a
-    # couple of eviction gets.
+    # Fill a full store, then count full-entry BLOB decodes during ONE more store().
+    # Post-fix: O — a collision-check get plus at most a couple of eviction gets.
     store = CompressionStore(
         max_entries=_N, backend=SqliteBackend(db_path=tmp_path / "big.sqlite3")
     )

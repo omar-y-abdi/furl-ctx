@@ -91,11 +91,7 @@ class DurableWriteError(RuntimeError):
         self.hash_key = hash_key
 
 
-# Cheap pre-check that skips the marker regex scan for the common raw original
-# that embeds no marker at all. Case-INSENSITIVE (RG5): the marker grammar's
-# ``GENERIC_BRACKET_PATTERN`` is itself ``re.IGNORECASE``, so an uppercase
-# ``HASH=`` marker IS a real reference; a case-sensitive pre-check skipped it and
-# silently left its blob behind on a cascade purge.
+# Skip expensive marker regex scans when no marker hint exists, but case-fold the hint because bracket markers accept uppercase `HASH=`.
 _MARKER_HINTS: Final = ("ccr:", "hash=")
 
 
@@ -138,118 +134,49 @@ class CascadeOutcome:
         return top + self.nested_deleted
 
 
-# Session-scale default (Engine P0-3): agentic sessions routinely outlive
-# 5 minutes, and an entry that expires mid-session silently converts
-# "lossless + retrieval" into lossy. 1800 s (30 min) matches the Rust
-# store's `DEFAULT_TTL` (crates/furl-core/src/ccr/mod.rs) — the two stores
-# back the same markers, so their defaults must agree. Override via
-# FURL_CCR_TTL_SECONDS (validated in `_get_env_default_ttl_seconds`).
+# Default CCR TTL is 30 minutes so markers survive normal agent sessions. Keep
+# Python and Rust defaults equal; operators may override `FURL_CCR_TTL_SECONDS`.
 DEFAULT_CCR_TTL_SECONDS = 1800
 CCR_TTL_SECONDS_ENV = "FURL_CCR_TTL_SECONDS"
 
-# Durable-write contention retry (store-concurrency-honesty). When a
-# ``require_durable`` write reports non-durable — the shared file is briefly
-# held by ANOTHER furl MCP server process (e.g. a second Claude Code session on
-# the same project), or the backend lost its own per-op busy_timeout retry — the
-# store re-attempts the durable persist a bounded number of times with capped
-# exponential backoff BEFORE vetoing. Everyday two-session contention clears
-# within this budget; only a lock held longer than the WHOLE budget (a hung or
-# stale sibling) still vetoes, and then with an honest, cause-naming message.
-#
-# Worst-case ADDED wall-clock is the sum of the backoff sleeps
-# (0.05 + 0.10 + 0.20 = 0.35 s) plus, under SUSTAINED contention, up to
-# ``attempts`` more of the backend's own busy_timeout budget (~1.3 s each) — a
-# few seconds total, far under the MCP tool-call timeout (Claude Code's default
-# is 60 s). The happy path adds nothing: the first persist already succeeded.
+# Retry required-durable writes three times with capped exponential backoff before vetoing. This
+# absorbs brief cross-process SQLite contention while keeping sustained lock failures loud and bounded.
 _DURABLE_RETRY_MAX_ATTEMPTS = 3
 _DURABLE_RETRY_BASE_BACKOFF_SECONDS = 0.05
 _DURABLE_RETRY_MAX_BACKOFF_SECONDS = 0.20
 
-# Minimum length for a caller-supplied ``explicit_hash``. This is the LOOSE
-# recovery-floor contract, intentionally distinct from the STRICT consumer set
-# ``marker_grammar.HASH_WIDTHS`` ({12, 24}) that the anti-spoofing ingress
-# (the MCP retrieve handler, via ``marker_grammar.is_valid_ccr_hash``) enforces — see
-# the "Two DISTINCT width contracts" note in ``ccr/marker_grammar.py``. The store
-# must accept any hex key a DIRECT lookup can recover (shape I, the read-lifecycle
-# marker, is recovered by direct store lookup and never by the strict scanner), so
-# its floor is deliberately looser than the spoofing guard. The floor only rejects
-# trivially-collidable sub-6 keys; every real producer emits exactly 12- or 24-char
-# hashes, well clear of it.
+# Minimum length for a caller-supplied ``explicit_hash``. This is the LOOSE recovery-floor contract, intentionally distinct from the STRICT consumer set ``marker_grammar.HASH_WIDTHS`` ({12,
+# 24}) that the anti-spoofing ingress (the MCP retrieve handler, via ``marker_grammar.is_valid_ccr_hash``) enforces — see the "Two DISTINCT width contracts" note in ``ccr/the module``.
 _MIN_EXPLICIT_HASH_LEN = 6
 
-# Sentinel for "this backend does not declare a ``max_rows`` at all", kept
-# distinct from a declared ``None`` ("no physical row cap"). The cap-ordering
-# guard (F4) treats both as "nothing to check", but only one of them means the
-# guard is BLIND — conflating them is what let the old private-attribute reach
-# no-op silently for every backend that did not expose ``_max_rows``.
+# Sentinel for "this backend does not declare a ``max_rows`` at all", kept distinct from a declared ``None`` ("no physical row cap").
 _ROW_CAP_UNDECLARED: Final = object()
 
 _RETRIEVAL_LOG_PREVIEW_CHARS = 4096
-# Preview-snippet length for cross-store search (``search_all``) hits. Short by
-# design: the snippet is a disambiguation preview so the caller can pick a hash
-# to retrieve in full, not a content channel. Redacted before truncation.
+# Preview-snippet length for cross-store search (``search_all``) hits.
 _CROSS_STORE_PREVIEW_CHARS = 200
-# ReDoS guard (PERF/SEC). The credential regexes below — chiefly
-# ``_SECRET_KEY_VALUE_RE`` — are O(N^2) on a long unbroken base64url/hex/minified
-# run: a ``-`` sits INSIDE the ``[A-Z0-9_-]`` secret-key class yet is a word
-# boundary, so ``\b([A-Z0-9_-]*KEYWORD...)`` opens O(N) anchor positions each
-# scanning O(N). Empirically a 64 KB dashed run took ~82 s. Every preview/log
-# surface keeps only a bounded head, so callers redact the kept window PLUS this
-# margin (never the whole multi-MB original) — bounding the regex input to a
-# constant. The margin lets a secret straddling the budget edge be seen whole
-# and masked before truncation; real secrets (keys/tokens/URL passwords) fit
-# inside it.
+# ReDoS guard (PERF/SEC). Every preview/log surface keeps only a bounded head bounding the regex input to a constant. The margin lets a
+# secret straddling the budget edge be seen whole and masked before truncation; real secrets (keys/tokens/URL passwords) fit inside it.
 _REDACT_WINDOW_MARGIN_CHARS = 256
-# Match ``<sensitive-key><sep><value>`` in both plain (``api_key=...``) and JSON
-# quoted-key (``"api_key": "..."``) form. Group 2 allows an OPTIONAL closing quote
-# before the separator: in JSON the key's own closing ``"`` sits between the key
-# name and the ``:``, so without it the ``[:=]`` never abuts the key and the whole
-# rule silently misses every JSON-embedded secret (the PRIMARY shape in tool
-# output) — the value stayed un-redacted unless it independently matched the
-# ``sk-`` rule below. Group 3 captures the value's optional opening quote so
-# ``\1\2\3[REDACTED]`` preserves surrounding structure and only the value is cut.
-# The value itself is CONDITIONAL on group 3 (SEC-4d): when an opening quote was
-# captured, match to the closing quote (``\\.`` steps over JSON-escaped quotes;
-# ``.`` stops at end-of-line, bounding an unterminated quote) — the old
-# ``[^\"'\s,}]+`` class stopped at the first space, redacting ``correct`` and
-# leaking ``horse battery staple``. Unquoted values keep the old class.
+# Match ``<sensitive-key><sep><value>`` in both plain (``api_key=...``) and JSON quoted-key (``"api_key": "..."``) form. Group 2 allows an OPTIONAL closing quote before the
+# separator. The value itself is CONDITIONAL on group 3 (SEC-4d): when an opening quote was captured, match to the closing quote (``\\.`` steps over JSON-escaped quotes.
 _SECRET_KEY_VALUE_RE = re.compile(
     r"(?i)\b([A-Z0-9_-]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[A-Z0-9_-]*)"
     r"([\"']?\s*[:=]\s*)([\"'])?(?(3)(?:\\.|(?!\3).)*|[^\"'\s,}]+)"
 )
 _AUTH_VALUE_RE = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}")
 _API_KEY_VALUE_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
-# Provider-issued tokens that are recognizable by prefix alone, so they leak even
-# when the surrounding key name is absent or unrecognized (a bare ``AKIA...`` /
-# ``ghp_...`` in free text). Same prefix-anchored approach as ``_API_KEY_VALUE_RE``.
-# AWS access-key IDs are ``AKIA`` + 16 uppercase alnum; GitHub tokens are
-# ``gh[opsru]_`` + >=36 alnum. Deliberately NOT a generic long-hex/base64 rule:
-# the retrieval log emits SHA-256 store hash keys throughout, and a blanket
-# high-entropy rule would redact the log's own hashes and other benign IDs.
+# Provider-issued tokens that are recognizable by prefix alone, so they leak even when the surrounding key name is absent or unrecognized (a bare
+# ``AKIA...`` / ``ghp_...`` in free text). AWS access-key IDs are ``AKIA`` + 16 uppercase alnum; GitHub tokens are ``gh[opsru]_`` + >=36 alnum.
 _PROVIDER_TOKEN_RE = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|gh[opsru]_[A-Za-z0-9]{36,})\b")
-# SEC-4a — URL userinfo credentials (``scheme://user:pass@host``). Only the
-# password is cut; user and host survive so the log line stays operationally
-# useful. The password class excludes ``/`` (a raw ``/`` cannot appear in URL
-# userinfo, and admitting it made ``https://host:8080/x@y`` — a port plus an
-# ``@`` later in the path — a false positive). Bounded quantifiers keep the
-# scan cheap on the 4096-char preview.
+# SEC-4a Only the password is cut; user and host survive so the log line stays operationally useful.
 _URL_CREDENTIAL_RE = re.compile(r"(://[^/?#\s:@]{1,128}:)([^@/\s]{1,256})@")
-# SEC-4b — PEM private-key blocks (PKCS#8 ``BEGIN PRIVATE KEY`` plus the
-# labelled RSA/EC/OPENSSH/ENCRYPTED variants). The WHOLE block goes, base64
-# body and armor alike. ``[\s\S]*?`` spans real newlines and the two-char
-# ``\n`` escapes of JSON-embedded keys. Public material (``BEGIN
-# CERTIFICATE``, ``BEGIN PUBLIC KEY``) is not matched. The armor string is
-# assembled at import so no verbatim PEM header sits in source (hook-safe,
-# same trick as the redaction tests' ``sk-`` literal).
+# SEC-4b
 _PEM_ARMOR = "PRIVATE" + " KEY-----"
 _PEM_PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z0-9 ]* " + _PEM_ARMOR + r"[\s\S]*?-----END[A-Z0-9 ]* " + _PEM_ARMOR
 )
-# SEC-4c — bare JWTs: ``eyJ`` (base64 of ``{"``) + two dot-joined base64url
-# segments, no ``Bearer`` prefix and no sensitive key name required. The
-# optional third segment covers both signed tokens and the trailing-dot
-# unsecured form. Anchored on the ``eyJ`` magic so the store's own hex hash
-# keys and ordinary prose can never match.
+# SEC-4c — bare JWTs: ``eyJ`` (base64 of ``{"``) + two dot-joined base64url segments, no ``Bearer`` prefix and no sensitive key name required.
 _BARE_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]*)?")
 
 
@@ -318,15 +245,8 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
 
 
 def _redact_retrieval_log_payload(payload: str) -> str:
-    # Order matters. PEM blocks and URL credentials go FIRST: they are
-    # structural multi-token shapes, redacted whole before the generic rules
-    # can chew on fragments of them. Then ``Bearer``/``Basic`` scheme tokens
-    # BEFORE the secret-key rule so the scheme anchor survives — otherwise
-    # ``_SECRET_KEY_VALUE_RE`` (which matches the ``Authorization`` key)
-    # consumes the bare ``Bearer`` scheme word as its value, leaving the actual
-    # credential after it un-redacted in a plain-text ``Authorization: Bearer
-    # <JWT>`` header. The bare-JWT rule runs LAST as the catch-all for tokens
-    # no earlier rule anchored on. Over-redaction is safe.
+    # Order matters. PEM blocks and URL credentials go FIRST: they are structural multi-token shapes, redacted whole before the generic
+    # rules can chew on fragments of them. Then ``Bearer``/``Basic`` scheme tokens BEFORE the secret-key rule so the scheme anchor survives.
     redacted = _PEM_PRIVATE_KEY_RE.sub("[REDACTED]", payload)
     redacted = _URL_CREDENTIAL_RE.sub(r"\1[REDACTED]@", redacted)
     redacted = _AUTH_VALUE_RE.sub(r"\1 [REDACTED]", redacted)
@@ -337,12 +257,8 @@ def _redact_retrieval_log_payload(payload: str) -> str:
 
 
 def _payload_for_retrieval_log(payload: str) -> dict[str, Any]:
-    # SLICE-before-REDACT (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``).
-    # Redacting the FULL payload first is O(N^2) on unbroken base64url/hex runs
-    # and this fires on EVERY retrieve (full-body log redact). The preview keeps
-    # only ``_RETRIEVAL_LOG_PREVIEW_CHARS`` regardless, so redact just the bounded
-    # window that feeds it. ``payload_chars`` still reports the FULL length, and
-    # ``payload_truncated`` still reflects whether content was cut.
+    # SLICE-before-REDACT (ReDoS guard, see ``_REDACT_WINDOW_MARGIN_CHARS``). Redacting the FULL payload first is O(N^2) on unbroken base64url/hex runs and this fires
+    # on EVERY retrieve (full-body log redact). The preview keeps only ``_RETRIEVAL_LOG_PREVIEW_CHARS`` regardless, so redact just the bounded window that feeds it.
     window = payload[: _RETRIEVAL_LOG_PREVIEW_CHARS + _REDACT_WINDOW_MARGIN_CHARS]
     redacted_window = _redact_retrieval_log_payload(window)
     preview = redacted_window[:_RETRIEVAL_LOG_PREVIEW_CHARS]
@@ -521,21 +437,8 @@ class CompressionStore:
         self._max_entries = max_entries
         self._default_ttl = default_ttl
 
-        # Durability contract, checked HERE rather than at first write. The
-        # durability path now reaches ``durable``/``set_durable`` by direct
-        # attribute access (that is what makes it type-checked at all — a
-        # ``getattr`` reads as ``Any`` and mypy stays silent). Backends loaded
-        # through the ``furl_ctx.ccr_backend`` entry point group are duck-typed at
-        # runtime and never see that check, so a non-conforming one would other-
-        # wise surface as a bare ``AttributeError`` from inside a persist, on some
-        # later ``store()`` call, naming a member the author never knew existed.
-        #
-        # This is a deliberate behaviour change at a supported extension seam: the
-        # old code answered "durability satisfied" for such a backend and shipped a
-        # ``<<ccr:HASH>>`` marker for content whose durability was never checked,
-        # which is the defect being closed. Failing is correct; failing EARLY and
-        # LEGIBLY — at the moment the operator wires the backend up, naming the
-        # contract — is the part worth spending ten lines on.
+        # Validate backend durability capabilities at construction. Missing `durable`/`set_durable` is a contract error
+        # because shipping a recovery marker without verified durability is unsafe; fail early with a clear `TypeError`.
         missing = [
             member for member in ("durable", "set_durable") if not hasattr(self._backend, member)
         ]
@@ -548,60 +451,12 @@ class CompressionStore:
                 f"furl_ctx.cache.backends.base.CompressionStoreBackend."
             )
 
-        # Cap-ordering guard (F4). The documented invariant — the logical
-        # ``max_entries`` cap binds before the backend's physical file-row cap —
-        # holds only AT THE DEFAULTS (1000 << 10 000). Both caps are configurable
-        # (``max_entries`` here; ``FURL_CCR_SQLITE_MAX_ROWS`` / ``max_rows`` on a
-        # ``SqliteBackend``), so a ``max_rows`` set below ``max_entries`` inverts
-        # it: the file cap would then evict oldest-first with NO TTL ordering
-        # before the logical cap ever binds. Warn loudly rather than let a
-        # documented invariant flip silently.
-        #
-        # Reads the backend's DECLARED public ``max_rows``, not a private field of
-        # one implementation. The old form — ``getattr(backend, "_max_rows", None)``
-        # — reached through the backend protocol into ``SqliteBackend``'s internals
-        # and collapsed three different situations into the same silent skip: a
-        # backend with no physical cap, a backend that renamed the field, and a
-        # backend that never had it. Any rename would have disabled this invariant
-        # permanently and invisibly. Backends now declare: an ``int`` (a real cap
-        # to check), or ``None`` (explicitly no physical cap — InMemoryBackend).
-        # A backend declaring NEITHER is outside the contract and is logged, so
-        # "guard checked and found nothing wrong" is distinguishable from "guard
-        # could not see anything at all".
-        #
-        # WHY THIS STAYS A ``getattr`` while ``durable``/``set_durable`` below use
-        # DIRECT attribute access — this is a decision, not an inconsistency. The
-        # criterion is whether the member is a CORRECTNESS GATE or an ADVISORY
-        # signal. ``durable`` decides whether a marker may ship for content whose
-        # durability was never verified, so a backend missing it is rejected at
-        # construction and mypy enforces the call site. ``max_rows`` only orders
-        # two caps against each other; a backend missing it loses a diagnostic,
-        # not an invariant. Direct access cannot express the three states this
-        # needs — undeclared / declared-None / declared-int — it collapses the
-        # first two, and the third state is the whole reason the sentinel exists.
-        # Buying static enforcement here would mean CRASHING a duck-typed backend
-        # from the ``furl_ctx.ccr_backend`` entry point over an advisory ordering
-        # check, at a supported extension seam. That is a worse outcome than the
-        # enforcement is worth.
-        #
-        # The consequence, stated plainly so nobody reads more safety into this
-        # line than it has: removing ``max_rows`` from the Protocol does NOT fail
-        # mypy, because mypy types a ``getattr`` result as ``Any``. The Protocol
-        # declaration here is documentation and a contract for authors; it is not
-        # statically enforced. That is true of THIS member only.
+        # Warn when a backend's physical `max_rows` cap can bind before logical `max_entries`, or when the cap is undeclared. This
+        # is advisory, so `getattr` preserves undeclared/None/int states; durability remains a strict direct-access contract.
         declared_max_rows = getattr(self._backend, "max_rows", _ROW_CAP_UNDECLARED)
         if declared_max_rows is _ROW_CAP_UNDECLARED:
-            # WARNING, not DEBUG, and deliberately at the SAME level as the
-            # inversion warning below. "The invariant cannot be checked at all"
-            # is strictly less knowable than "checked and found inverted", so
-            # reporting it more quietly would inverts the severities. DEBUG is
-            # invisible at any production log level, which would leave this case
-            # observably indistinguishable from the silent skip this whole guard
-            # exists to eliminate. It costs nothing: it fires once per store
-            # construction, not on any hot path. The Protocol makes an undeclared
-            # backend a TYPE error, so the only way to reach this at runtime is a
-            # duck-typed or third-party backend that was never type-checked —
-            # exactly the case that has had no other warning.
+            # WARNING, not DEBUG, and deliberately at the SAME level as the inversion warning below. "The invariant cannot be checked at
+            # all" is strictly less knowable than "checked and found inverted", so reporting it more quietly would inverts the severities.
             logger.warning(
                 "CompressionStore backend %s declares no max_rows; the cap-ordering "
                 "invariant cannot be verified for it",
@@ -706,46 +561,29 @@ class CompressionStore:
             to the other producer's foreign content. The key is still returned
             (signature unchanged); its marker simply no longer resolves.
         """
-        # content_kind threading: a writer that did not attribute a tool (the
-        # router CCR offload, SmartCrusher on a single wrapped tool output)
-        # inherits the request-scoped originating tool that compress() bound for
-        # this call, so its entry still surfaces a content_kind. An explicit
-        # tool_name is never overridden; unbound context => None, unchanged.
+        # content_kind threading: a writer that did not attribute a tool (the router CCR offload, SmartCrusher on a single wrapped tool
+        # output) inherits the request-scoped originating tool that compress() bound for this call, so its entry still surfaces a content_kind.
         if tool_name is None:
             tool_name = _request_tool_name.get()
 
-        # Reject a non-positive TTL loudly. ttl=0 (or negative) produces an
-        # entry that is_expired() immediately (time.time()-created_at > 0), so it
-        # would be stored in the backend + heap, never retrievable, and leak until
-        # the next store() reaps it. No live caller passes ttl<=0; this is an
-        # invalid input only reachable via direct API misuse. Reject (matching the
-        # explicit_hash style) rather than silently clamp, which would mask the
-        # caller bug. ttl=None (use default) and ttl>0 are unaffected.
+        # Reject a non-positive TTL loudly. ttl=0 (or negative) produces an entry that is_expired() immediately (time.time()-created_at
+        # > 0) so it would be stored in the backend + heap, never retrievable, and leak until the next store() reaps it.
         if ttl is not None and ttl <= 0:
             raise ValueError(
                 f"ttl must be a positive number of seconds (or None for the default), "
                 f"got {ttl!r} — a non-positive ttl creates an immediately-expired entry"
             )
 
-        # Generate hash from original content. Default: SHA-256[:24] of the
-        # original; `explicit_hash` is used verbatim (see the arg docs above).
-        # 24 chars (96 bits) was chosen for collision resistance under the
-        # birthday bound: 50% collision probability at ~280 trillion entries
-        # (2^48).
+        # Generate hash from original content. 24 chars (96 bits) was chosen for collision resistance
+        # under the birthday bound: 50% collision probability at ~280 trillion entries (2^48).
         if explicit_hash is not None:
-            # Validate as hex and bail LOUDLY on a bad key: silently falling back
-            # to the computed default when the caller asked for a specific key
-            # would break the marker<->store consistency the recovery plane needs.
+            # Validate as hex and bail LOUDLY on a bad key: silently falling back to the computed default when the
+            # caller asked for a specific key would break the marker<->store consistency the recovery plane needs.
             if not explicit_hash or not all(c in "0123456789abcdefABCDEF" for c in explicit_hash):
                 raise ValueError(
                     f"explicit_hash must be a non-empty hex string, got {explicit_hash!r}"
                 )
-            # Reject trivially-collidable short keys (e.g. a 1-char hash). This is
-            # the loose recovery floor (``_MIN_EXPLICIT_HASH_LEN``), intentionally
-            # looser than the strict {12, 24} anti-spoofing ingress — the store
-            # must accept every hex key a DIRECT lookup can recover, not only the
-            # strict scanner's widths. Real producers emit 12- or 24-char hashes,
-            # well clear of the floor.
+            # Reject trivially-collidable short keys (e.g. a 1-char hash).
             if len(explicit_hash) < _MIN_EXPLICIT_HASH_LEN:
                 raise ValueError(
                     f"explicit_hash must be at least {_MIN_EXPLICIT_HASH_LEN} hex chars "
@@ -753,20 +591,8 @@ class CompressionStore:
                 )
             hash_key = explicit_hash.lower()
         else:
-            # SHA-256 truncated to 24 hex chars (96 bits) — same collision
-            # space as the MD5[:24] this replaced. Switched from MD5
-            # to silence CodeQL's `py/weak-sensitive-data-hashing`
-            # rule (the `usedforsecurity=False` parameter and the `lgtm`
-            # comment marker both failed to suppress it). The cache is
-            # in-memory, so changing the hash function on upgrade has no
-            # persistence-side effect — the same content always hashes
-            # deterministically under whichever function is in use.
-            # ``surrogatepass`` keeps this path total: a lone-surrogate
-            # original (JSON delivers them via \uD800 escapes, reachable
-            # through the MCP furl_compress tool) hashes instead of raising
-            # UnicodeEncodeError. For every valid-UTF8 original the emitted
-            # bytes are identical to a strict encode, so existing keys are
-            # unchanged.
+            # SHA-256 truncated to 24 hex chars (96 bits) — same collision space as the MD5[:24] this replaced. Switched from MD5 to silence CodeQL's
+            # `py/weak-sensitive-data-hashing` rule (the `usedforsecurity=False` parameter and the `lgtm` comment marker both failed to suppress it).
             hash_key = hashlib.sha256(original.encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
         entry = CompressionEntry(
@@ -790,20 +616,8 @@ class CompressionStore:
         with self._lock:
             self._evict_if_needed()
 
-            # Hash collision handling. If the key already exists with
-            # DIFFERENT content it is a true hash collision (astronomically
-            # rare at 96-/48-bit keys). Both producers' ``<<ccr:HASH>>`` markers
-            # now point at the SAME key, and retrieval — a bare
-            # ``backend.get(hash_key)`` with no per-marker content identity —
-            # cannot tell them apart. Serving the stored entry would hand the
-            # SECOND producer the FIRST producer's bytes: foreign content, i.e.
-            # silent corruption, the exact outcome this store exists to prevent.
-            # We cannot safely serve EITHER binding, so we DROP the binding
-            # entirely: delete the stored entry and refuse the new one. Every
-            # marker on this key then resolves to a LOUD, cause-honest miss
-            # (recompute) instead of foreign content. An expired same-key entry
-            # never reaches this branch: _evict_if_needed() above already reaped
-            # it, so a dead binding cannot wedge its key.
+            # Hash collision handling. Both producers' ``<<ccr:HASH>>`` markers now point at the SAME key, and retrieval a bare
+            # ``backend.get(hash_key)`` with no per-marker content identity silent corruption, the exact outcome this store exists to prevent.
             existing = self._backend.get(hash_key)
             if existing is not None:
                 if existing.original_content != original:
@@ -817,11 +631,7 @@ class CompressionStore:
                         len(existing.original_content),
                         len(original),
                     )
-                    # Drop the stored entry so retrieve() loud-misses instead of
-                    # serving foreign bytes; its heap tuple is now stale. The
-                    # binding reached NEITHER a durable nor a volatile tier, so a
-                    # require_durable caller must veto below (Bug-6) rather than
-                    # receive the hash as if the content were stored.
+                    # Drop the stored entry so retrieve() loud-misses instead of serving foreign bytes; its heap tuple is now stale.
                     self._backend.delete(hash_key)
                     self._stale_heap_entries += 1
                     collision_dropped = True
@@ -839,11 +649,7 @@ class CompressionStore:
                 # Add to eviction heap for O(log n) eviction
                 heapq.heappush(self._eviction_heap, (entry.created_at, hash_key))
 
-        # Collision-drop veto (Bug-6): the ambiguous binding was dropped, so
-        # NOTHING is retrievable under this key. A require_durable caller reverts
-        # to the original (the veto contract) exactly as for a failed durable
-        # write; a non-durable caller keeps today's behavior (the returned hash
-        # loud-misses, never serves foreign content).
+        # Collision-drop veto (Bug-6): the ambiguous binding was dropped, so NOTHING is retrievable under this key.
         if collision_dropped:
             if require_durable:
                 raise DurableWriteError(
@@ -855,21 +661,12 @@ class CompressionStore:
                 )
             return hash_key
 
-        # Contention retry BEFORE the veto (store-concurrency-honesty). A durable
-        # write that reported non-durable most often lost a brief cross-process
-        # lock race — a second furl MCP server (another Claude Code session)
-        # writing the shared file. Re-attempt the persist under a bounded,
-        # capped-backoff budget (sleeps OUTSIDE the lock) so everyday two-session
-        # contention lands durably instead of spuriously vetoing.
+        # Contention retry BEFORE the veto (store-concurrency-honesty).
         if require_durable and not durable:
             durable = self._retry_durable_persist(hash_key, entry)
 
-        # Durability veto (audit #3), raised OUTSIDE the lock, only once the whole
-        # retry budget is spent. The entry stays in the volatile tier so
-        # SAME-PROCESS retrieval still works right now (hence the hash rides the
-        # error); it simply is not durable, so a marker-decision caller reverts to
-        # the ORIGINAL uncompressed content (nothing lost) and a hash-surfacing
-        # caller reports the volatile handle honestly rather than implying loss.
+        # Durability veto (audit #3), raised OUTSIDE the lock, only once the whole retry budget is spent. The entry
+        # stays in the volatile tier so SAME-PROCESS retrieval still works right now (hence the hash rides the error).
         if require_durable and not durable:
             raise DurableWriteError(
                 f"CCR durable write for hash {hash_key} did not reach durable "
@@ -973,11 +770,7 @@ class CompressionStore:
             entry = self._backend.get(hash_key)
 
             if entry is None:
-                # Primary miss: fall through to the durable spill tier (Q10). A
-                # spill hit is returned as-is (no promotion back into the
-                # primary, no access bookkeeping) so it is byte-identical to the
-                # evicted value. Spill-off (``self._spill is None``)
-                # short-circuits to today's loud miss.
+                # Primary miss: fall through to the durable spill tier (Q10).
                 return self._recover_from_spill(hash_key)
 
             if entry.is_expired(self._now()):
@@ -1011,17 +804,11 @@ class CompressionStore:
                 entry=entry,
             )
 
-            # CRITICAL: Make a deep copy to return
-            # (entry could be modified/evicted after lock release)
-            # The entry contains mutable fields (search_queries list) that must be copied
+            # CRITICAL: Make a deep copy to return (entry could be modified/evicted after lock
+            # release) The entry contains mutable fields (search_queries list) that must be copied
             result_entry = replace(entry, search_queries=list(entry.search_queries))
 
-        # Engine P2-13: a real hit is the retrieval-feedback signal — the
-        # model needed content this entry's compression dropped. Emitted
-        # OUTSIDE the store lock (the aggregator's lock is a leaf; the store
-        # never nests into it) and only for model-driven retrievals (see the
-        # ``record_feedback_signal`` doc above). Misses and expired entries
-        # returned ``None`` earlier and never reach this point.
+        # Engine P2-13: a real hit is the retrieval-feedback signal — the model needed content this entry's compression dropped.
         if record_feedback_signal and self._enable_feedback:
             self._emit_retrieval_signal(result_entry.tool_name, result_entry.compression_strategy)
 
@@ -1062,10 +849,8 @@ class CompressionStore:
                 "compressed_content": entry.compressed_content,
                 "created_at": entry.created_at,
                 "ttl": entry.ttl,
-                # Strategy + token counts let a caller tell an opaque whole-blob
-                # offload (``ccr_offload``: retrieval returns the entire payload)
-                # apart from a granular per-row drop, and quantify the round-trip
-                # cost, without fetching the full original content.
+                # Strategy + token counts let a caller tell an opaque whole-blob offload (``ccr_offload``: retrieval returns the entire
+                # payload) apart from a granular per-row drop, and quantify the round-trip cost, without fetching the full original content.
                 "compression_strategy": entry.compression_strategy,
                 "original_tokens": entry.original_tokens,
                 "compressed_tokens": entry.compressed_tokens,
@@ -1108,13 +893,8 @@ class CompressionStore:
         scored = ((i, s.score) for i, s in zip(items, scores) if s.score >= score_threshold)
         results = [item for item, _ in heapq.nlargest(max_results, scored, key=itemgetter(1))]
 
-        # COR-37: record the access only AFTER results are known, and only
-        # when the search actually returned items. A zero-result probe must
-        # not bump retrieval_count — the MCP retrieve path documents that
-        # retrieval metrics reflect ACTUAL retrievals (its no-match branch
-        # uses the side-effect-free exists() on the same rationale). The
-        # retrieval-EVENT log below still records zero-result probes with an
-        # honest items_retrieved=0.
+        # COR-37: record the access only AFTER results are known, and only when the search actually returned items. A zero-result probe must not bump retrieval_count —
+        # the MCP retrieve path documents that retrieval metrics reflect ACTUAL retrievals (its no-match branch uses the side-effect-free exists() on the same rationale).
         if results:
             self._record_search_access(hash_key, query)
 
@@ -1188,15 +968,8 @@ class CompressionStore:
             return []
 
         now = self._now()
-        # Snapshot only the KEYS under the lock, which is cheap and decodes no
-        # content, then decode and expiry-filter each entry under a brief per-key
-        # lock so a concurrent store op is never blocked for the whole decode.
-        # Holding the lock across ``items()`` used to freeze every writer for the
-        # full materialize-and-decode of up to the cap of large entries; the
-        # sibling eviction path was already narrowed off ``items()`` this way
-        # (audit #2, ``created_at_index``). ``created_at_index()`` and ``items()``
-        # iterate the backend in the same order and ``get`` reproduces each entry,
-        # so a stable store yields byte-identical results and ranking order.
+        # Snapshot only the KEYS under the lock which is cheap and decodes no content, then decode and expiry-filter each entry under a brief per-key
+        # lock so a concurrent store op is never blocked for the whole decode. so a stable store yields byte-identical results and ranking order.
         with self._lock:
             snapshot_keys = [hash_key for _created_at, hash_key in self._backend.created_at_index()]
 
@@ -1212,10 +985,7 @@ class CompressionStore:
         if not live_entries:
             return []
 
-        # Score every live entry as ONE document. Batch scoring builds a real
-        # corpus IDF map, so a discriminative term (a UUID/ID) outranks a term
-        # common to many entries — the property that makes this BM25 rather
-        # than raw term-frequency ranking.
+        # Score every live entry as ONE document.
         documents = [entry.original_content for _hash, entry in live_entries]
         scores = self._scorer.score_batch(documents, query)
 
@@ -1275,9 +1045,8 @@ class CompressionStore:
             "event": "furl_retrieve",
             "hash": hash_key,
             "retrieval_type": retrieval_type,
-            # The query is caller/model-supplied and can itself carry a secret
-            # (e.g. searching retrieved content for a token), so redact it with
-            # the same rules as the payload before it reaches the log sink.
+            # The query is caller/model-supplied and can itself carry a secret (e.g. searching retrieved content
+            # for a token), so redact it with the same rules as the payload before it reaches the log sink.
             "query": _redact_retrieval_log_payload(query) if query else query,
             "items_retrieved": items_retrieved,
             "total_items": total_items,
@@ -1317,15 +1086,7 @@ class CompressionStore:
             return self._plain_text_search_items(original_content)
 
         if numerics_lossy:
-            # Numeric-fidelity fallback: the canonical parses, but at least
-            # one numeric literal cannot survive Python's float round-trip —
-            # e.g. 1e400 overflows to inf (re-emitted by json.dumps as the
-            # RFC-invalid bare Infinity) and >17-significant-digit decimals
-            # collapse. The engine's serde is configured with
-            # arbitrary_precision precisely to preserve these, and the
-            # no-query path returns verbatim bytes; serve text chunks sliced
-            # from the verbatim original instead of silently-corrupted
-            # re-parsed numbers.
+            # If parsed JSON contains numbers Python cannot round-trip exactly, search the verbatim original instead of reserializing corrupted numeric values.
             return self._plain_text_search_items(original_content)
 
         if isinstance(parsed, list):
@@ -1517,9 +1278,8 @@ class CompressionStore:
                 self._stale_heap_entries += 1
                 return None
 
-            # CRITICAL FIX #4: Return a copy to prevent race conditions
-            # The entry contains mutable fields (search_queries list) that could be
-            # modified by other threads after we release the lock
+            # CRITICAL FIX #4: Return a copy to prevent race conditions The entry contains mutable fields
+            # (search_queries list) that could be modified by other threads after we release the lock
             return replace(entry, search_queries=list(entry.search_queries))
 
     def _record_search_access(self, hash_key: str, query: str | None) -> None:
@@ -1631,9 +1391,7 @@ class CompressionStore:
             try:
                 spilled = self._spill.get(hash_key)
             except Exception as exc:  # noqa: BLE001 — a spill that cannot be read
-                # cannot prove the entry is GONE. Treat an unreadable spill as
-                # "still there": a false survivor is a loud, retryable purge
-                # error; a false all-clear is the silent data-safety bug.
+                # cannot prove the entry is GONE.
                 logger.warning("CCR spill existence check failed (assuming present): %s", exc)
                 return True
             return spilled is not None and not spilled.is_expired(now)
@@ -1721,28 +1479,10 @@ class CompressionStore:
         through this, the public surface every caller actually uses. Validating
         here keeps the caller bug loud and the operational failure quiet.
         """
-        # From ``backends.base``, beside the contract it validates — NOT from a
-        # concrete backend. Importing it out of ``memory.py`` would be this
-        # module reaching past the protocol into one implementation, the same
-        # defect the ``max_rows`` declaration removes one field up. Local import
-        # mirrors this module's other backend imports (line ~517): ``backends``
-        # TYPE_CHECKING-imports from here, and the lazy form avoids that edge.
+        # From ``backends.base``, beside the contract it validates
         from .backends.base import reject_negative_counter_amount
 
-        # POSITION IS LOAD-BEARING: this call must stay OUTSIDE the ``try`` below.
-        # Measured both ways. Moving it inside the try, OR deleting it and relying
-        # on the backends' own identical check, each turn a negative amount into a
-        # silent ``None`` with the tally unchanged — indistinguishable from an
-        # unsupported backend, because the broad ``except Exception`` eats the
-        # ValueError either way. Caller bugs stay loud here; only OPERATIONAL
-        # counter failures fail open.
-        #
-        # This is not left to a comment to enforce. Moving this line inside the
-        # try reddens exactly one test, with "DID NOT RAISE ValueError"
-        # (measured: 1 failed, 2875 passed):
-        #   test_store_surface_rejects_negative_counter_amount_despite_fail_open
-        # A tidier who moves it gets a red test naming the reason, not a silent
-        # regression.
+        # POSITION IS LOAD-BEARING: this call must stay OUTSIDE the ``try`` below. Caller bugs stay loud here; only OPERATIONAL counter failures fail open.
         reject_negative_counter_amount(name, amount)
         inc = getattr(self._backend, "increment_counter", None)
         if inc is None:
@@ -1928,13 +1668,7 @@ class CompressionStore:
                 deleted.append(nested_hash)
             deleted.extend(child.nested_deleted)
             skipped.extend(child.nested_shared_skipped)
-        # A hash can be skipped by one branch and then legitimately deleted by a
-        # later one (a skip deliberately does not enter ``visited``, so a diamond
-        # T->[A,B] with A->[C] and B->[C] skips C under A, then deletes it under
-        # B once A is gone). DELETED WINS: the erase is what actually happened,
-        # and reporting C as "kept because another entry references it" would be
-        # a false claim about live data -- the exact class of bug the read-back
-        # and the kept-shared disclosure exist to prevent.
+        # A hash can be skipped by one branch and then legitimately deleted by a later one (a skip deliberately does not enter ``visited``.
         deleted_set = set(deleted)
         return CascadeOutcome(
             top_deleted=top_deleted,
@@ -2085,24 +1819,8 @@ class CompressionStore:
             if stale_ratio >= self._heap_rebuild_threshold:
                 self._rebuild_heap()
 
-        # If still at capacity, remove oldest entries using the heap.
-        #
-        # The eviction loop must GUARANTEE ``count() <= max_entries`` on
-        # exit. The old loop ran ``while heap`` and could exit over capacity if
-        # the heap held only stale references (deleted/replaced keys, or stale
-        # timestamps) — popping those evicts nothing real, so the heap could
-        # drain (or a fixed budget could be exhausted by ghost refs) while the
-        # backend was still over capacity. The ratio-guard rebuild above only
-        # fires when the stale COUNTER is accurate; a heap whose staleness is
-        # under-counted slips past it.
-        #
-        # Fix: track real progress. Each iteration that fails to evict a real
-        # entry while over capacity rebuilds the heap from the LIVE backend
-        # (correct timestamps, no ghost refs) so the next pop is guaranteed to
-        # hit a real oldest entry. Eviction stays oldest-first (no side-door).
-        # Bounded: each rebuild yields a heap of exactly the live entries, and
-        # every subsequent pop removes one, so the loop terminates in
-        # O(live entries).
+        # Evict until the backend is below the logical cap. If stale heap entries make no real
+        # progress, rebuild from live backend timestamps so the next oldest pop removes a real entry.
         rebuilt_since_progress = False
         while self._backend.count() >= self._max_entries:
             if not self._eviction_heap:
@@ -2117,19 +1835,13 @@ class CompressionStore:
             created_at, hash_key = heapq.heappop(self._eviction_heap)
             entry = self._backend.get(hash_key)
             if entry is not None and entry.created_at == created_at:
-                # Real oldest entry — evict it. Q10 spill tier: demote the
-                # (still-live: ``_clean_expired`` ran above) entry to the durable
-                # spill BEFORE dropping it from the primary, so the marker stays
-                # resolvable past this eviction. The primary delete is
-                # unconditional — capacity MUST be freed even if the spill write
-                # fails (best-effort), or this loop would not make progress.
+                # Real oldest entry — evict it.
                 self._spill_evicted(hash_key, entry)
                 self._backend.delete(hash_key)
                 rebuilt_since_progress = False  # made progress
             else:
-                # Stale heap reference — decrement the counter. If the heap
-                # drains to nothing but ones (no real eviction) the `not heap`
-                # branch above rebuilds from the live backend.
+                # Stale heap reference — decrement the counter. If the heap drains to nothing but
+                # ones (no real eviction) the `not heap` branch above rebuilds from the live backend.
                 if self._stale_heap_entries > 0:
                     self._stale_heap_entries -= 1
 
@@ -2155,9 +1867,7 @@ class CompressionStore:
         CRITICAL FIX: This removes stale heap entries that accumulate when entries
         are deleted or replaced. Without this, the heap grows unboundedly.
         """
-        # Build new heap from current store entries only. Uses the backend's
-        # projected (created_at, hash_key) read (audit #2) so a rebuild on the
-        # store() hot path does not decode every content BLOB out of the file.
+        # Build new heap from current store entries only.
         self._eviction_heap = list(self._backend.created_at_index())
         heapq.heapify(self._eviction_heap)
         # Reset stale counter - heap is now clean
@@ -2198,16 +1908,7 @@ _request_ccr_store: ContextVar[CompressionStore | None] = ContextVar(
     "furl_request_ccr_store", default=None
 )
 
-# Request-scoped ORIGINATING TOOL NAME (content_kind threading). ``compress()``
-# binds this to the tool whose output it is compressing (e.g. "Bash" from the
-# PostToolUse hook, "mcp:furl_compress" from the MCP server). ``store()`` reads
-# it as the DEFAULT ``tool_name`` when a writer does not supply one — so the
-# router's CCR offload and SmartCrusher (which have no per-message tool
-# attribution for a single wrapped tool output) still label their entries,
-# surfacing as ``content_kind`` in furl_list / furl_retrieve. A writer that
-# DOES pass a concrete ``tool_name`` (read_lifecycle's "Read", dedup's
-# message-derived name) is never overridden. Default ``None`` => today's
-# behavior, byte-identical.
+# Request-scoped ORIGINATING TOOL NAME (content_kind threading). ``store()`` reads it as the DEFAULT ``tool_name`` when a writer does not supply one.
 _request_tool_name: ContextVar[str | None] = ContextVar("furl_request_tool_name", default=None)
 
 # Global store instance (lazy initialization)
@@ -2232,31 +1933,16 @@ def clear_request_compression_store() -> None:
     _request_ccr_store.set(None)
 
 
-# ---------------------------------------------------------------------------
 # Per-tenant CCR namespacing (B2 durable-retention).
-#
-# Real isolation, not prefixing: search/stats/expiry/heap-rebuild all iterate
-# the WHOLE backend and the sqlite backend has no namespace column, so a shared
-# backend with prefixed keys would leak entries across tenants. Instead each
-# namespace gets its OWN ``CompressionStore`` (its own backend / sqlite file),
-# swapped in via the ``_request_ccr_store`` ContextVar around the pipeline call.
-# An entry written under namespace A is simply not present in namespace B's
-# store object, so cross-namespace retrieval returns None — the invariant is
-# structural, not a filter that can be forgotten.
-# ---------------------------------------------------------------------------
 
 FURL_CCR_NAMESPACE_ENV = "FURL_CCR_NAMESPACE"
 
-# Per-project isolation (audit #4). When set — the plugin deployment exports it
-# from the project root — an otherwise un-namespaced call is scoped to a
-# per-project store instead of the process-global singleton, closing the
-# cross-project commingling + eviction hole with zero user config. Absent
-# (library / unit tests) the global singleton serves, byte-for-byte unchanged.
+# When set — the plugin deployment exports it from the project root — an otherwise un-namespaced call is scoped to a per-project
+# store instead of the process-global singleton, closing the cross-project commingling + eviction hole with zero user config.
 FURL_CCR_PROJECT_DIR_ENV = "FURL_CCR_PROJECT_DIR"
 
-# Registry of namespace-key -> store, so identical (namespace, session, agent)
-# tuples converge on the SAME store across calls (cross-turn retrieval works)
-# and in-memory tenants do not lose their entries between compress() calls.
+# Registry of namespace-key -> store, so identical (namespace, session, agent) tuples converge on the SAME store
+# across calls (cross-turn retrieval works) and in-memory tenants do not lose their entries between compress() calls.
 _namespace_stores: dict[str, CompressionStore] = {}
 _namespace_lock = threading.Lock()
 
@@ -2301,9 +1987,8 @@ def _namespace_key(session_id: str | None, agent_id: str | None) -> str | None:
         # No explicit tenant identity: prefer per-project isolation when the
         # deployment provides a project root, else None (global singleton).
         return _project_scope_key()
-    # NUL-joined so distinct segmentations cannot alias (``a`` + ``bc`` vs
-    # ``ab`` + ``c``); the raw values are opaque and never touch a filesystem
-    # path directly — the sqlite filename is derived by hashing this key.
+    # NUL-joined so distinct segmentations cannot alias (``a`` + ``bc`` vs ``ab`` + ``c``); the raw values are
+    # opaque and never touch a filesystem path directly — the sqlite filename is derived by hashing this key.
     return "\x00".join((env_ns, session, agent))
 
 

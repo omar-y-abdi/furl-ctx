@@ -1,55 +1,5 @@
-//! Detection-trait module — cross-cutting classifiers used by transforms.
-//!
-//! # Why a top-level module
-//!
-//! Transforms in [`crate::transforms`] mutate data; signals in this module
-//! *classify* it. The same classifier feeds many transforms (e.g. line
-//! importance scoring is consumed by `text_compressor`, `search_compressor`,
-//! `diff_compressor`, and `log_compressor`), so the layering belongs at the
-//! crate root, not nested under any one transform.
-//!
-//! # The shape we follow
-//!
-//! Detection in Furl matures along a known curve:
-//!
-//! 1. **Pattern fallback** — keyword/regex scanning. Cheap, brittle, the
-//!    starting point for every detector. This is what
-//!    [`keyword_detector::KeywordDetector`] gives us today.
-//! 2. **Structured parser** — when the input has grammar (diffs, JSON,
-//!    code), parse it. Already done for `unidiff` (content type) here in
-//!    the core, and for `tree-sitter` (language) on the Python side —
-//!    the opt-in `furl-ctx[code]` extra's code-aware compressor; the
-//!    Rust core itself ships no tree-sitter.
-//! 3. **ML model** — for fuzzy categories (line importance, anchor cells,
-//!    HTML extraction), a small classifier trained on labeled traffic
-//!    outperforms keywords.
-//!
-//! All three live behind the same per-granularity trait; a richer
-//! detector slots in as a new [`LineImportanceDetector`] impl without
-//! touching the keyword detector or any caller. (A `Tiered` chaining
-//! combinator existed here but had zero production constructions and
-//! was deleted — SIMP-5b; composition happens at the call site.)
-//!
-//! # Per-granularity, not per-domain
-//!
-//! Different inputs warrant different trait signatures:
-//!
-//! - [`line_importance::LineImportanceDetector`] — single line → priority
-//! - (future) `ContentTypeDetector` — whole blob → category
-//! - (future) `ItemImportanceDetector<I>` — `&[I]` → ranking
-//!
-//! Cramming everything into one `Detector<Any>` would force callers to
-//! match on input shape at every site. Three traits keep each callsite
-//! type-checked.
-//!
-//! # No silent fallbacks
-//!
-//! Per project conventions, every concrete impl in this module is real.
-//! No `NoOpDetector`, no stub-ML impl that returns zeros, no
-//! "fallback" classifier that quietly degrades. If a tier is registered,
-//! it does the work; if no tier confidently matches, the signal carries
-//! that fact in its `confidence` field rather than being silently
-//! coerced to a positive answer.
+//! Cross-cutting detection traits used by transforms. Prefer structured parsers when grammar exists;
+//! otherwise use deterministic pattern fallback. Detectors return signals only and must not mutate input.
 
 pub mod keyword_detector;
 pub mod line_importance;

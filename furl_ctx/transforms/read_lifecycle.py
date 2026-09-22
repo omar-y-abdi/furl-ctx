@@ -178,11 +178,7 @@ class ReadLifecycleManager:
             if msg.get("role") != "assistant":
                 continue
 
-            # OpenAI format: tool_calls array. `or []` (not a .get default):
-            # openai-python's ChatCompletionMessage.model_dump() serializes
-            # tool_calls as present-but-None, which .get(..., []) passes
-            # through — iterating None would TypeError and fail-open the
-            # whole request (same idiom as smart_crusher's tool-call index).
+            # OpenAI format: tool_calls array.
             for tc in msg.get("tool_calls") or []:
                 if not isinstance(tc, dict):
                     continue
@@ -303,11 +299,8 @@ class ReadLifecycleManager:
                     e.msg_index > read_op.msg_index for e in edits
                 )
 
-                # Check superseded: any later read that FULLY COVERS this read's range?
-                # A partial read (offset=100, limit=50) is NOT superseded by a
-                # different partial read (offset=200, limit=50) — they cover
-                # different lines. Only supersede when the later read contains
-                # all the lines of this read.
+                # Check superseded: any later read that FULLY COVERS this read's range? A partial read (offset=100, limit=50) is NOT superseded by a different
+                # partial read (offset=200, limit=50) — they cover different lines. Only supersede when the later read contains all the lines of this read.
                 is_superseded = self.config.compress_superseded and any(
                     r.msg_index > read_op.msg_index and self._read_covers(r, read_op) for r in reads
                 )
@@ -434,25 +427,11 @@ class ReadLifecycleManager:
             return False, content, None
 
         # When no CCR store is available, we cannot back a recovery pointer.
-        # Emitting "Retrieve original: hash=<phantom_hash>" would point to
-        # nothing and make the original content permanently unrecoverable —
-        # a Contract #1 (CCR recovery invariant) violation on the DEFAULT path.
-        # The safest option is to skip the substitution entirely: leave the
-        # content verbatim so it remains recoverable from the output alone.
         if self.store is None:
             return False, content, None
 
-        # Store original in CCR and obtain the backed hash. require_durable:
-        # when the store's backend is durable (e.g. sqlite), a write that only
-        # reached its volatile in-process fallback (backend degraded, or the
-        # write lost the lock-contention retry) raises DurableWriteError —
-        # decline the substitution exactly like the store-is-None guard above
-        # and serve the content verbatim. A replacement marker must never ship
-        # when the original's only backing dies with this process: a second
-        # process's retrieve would miss and the replaced bytes would be
-        # unrecoverable (audit #3 / review F1 — the same veto every other
-        # marker seam applies). Lazy import: content producers must not pull
-        # the cache package at module import time.
+        # Store original in CCR and obtain the backed hash. require_durable when the store's backend is durable (e.g. sqlite), a write that only
+        # reached its volatile in-process fallback (backend degraded, or the write lost the lock-contention retry) raises DurableWriteError.
         from ..cache.compression_store import DurableWriteError
 
         try:

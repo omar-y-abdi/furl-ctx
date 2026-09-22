@@ -20,10 +20,8 @@ from .cache.compression_store import CompressionStore, _active_ccr_store
 from .ccr.marker_grammar import hash_of_match, sub_within_budget, substitution_patterns
 from .ccr.retrieve_filters import FilterError, RetrieveFilters, apply_filters
 
-# Distinguishes "select_equals was omitted" from an explicit ``select_equals=None``
-# (a real "field is null" match): the MCP dict path keys on presence, and the
-# Python keyword path needs the same distinction, which a plain ``None`` default
-# cannot express. Never leaks past ``retrieve``.
+# Distinguishes "select_equals was omitted" from an explicit ``select_equals=None`` (a real "field is null" match): the MCP dict path keys on
+# presence, and the Python keyword path needs the same distinction, which a plain ``None`` default cannot express. Never leaks past ``retrieve``.
 _UNSET: Any = object()
 
 
@@ -92,10 +90,8 @@ def retrieve(
             "line_range": line_range,
             "fields": fields,
             "select_field": select_field,
-            # Forward ``select_equals`` only when the caller actually passed one:
-            # ``parse`` keys on presence (an equals-null request differs from a
-            # range request), and the ``_UNSET`` sentinel preserves that
-            # distinction across the keyword boundary.
+            # Forward ``select_equals`` only when the caller actually passed one: ``parse`` keys on presence (an equals-null request
+            # differs from a range request), and the ``_UNSET`` sentinel preserves that distinction across the keyword boundary.
             **({} if select_equals is _UNSET else {"select_equals": select_equals}),
             "select_min": select_min,
             "select_max": select_max,
@@ -174,9 +170,8 @@ def resolve_markers(
     so markers a namespaced compress just emitted actually expand instead of
     silently window-missing against the global store.
     """
-    # Bug-12: a public API must fail with a typed, actionable error on the wrong
-    # shape, not a bare ``AttributeError`` from ``str.get`` when a plain string is
-    # iterated char-by-char. The documented input is a list of message dicts.
+    # Bug-12: a public API must fail with a typed, actionable error on the wrong shape, not a
+    # bare ``AttributeError`` from ``str.get`` when a plain string is iterated char-by-char.
     if not isinstance(messages, list):
         raise TypeError(
             "resolve_markers expects a list of message dicts "
@@ -190,19 +185,16 @@ def resolve_markers(
         for pattern in substitution_patterns():
 
             def _sub(match: Any) -> str:
-                # lazy: bulk expansion does NOT feed the retrieval-feedback loop
-                # (record_feedback_signal=False) — it mechanically restores every
-                # marker, not the model selectively fetching one.
+                # lazy: bulk expansion does NOT feed the retrieval-feedback loop (record_feedback_signal=False)
+                # — it mechanically restores every marker, not the model selectively fetching one.
                 entry = active.retrieve(hash_of_match(match), record_feedback_signal=False)
                 return entry.original_content if entry is not None else match.group(0)
 
             text = sub_within_budget(pattern, _sub, text)
         return text
 
-    # A non-dict element passes through untouched (total) rather than crashing
-    # on ``.get`` — mirrors the "non-string content is passed through" contract
-    # one level up; the ``isinstance(message, dict)`` short-circuit is what
-    # keeps ``.get`` off non-dicts.
+    # A non-dict element passes through untouched (total) rather than crashing on ``.get`` — mirrors the "non-string content is
+    # passed through" contract one level up; the ``isinstance(message, dict)`` short-circuit is what keeps ``.get`` off non-dicts.
     return [
         {**message, "content": _expand(content)}
         if isinstance(message, dict) and isinstance(content := message.get("content"), str)

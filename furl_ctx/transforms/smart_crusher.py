@@ -56,35 +56,19 @@ from .base import Transform
 logger = logging.getLogger(__name__)
 
 
-# Lossless-compaction renderers known to the Rust core — mirrors
-# `CompactionStage::SUPPORTED_FORMAT_NAMES` in
-# `crates/furl-core/.../compaction/mod.rs`.
+# Keep this lossless-renderer set in parity with the Rust compaction registry.
 _SUPPORTED_COMPACTION_FORMATS = ("csv-schema", "json", "markdown-kv")
 
 
-# ─── PERF-12: relevance-context extraction caps ───────────────────────────
-#
-# `_extract_context_from_messages` walks the conversation NEWEST-first to
-# build the BM25 query context. The historical sole bound — "stop after 5
-# user messages" — degenerated to the FULL history exactly on the common
-# agentic shape (long single-prompt sessions where every other turn is
-# `role:"tool"`): a 200-turn session pushed hundreds of KB of query context
-# into Rust BM25 on every crushed message. These caps bound the scan
-# independently of the user-turn count; because the walk is newest-first,
-# capping drops the OLDEST (least relevant) signal first.
+# ─── PERF-12: relevance-context extraction caps ─────────────────────────── `_extract_context_from_messages` walks the conversation NEWEST-first to build the BM25 query context. The historical
+# sole bound — "stop after 5 user messages" — degenerated to the FULL history exactly on the common agentic shape (long single-prompt sessions where every other turn is `role:"tool"`).
 _CONTEXT_MAX_USER_MESSAGES = 5  # historical user-turn cap, unchanged
 _CONTEXT_MAX_ASSISTANT_MESSAGES = 10  # assistant tool-call-argument scans
 _CONTEXT_MAX_TOTAL_CHARS = 8000  # hard bound on collected query-context chars
 
 
-# ─── §4.2 typed-refs recovery ─────────────────────────────────────────────
-#
-# Every fresh-output mirror site consumes TYPED refs (``dropped_refs`` /
-# ``smart_crush_content_typed`` / ``compact_document_json_typed``) as the
-# sole recovery path — the engine surfaces exactly the hashes it dropped,
-# so nothing is re-parsed out of rendered text. The text scrape survives
-# ONLY as the result-cache re-mirror bridge below, where cached rendered
-# prompt text carries no typed refs.
+# ─── §4.2 typed-refs recovery ───────────────────────────────────────────── Every fresh-output mirror site consumes TYPED refs (``dropped_refs`` / ``smart_crush_content_typed``
+# / ``compact_document_json_typed``) as the sole recovery path — the engine surfaces exactly the hashes it dropped, so nothing is re-parsed out of rendered text.
 
 
 class CcrMirrorError(RuntimeError):
@@ -107,14 +91,8 @@ class CcrMirrorError(RuntimeError):
     """
 
 
-# ─── CCR sentinel ─────────────────────────────────────────────────────────
-#
-# When SmartCrusher's lossy path drops rows, it appends a sentinel object
-# `{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>"}` to the kept-items
-# array. The LLM sees this in the prompt and can ask for the original via
-# the CCR retrieval tool. Downstream consumers that iterate the array
-# expecting a uniform schema (e.g. `for e in entries: e["level"]`) need
-# to skip the sentinel — that's what `strip_ccr_sentinels` is for.
+# ─── CCR sentinel ───────────────────────────────────────────────────────── When SmartCrusher's lossy path drops
+# rows, it appends a sentinel object `{"_ccr_dropped": "<<ccr:HASH N_rows_offloaded>>"}` to the kept-items array.
 
 CCR_SENTINEL_KEY = "_ccr_dropped"
 
@@ -218,32 +196,13 @@ class SmartCrusherConfig:
     dedup_identical_items: bool = True
     first_fraction: float = 0.3
     last_fraction: float = 0.15
-    # Lossless compaction only replaces the original when it saves at
-    # least this byte fraction vs the (minified) input. Mirrors the Rust
-    # default; mainly lowered in tests and KV experiments — KV repeats
-    # field names per row, so it clears the gate less often than CSV.
+    # Lossless compaction only replaces the original when it saves at least this byte fraction vs the (minified) input.
     lossless_min_savings_ratio: float = 0.30
-    # How the crusher chooses between a lossless render (all rows,
-    # encoded) and a lossy-recoverable render (dropped + ``<<ccr:HASH>>``
-    # sentinel) when BOTH are available — both are 100% recoverable, so
-    # the choice loses no information.
-    #
-    # * ``"min-tokens"`` (default, max compression): ship whichever render
-    #   is fewer TOKENS (a real tokenizer, not bytes — bytes mislead).
-    # * ``"lossless-first"``: keep the legacy behavior; lossless wins
-    #   whenever it clears ``lossless_min_savings_ratio``. Used by the
-    #   lossless round-trip suite, which asserts the lossless rendering.
+    # How the crusher chooses between a lossless render (all rows, encoded) and a lossy-recoverable render (dropped + ``<<ccr:HASH>>``
+    # sentinel) when BOTH are available. Used by the lossless round-trip suite, which asserts the lossless rendering.
     routing_policy: str = "min-tokens"
-    # STRICT lossless-or-passthrough mode (default OFF — behavior
-    # unchanged). When True, only proven-lossless transforms may change
-    # the output: an array is either replaced by a decoder-verifiable,
-    # opaque-free lossless render or passed through untouched. Lossy
-    # candidates are never built — no row drops, no ``<<ccr:`` pointers
-    # of any shape, no opaque-blob substitution, no non-dict array
-    # sampling, no object key-crush, and no CCR store writes (nothing is
-    # dropped, so there is nothing to recover). For callers who cannot
-    # tolerate ANY visible information reduction, even a CCR-recoverable
-    # one.
+    # STRICT lossless-or-passthrough mode (default OFF — behavior unchanged). When True, only proven-lossless transforms may change
+    # the output: an array is either replaced by a decoder-verifiable, opaque-free lossless render or passed through untouched.
     lossless_only: bool = False
 
 
@@ -272,10 +231,7 @@ class SmartCrusher(Transform):
         observer: Any = None,
         compaction_format: str | None = None,
     ):
-        # Hard import — no Python fallback. If the wheel is missing the
-        # caller must build it (scripts/build_rust_extension.sh) or
-        # install a prebuilt one. Failing loudly is better than silent
-        # degradation; see feedback memory `feedback_no_silent_fallbacks.md`.
+        # Require the compiled extension; if unavailable, fail loudly instead of silently degrading to a Python fallback.
         from furl_ctx._core import (
             SmartCrusher as _RustSmartCrusher,
         )
@@ -287,48 +243,17 @@ class SmartCrusher(Transform):
         self.config = cfg
         self._with_compaction = with_compaction
         # `observer`: duck-typed, must expose `record_compression(...)`.
-        # Callers that use SmartCrusher.apply() directly (no ContentRouter)
-        # would, without an observer here, make those compressions
-        # invisible to per-strategy metrics — exactly the
-        # silent-regression class we're guarding against.
         self._observer = observer
 
-        # CCR config is preserved on `self` for callers that read it
-        # back (external embedders rely on this). Both `enabled=False`
-        # and `inject_retrieval_marker=False` collapse to the Rust
-        # crusher's `advertise_retrieval_tool=False` field.
-        #
-        # That field does NOT skip the marker or the CCR store write.
-        # The lossy row-drop path ALWAYS surfaces the `<<ccr:HASH>>`
-        # recovery pointer and ALWAYS writes the store when a distinct
-        # item is dropped, regardless of this flag — a drop without a
-        # recovery pointer is silent loss, which the recovery invariant
-        # forbids on the public `compress()` path. The flag is consumed
-        # by the router layer to decide whether to inject the
-        # heavier `furl_retrieve` TOOL into the request; it is the
-        # retrieval-tool preference, not a data-loss switch.
-        #
-        # Default falls through to `CCRConfig()` so direct callers
-        # (the engine and tests that don't pass an explicit config) get
-        # the documented dataclass defaults (`enabled=True,
-        # inject_retrieval_marker=True`).
-        #
-        # Opaque-string CCR substitutions likewise always emit their
-        # pointer — they have no Python equivalent.
+        # CCR config controls retrieval-tool advertising, not data recovery. Any dropped distinct content still writes the store
+        # and emits a recovery pointer; disabling marker injection only suppresses the heavier retrieval-tool advertisement.
         if ccr_config is None:
             self._ccr_config = CCRConfig()
         else:
             self._ccr_config = ccr_config
 
-        # `relevance_config` and `scorer` remain in the signature for
-        # source compatibility, but the Rust port doesn't support
-        # overrides yet (it always uses `HybridScorer` from the
-        # relevance crate; the Python-bridged constructor surface
-        # is not yet wired). Silently dropping a user-supplied
-        # scorer would be a textbook silent fallback — if a caller
-        # depends on a custom scoring function and we ignore it, the
-        # compression they get back is wrong in a way they cannot see.
-        # Fail loud instead. See `feedback_no_silent_fallbacks.md`.
+        # `relevance_config` and `scorer` remain in the signature for source compatibility, but the Rust port doesn't support overrides yet
+        # (it always uses `HybridScorer` from the relevance crate; the Python-bridged constructor surface is not yet wired). Fail loud instead.
         if relevance_config is not None or scorer is not None:
             raise NotImplementedError(
                 "SmartCrusher: custom `relevance_config` / `scorer` "
@@ -338,28 +263,8 @@ class SmartCrusher(Transform):
                 "lands with Stage 3c.2's relevance-crate Python bridge."
             )
 
-        # Build the Rust crusher. Forward EVERY field of the Python
-        # `SmartCrusherConfig` dataclass via `asdict(cfg)` so the field
-        # set is single-sourced from the dataclass definition — adding a
-        # field there flows across the FFI with no extra edit here, and
-        # no field can be silently dropped by a forgotten forwarding line.
-        # `asdict` yields a flat dict of the 11 scalar fields (all
-        # bool/int/float/str — no nesting), matching the pyo3 signature
-        # kwargs 1:1 by name (pyo3-side kwargs not covered here fall
-        # through to their pyo3 signature defaults).
-        #
-        # The pyo3 constructor accepts two MORE kwargs that are NOT
-        # dataclass fields and so must be passed explicitly:
-        #   * `relevance_threshold` (0.3) — the scoring threshold the
-        #     engine actually runs with (it matches the Rust default).
-        #   * `advertise_retrieval_tool` — derived from the CCR config, not
-        #     a crusher-config field. Falling through to the pyo3 default
-        #     (`true`) would ignore a caller's `CCRConfig(enabled=False)` /
-        #     `inject_retrieval_marker=False`, so it MUST be passed here.
-        #     (Renamed from `enable_ccr_marker`, still accepted as a
-        #     deprecation alias for one release.)
-        # Neither name collides with a dataclass field, so there is no
-        # duplicate-kwarg conflict with `**asdict(cfg)`.
+        # Forward every `SmartCrusherConfig` dataclass field to Rust via `asdict`. Pass non-dataclass
+        # FFI options explicitly, especially retrieval-tool advertising derived from CCR config.
         rust_cfg = _RustSmartCrusherConfig(
             **asdict(cfg),
             relevance_threshold=0.3,
@@ -367,25 +272,13 @@ class SmartCrusher(Transform):
                 self._ccr_config.enabled and self._ccr_config.inject_retrieval_marker
             ),
         )
-        # Default: lossless-first compaction. Lossless wins for
-        # cleanly tabular input where it saves ≥ 30% bytes; otherwise
-        # falls through to the lossy path with CCR-Dropped retrieval
-        # markers. Pass `with_compaction=False` to opt into the
-        # lossy-only path (used by retention-property tests
-        # that depend on row-level item preservation).
-        #
-        # `compaction_format` picks the lossless renderer:
-        # "csv-schema" (default), "json", or "markdown-kv" (opt-in
-        # trade of tokens for model read accuracy). Falls back to the
-        # FURL_COMPACTION_FORMAT env var when the kwarg is None.
-        # Ignored when with_compaction=False.
+        # Default: lossless-first compaction. Lossless wins for cleanly tabular input where it saves ≥ 30% bytes; otherwise falls through to the lossy path with CCR-Dropped
+        # retrieval markers. Pass `with_compaction=False` to opt into the lossy-only path (used by retention-property tests that depend on row-level item preservation).
         resolved_format = compaction_format or os.environ.get(
             "FURL_COMPACTION_FORMAT", "csv-schema"
         )
-        # Validate even when with_compaction=False: an explicit bogus
-        # format (kwarg or env var) is a misconfiguration that should be
-        # visible, not silently accepted because the knob happens to be
-        # ignored on this path.
+        # Validate even when with_compaction=False: an explicit bogus format (kwarg or env var) is a misconfiguration
+        # that should be visible, not silently accepted because the knob happens to be ignored on this path.
         if resolved_format not in _SUPPORTED_COMPACTION_FORMATS:
             raise ValueError(
                 f"unknown compaction format {resolved_format!r}; "
@@ -395,9 +288,7 @@ class SmartCrusher(Transform):
         if not with_compaction:
             self._rust = _RustSmartCrusher.without_compaction(rust_cfg)
         elif resolved_format == "csv-schema":
-            # Keep the `new()` constructor for the default path so its
-            # byte-parity coverage stays on the exact production
-            # codepath.
+            # Keep the `new()` constructor for the default path so its byte-parity coverage stays on the exact production codepath.
             self._rust = _RustSmartCrusher(rust_cfg)
         else:
             self._rust = _RustSmartCrusher.with_compaction_format(rust_cfg, resolved_format)
@@ -410,23 +301,8 @@ class SmartCrusher(Transform):
         working.
         """
         r = self._rust.crush(content, query, bias)
-        # ── Recovery mirroring: TYPED refs (§4.2 R5) ──
-        #
-        # `crush()` receives EVERY recovery ref typed on `dropped_refs` —
-        # the row-drop hashes AND the opaque-blob substitutions — so
-        # nothing is re-parsed out of `r.compressed`. Unlike the sibling
-        # `crush_array_json` (one
-        # top-level array, one hash), `crush()` recurses via
-        # `process_value` and can reduce many spots, so the refs are
-        # PLURAL. The A1 fail-safe is preserved — the mirror helpers
-        # raise `CcrMirrorError` on a store failure (and, with
-        # `typed=True`, on a Rust store MISS — COR-5: the engine reported
-        # this exact reduction, so a missing entry is a dangling marker,
-        # not a foreign one), propagating up through this `crush()` call
-        # site (`router_dispatch.RouterDispatch` — compressor exceptions
-        # propagate by design) to `compress()`'s fail-open boundary, which
-        # reverts to the ORIGINAL uncompressed messages so the reduction
-        # never stands without a recovery copy.
+        # Recovery mirroring TYPED refs (§4.2 R5) ── `crush()` receives EVERY recovery ref typed on `dropped_refs` the row-drop hashes AND the opaque-blob
+        # substitutions The A1 fail-safe is preserved the mirror helpers raise `CcrMirrorError` on a store failure (and, with `typed=True`, on a Rust store MISS
         self._mirror_typed_refs(
             r.dropped_refs,
             strategy="smart_crusher_row_drop",
@@ -493,10 +369,8 @@ class SmartCrusher(Transform):
         the hash directly rather than parsing it out of a prompt marker.
         """
         result: dict[str, Any] = self._rust.crush_array_json(items_json, query, bias)
-        # Every recovery ref of the shipped render — the row-drop (hash)
-        # and any opaque substitutions baked into `compacted` — arrives
-        # TYPED on `dropped_refs` (§4.2 R5). Mirror them directly; nothing
-        # is re-parsed out of the rendered text.
+        # Every recovery ref of the shipped render — the row-drop (hash) and any opaque
+        # substitutions baked into `compacted` — arrives TYPED on `dropped_refs` (§4.2 R5).
         strategy = str(result.get("strategy_info") or "smart_crusher_row_drop")
         self._mirror_typed_refs(
             list(result.get("dropped_refs") or []),
@@ -517,10 +391,7 @@ class SmartCrusher(Transform):
         Use this when callers want pure document-shape compaction
         without per-array lossy crushing.
         """
-        # Typed sibling (§4.2 R5): identical compacted JSON plus the
-        # typed opaque refs of every substitution the walker shipped —
-        # including the ones column-encoding folds hide from the raw-text
-        # scrape (see tests/typed_dropped_refs.rs for that discovery).
+        # Return identical compacted JSON plus every typed opaque ref the walker shipped, including substitutions hidden inside column encodings.
         compacted, refs = self._rust.compact_document_json_typed(doc_json)
         self._mirror_typed_refs(
             list(refs),
@@ -583,31 +454,8 @@ class SmartCrusher(Transform):
         )
         return crushed, was_modified, info
 
-    # ─── CCR Rust → Python store bridge (scrape plane) ────────────────────
-    #
-    # SmartCrusher's row-drop and opaque-blob paths emit
-    # `<<ccr:HASH ...>>` markers and stash the original payload in the
-    # Rust process-local CCR store. The MCP `furl_retrieve` tool queries
-    # the Python `compression_store` via `get_compression_store()` — which
-    # is a different store. Without an explicit bridge, every retrieve
-    # call for a marker emitted by the Rust crusher misses.
-    #
-    # Since §4.2 the fresh-output mirror sites consume TYPED refs
-    # (`_mirror_typed_refs`) exclusively — the scrape below is NOT on that
-    # path at all. It survives ONLY as the bridge for the RESULT-CACHE
-    # plane (`router_ccr_mirror.CcrMirror` re-mirrors hashes parsed out of
-    # CACHED prompt text, where no typed refs exist).
-    #
-    # The bridge is straight Rust→Python mirror: extract every
-    # `<<ccr:HASH>>` hash from the rendered output, fetch the canonical
-    # bytes via `self._rust.ccr_get(hash)`, and call
-    # `compression_store.store(..., explicit_hash=hash)` so the Python
-    # store is keyed by the exact hash that's in the prompt marker.
-    #
-    # Best-effort by design: a missing compression_store import (e.g.
-    # in a stripped CLI build) or a transient store error must NOT
-    # break compression itself. Compression has already succeeded; the
-    # bridge just makes `furl_retrieve` work. Errors log at debug.
+    # Fresh Rust outputs mirror typed recovery refs into the Python store. Text scraping remains only for cached
+    # prompt text that has no typed refs; mirror failures are best-effort and must not break compression.
 
     def _mirror_ccr_to_python_store(
         self,
@@ -658,9 +506,8 @@ class SmartCrusher(Transform):
             parsed = json.loads(rendered)
             self._collect_ccr_hashes(parsed, hashes)
         except (json.JSONDecodeError, ValueError):
-            # Output isn't valid JSON (rare — `smart_crush_content`
-            # always re-serializes via `python_safe_json_dumps`). Fall
-            # through to a string-token scan so we still bridge.
+            # Output isn't valid JSON (rare — `smart_crush_content` always re-serializes via
+            # `python_safe_json_dumps`). Fall through to a string-token scan so we still bridge.
             self._collect_ccr_hashes_from_string(rendered, hashes)
         if not hashes:
             return
@@ -714,10 +561,7 @@ class SmartCrusher(Transform):
         ``_mirror_single_hash_to_python_store``); the suffix is kept only
         so scrapers and the result-cache bridge can distinguish the shapes.
         """
-        # Prefix + hex alphabet come from the owned grammar spec
-        # (marker_grammar). This walker intentionally enforces NO width — it
-        # keeps any hex run, unlike the strict-width regex consumer — and keeps
-        # the ``#rows`` suffix below.
+        # Prefix + hex alphabet come from the owned grammar spec (marker_grammar).
         idx = 0
         prefix = marker_grammar.CCR_PREFIX
         n = len(s)
@@ -734,11 +578,8 @@ class SmartCrusher(Transform):
                 idx = cursor
                 continue
             hash_str = s[cursor:end].lower()
-            # Granular row-index key: `<<ccr:HASH#rows N_chunks>>`. Keep the
-            # `#rows` suffix so a consumer can tell an index key from a row/blob
-            # hash. `_mirror_single_hash_to_python_store` now SKIPS such keys
-            # (Design A): per-row chunks are no longer mirrored into the Python
-            # store, so the whole-blob parent is the only entry a row-drop adds.
+            # Preserve the `#rows` suffix on granular row-index keys so consumers distinguish them
+            # from blob hashes. Python mirrors only the whole-blob parent, not per-row chunks.
             if s[end:].startswith("#rows"):
                 hash_str = f"{hash_str}#rows"
                 end += len("#rows")
@@ -780,43 +621,22 @@ class SmartCrusher(Transform):
         canonical = self._rust.ccr_get(ccr_hash)
         if canonical is None:
             if typed:
-                # COR-5: for a TYPED hash the "marker leaked from
-                # elsewhere" excuse is impossible — the engine reported
-                # this exact drop, so a miss means the entry was already
-                # evicted/expired (COR-4 bounds the chunk flood at the
-                # producer, but in_memory.rs documents the window "cannot
-                # be fully eliminated"). The surfaced `<<ccr:HASH>>`
-                # marker dangles and the dropped rows are UNRECOVERABLE —
-                # the silent loss the store contract forbids, and Python
-                # is the last place to catch it. Raise so compress()'s
-                # fail-open boundary (its BaseException handler) discards
-                # the lossy output and returns the ORIGINAL messages.
+                # COR-5 for a TYPED hash the "marker leaked from elsewhere" excuse is impossible.
+                # The surfaced `<<ccr:HASH>>` marker dangles and the dropped rows are UNRECOVERABLE
                 raise CcrMirrorError(
                     f"CCR mirror: typed row-drop hash {ccr_hash} missing "
                     f"from the Rust store; its <<ccr:{ccr_hash}>> marker "
                     f"dangles and the dropped rows would be unrecoverable"
                 )
-            # SCRAPED hash the Rust store doesn't have — either the marker
-            # came from somewhere else (defensive: another transform's
-            # marker leaked into our input), or the entry expired between
-            # emission and mirror. Either way, nothing to mirror.
+            # SCRAPED hash the Rust store doesn't have — either the marker came from somewhere else (defensive:
+            # another transform's marker leaked into our input), or the entry expired between emission and mirror.
             logger.debug(
                 "CCR mirror: hash %s not in Rust store (skipped)",
                 ccr_hash,
             )
             return
-        # Hash-verify the fetched bytes actually hash to the key we are about to
-        # persist them under. Every content-addressed CCR key the mirror reaches
-        # here (whole-blob, per-row chunk, opaque blob) is ``SHA-256(payload)``
-        # truncated to the key's own width — 12 hex legacy, 24 hex current — so
-        # ``sha256(bytes)[:len(key)] == key``. A mismatch means ``ccr_get``
-        # returned FOREIGN bytes: a store collision that slipped the producer,
-        # or corruption. The Rust store's collision guard already drops such a
-        # binding, but this is the last line of defense on the Python side —
-        # never persist wrong bytes under a key (a later ``retrieve`` would
-        # serve them as truth). Raising routes through ``compress()``'s
-        # fail-open boundary, which reverts to the ORIGINAL rows. ``#rows``
-        # index keys never reach here (handled by the early return above).
+        # Hash-verify the fetched bytes actually hash to the key we are about to persist them under. A mismatch
+        # means ``ccr_get`` returned FOREIGN bytes: a store collision that slipped the producer, or corruption.
         computed = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[: len(ccr_hash)]
         if computed != ccr_hash.lower():
             raise CcrMirrorError(
@@ -826,16 +646,8 @@ class SmartCrusher(Transform):
         try:
             from ..cache.compression_store import DurableWriteError, get_compression_store
         except ImportError as e:
-            # The lossy row-drop has ALREADY happened in the Rust store
-            # (ephemeral, process-local). If we cannot reach the Python
-            # compression_store — the store the production MCP furl_retrieve
-            # tool reads — the dropped rows are UNRECOVERABLE for the
-            # consumer that holds only the output. That is the silent-loss
-            # the store's contract forbids ("no SILENT loss" in
-            # CompressionStore's class docstring). Raise so the failure
-            # propagates to compress()'s fail-open boundary, which discards
-            # the lossy output and returns the ORIGINAL messages
-            # uncompressed — nothing lost.
+            # The lossy row-drop has ALREADY happened in the Rust store (ephemeral, process-local). the store the production MCP furl_retrieve tool reads the
+            # dropped rows are UNRECOVERABLE for the consumer that holds only the output. Raise so the failure propagates to compress()'s fail-open boundary
             raise CcrMirrorError(
                 f"CCR mirror: compression_store module unavailable; "
                 f"hash {ccr_hash} would be unrecoverable"
@@ -843,67 +655,40 @@ class SmartCrusher(Transform):
         try:
             store = get_compression_store()
         except Exception as e:
-            # Same loss class as the ImportError branch above: the row-drop
-            # is committed in Rust but the Python store is unreachable, so a
-            # later retrieve() returns None silently. Fail-safe via the
-            # compress() boundary instead of swallowing.
+            # Same loss class as the ImportError branch above: the row-drop is committed in Rust
+            # but the Python store is unreachable, so a later retrieve() returns None silently.
             raise CcrMirrorError(
                 f"CCR mirror: cannot get compression_store ({e}); "
                 f"hash {ccr_hash} would be unrecoverable"
             ) from e
-        # The TTL on the Python store defaults to 30 minutes — same as
-        # the Rust store's `DEFAULT_TTL` (see crates/furl-core/src/
-        # ccr/mod.rs). No need to override.
+        # Use the store default TTL; Python and Rust both default to 30 minutes.
         try:
             store.store(
                 original=canonical,
-                # The "compressed" payload for the row-drop case isn't
-                # readily available here (the rendered output may be
-                # only one of many crushed sub-arrays). Use the marker
-                # itself as a placeholder — `furl_retrieve` returns
-                # `original_content` and `compressed` isn't surfaced.
+                # The "compressed" payload for the row-drop case isn't readily available here (the rendered
+                # output may be only one of many crushed sub-arrays). Use the marker itself as a placeholder
                 compressed=f"<<ccr:{ccr_hash}>>",
                 tool_name=tool_name,
                 query_context=query_context if query_context else None,
                 compression_strategy=strategy,
                 explicit_hash=ccr_hash,
-                # A durable write that fell open to the volatile fallback raises
-                # DurableWriteError (audit #3); the `except Exception` below
-                # turns it into CcrMirrorError so compress() reverts to the
-                # ORIGINAL rows rather than shipping a marker whose only copy
-                # dies with the process.
+                # A durable write that fell open to the volatile fallback raises DurableWriteError (audit #3); the `except Exception` below turns it
+                # into CcrMirrorError so compress() reverts to the ORIGINAL rows rather than shipping a marker whose only copy dies with the process.
                 require_durable=True,
             )
         except ValueError as e:
-            # store.store() rejects a malformed explicit_hash / non-positive ttl
-            # with ValueError. It "shouldn't happen in practice", but the lossy
-            # Rust row-drop is ALREADY committed and the <<ccr:HASH>> marker
-            # ships — so swallowing it is the SAME signalled-but-unrecoverable
-            # silent loss the sibling branch guards against. Never
-            # log-and-return here: that asymmetry defeats the invariant it sits
-            # next to. Fail the drop: raise CcrMirrorError so compress()'s
-            # fail-open boundary reverts to the ORIGINAL rows (audit #10). A
-            # marker never stands without a backing store entry.
+            # store.store() rejects a malformed explicit_hash / non-positive ttl with ValueError.
+            # but the lossy Rust row-drop is ALREADY committed and the <<ccr:HASH>> marker ships
             raise CcrMirrorError(
                 f"CCR mirror: store.store() rejected hash {ccr_hash} ({e}); "
                 f"dropped rows would be unrecoverable"
             ) from e
         except Exception as e:
-            # CORE silent-loss branch: the lossy row-drop is committed in the
-            # ephemeral Rust store, but the Python store write FAILED, so the
-            # dropped rows never reach the store production retrieval reads —
-            # a later retrieve() returns None and the recovery data is GONE.
-            # Raise so the failure reaches compress()'s fail-open boundary,
-            # which reverts to the ORIGINAL uncompressed messages. The lossy
-            # drop never stands without a recovery copy.
+            # CORE silent-loss branch the lossy row-drop is committed in the ephemeral Rust store but the Python store write FAILED so the
+            # dropped rows never reach the store production retrieval reads Raise so the failure reaches compress()'s fail-open boundary
             if isinstance(e, DurableWriteError):
-                # Store-concurrency-honesty: the store's veto text is already
-                # precise — the original IS retrievable from this process right
-                # now (volatile tier, under e.hash_key); it just is not durable.
-                # Appending "unrecoverable" would contradict that truth inside
-                # one user-visible string, so keep the honest inner text as-is.
-                # The fail-open boundary still reverts to the ORIGINAL rows, so
-                # nothing is lost either way.
+                # Store-concurrency-honesty: the store's veto text is already precise — the original IS retrievable from this process right now (volatile
+                # tier, under e.hash_key); it just is not durable. The fail-open boundary still reverts to the ORIGINAL rows, so nothing is lost either way.
                 raise CcrMirrorError(
                     f"CCR mirror: store.store() failed for hash {ccr_hash} ({e})"
                 ) from e
@@ -1046,11 +831,8 @@ class SmartCrusher(Transform):
                         )
                         if was_modified:
                             marker = create_tool_digest_marker(compute_short_hash(content))
-                            # Copy-on-write (COR-55): deepcopy preserves
-                            # aliasing via its memo, so mutating `msg` in
-                            # place would rewrite an aliased occurrence of
-                            # the same dict inside the frozen prefix.
-                            # Mirror the router/dedup idiom instead.
+                            # Copy-on-write (COR-55): deepcopy preserves aliasing via its memo, so mutating `msg` in
+                            # place would rewrite an aliased occurrence of the same dict inside the frozen prefix.
                             result_messages[msg_idx] = {
                                 **msg,
                                 "content": crushed + "\n" + marker,
@@ -1062,18 +844,12 @@ class SmartCrusher(Transform):
                                 transforms_applied.append(f"smart:{info}")
                             self._notify_observer(tokens, tokenizer.count_text(crushed))
 
-            # Anthropic-style: content is a list of blocks; each tool_result
-            # block has a string content field of its own — or, in the
-            # canonical Anthropic/MCP shape, a nested parts list
-            # ``[{"type": "text", "text": …}]`` whose text parts crush
-            # individually (COR-47 mirror).
+            # Anthropic-style: content is a list of blocks; each tool_result block has a string content field of its own — or, in the canonical
+            # Anthropic/MCP shape, a nested parts list ``[{"type": "text", "text": …}]`` whose text parts crush individually (COR-47 mirror).
             content = msg.get("content")
             if isinstance(content, list):
-                # Copy-on-write (COR-55): lazily copy the containing list /
-                # block / message on the first write — never mutate the
-                # originals, which an aliased occurrence inside the frozen
-                # prefix may still reference (deepcopy's memo preserves
-                # aliasing). Mirrors the router/dedup idiom.
+                # Copy-on-write (COR-55): lazily copy the containing list / block / message on the first write — never mutate the
+                # originals, which an aliased occurrence inside the frozen prefix may still reference (deepcopy's memo preserves aliasing).
                 new_content: list[Any] | None = None
                 for i, block in enumerate(content):
                     if not isinstance(block, dict) or block.get("type") != "tool_result":

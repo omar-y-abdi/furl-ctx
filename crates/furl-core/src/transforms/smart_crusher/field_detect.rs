@@ -1,38 +1,12 @@
-//! Statistical detectors for ID-like and score-like fields.
-//!
-//! Direct ports of `_detect_id_field_statistically` and
-//! `_detect_score_field_statistically` from `smart_crusher.py:484-603`.
-//!
-//! These run *after* per-field statistics are computed and consume a
-//! `FieldStats` plus the raw values. They're called by the analyzer's
-//! crushability logic to decide whether a field carries a meaningful
-//! ranking signal (score) or is just a unique identifier (ID) that
-//! shouldn't drive compression decisions.
+//! Statistical detectors for ID-like and score-like fields. These run *after*
+//! per-field statistics are computed and consume a `FieldStats` plus the raw values.
 
 use serde_json::Value;
 
 use super::statistics::{calculate_string_entropy, detect_sequential_pattern, is_uuid_format};
 use super::types::{FieldStats, FieldType};
 
-/// Detect whether a field is an "ID field" — high-uniqueness column
-/// that doesn't carry semantic information.
-///
-/// Direct port of `_detect_id_field_statistically` (Python
-/// `smart_crusher.py:484-530`). Returns `(is_id, confidence)` where
-/// confidence ∈ [0.0, 1.0]. The caller uses this to decide whether the
-/// field is a strong enough signal to drive crushability analysis.
-///
-/// # Detection rules (mirroring Python step-by-step)
-///
-/// 1. Hard gate: `unique_ratio < 0.9` → not an ID field.
-/// 2. String fields:
-///    - >80% of first-20 sample values look like UUIDs → confidence 0.95.
-///    - Average entropy >0.7 AND `unique_ratio > 0.95` → confidence 0.8.
-/// 3. Numeric fields:
-///    - Sequential pattern (via `detect_sequential_pattern`) AND
-///      `unique_ratio > 0.95` → confidence 0.9.
-///    - Has a value range AND `unique_ratio > 0.95` → confidence 0.85.
-/// 4. Catch-all: very high uniqueness (`> 0.98`) → confidence 0.7.
+/// Detect whether a field is an "ID field" — high-uniqueness column that doesn't carry semantic information.
 pub fn detect_id_field_statistically(stats: &FieldStats, values: &[Value]) -> (bool, f64) {
     // Hard gate matching Python line 494.
     if stats.unique_ratio < 0.9 {
@@ -41,9 +15,8 @@ pub fn detect_id_field_statistically(stats: &FieldStats, values: &[Value]) -> (b
 
     // String-field branches.
     if stats.field_type == FieldType::String {
-        // First 20 string-typed values for sampling. Python: `values[:20]`
-        // then filters by `isinstance(v, str)` — order-preserving slice
-        // before filter, so we mirror that.
+        // First 20 string-typed values for sampling. Python: `values[:20]` then filters by
+        // `isinstance(v, str)` — order-preserving slice before filter, so we mirror that.
         let sample_values: Vec<&str> = values.iter().take(20).filter_map(|v| v.as_str()).collect();
 
         if !sample_values.is_empty() {
@@ -73,9 +46,7 @@ pub fn detect_id_field_statistically(stats: &FieldStats, values: &[Value]) -> (b
             return (true, 0.9);
         }
 
-        // High-uniqueness numeric with non-trivial range — likely an ID
-        // even without sequential structure (e.g., random ints in a wide
-        // band).
+        // High-uniqueness numeric with non-trivial range — likely an ID even without sequential structure (e.g., random ints in a wide band).
         if let (Some(min_v), Some(max_v)) = (stats.min_val, stats.max_val) {
             let value_range = max_v - min_v;
             if value_range > 0.0 && stats.unique_ratio > 0.95 {
@@ -92,31 +63,8 @@ pub fn detect_id_field_statistically(stats: &FieldStats, values: &[Value]) -> (b
     (false, 0.0)
 }
 
-/// Detect whether a field is a "score field" — bounded-range numeric
-/// where higher values mean "more relevant".
-///
-/// Direct port of `_detect_score_field_statistically` (Python
-/// `smart_crusher.py:533-603`). Returns `(is_score, confidence)`.
-///
-/// # Detection rules (mirroring Python, plus the COR-24 variation gate)
-///
-/// 1. Field must be numeric AND have both `min_val` and `max_val`.
-/// 2. Must show variation: `unique_count > 1` AND `variance > 0`
-///    (COR-24 — a rank signal requires variation; see the gate comment
-///    in the body. Deviation from the retired Python twin, which lacked
-///    this gate).
-/// 3. Range must match a "common score range":
-///    - `[0, 1]` (most common ML score range) → +0.4
-///    - `[0, 10]` → +0.3
-///    - `[0, 100]` → +0.25
-///    - `[-1, 1]` (signed similarity) → +0.35
-/// 4. Must NOT be a sequential pattern (IDs are sequential; scores aren't).
-/// 5. If first-50 values appear sorted descending (>70% of pairs) → +0.3.
-/// 6. If >30% of first-20 are non-integer floats → +0.1.
-/// 7. Returns `(confidence >= 0.4, min(confidence, 0.95))`.
-///
-/// `items` is the list of original-array dict items so we can pull the
-/// field's values in array order for the descending-sort check.
+/// A score field must be varying numeric data in a common bounded score range, non-sequential,
+/// and optionally descending/float-like. Return score status with confidence capped at 0.95.
 pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> (bool, f64) {
     if stats.field_type != FieldType::Numeric {
         return (false, 0.0);
@@ -127,22 +75,7 @@ pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> 
         _ => return (false, 0.0),
     };
 
-    // COR-24: a rank signal requires variation — gate ALL confidence
-    // bonuses (bounded-range, descending, float-fraction) on it. Ties
-    // count as "descending" below (`w[0] >= w[1]`), so a constant
-    // bounded column (`progress: 50` ×30, 0-100 bucket) would otherwise
-    // take +0.25 + 0.3 = 0.55, and a fractional [0,1] constant
-    // (`progress: 0.5`) reaches 0.5 on the bounded+float bonuses alone —
-    // both misclassify as score fields, routing the array to the
-    // `search_results` pattern where TopN "sorts" on the constant and
-    // silently degrades to positional keep-first-K.
-    //
-    // `unique_count > 1` rejects pure constants; the `variance > 0`
-    // clause also rejects constants interleaved with nulls (their
-    // stringified unique_count is 2 but the sortable signal is flat —
-    // `analyze_field` computes variance over the finite numerics only).
-    // Deviation from the retired Python twin (`smart_crusher.py:533-603`),
-    // which lacked this gate; Rust is the live source of truth.
+    // COR-24 a rank signal requires variation gate ALL confidence bonuses (bounded-range, descending, float-fraction) on it.
     if stats.unique_count <= 1 || stats.variance.unwrap_or(0.0) <= 0.0 {
         return (false, 0.0);
     }
@@ -161,9 +94,7 @@ pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> 
         confidence += 0.25;
         true
     } else if min_val >= -1.0 && max_val <= 1.0 {
-        // Python: `elif -1 <= min_val and max_val <= 1`. Note Python's
-        // chained `<=` only on max_val side; min_val is checked
-        // separately. Pinned exactly.
+        // Python: `elif -1 <= min_val and max_val <= 1`. Note Python's chained `<=` only on max_val side; min_val is checked separately. Pinned exactly.
         confidence += 0.35;
         true
     } else {
@@ -254,10 +185,7 @@ mod tests {
         let mut s = stats(name, FieldType::Numeric, 1.0);
         s.min_val = Some(min_v);
         s.max_val = Some(max_v);
-        // COR-24: the variation gate consults `variance`. A fixture with
-        // a non-degenerate range models a varying column (any positive
-        // value satisfies the gate, which only tests > 0.0); a
-        // degenerate range models a constant one.
+        // COR-24: the variation gate consults `variance`.
         s.variance = Some(if min_v < max_v { 1.0 } else { 0.0 });
         s
     }
@@ -406,13 +334,7 @@ mod tests {
 
     #[test]
     fn score_field_constant_bounded_column_rejected() {
-        // COR-24 regression pin (RED pre-fix): `progress: 50` ×30 — a
-        // CONSTANT bounded column. Ties count as "descending"
-        // (`w[0] >= w[1]`: 29/29 pairs), so pre-fix it scored +0.25
-        // (0-100 bucket) + 0.3 (descending) = 0.55 ≥ 0.4 → score field →
-        // `search_results` pattern → TopN sorted a constant → silently
-        // degraded to positional keep-first-K. A rank signal requires
-        // variation.
+        // COR-24 regression pin (RED pre-fix): `progress: 50` ×30 — a CONSTANT bounded column. A rank signal requires variation.
         let mut s = stats_with_range("progress", 50.0, 50.0);
         s.count = 30;
         s.unique_count = 1;
@@ -425,11 +347,8 @@ mod tests {
 
     #[test]
     fn score_field_constant_fractional_column_rejected() {
-        // COR-24 (RED pre-fix): a fractional [0,1] constant crossed the
-        // 0.4 threshold WITHOUT the descending bonus — 0.4 (bounded) +
-        // 0.1 (float fraction) = 0.5 — so gating the descending bonus
-        // alone is not enough; the bounded/float bonuses are gated on
-        // variation too.
+        // COR-24 (RED pre-fix): a fractional [0,1] constant crossed the 0.4 threshold WITHOUT the descending bonus 0.4 (bounded) + 0.1
+        // (float fraction) = 0.5 — so gating the descending bonus alone is not enough; the bounded/float bonuses are gated on variation too.
         let mut s = stats_with_range("progress", 0.5, 0.5);
         s.count = 30;
         s.unique_count = 1;
@@ -442,12 +361,8 @@ mod tests {
 
     #[test]
     fn score_field_constant_with_nulls_rejected() {
-        // COR-24 variance clause: a constant numeric column interleaved
-        // with nulls stringifies to two distinct values ("50"/"None") so
-        // `unique_count > 1` alone would pass — but the sortable signal
-        // is still flat (`analyze_field` computes variance over the
-        // finite numerics only → 0.0). No rank information → not a
-        // score field.
+        // COR-24 variance clause: a constant numeric column interleaved with nulls stringifies to two distinct values ("50"/"None") so `unique_count
+        // > 1` alone would pass — but the sortable signal is still flat (`analyze_field` computes variance over the finite numerics only → 0.0).
         let mut s = stats_with_range("progress", 50.0, 50.0);
         s.count = 30;
         s.unique_count = 2; // {"50", "None"} stringified
@@ -466,11 +381,7 @@ mod tests {
 
     #[test]
     fn score_field_confidence_capped_at_95() {
-        // Range [0, 1] (+0.4) + descending sort (+0.3) + float fraction
-        // (+0.1) = 0.8. Below cap. To exceed 0.95 we'd need >0.55 from
-        // bonuses, which isn't possible with current rules. Pin the cap
-        // anyway by constructing the highest-scoring case and confirming
-        // it doesn't go above 0.95.
+        // Range [0, 1] (+0.4) + descending sort (+0.3) + float fraction (+0.1) = 0.8.
         let s = stats_with_range("score", 0.0, 1.0);
         let items: Vec<Value> = (0..50)
             .rev()

@@ -1,18 +1,7 @@
-//! Canonical error keyword set for item preservation.
-//!
-//! Direct port of `ERROR_KEYWORDS` from `furl_ctx/transforms/error_detection.py:18-33`.
-//! These are the keyword-based preservation signal (no learned field
-//! semantics exist). Intentionally broad — better to over-preserve
-//! than to drop a real error item.
-//!
-//! Used by `detect_error_items_for_preservation`. The list is small
-//! enough to keep as a `&[&str]`; if we ever cross ~50 keywords, switch
-//! to a `phf::Set` or pre-built FST for sub-linear lookup.
+//! Canonical error keywords for item preservation. Keep this broad set aligned with Python; over-preserving is safer than dropping a real error item.
 
-/// 12 error/failure keywords. Order doesn't matter for correctness, but
-/// matches Python's set-literal order so reading both side-by-side is
-/// easier. Lowercase by construction; callers must lowercase the
-/// haystack before substring-matching.
+/// 12 error/failure keywords. Order doesn't matter for correctness, but matches Python's set-literal order so reading
+/// both side-by-side is easier. Lowercase by construction; callers must lowercase the haystack before substring-matching.
 pub const ERROR_KEYWORDS: &[&str] = &[
     "error",
     "exception",
@@ -34,9 +23,7 @@ mod tests {
 
     #[test]
     fn matches_python_count() {
-        // Python `len(ERROR_KEYWORDS) == 12`. If this drifts, the
-        // Python set was edited and the Rust list needs a matching
-        // update.
+        // Python `len(ERROR_KEYWORDS) == 12`. If this drifts, the Python set was edited and the Rust list needs a matching update.
         assert_eq!(ERROR_KEYWORDS.len(), 12);
     }
 

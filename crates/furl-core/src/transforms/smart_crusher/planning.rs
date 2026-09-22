@@ -1,31 +1,5 @@
-//! Strategy-specific compression planning.
-//!
-//! Direct port of Python's `_create_plan` dispatcher and the four
-//! `_plan_*` methods from `smart_crusher.py:3117-3615`. Each planner
-//! produces a `CompressionPlan` whose `keep_indices` is a sorted list
-//! of original-array indices to retain.
-//!
-//! All four planners share the same skeleton:
-//!
-//! 1. **Anchor selection** — `AnchorSelector::select_anchors` for
-//!    position-based slots.
-//! 2. **Strategy-specific signals** — outliers, change points, top-N
-//!    by score, message-cluster reps, etc.
-//! 3. **Error keywords** — preservation guarantee.
-//! 4. **Query anchors** (deterministic exact match) and **relevance
-//!    scoring** (probabilistic) — both gated on `query_context`.
-//! 5. **preserve_fields** — items where a query token matches a
-//!    caller-supplied preserve-field's value.
-//! 6. **Prioritize** — dedup + fill + over-budget pruning.
-//!
-//! # preserve_fields surface
-//!
-//! The retired learning system was the intended supplier of
-//! `preserve_fields`; today no caller supplies them, so the production
-//! path always passes `preserve_fields = None`. The
-//! `item_has_preserve_field_match` helper keeps the full semantics
-//! (SHA256[:8]-hashed field names) for callers that pass their own
-//! list.
+//! Strategy-specific compression planning. 3. **Error keywords** — preservation guarantee. 5.
+//! **preserve_fields** — items where a query token matches a caller-supplied preserve-field's value.
 
 use md5::{Digest, Md5};
 use serde_json::Value;
@@ -42,8 +16,7 @@ use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldSta
 use crate::relevance::RelevanceScorer;
 use crate::transforms::anchor_selector::{AnchorSelector, DataPattern};
 
-/// Stateless planner that owns its dependencies. Mirrors the relevant
-/// fields on Python's `SmartCrusher` instance.
+/// Stateless planner that owns its dependencies; keep these fields aligned with Python `SmartCrusher`.
 pub struct SmartCrusherPlanner<'a> {
     pub config: &'a SmartCrusherConfig,
     pub anchor_selector: &'a AnchorSelector,
@@ -90,12 +63,8 @@ impl<'a> SmartCrusherPlanner<'a> {
             return plan;
         }
 
-        // Field-aware exclude-set (DESIGN.md Imp2): names of the
-        // high-cardinality identity columns (timestamps, ids, hashes)
-        // that defeat whole-item dedup. Derived once from the analysis +
-        // item samples; threaded into dedup/cluster/fill grouping via the
-        // stable-projection hash. Empty when no identity column exists
-        // (e.g. real search results), so those datasets are unaffected.
+        // Compute high-cardinality identity fields once, then exclude them from stable-projection
+        // dedup, cluster, and fill hashes. With no identity fields, behavior is unchanged.
         let exclude = compute_exclude_set(&analysis.field_stats, items);
 
         match analysis.recommended_strategy {
@@ -233,13 +202,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         item_strings: Option<&[String]>,
         exclude: &BTreeSet<String>,
     ) -> CompressionPlan {
-        // Locate the highest-confidence score field. If none, fall back
-        // to plan_smart_sample.
-        // `is_score` implies `confidence >= 0.4`, so it subsumes the old
-        // `confidence > 0.0` seed. `.rev()` is load-bearing: `max_by`
-        // returns the LAST maximum, the old `confidence > max` kept the
-        // FIRST. `total_cmp` is safe here — `confidence` is a sum of
-        // literal constants clamped by `min(0.95)`, never NaN.
+        // Locate the highest-confidence score field.
         let score_field = analysis
             .field_stats
             .iter()
@@ -291,9 +254,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         keep.extend(detect_error_items_for_preservation(items, item_strings));
         keep.extend(detect_structural_outliers(items));
 
-        // 3. Query-anchor matches (additive — preserved regardless of
-        // top-N). Collected separately: anchor matches take priority when
-        // the keep set must be capped back to `max_items` below.
+        // Query-anchor matches are additive and outrank top-N relevance when the keep set must be capped to `max_items`.
         let mut anchor_pinned: BTreeSet<usize> = BTreeSet::new();
         if !query_context.is_empty() {
             let anchors = extract_query_anchors(query_context);
@@ -336,16 +297,8 @@ impl<'a> SmartCrusherPlanner<'a> {
 
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        // Enforce the budget (COR-35). The adds above (constraints,
-        // anchors, relevance, preserve-fields) historically left the keep
-        // set unbounded above `max_items`, silently ignoring the
-        // CCR-backed (possibly halved) effective budget on the TopN
-        // strategy — the only planner that skips `prioritize_indices`.
-        // Cap it back: query-anchor matches first (the user literally
-        // named those values — mirroring the prioritizer's query
-        // pinning), then the highest-scored keeps fill the rest (stable
-        // sort ⇒ ties resolve by ascending index). Every dropped row
-        // stays CCR-recoverable, so the cap loses no information.
+        // Enforce the budget (COR-35). The adds above (constraints, anchors, relevance, preserve-fields) left the keep set unbounded above `max_items`,
+        // silently ignoring the CCR-backed (possibly halved) effective budget on the TopN strategy — the only planner that skips `prioritize_indices`.
         if keep.len() > max_items {
             let mut capped: BTreeSet<usize> = BTreeSet::new();
             for &i in &anchor_pinned {
@@ -400,11 +353,8 @@ impl<'a> SmartCrusherPlanner<'a> {
         keep.extend(detect_error_items_for_preservation(items, item_strings));
         keep.extend(detect_structural_outliers(items));
 
-        // 3. Cluster by message-like field (highest unique_ratio > 0.3).
-        // Same shape as the TopN score-field pick: `> 0.3` subsumes the
-        // `0.0` seed, `.rev()` restores first-wins tie-breaking, and
-        // `unique_ratio` is `unique_count / len` with `len >= 1`, so it is
-        // never NaN.
+        // 3. Cluster by message-like field (highest unique_ratio > 0.3). Same shape as the TopN score-field pick: `> 0.3` subsumes the `0.0`
+        // seed, `.rev()` restores first-wins tie-breaking, and `unique_ratio` is `unique_count / len` with `len >= 1`, so it is never NaN.
         let message_field = analysis
             .field_stats
             .iter()
@@ -425,9 +375,8 @@ impl<'a> SmartCrusherPlanner<'a> {
                     .unwrap_or("");
                 let truncated: String = msg.chars().take(50).collect();
                 let digest = Md5::digest(truncated.as_bytes());
-                // Per-byte `{:02x}` (digest 0.11 `Array` has no `LowerHex`);
-                // byte-identical to the old `format!("{:x}", digest)[..8]`
-                // (8 hex chars = first 4 digest bytes).
+                // Per-byte `{:02x}` (digest 0.11 `Array` has no `LowerHex`); byte-identical to
+                // the old `format!("{:x}", digest)[..8]` (8 hex chars = first 4 digest bytes).
                 let hash: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
                 clusters.entry(hash).or_default().push(i);
             }
@@ -525,19 +474,8 @@ impl<'a> SmartCrusherPlanner<'a> {
 
     // --- Shared helpers ---
 
-    /// Apply query-anchor matches (deterministic) + relevance scoring
-    /// (probabilistic) to `keep`. (`plan_top_n` runs its own inline
-    /// variant of this logic; the other three planners share this one.)
-    ///
-    /// Returns the **query-pinned** subset: indices the user's query
-    /// names directly (deterministic anchor matches) plus a capped
-    /// number of HIGH-confidence relevance matches (score ≥
-    /// `max(2 × relevance_threshold, 0.5)`, at most
-    /// [`MAX_QUERY_RELEVANCE_PINS`], ascending index — the exact
-    /// threshold/cap discipline `plan_top_n` already uses). The
-    /// over-budget prioritizer pins these like critical items so a
-    /// query-relevant row is never dropped from the visible output by
-    /// position while generic fill survives.
+    /// Apply query-anchor matches (deterministic) + relevance scoring (probabilistic) to `keep`. (`plan_top_n` runs its own inline variant of this logic. The
+    /// over-budget prioritizer pins these like critical items so a query-relevant row is never dropped from the visible output by position while generic fill survives.
     fn apply_query_signals(
         &self,
         items: &[Value],
@@ -607,11 +545,7 @@ impl<'a> SmartCrusherPlanner<'a> {
     }
 }
 
-/// Cap on probabilistic high-relevance pins per array. Matches
-/// `plan_top_n`'s `max_relevance_adds = 3` so the pinned set stays
-/// bounded on generic queries that weakly match many rows; deterministic
-/// anchor matches (the user literally named the value) are not capped,
-/// mirroring top_n's additive anchor preservation.
+/// Cap on probabilistic high-relevance pins per array.
 const MAX_QUERY_RELEVANCE_PINS: usize = 3;
 
 // --- Free helper functions ---
@@ -628,33 +562,18 @@ pub fn map_to_anchor_pattern(strategy: CompressionStrategy) -> DataPattern {
     }
 }
 
-/// SHA-256 of the UTF-8 bytes, hex-encoded, truncated to **8** chars.
-///
-/// Python equivalent: `hashlib.sha256(field_name.encode()).hexdigest()[:8]`.
-/// Rust is the SOLE owner of this hash — the Python `_hash_field_name`
-/// it was ported from no longer exists, so the unit tests below are the
-/// only thing pinning the digest. `preserve_fields` entries are stored
-/// as SHA-256[:8], so lookups silently miss if the truncation length
-/// drifts (an early version used `[:16]` and matched nothing).
+/// SHA-256 of the UTF-8 bytes, hex-encoded, truncated to **8** chars. Python equivalent: `hashlib.sha256(field_name.encode()).hexdigest()[:8]`. Rust is the
+/// SOLE owner of this hash — the Python `_hash_field_name` it was ported from no longer exists, so the unit tests below are the only thing pinning the digest.
 pub fn hash_field_name(field_name: &str) -> String {
     let mut hasher = sha2::Sha256::new();
     hasher.update(field_name.as_bytes());
     let digest = hasher.finalize();
     // Truncate to first 8 hex chars (4 bytes of digest).
-    //
-    // Per-byte `{:02x}` (same pattern as walker.rs/compactor.rs/crusher.rs)
-    // instead of `format!("{:x}", digest)`: digest 0.11 returns
-    // `hybrid_array::Array`, which does not implement `LowerHex` (the old
-    // `GenericArray` did). Byte-identical output — `LowerHex` on the array
-    // was zero-padded per-byte hex, exactly what `{:02x}` produces.
     digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-/// Check if any of an item's preserve_field values matches the query.
-///
-/// Direct port of `_item_has_preserve_field_match` (Python line 289-315).
-/// `preserve_field_hashes` are SHA256[:8] hashes — match against
-/// `hash_field_name(item_field_name)`.
+/// Check if any of an item's preserve_field values matches the query. Direct port of `_item_has_preserve_field_match`
+/// (Python line 289-315). `preserve_field_hashes` are SHA256[:8] hashes — match against `hash_field_name(item_field_name)`.
 pub fn item_has_preserve_field_match(
     item: &Value,
     preserve_field_hashes: &[String],
@@ -978,12 +897,8 @@ mod tests {
 
     #[test]
     fn top_n_keep_set_capped_at_max_items_anchors_first() {
-        // COR-35: the pre-cap keep set is top-N + constraint + anchor +
-        // relevance adds, historically unbounded above `max_items` — 20
-        // anchor matches on a 10-item budget shipped ~27 rows and ignored
-        // the CCR-backed (possibly halved) budget on the TopN strategy.
-        // The cap keeps query-anchor matches (user-named values) first,
-        // then fills by score.
+        // COR-35: the pre-cap keep set is top-N + constraint + anchor + relevance adds, unbounded above `max_items` 20 anchor
+        // matches on a 10-item budget shipped ~27 rows and ignored the CCR-backed (possibly halved) budget on the TopN strategy.
         let (cfg, asel, scorer, analyzer) = make_planner_deps();
         let p = fixture(&cfg, &asel, &scorer, &analyzer);
         let shared = "550e8400-e29b-41d4-a716-446655440000";
@@ -1021,9 +936,8 @@ mod tests {
             plan.keep_indices.len(),
             plan.keep_indices
         );
-        // Anchor-matched items (indices 10..30 carry the queried UUID)
-        // take priority over generic top-scored fill; the ten
-        // lowest-indexed anchor matches fill the whole budget.
+        // Anchor-matched items (indices 10..30 carry the queried UUID) take priority over
+        // generic top-scored fill; the ten lowest-indexed anchor matches fill the whole budget.
         let expected: Vec<usize> = (10..20).collect();
         assert_eq!(plan.keep_indices, expected);
     }
@@ -1069,13 +983,8 @@ mod tests {
     fn time_series_keeps_window_around_change_points() {
         let (cfg, asel, scorer, analyzer) = make_planner_deps();
         let p = fixture(&cfg, &asel, &scorer, &analyzer);
-        // 60 items with a step at index 50. The split is deliberately
-        // ASYMMETRIC (50 low / 10 high): the detector fires on
-        // |mean_after - mean_before| > variance_threshold (2.0) x overall
-        // std, and a 50/50 two-level step has shift ~= 2 x std — exactly AT
-        // the threshold, never above it. (That is why the original 30/30
-        // fixture produced ZERO change points and the old assert-non-empty
-        // test stayed green vacuously — TEST-17.)
+        // Use an asymmetric 50/10 two-level step: the detector requires mean shift > 2× overall std, while a 50/50
+        // split lands about exactly at the threshold. This fixture must therefore exceed, not merely meet, the boundary.
         let items: Vec<Value> = (0..60)
             .map(|i| {
                 let v = if i < 50 { 1.0 } else { 100.0 };
@@ -1111,9 +1020,8 @@ mod tests {
             &BTreeSet::new(),
         );
 
-        // The name's promise, actually asserted (TEST-17: the old test
-        // only checked `!keep_indices.is_empty()`): EVERY in-range index
-        // in the ±2 window around EVERY detected change point is kept.
+        // The name's promise, actually asserted (TEST-17: the old test only checked `!keep_indices.is_empty()`):
+        // EVERY in-range index in the ±2 window around EVERY detected change point is kept.
         let kept: BTreeSet<usize> = plan.keep_indices.iter().copied().collect();
         for &cp in &change_points {
             for offset in -2_isize..=2 {

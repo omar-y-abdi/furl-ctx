@@ -35,11 +35,8 @@ from furl_ctx.transforms.content_router import ContentRouterConfig
 from furl_ctx.transforms.router_dispatch import StrategyDispatcher
 from furl_ctx.transforms.router_policy import CompressionStrategy
 
-# Plain prose: no commas (won't sniff as CSV) and not JSON-shaped (won't sniff
-# as an envelope), so `apply` takes the direct `crusher.crush(...)` path this
-# module's own docstring calls out as the ordinary SMART_CRUSHER arm — the
-# same content shape `test_router_token_counter_units.py` already relies on
-# for that same guarantee.
+# Plain prose: no commas (won't sniff as CSV) and not JSON-shaped (won't sniff as an envelope), so `apply` takes
+# the direct `crusher.crush(...)` path this module's own docstring calls out as the ordinary SMART_CRUSHER arm.
 CONTENT = "alpha beta gamma delta epsilon zeta eta theta iota kappa " * 8
 
 
@@ -217,9 +214,8 @@ def test_log_fallback_exception_fails_open(caplog: pytest.LogCaptureFixture) -> 
     assert tokens == len(CONTENT)
     assert chain == [CompressionStrategy.SMART_CRUSHER.value, CompressionStrategy.LOG.value]
     assert _reason(debug_events) == "smart_crusher"
-    # Pin the stable token and the debug level, not the full sentence: the
-    # exception detail interpolated after it is not load-bearing here, and a
-    # future rewording of that detail should not break this test.
+    # Pin the stable token and the debug level, not the full sentence: the exception detail interpolated
+    # after it is not load-bearing here, and a future rewording of that detail should not break this test.
     matching = [
         r
         for r in caplog.records

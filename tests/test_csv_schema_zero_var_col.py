@@ -44,9 +44,8 @@ def test_single_arith_only_zero_var_emits_rows() -> None:
 
 
 def test_all_const_zero_var_still_works() -> None:
-    # Contrast: the all-const path (the only zero-var shape the reference
-    # encoder emits) must keep working — guards against regressing it while
-    # generalizing the branch.
+    # Contrast: the all-const path (the only zero-var shape the reference encoder emits)
+    # must keep working — guards against regressing it while generalizing the branch.
     rows = decode_csv_schema_rows("[3]{x:int=5,y:string=A}")
     assert rows == [{"x": 5, "y": "A"}] * 3
 

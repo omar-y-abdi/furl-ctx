@@ -1,33 +1,5 @@
-//! Three universal crushers for non-dict-array JSON shapes.
-//!
-//! Direct ports from `furl_ctx/transforms/smart_crusher.py`:
-//!
-//! - `crush_string_array`  ← `_crush_string_array`  (line 2727)
-//! - `crush_number_array`  ← `_crush_number_array`  (line 2810) — has BUG #1
-//! - `crush_object`        ← `_crush_object`        (line 3015)
-//!
-//! Each takes a `&SmartCrusherConfig`, a `bias` multiplier, and returns
-//! `(crushed_items, strategy_string)`. Schema-preserving: the output
-//! contains only items/values from the original; no generated text or
-//! summary objects sneak in.
-//!
-//! `_crush_array` (the dict-array orchestrator) and `_crush_mixed_array`
-//! (the type-grouped fallback) live in `crusher.rs` because they pull
-//! in the planning + execution + CCR scaffolding.
-//!
-//! # BUG #1 — percentile off-by-one in `crush_number_array`
-//!
-//! Python's `_crush_number_array` computes p25/p75 as
-//! `sorted_finite[len(sorted_finite) // 4]` and
-//! `sorted_finite[3 * len(sorted_finite) // 4]`. For `len < 8`, those
-//! integer-division indices land one position before where a proper
-//! quantile would sit. The bug only affects the strategy debug string
-//! (`f",p25={p25:.4g},p75={p75:.4g}"`); item-selection logic is
-//! unaffected.
-//!
-//! We port the bug **as-is** so parity fixtures still byte-match.
-//! When both languages are fixed in lockstep, the bug-doc test below
-//! flips to pin the corrected behavior and the fixtures are regenerated.
+//! Non-dict array crushers keep only original values. Number-array percentile indices intentionally
+//! retain Python's small-array parity quirk because it affects only the strategy string, not selection.
 
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashSet};
@@ -37,41 +9,8 @@ use super::error_keywords::ERROR_KEYWORDS;
 use super::stats_math::{format_g, mean, median, sample_stdev};
 use crate::transforms::adaptive_sizer::compute_optimal_k;
 
-/// Compute K split (total / first / last / importance) for adaptive
-/// crushers. Mirrors `_compute_k_split` (Python `smart_crusher.py:2693-2725`).
-///
-/// Splits the Kneedle-derived `k_total` into:
-/// - `k_first`: items kept from the start of the array.
-/// - `k_last`: items kept from the end.
-/// - `k_importance`: leftover budget for importance-driven items.
-///
-/// Returns `(k_total, k_first, k_last, k_importance)`.
-///
-/// # BUG #4 — k-split overshoot (FIXED in Rust)
-///
-/// Python's original (line 2722):
-/// ```text
-/// k_first = max(1, round(k_total * first_fraction))
-/// k_last  = max(1, round(k_total * last_fraction))
-/// ```
-/// For `k_total = 1`, both `round()` results are 0, both `max(1, …)`s
-/// return 1, so `k_first + k_last = 2 > k_total = 1`. The crusher then
-/// overshoots `max_items_after_crush` because the boundary unions
-/// already exceed the budget before importance-fill kicks in.
-///
-/// The fix: after computing the floored fractions, clamp `k_first` to
-/// `min(k_first, k_total)`, then clamp `k_last` to
-/// `min(k_last, k_total - k_first)`. Preserves the Python behavior in
-/// every case where `k_total >= 2` (the common path) and only deviates
-/// for `k_total <= 1` (the previously buggy edge).
-///
-/// Same fix lands in `furl_ctx/transforms/smart_crusher.py:2722` at
-/// commit 7 (parity-fixture stage). Until then this is a one-sided fix
-/// — Rust is correct, Python overshoots — and parity fixtures for the
-/// `k_total=1` edge case won't match. Real-world inputs reach `k_total=1`
-/// only when `n <= 8` AND all items deduplicate to a single SimHash
-/// cluster, which rarely happens because every crusher early-returns
-/// `passthrough` on `n <= 8` before `compute_k_split` is even called.
+/// Split adaptive `k_total` into first/last/importance budgets without overshooting. Clamp first to
+/// `k_total`, then last to the remaining slots so `k_total <= 1` cannot reserve two boundary items.
 pub fn compute_k_split(
     items: &[&str],
     config: &SmartCrusherConfig,
@@ -83,15 +22,12 @@ pub fn compute_k_split(
         None
     };
     let k_total = compute_optimal_k(items, bias, 3, max_k);
-    // Python: `max(1, round(k_total * fraction))`. Python's round() uses
-    // banker's rounding (round-half-to-even). Rust's
-    // f64::round_ties_even() mirrors that exactly — was stabilized in
-    // Rust 1.77 and is the right primitive for this parity port.
+    // Python: `max(1, round(k_total * fraction))`. Rust's f64::round_ties_even() mirrors that
+    // exactly — was stabilized in Rust 1.77 and is the right primitive for this parity port.
     let k_first_raw = 1_usize.max(round_ties_even(k_total as f64 * config.first_fraction) as usize);
     let k_last_raw = 1_usize.max(round_ties_even(k_total as f64 * config.last_fraction) as usize);
-    // BUG #4 FIX: clamp so `k_first + k_last <= k_total`. Without this,
-    // a `k_total=1` produces `k_first=k_last=1` → 2 items kept,
-    // violating max_items_after_crush.
+    // BUG #4 FIX: clamp so `k_first + k_last <= k_total`. Without this, a `k_total=1`
+    // produces `k_first=k_last=1` → 2 items kept, violating max_items_after_crush.
     let k_first = k_first_raw.min(k_total);
     let k_last = k_last_raw.min(k_total.saturating_sub(k_first));
     let k_importance = k_total.saturating_sub(k_first + k_last);
@@ -99,16 +35,6 @@ pub fn compute_k_split(
 }
 
 /// Crush an array of strings.
-///
-/// Strategy (Python `_crush_string_array`):
-/// 1. Adaptive K via Kneedle (passthrough on `n <= 8`).
-/// 2. **Always keep**: error-keyword strings + length-anomaly strings.
-/// 3. **Boundary keep**: first K_first + last K_last.
-/// 4. **Stride-fill**: stride-based diverse sampling, dedup by content.
-/// 5. Output preserves original array order.
-///
-/// `bias` is the compression-aggressiveness multiplier used by
-/// `compute_optimal_k`.
 pub fn crush_string_array(
     items: &[&str],
     config: &SmartCrusherConfig,
@@ -122,10 +48,7 @@ pub fn crush_string_array(
         );
     }
 
-    // K split. Python serializes each item via json.dumps; for already-
-    // string items that just wraps in quotes. We feed the raw &str refs
-    // since adaptive_sizer's input is documented as "string repr in
-    // importance order" — matches Python's intent.
+    // K split. We feed the raw &str refs since adaptive_sizer's input is documented as "string repr in importance order" — matches Python's intent.
     let (k_total, k_first, k_last, _k_importance) = compute_k_split(items, config, bias);
 
     // 1. Error-keyword indices.
@@ -212,10 +135,8 @@ pub fn crush_string_array(
     (result, strategy)
 }
 
-/// Crush an array of numbers.
-///
-/// Mirrors `_crush_number_array`. **Carries BUG #1** in the percentile
-/// computation (see module-level doc); fix lands in commit 7.
+/// Crush an array of numbers. Mirrors `_crush_number_array`. **Carries BUG #1**
+/// in the percentile computation (see module-level doc); fix lands in commit 7.
 pub fn crush_number_array(
     items: &[Value],
     config: &SmartCrusherConfig,
@@ -254,15 +175,7 @@ pub fn crush_number_array(
     let mut sorted_finite: Vec<f64> = finite.clone();
     sorted_finite.sort_by(f64::total_cmp);
 
-    // BUG #1 FIX (lockstep with Python `_percentile_linear`): replace
-    // integer-division indexing with proper linear interpolation.
-    // Matches numpy's "linear" method exactly:
-    //   index = q * (n - 1)
-    //   if integer: sorted[index]
-    //   else: linear interpolate between floor and ceil
-    // The Python source's `_percentile_linear` helper uses the same
-    // formula; both languages now agree byte-for-byte on the strategy
-    // string's p25/p75 values.
+    // BUG #1 FIX (lockstep with Python `_percentile_linear`): replace integer-division indexing with proper linear interpolation.
     let p25 = percentile_linear(&sorted_finite, 0.25);
     let p75 = percentile_linear(&sorted_finite, 0.75);
 
@@ -318,9 +231,8 @@ pub fn crush_number_array(
     keep_indices.extend(first_indices.iter().copied());
     keep_indices.extend(last_indices.iter().copied());
 
-    // Stride-fill. Cap = k_total + len(outlier_indices) (Python:
-    // `keep_indices >= k_total + len(outlier_indices)` — note no
-    // anomaly term here, unlike crush_string_array).
+    // Stride-fill. Cap = k_total + len(outlier_indices) (Python: `keep_indices >= k_total
+    // + len(outlier_indices)` — note no anomaly term here, unlike crush_string_array).
     let remaining_budget = k_total.saturating_sub(keep_indices.len());
     if remaining_budget > 0 {
         let stride = ((n.saturating_sub(1)) / (remaining_budget + 1)).max(1);
@@ -363,16 +275,8 @@ pub fn crush_number_array(
     (kept_values, strategy)
 }
 
-/// Crush a JSON object by selecting the most informative keys.
-///
-/// Mirrors `_crush_object`. Treats key-value pairs as items and applies
-/// `compute_optimal_k` directly on `f"{k}: {json.dumps(v)}"` strings.
-/// Always-kept rules:
-/// - keys whose value contains an error keyword.
-/// - keys with small total token estimate (<=12 tokens via the rough
-///   `len(str)/4 + len(key)/4 + 2` heuristic).
-/// - first K_first and last K_last keys (insertion order — `IndexMap`
-///   preserves it via the `serde_json/preserve_order` feature).
+/// Crush a JSON object by selecting the most informative keys. keys with small total token estimate (<=12 tokens via the rough `len(str)/4 + len(key)/4
+/// + 2` heuristic). first K_first and last K_last keys (insertion order `IndexMap` preserves it via the `serde_json/preserve_order` feature).
 pub fn crush_object(
     obj: &Map<String, Value>,
     config: &SmartCrusherConfig,
@@ -433,9 +337,7 @@ pub fn crush_object(
         }
     }
 
-    // Always keep: small values (cheap to keep).
-    // Python: `if tokens <= small_threshold // 4` where small_threshold=50,
-    // so tokens <= 12.
+    // Always keep: small values (cheap to keep). Python: `if tokens <= small_threshold // 4` where small_threshold=50, so tokens <= 12.
     let small_threshold_tokens = 50_usize / 4;
     for (key, tokens) in &kv_tokens {
         if *tokens <= small_threshold_tokens {
@@ -453,11 +355,8 @@ pub fn crush_object(
         keep_keys.insert((*k).clone());
     }
 
-    // Stride fill. Python's cap recomputes the error-keyword count each
-    // iteration (inefficient but deterministic). We can compute once
-    // because once a key is in keep_keys, the count of error-flagged
-    // entries grows monotonically — which means the cap effectively
-    // grows. Mirror Python's behavior by recomputing.
+    // Stride fill. Python's cap recomputes the error-keyword count each iteration (inefficient but deterministic). We can compute once
+    // because once a key is in keep_keys, the count of error-flagged entries grows monotonically — which means the cap effectively grows.
     let remaining = k_total.saturating_sub(keep_keys.len());
     if remaining > 0 {
         let stride = ((n.saturating_sub(1)) / (remaining + 1)).max(1);
@@ -495,9 +394,8 @@ pub fn crush_object(
 
 // ---------- helpers ----------
 
-/// Linear-interpolation percentile (numpy "linear" method).
-/// Mirrors Python's `_percentile_linear` helper for byte-equal
-/// strategy-string parity (BUG #1 FIX).
+/// Linear-interpolation percentile (numpy "linear" method). Mirrors Python's
+/// `_percentile_linear` helper for byte-equal strategy-string parity (BUG #1 FIX).
 fn percentile_linear(sorted_values: &[f64], q: f64) -> f64 {
     let n = sorted_values.len();
     if n == 0 {
@@ -521,20 +419,14 @@ fn finite_max(values: &[f64]) -> f64 {
     values.iter().cloned().reduce(f64::max).unwrap_or(0.0)
 }
 
-/// Python's `round()` uses banker's rounding (round-half-to-even). Rust
-/// stabilized `f64::round_ties_even()` in 1.77 — that's the right
-/// primitive for parity. Wrapping it in a helper keeps the call sites
-/// readable.
+/// Python's `round()` uses banker's rounding (round-half-to-even). Rust stabilized `f64::round_ties_even()`
+/// in 1.77 — that's the right primitive for parity. Wrapping it in a helper keeps the call sites readable.
 fn round_ties_even(x: f64) -> f64 {
     x.round_ties_even()
 }
 
-/// Format a number for Python's f-string default repr (no precision
-/// specifier). `min(finite)` and `max(finite)` in Python's strategy
-/// string fall here. Integers print without a decimal; floats print
-/// with their natural decimal form. JSON Number doesn't preserve the
-/// integer/float distinction once parsed via `as_f64`, so we approximate:
-/// values exactly representable as `i64` get integer formatting.
+/// Format a number for Python's f-string default repr (no precision specifier). JSON Number doesn't preserve the integer/float
+/// distinction once parsed via `as_f64`, so we approximate: values exactly representable as `i64` get integer formatting.
 fn format_number_repr(x: f64) -> String {
     if x.is_nan() {
         return "nan".to_string();
@@ -549,9 +441,7 @@ fn format_number_repr(x: f64) -> String {
     if x.fract() == 0.0 && x.abs() < 1e16 {
         return format!("{}", x as i64);
     }
-    // Otherwise Python's `str(float)` — which is "shortest round-trip".
-    // Rust's f64 Display is also shortest round-trip; should match for
-    // typical inputs.
+    // Otherwise Python's `str(float)` — which is "shortest round-trip". Rust's f64 Display is also shortest round-trip; should match for typical inputs.
     format!("{}", x)
 }
 
@@ -582,14 +472,8 @@ mod tests {
 
     #[test]
     fn bug4_k_split_no_overshoot_when_k_total_is_one() {
-        // BUG #4 FIX (Rust): direct test on the helper. We can't easily
-        // make `compute_optimal_k` return 1 (its `min_k` floor is 3),
-        // so verify the clamp via the helper that does the splitting:
-        // when `k_total = 1`, we want `k_first + k_last <= 1`.
-        //
-        // We verify by exposing the clamp directly via a small synthetic
-        // scenario: `compute_optimal_k` falls through to the n<=8 branch
-        // with `n=1` and returns `n=1`. Construct that input.
+        // BUG #4 FIX (Rust): direct test on the helper. We can't easily make `compute_optimal_k` return 1 (its `min_k` floor is
+        // 3), so verify the clamp via the helper that does the splitting: when `k_total = 1`, we want `k_first + k_last <= 1`.
         let items: [&str; 1] = ["only"];
         let (kt, kf, kl, ki) = compute_k_split(&items, &cfg(), 1.0);
         assert_eq!(kt, 1, "n=1 triggers fast-path n<=8 → k_total=1");
@@ -605,9 +489,8 @@ mod tests {
 
     #[test]
     fn bug4_k_split_no_overshoot_when_k_total_is_two() {
-        // For k_total=2: k_first=1, k_last=1 — sum=2 = k_total ✓
-        // (this case wasn't actually buggy). We pin it anyway to lock the
-        // boundary that the k-split overshoot fix preserves untouched.
+        // For k_total=2: k_first=1, k_last=1 — sum=2 = k_total ✓ (this case wasn't actually buggy).
+        // We pin it anyway to lock the boundary that the k-split overshoot fix preserves untouched.
         let items: [&str; 2] = ["a", "b"];
         let (kt, kf, kl, _) = compute_k_split(&items, &cfg(), 1.0);
         assert_eq!(kt, 2);
@@ -670,9 +553,7 @@ mod tests {
         // Lots of duplicates that survive stride sampling get deduped.
         let items: Vec<&str> = std::iter::repeat("dup").take(50).collect();
         let (_out, strat) = crush_string_array(&items, &cfg(), 1.0);
-        // 50 identical items: unique-by-simhash = 1, fast-path returns 3.
-        // So k_total=3. Stride loop runs but every item is "dup" already
-        // seen → dedup_count > 0.
+        // 50 identical items: unique-by-simhash = 1, fast-path returns 3. So k_total=3. Stride loop runs but every item is "dup" already seen → dedup_count > 0.
         assert!(
             strat.contains("dedup="),
             "strategy {} should mention dedup",
@@ -692,9 +573,8 @@ mod tests {
 
     #[test]
     fn number_array_no_finite_returns_passthrough() {
-        // n > 8 but no finite values → "number:no_finite" strategy.
-        // serde_json can't carry NaN, so use null values for non-numeric:
-        // they're filtered out by `as_f64()`.
+        // n > 8 but no finite values → "number:no_finite" strategy. serde_json can't carry
+        // NaN, so use null values for non-numeric: they're filtered out by `as_f64()`.
         let items: Vec<Value> = (0..15).map(|_| json!(null)).collect();
         let (out, strat) = crush_number_array(&items, &cfg(), 1.0);
         assert_eq!(out.len(), items.len());
@@ -819,12 +699,7 @@ mod tests {
 
     #[test]
     fn bug1_percentile_proper_linear_interpolation() {
-        // BUG #1 FIX (Rust + Python in lockstep): proper linear-
-        // interpolation percentile. For sorted [1,2,3,4,5,6,7,8,9],
-        // n=9 so:
-        //   p25 index = 0.25 * 8 = 2.0    → sorted[2] = 3.0
-        //   p75 index = 0.75 * 8 = 6.0    → sorted[6] = 7.0
-        // (Both p25 and p75 land on integer indices for n=9.)
+        // BUG #1 FIX (Rust + Python in lockstep): proper linear- interpolation percentile.
         let mut items: Vec<Value> = (1..=9).map(|i| json!(i)).collect();
         items.extend(vec![json!(null); 5]); // nulls drop out of `finite`
         let (_out, strat) = crush_number_array(&items, &cfg(), 1.0);
@@ -834,17 +709,7 @@ mod tests {
 
     #[test]
     fn bug1_percentile_interpolates_when_index_non_integer() {
-        // For sorted [10, 20, 30, 40, 50] (n=5):
-        //   p25 = 0.25 * 4 = 1.0  → sorted[1] = 20
-        //   p75 = 0.75 * 4 = 3.0  → sorted[3] = 40
-        // For sorted with n=10, n=11, etc., the index is non-integer
-        // and we interpolate. Pin a case where interpolation actually
-        // happens to verify the fix.
-        // n=10 finite: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-        //   p25 = 0.25 * 9 = 2.25 → sorted[2] * 0.75 + sorted[3] * 0.25
-        //                          = 30 * 0.75 + 40 * 0.25 = 32.5
-        //   p75 = 0.75 * 9 = 6.75 → sorted[6] * 0.25 + sorted[7] * 0.75
-        //                          = 70 * 0.25 + 80 * 0.75 = 77.5
+        // For sorted [10, 20, 30, 40, 50] (n=5).
         let items: Vec<Value> = (1..=10).map(|i| json!(i * 10)).collect();
         let (_out, strat) = crush_number_array(&items, &cfg(), 1.0);
         // Pre-fix would have given p25=sorted[10/4]=sorted[2]=30 (wrong).

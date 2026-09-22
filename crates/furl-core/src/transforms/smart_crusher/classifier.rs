@@ -1,30 +1,9 @@
 //! JSON array element-type classification.
-//!
-//! Direct port of `_classify_array` (Python `smart_crusher.py:341-368`).
-//! Classification drives compression strategy: dict arrays go through
-//! `_crush_array`, string arrays through `_crush_string_array`, etc.
-//!
-//! # Python parity note: bool vs int
-//!
-//! Python's `True`/`False` are an int subclass, so a list `[True, False, 1]`
-//! has `types == {bool, int}` but `[True, False]` has `types == {bool}`.
-//! The Python code uses two checks to disambiguate:
-//!   1. `has_bool` flag set during the type-walk
-//!   2. `all(isinstance(i, bool) for i in items)` for pure-bool arrays
-//!
-//! The Rust `serde_json::Value` enum has separate `Bool` and `Number`
-//! variants — no inheritance — so the disambiguation is naturally cleaner
-//! here. We still walk every element (not a sample) to guarantee correct
-//! classification on adversarial inputs.
 
 use serde_json::Value;
 
-/// JSON array element type classification.
-///
-/// Mirrors Python's `ArrayType` enum at `smart_crusher.py:329-338`. The
-/// string variants in `Display`/`Debug` match Python's lowercase `value=`
-/// strings exactly, which is required for parity with serialized strategy
-/// debug output (e.g. `"dict_array(100->10)"`).
+/// JSON array element type classification. The string variants in `Display`/`Debug` match Python's lowercase
+/// `value=` strings exactly, which is required for parity with serialized strategy debug output (e.g.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArrayType {
     /// `[{...}, {...}, ...]` — dict array, full statistical path.
@@ -60,21 +39,12 @@ impl ArrayType {
 }
 
 /// Classify a JSON array by its element types.
-///
-/// Walks every element (not a sample) to guarantee correct classification
-/// even on adversarial inputs where the first few items hide a type
-/// transition deeper in the list. `Value::is_*` is O(1), so the full
-/// walk is fine.
-///
-/// Returns `ArrayType::Empty` for an empty slice.
 pub fn classify_array(items: &[Value]) -> ArrayType {
     if items.is_empty() {
         return ArrayType::Empty;
     }
 
-    // Track which Value variants we've seen. We collapse Number into
-    // either "int-like" or "float-like" once below; here we only need to
-    // know whether there's at least one of each high-level kind.
+    // Track which Value variants we've seen.
     let mut has_bool = false;
     let mut has_number = false;
     let mut has_string = false;
@@ -93,9 +63,7 @@ pub fn classify_array(items: &[Value]) -> ArrayType {
         }
     }
 
-    // Pure bool array — Python's check is `all(isinstance(i, bool))`.
-    // Note Python `[True, False, 1]` evaluates to `types == {bool, int}`
-    // because bool is an int subclass; that maps to MixedArray here.
+    // Pure bool array
     if has_bool && !has_number && !has_string && !has_object && !has_array && !has_null {
         return ArrayType::BoolArray;
     }
@@ -173,21 +141,7 @@ mod tests {
 
     #[test]
     fn bool_with_number_is_mixed_not_bool_or_number() {
-        // Python's `[True, False, 1]` walks like this:
-        //   types == {bool, int} (because bool is an int subclass)
-        //   has_bool = True
-        //   `types <= {bool, int}` is True, so the bool-array gate is
-        //   considered, but the inner `all(isinstance(i, bool))` check
-        //   is False (because of the `1`), so does NOT return BOOL_ARRAY.
-        //   `types == {dict}` False. `types == {str}` False.
-        //   `types <= {int, float} and not has_bool` — has_bool is True,
-        //   so the number-array gate fails too. `types == {list}` False.
-        //   Falls through to MIXED_ARRAY.
-        //
-        // Rust matches by side effect of separate `Bool`/`Number` enum
-        // variants: the bool-array gate fails because `has_number` is
-        // True; the number-array gate fails because `has_bool` is True.
-        // Final: MIXED_ARRAY. Same outcome via different code path.
+        // Python's `[True, False, 1]` walks like this
         let items = vec![json!(true), json!(false), json!(1)];
         assert_eq!(classify_array(&items), ArrayType::MixedArray);
     }

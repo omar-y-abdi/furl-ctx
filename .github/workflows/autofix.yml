@@ -1,12 +1,7 @@
 name: autofix
 
-# Unprivileged mechanical repair proposal for every PR. This workflow executes
-# PR-controlled source, so it deliberately receives NO write credential and no
-# long-lived AUTOFIX_TOKEN. It creates a reviewable patch artifact only.
-# `autofix apply` is a separate default-branch workflow_run bridge. It never
-# checks out or executes PR code: it treats this job's candidate artifact as
-# hostile data and auto-applies only Python changes it can prove preserve the
-# exact AST and security-significant comments.
+# Unprivileged mechanical repair proposal for every PR. It creates a reviewable patch artifact only. It never checks out or executes PR code: it treats
+# this job's candidate artifact as hostile data and auto-applies only Python changes it can prove preserve the exact AST and security-significant comments.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]

@@ -77,9 +77,8 @@ def test_parse_iso_field_boundaries(iso: str, valid: bool) -> None:
 
 
 def test_render_iso_year_upper_boundary() -> None:
-    # :156 (1<=y<=9999 upper) — reachable only via epoch arithmetic. y=9999
-    # renders; pushing one year past it (y=10000) returns None, not a 5-digit
-    # year string.
+    # :156 (1<=y<=9999 upper) — reachable only via epoch arithmetic. y=9999 renders;
+    # pushing one year past it (y=10000) returns None, not a 5-digit year string.
     assert _render_iso(_EPOCH_Y9999, "Z") == "9999-12-31T00:00:00Z"
     assert _render_iso(_EPOCH_Y9999 + _ONE_YEAR_SECONDS, "Z") is None
 
@@ -99,8 +98,7 @@ def test_parse_iso_invalid_calendar_date_rejected() -> None:
 
 
 def test_decode_csv_schema_rows_public_smoke() -> None:
-    # The boundary helpers above are private; confirm the PUBLIC decode entry
-    # round-trips a minimal valid schema so the helpers are exercised on a real
-    # code path, not only in isolation.
+    # The boundary helpers above are private; confirm the PUBLIC decode entry round-trips a
+    # minimal valid schema so the helpers are exercised on a real code path, not only in isolation.
     rows = decode_csv_schema_rows("[2]{id:int}\n1\n2")
     assert rows == [{"id": 1}, {"id": 2}]

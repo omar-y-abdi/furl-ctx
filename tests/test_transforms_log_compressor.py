@@ -23,9 +23,8 @@ def test_log_compressor_compress_and_ccr_paths() -> None:
         assert short.format_detected is LogFormat.GENERIC
         assert short.compression_ratio == 1.0
 
-        # Real npm log to exercise format detection + CCR end-to-end. Build
-        # a long enough corpus so the Rust adaptive sizer drops the
-        # compression ratio below the min_compression_ratio_for_ccr=0.5 threshold.
+        # Real npm log to exercise format detection + CCR end-to-end. Build a long enough corpus so the Rust
+        # adaptive sizer drops the compression ratio below the min_compression_ratio_for_ccr=0.5 threshold.
         npm_lines = ["npm WARN deprecated x"] * 30 + ["npm ERR! something broke"] * 5
         npm_content = "\n".join(npm_lines)
         result = compressor.compress(npm_content)
@@ -33,10 +32,8 @@ def test_log_compressor_compress_and_ccr_paths() -> None:
         assert result.original_line_count == 35
         assert result.compressed_line_count < result.original_line_count
 
-        # TEST-11: "CCR end-to-end" must include the recovery half — the npm
-        # case previously never asserted `cache_key` at all, so a CCR path
-        # that silently stopped storing originals stayed green. The key must
-        # exist AND round-trip the exact input bytes out of the store.
+        # TEST-11: "CCR end-to-end" must include the recovery half — the npm case never asserted
+        # `cache_key` at all, so a CCR path that silently stopped storing originals stayed green.
         assert result.cache_key is not None, "CCR-eligible compression must emit a cache_key"
         entry = get_compression_store().retrieve(result.cache_key)
         assert entry is not None, "cache_key must resolve in the compression store"

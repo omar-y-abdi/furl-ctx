@@ -1,34 +1,5 @@
-//! Dynamic anchor selection for array compression.
-//!
-//! Direct port of `furl_ctx/transforms/anchor_selector.py`. Used by
-//! `smart_crusher::analyzer` (and the not-yet-ported planning layer)
-//! to allocate position-based anchor slots — the items that are kept
-//! purely for their position in the array, not their relevance score.
-//!
-//! # What it does
-//!
-//! Given an array of N items and a target K (max items after compression),
-//! decide which K' < K positions to "anchor" (always keep). The choice
-//! depends on:
-//!
-//! 1. **Pattern**: search results favor the front; logs favor the back;
-//!    time series want both ends; generic spreads evenly.
-//! 2. **Query keywords**: "latest" / "recent" → shift toward back;
-//!    "first" / "earliest" → shift toward front.
-//! 3. **Information density** (middle region only): compute a [0,1]
-//!    score per candidate based on field-value uniqueness, content
-//!    length, and structural uniqueness.
-//! 4. **Dedup**: identical items hash to the same MD5[:16]; duplicates
-//!    are skipped so we don't waste slots.
-//!
-//! # Hash parity with Python
-//!
-//! `compute_item_hash` returns `md5(json.dumps(item, sort_keys=True,
-//! default=str)).hexdigest()[:16]`. Python's `json.dumps` by default
-//! emits `", "` and `": "` separators and ASCII-escapes non-ASCII via
-//! `\uXXXX`. The byte-exact serializers live in [`crate::util::pyjson`]
-//! (ARCH-8); mismatching the format would silently change which items
-//! are considered duplicates, so it's load-bearing for parity fixtures.
+//! Select position-based anchors by content pattern, query direction, middle-region information density, and
+//! deduplication. Item hashes must match Python's sorted JSON serialization exactly or anchor parity changes.
 
 use md5::{Digest, Md5};
 use serde_json::Value;
@@ -37,14 +8,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::util::pyjson::{python_json_dumps_sort_keys, python_json_dumps_sort_keys_filtered};
 
 // ============================================================================
-// Configuration (Python `furl_ctx/config.py:294` AnchorConfig)
+// Configuration: Python `AnchorConfig` parity.
 // ============================================================================
 
-/// Configuration for dynamic anchor allocation.
-///
-/// Direct port of Python `AnchorConfig` (`furl_ctx/config.py:294-348`).
-/// Defaults must match Python byte-for-byte — they're consulted by
-/// every anchor decision and parity fixtures lock the resulting choices.
+/// Configuration for dynamic anchor allocation. Defaults must match Python byte-for-byte —
+/// they're consulted by every anchor decision and parity fixtures lock the resulting choices.
 #[derive(Debug, Clone)]
 pub struct AnchorConfig {
     /// Base anchor budget as percentage of `max_items`. Default 0.25.
@@ -129,10 +97,8 @@ impl DataPattern {
         }
     }
 
-    /// Snake-case label, byte-identical to the strings the analyzer's
-    /// `detect_pattern` historically produced (and `from_string`
-    /// accepts) — `ArrayAnalysis.detected_pattern` is typed as this enum
-    /// (TYPE-1), so any rendered form must round-trip these exact bytes.
+    /// Snake-case label, byte-identical to the strings the analyzer's `detect_pattern` produced (and `from_string` accepts)
+    /// `ArrayAnalysis.detected_pattern` is typed as this enum (TYPE-1), so any rendered form must round-trip these exact bytes.
     pub fn as_str(self) -> &'static str {
         match self {
             DataPattern::SearchResults => "search_results",
@@ -192,19 +158,7 @@ impl AnchorWeights {
 // Information density scoring
 // ============================================================================
 
-/// Region-global aggregates for information scoring, computed ONCE over a
-/// candidate region and reused for every item scored against it.
-///
-/// The three [`calculate_information_score`] factors each derive a
-/// region-wide summary from `all_items` (identical for every item in the
-/// region) and then compare a single `item` against it. Scoring K
-/// candidates against the same region recomputed those summaries K times —
-/// each an O(region) pass that re-serialized heavy fields (e.g. a Chrome
-/// trace's `args` dict). `RegionProfile` hoists the shared passes out of
-/// the per-candidate loop: build once (O(region)), score each candidate in
-/// O(item fields). The per-item arithmetic below is byte-for-byte the old
-/// per-call code — same counts, same min/max, same threshold sets — so the
-/// resulting scores are bit-identical and the candidate sort is unchanged.
+/// Region-global aggregates for information scoring, computed ONCE over a candidate region and reused for every item scored against it.
 struct RegionProfile {
     /// `all_items.len()` — the divisor for value-rareness and the `< 2`
     /// guards. Counts ALL items (not just objects), matching the ports.
@@ -223,9 +177,8 @@ struct RegionProfile {
 }
 
 impl RegionProfile {
-    /// Build the aggregates in a single pass over `all_items`. Mirrors the
-    /// setup halves of `calculate_value_uniqueness`,
-    /// `calculate_length_score`, and `calculate_structural_uniqueness`.
+    /// Build the aggregates in a single pass over `all_items`. Mirrors the setup halves of
+    /// `calculate_value_uniqueness`, `calculate_length_score`, and `calculate_structural_uniqueness`.
     fn build(all_items: &[Value]) -> Self {
         let total_items = all_items.len();
 
@@ -349,9 +302,8 @@ impl RegionProfile {
             .map(|o| o.keys().map(String::as_str).collect())
             .unwrap_or_default();
 
-        // `has_rare` = |item_fields ∩ rare|; `missing_common` =
-        // |common \ item_fields| — same set operations as the port, just
-        // with the region sets precomputed as owned `String`s.
+        // `has_rare` = |item_fields ∩ rare|; `missing_common` = |common \ item_fields| — same
+        // set operations as the port, just with the region sets precomputed as owned `String`s.
         let has_rare = self
             .rare_fields
             .iter()
@@ -389,17 +341,8 @@ impl RegionProfile {
     }
 }
 
-/// Information density score for an item, in `[0.0, 1.0]`.
-///
-/// Combines three factors with hard-coded Python weights:
-/// - 0.4: field-value rareness (rare values → higher score).
-/// - 0.3: content length (relative to the corpus).
-/// - 0.3: structural uniqueness (rare/missing fields).
-///
-/// Stringification used for uniqueness counting. Python:
-///   `json.dumps(value, sort_keys=True) if not isinstance(value, str) else value`
-/// Mirror that exactly: bare strings stay bare; everything else uses the
-/// Python-compatible sort-keys serializer (`util::pyjson`).
+/// Information density score for an item, in `[0.0, 1.0]`. Python: `json.dumps(value, sort_keys=True) if not isinstance(value, str) else
+/// value` Mirror that exactly: bare strings stay bare; everything else uses the Python-compatible sort-keys serializer (`util::pyjson`).
 fn stringify_for_uniqueness(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -411,38 +354,17 @@ fn stringify_for_uniqueness(value: &Value) -> String {
 // Item hashing (with Python-compatible JSON serialization)
 // ============================================================================
 
-/// Compute a 16-hex-char MD5 hash of the item's content for dedup.
-///
-/// Python: `md5(json.dumps(item, sort_keys=True, default=str)).hexdigest()[:16]`.
-/// The serialization MUST match Python byte-for-byte — different
-/// formatting → different hash → different dedup behavior.
+/// Compute a 16-hex-char MD5 hash of the item's content for dedup. The serialization MUST match
+/// Python byte-for-byte — different formatting → different hash → different dedup behavior.
 pub fn compute_item_hash(item: &Value) -> String {
     let content = python_json_dumps_sort_keys(item);
     let digest = Md5::digest(content.as_bytes());
-    // Per-byte `{:02x}` (mirrors the sha2 sites) instead of
-    // `format!("{:x}", digest)`: digest 0.11 returns `hybrid_array::Array`,
-    // which does not implement `LowerHex` (the old `GenericArray` did).
-    // Byte-identical: 16 hex chars = first 8 digest bytes, and `LowerHex`
-    // on the array was zero-padded per-byte hex — exactly `{:02x}`.
+    // Per-byte `{:02x}` (mirrors the sha2 sites) instead of `format!("{:x}", digest)`: digest 0.11 returns `hybrid_array::Array`, which does not implement `LowerHex`
+    // (the old `GenericArray` did). Byte-identical: 16 hex chars = first 8 digest bytes, and `LowerHex` on the array was zero-padded per-byte hex — exactly `{:02x}`.
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-/// Field-aware **stable-projection** hash (DESIGN.md Improvement 2).
-///
-/// Identical to [`compute_item_hash`] EXCEPT that, when `item` is a JSON
-/// object, any top-level key in `exclude` is omitted from the serialization
-/// before hashing. This is the dedup/cluster/fill grouping hash: by dropping
-/// high-cardinality identity columns (timestamps, ids, hashes) two rows that
-/// differ ONLY in those columns project to the same bytes and collapse.
-///
-/// **This is a SEPARATE hash from [`compute_item_hash`].** The full-item
-/// canonical hash used for the CCR retrieve key is unchanged — only this
-/// projection hash filters keys. When `exclude` is empty the output is
-/// byte-identical to [`compute_item_hash`] (same serializer, same key set),
-/// so non-identity data is completely unaffected and parity is preserved.
-///
-/// Exclusion applies only at the top level of an object item — nested objects
-/// are serialized whole (an identity column is a top-level field of a row).
+/// Stable-projection hash: identical to `compute_item_hash`, except excluded top-level object keys are omitted before serialization and hashing.
 pub fn stable_item_hash(item: &Value, exclude: &BTreeSet<String>) -> String {
     // No exclusions, or not an object → identical to the full-item hash.
     if exclude.is_empty() || !item.is_object() {
@@ -516,10 +438,7 @@ impl AnchorSelector {
         }
     }
 
-    /// Adjust weights based on query keywords. `+0.15` toward back on
-    /// recency keywords, `+0.15` toward front on historical. Returns
-    /// `base_weights` unchanged when no keywords match (or both match —
-    /// they cancel out).
+    /// Adjust weights based on query keywords. Returns `base_weights` unchanged when no keywords match (or both match — they cancel out).
     pub fn adjust_weights_for_query(
         &self,
         base: AnchorWeights,
@@ -620,9 +539,8 @@ impl AnchorSelector {
         let back_count = back_anchors.len();
         anchors.extend(back_anchors.iter().copied());
 
-        // Middle region: [front_count, array_size - back_count)
-        // Note Python uses `len(front_anchors)` and `len(back_anchors)` — the
-        // ACTUAL counts after dedup, not the slot-allocated counts. We mirror.
+        // Middle region: [front_count, array_size - back_count) Note Python uses `len(front_anchors)` and
+        // `len(back_anchors)` — the ACTUAL counts after dedup, not the slot-allocated counts. We mirror.
         if middle_slots > 0 {
             let middle_start = front_count;
             let middle_end = array_size.saturating_sub(back_count);
@@ -711,17 +629,10 @@ impl AnchorSelector {
             1.0
         };
 
-        // Borrow the region directly — scoring only reads, so deep-cloning
-        // every `Value` in the region per call was pure allocation
-        // overhead.
+        // Borrow the region directly — scoring only reads, so deep-cloning every `Value` in the region per call was pure allocation overhead.
         let region_items: &[Value] = &items[start_idx..end_idx];
-        // The region aggregates (per-field value counts, length bounds,
-        // structural common/rare sets) are identical for every candidate in
-        // this region — build them ONCE instead of recomputing (and
-        // re-serializing the whole region) per candidate. Byte-identical:
-        // `RegionProfile::score` reproduces `calculate_information_score`
-        // exactly (the non-empty-region / object-item guards below still
-        // hold, so the wrapper's early 0.0 returns never applied here).
+        // Build region aggregates once and score every candidate from the shared profile. The
+        // profile preserves per-candidate scoring while avoiding repeated region serialization.
         let profile = RegionProfile::build(region_items);
         let mut candidates: Vec<(usize, f64)> = Vec::new();
 
@@ -740,11 +651,8 @@ impl AnchorSelector {
             candidates.push((idx, score));
         }
 
-        // Sort by score descending; ties broken by index ascending so
-        // results are deterministic (Python's sort is stable, but since
-        // we're sorting on tuples (idx, score) the input order matters —
-        // we built candidates in increasing-idx order so stable sort
-        // yields the same effect).
+        // Sort by score descending; ties broken by index ascending so results are deterministic (Python's
+        // sort is stable, but since we're sorting on tuples (idx, score) the input order matters.
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut selected = BTreeSet::new();
@@ -796,10 +704,8 @@ mod tests {
         AnchorSelector::new(cfg())
     }
 
-    // The Python-json.dumps serializer parity tests moved to
-    // `crate::util::pyjson::tests` with the serializers (ARCH-8). The
-    // hash tests below still transitively exercise the sort-keys
-    // serializer byte-for-byte (the MD5 vectors are Python-computed).
+    // The Python-json.dumps serializer parity tests moved to `crate::util::pyjson::tests` with the serializers (ARCH-8). The
+    // hash tests below still transitively exercise the sort-keys serializer byte-for-byte (the MD5 vectors are Python-computed).
 
     // ---------- compute_item_hash ----------
 
@@ -812,9 +718,7 @@ mod tests {
 
     #[test]
     fn compute_item_hash_matches_python_basic() {
-        // Reference verified via Python:
-        //   hashlib.md5(json.dumps({"a":1,"b":2}, sort_keys=True).encode()).hexdigest()[:16]
-        //   = "8aacdb17187e6acf"
+        // Reference verified via Python: hashlib.md5(json.dumps({"a":1,"b":2}, sort_keys=True).encode()).hexdigest()[:16] = "8aacdb17187e6acf"
         assert_eq!(
             compute_item_hash(&json!({"a": 1, "b": 2})),
             "8aacdb17187e6acf"
@@ -843,9 +747,8 @@ mod tests {
 
     #[test]
     fn stable_hash_empty_exclude_equals_full_hash() {
-        // CONTRACT: empty exclude-set => byte-identical to compute_item_hash.
-        // This is what preserves Python/Rust parity and leaves non-identity
-        // data (search, code) completely unaffected.
+        // CONTRACT: empty exclude-set => byte-identical to compute_item_hash. This is what preserves
+        // Python/Rust parity and leaves non-identity data (search, code) completely unaffected.
         let item = json!({"a": 1, "b": "x", "c": [1, 2, 3]});
         let empty = BTreeSet::new();
         assert_eq!(stable_item_hash(&item, &empty), compute_item_hash(&item));
@@ -853,8 +756,7 @@ mod tests {
 
     #[test]
     fn stable_hash_collapses_rows_differing_only_in_excluded_fields() {
-        // Two rows identical except the excluded identity columns -> same
-        // stable hash. This is the dedup win (DESIGN.md Imp2).
+        // Rows differing only in excluded identity columns must share a stable hash so deduplication can collapse them.
         let a = json!({"ts": "2026-06-12T10:00:00Z", "id": "aaaa", "msg": "disk full"});
         let b = json!({"ts": "2026-06-12T10:00:09Z", "id": "bbbb", "msg": "disk full"});
         let exclude: BTreeSet<String> = ["ts".to_string(), "id".to_string()].into_iter().collect();
@@ -1093,9 +995,8 @@ mod tests {
         // string → only one anchor per region survives dedup.
         let items: Vec<Value> = (0..100).map(|_| json!({"value": "same"})).collect();
         let anchors = selector().select_anchors(&items, 10, DataPattern::Generic, None);
-        // With dedup_identical_items=true, after the first slot in each
-        // region claims the hash, subsequent attempts find duplicates.
-        // Result should be far fewer than the full budget (12).
+        // With dedup_identical_items=true, after the first slot in each region claims the hash,
+        // subsequent attempts find duplicates. Result should be far fewer than the full budget (12).
         assert!(
             anchors.len() <= 3,
             "duplicate items should dedup: got {} anchors",

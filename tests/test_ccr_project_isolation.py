@@ -91,10 +91,7 @@ def test_furl_stats_reports_store_block_under_project_isolation(
     must resolve the ACTIVE store via _get_local_store(), not read the
     self._local_store slot, which the namespace path never populates.
     """
-    # Scoped to THIS test only: it drives furl_stats through the MCP server, which
-    # needs the optional `mcp` extra (CI shard 1 runs without it). The A–E
-    # isolation tests hit the store layer directly and must still run here, so the
-    # guard stays at function level — never module level.
+    # Scoped to THIS test only: it drives furl_stats through the MCP server, which needs the optional `mcp` extra (CI shard 1 runs without it).
     pytest.importorskip("mcp")
 
     from furl_ctx.ccr.mcp_server import FurlMCPServer
@@ -108,9 +105,8 @@ def test_furl_stats_reports_store_block_under_project_isolation(
     assert stats["store"]["entries"] == 1
 
 
-# --------------------------------------------------------------------------- #
-# B. Data loss — eviction is scoped to the acting store's own backend
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # B. Data loss — eviction is scoped
+# to the acting store's own backend --------------------------------------------------------------------------- #
 
 
 def test_B_eviction_scoped_to_own_backend(tmp_path) -> None:
@@ -156,9 +152,8 @@ def test_C_explicit_shared_namespace_overrides_project(
     assert s2.retrieve(key) is not None
 
 
-# --------------------------------------------------------------------------- #
-# D. Backward compat — a pre-upgrade (0.27.0) global store stays readable
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # D. Backward compat — a pre-upgrade
+# (0.27.0) global store stays readable --------------------------------------------------------------------------- #
 
 
 def test_D_pre_upgrade_global_store_readable_after_upgrade(

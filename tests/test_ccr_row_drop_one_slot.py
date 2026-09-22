@@ -122,17 +122,12 @@ def test_dropped_rows_recover_through_parent_not_chunks(monkeypatch: pytest.Monk
     rows = _distinct_rows(200)
     _crusher, parent = _crush_into(store, monkeypatch, rows)
 
-    # (a) COMPLETE recovery via the BARE parent retrieve — every original row is
-    # present, verbatim. This is the lossless path the docs lead with (no query,
-    # no filter, no cap): it returns the full stored array.
+    # (a) COMPLETE recovery via the BARE parent retrieve — every original row is present, verbatim.
     entry = store.retrieve(parent)
     assert entry is not None
     assert json.loads(entry.original_content) == rows, "parent must recover every dropped row"
 
-    # (b) NARROWING conveniences over the same parent — NOT the recovery path.
-    # The BM25 query and a select_field filter can each project a specific row;
-    # query is capped (max 20 + a 0.3 floor) and can miss a present row, so this
-    # exercises only the happy path where the id substring matches.
+    # (b) NARROWING conveniences over the same parent
     target = rows[123]
     hits = store.search(parent, target["id"])
     assert any(isinstance(h, dict) and h.get("id") == target["id"] for h in hits), (
@@ -144,9 +139,7 @@ def test_dropped_rows_recover_through_parent_not_chunks(monkeypatch: pytest.Monk
     assert not isinstance(outcome, FilterError), f"select_field rejected: {outcome}"
     assert outcome.matched_count == 1, "select_field did not project exactly the one row"
 
-    # (c) the parent is the ONLY store entry — no per-row chunk is an
-    # independently addressable entry consuming a cap/file slot. Per-row chunks
-    # are not written anywhere; row-level recovery is served from the parent.
+    # (c) the parent is the ONLY store entry — no per-row chunk is an independently addressable entry consuming a cap/file slot.
     assert store.get_stats()["entry_count"] == 1, (
         "the drop added more than the whole-blob parent — a per-row chunk was "
         "mirrored as its own entry, consuming a cap/file slot the parent covers"
@@ -209,14 +202,11 @@ def test_handful_of_columnar_outputs_do_not_evict_within_cap_content(
     anchor (oldest), turning this RED. The cap is sized just above the five
     outputs (below twice that), so a >=2x per-output inflation is caught.
     """
-    # Neutralize any ambient FURL_CCR_SQLITE_MAX_ROWS (L2): the sqlite variant
-    # builds a backend at its DEFAULT cap, and an env value below max_entries would
-    # evict content (or warn) spuriously.
+    # Neutralize any ambient FURL_CCR_SQLITE_MAX_ROWS (L2): the sqlite variant builds a backend at
+    # its DEFAULT cap, and an env value below max_entries would evict content (or warn) spuriously.
     monkeypatch.delenv("FURL_CCR_SQLITE_MAX_ROWS", raising=False)
 
-    # One output = one entry (Design A). This test stores five distinct outputs;
-    # size the cap just above five so they all fit, but below twice five so a
-    # regression writing >=2 entries per output floods and evicts the anchor.
+    # One output = one entry (Design A).
     n_outputs = 5
     max_entries = n_outputs + 3
     assert n_outputs <= max_entries < 2 * n_outputs
@@ -229,15 +219,11 @@ def test_handful_of_columnar_outputs_do_not_evict_within_cap_content(
     )
     try:
         store = CompressionStore(backend=backend, enable_feedback=False, max_entries=max_entries)
-        # Anchor = the first output. With the cap sized above one output's chunks
-        # it survives its OWN crush on BOTH main and the branch, so this setup
-        # guard passes either way — the RED is forced onto the OUTCOME assertion.
+        # Anchor = the first output.
         _c, anchor = _crush_into(store, monkeypatch, _distinct_rows(200, seed=1))
         assert store.retrieve(anchor) is not None, "anchor not stored — fixture broken"
 
-        # A handful more distinct outputs. Each output is one entry, so all five
-        # fit under the cap with room to spare; a regression that writes extra
-        # entries per output would push past the cap and evict the anchor.
+        # A handful more distinct outputs.
         for seed in range(2, 6):
             _crush_into(store, monkeypatch, _distinct_rows(200, seed=seed))
 
@@ -253,10 +239,8 @@ def test_handful_of_columnar_outputs_do_not_evict_within_cap_content(
         assert len(json.loads(entry.original_content)) == 200, (
             "the surviving anchor lost rows — its whole-blob content is not intact"
         )
-        # F15: the five outputs must be five DISTINCT logical entries, else a
-        # content collision would dedupe them and the anchor would survive
-        # trivially — a vacuous green. (Reached only on the GREEN path; on main
-        # the OUTCOME assertion above has already fired.)
+        # F15: the five outputs must be five DISTINCT logical entries, else a content
+        # collision would dedupe them and the anchor would survive trivially — a vacuous green.
         assert store.get_stats()["entry_count"] == 5, (
             "the five seeded outputs collapsed to fewer entries — anchor survival would be vacuous"
         )
@@ -294,9 +278,8 @@ def test_inverted_physical_cap_loses_within_ttl_and_warns(
             "F4 warning did not fire for the inverted cap config (max_rows < max_entries)"
         )
 
-        # Store more distinct columnar outputs than the physical cap allows. Under
-        # Design A each output is ONE physical row; all are within the default TTL
-        # and well under the logical cap (10). Oldest = the first output.
+        # Store more distinct columnar outputs than the physical cap allows. Under Design A each
+        # output is ONE physical row; all are within the default TTL and well under the logical cap .
         _c, oldest = _crush_into(store, monkeypatch, _distinct_rows(200, seed=1))
         for seed in range(2, max_rows + 3):  # seeds 2..5 -> 5 outputs total > max_rows
             _crush_into(store, monkeypatch, _distinct_rows(200, seed=seed))
@@ -331,9 +314,8 @@ def test_cap_inversion_warning_fires_only_when_max_rows_below_max_entries(
     distinction; this test carries the warn/no-warn behaviour.
     """
     logger_name = "furl_ctx.cache.compression_store"
-    # Neutralize ambient FURL_CCR_SQLITE_MAX_ROWS (L2): case (2) builds a backend
-    # at its DEFAULT cap, and an env value below max_entries would make the guard
-    # fire there and this test fail spuriously.
+    # Neutralize ambient FURL_CCR_SQLITE_MAX_ROWS (L2): case builds a backend at its DEFAULT cap, and
+    # an env value below max_entries would make the guard fire there and this test fail spuriously.
     monkeypatch.delenv("FURL_CCR_SQLITE_MAX_ROWS", raising=False)
 
     # (1) fires for the inverted config (max_rows < max_entries)
@@ -397,15 +379,8 @@ def test_backends_declare_their_row_cap_observably(tmp_path, monkeypatch) -> Non
     finally:
         backend.close()
 
-    # NO third assertion that the two answers "differ". The two positives above
-    # already force it: once one is exactly None and the other is exactly 7, any
-    # comparison between them is a tautology and can never redden. An earlier
-    # version asserted `InMemoryBackend().max_rows != 7` here and a comment called
-    # it the point of the test; it discriminated nothing. Rewriting it to compare
-    # the two live values instead is the SAME tautology wearing better clothes.
-    # The falsifiable content is the two exact positives — a collapse onto one
-    # value necessarily breaks one of them. Do not re-add a difference check: it
-    # would read as rigour and assert nothing.
+    # NO third assertion that the two answers "differ". The two positives above already force it: once one is
+    # exactly None and the other is exactly 7, any comparison between them is a tautology and can never redden.
 
 
 def test_undeclared_backend_is_logged_not_silently_skipped(caplog) -> None:
@@ -444,11 +419,7 @@ def test_undeclared_backend_is_logged_not_silently_skipped(caplog) -> None:
         "a backend declaring no max_rows must be logged — otherwise the guard "
         "going blind is indistinguishable from the guard passing"
     )
-    # Pinned at WARNING, captured at WARNING: a DEBUG record would not survive
-    # this level and the assertion above would fail. That is deliberate — DEBUG
-    # is invisible at production log levels, so reporting an UNCHECKABLE
-    # invariant there would be observably the same as the silent skip this guard
-    # removes, and quieter than the milder inversion case four lines below it.
+    # Pinned at WARNING, captured at WARNING a DEBUG record would not survive this level and the assertion above would fail.
     assert undeclared[0].levelno == logging.WARNING, (
         f"the undeclared-backend report must be WARNING (not quieter than the "
         f"inversion warning it outranks), got {undeclared[0].levelname}"

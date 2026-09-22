@@ -1,27 +1,4 @@
-//! Compaction subsystem.
-//!
-//! Lossless-first compaction of JSON arrays. Pipeline:
-//!
-//! ```text
-//! input array
-//!    ↓
-//! [TabularCompactor] → Compaction IR (recursive tree)
-//!    ↓
-//! [Formatter trait] → bytes
-//! ```
-//!
-//! The IR ([`ir::Compaction`]) is a recursive tree so we can express
-//! multi-level compression: nested-uniform objects flatten into dotted
-//! columns, stringified-JSON cells become sub-tables, opaque blobs
-//! become CCR pointers, heterogeneous arrays partition into buckets.
-//!
-//! Formatters consume the IR. [`JsonFormatter`] keeps byte-equal parity
-//! with today's SmartCrusher output. [`CsvSchemaFormatter`] emits a
-//! token-efficient `[N]{cols}:` declaration + JSON schema header + CSV
-//! rows that LLMs read reliably.
-//!
-//! [`JsonFormatter`]: format_json::JsonFormatter
-//! [`CsvSchemaFormatter`]: format_csv_schema::CsvSchemaFormatter
+//! Compaction subsystem. Lossless-first compaction of JSON arrays.
 
 pub mod classifier;
 pub mod compactor;
@@ -38,31 +15,16 @@ pub use walker::{
     emit_opaque_ccr_marker, has_serde_private_marker, try_parse_json_container, DocumentCompactor,
 };
 
-/// Composed compaction stage: a config + formatter pair.
-///
-/// Plug into [`SmartCrusher`] via the builder's `with_compaction(...)`.
-/// When configured, `crush_array` runs compaction as an opt-in
-/// lossless-first stage; when absent (default), behavior is byte-equal
-/// with today's lossy-only path.
-///
-/// [`SmartCrusher`]: super::SmartCrusher
+/// Composed compaction stage: a config + formatter pair. When configured, `crush_array` runs compaction as an opt-in lossless-first
+/// stage; when absent (default), behavior is byte-equal with today's lossy-only path. [`SmartCrusher`]: super::SmartCrusher
 pub struct CompactionStage {
     pub config: CompactConfig,
     pub formatter: Box<dyn Formatter>,
 }
 
 impl CompactionStage {
-    /// Wire a CCR store into the stage so opaque-blob substitutions on
-    /// the lossless path persist the original under the marker hash
-    /// (Defect 2). The store lives on `config.ccr_store`; `run()` reads
-    /// it. Returns `self` for builder-style chaining.
-    ///
-    /// Idempotent + safe to call with the same store the row-drop path
-    /// uses — same hash → same bytes. Without this call the stage still
-    /// renders opaque markers (unchanged hash), but the originals are
-    /// unretrievable, which is the silent loss the public path forbids;
-    /// `SmartCrusherBuilder::with_ccr_store` calls this for the
-    /// production stage.
+    /// Wire a CCR store into the stage so opaque-blob substitutions on the lossless path persist the original under the
+    /// marker hash (Defect 2). Idempotent + safe to call with the same store the row-drop path uses — same hash → same bytes.
     pub fn with_ccr_store(mut self, store: std::sync::Arc<dyn crate::ccr::CcrStore>) -> Self {
         self.config.ccr_store = Some(store);
         self
@@ -76,9 +38,7 @@ impl CompactionStage {
         }
     }
 
-    /// JSON formatter, default config — useful for debugging or for
-    /// downstream consumers that want structured rather than CSV-shaped
-    /// output.
+    /// JSON formatter, default config — useful for debugging or for downstream consumers that want structured rather than CSV-shaped output.
     pub fn default_json() -> Self {
         Self {
             config: CompactConfig::default(),
@@ -86,9 +46,8 @@ impl CompactionStage {
         }
     }
 
-    /// Markdown-KV formatter, default config — opt-in trade of tokens
-    /// for model read accuracy (field names repeat per row, but
-    /// format-comprehension benchmarks favor KV over CSV).
+    /// Markdown-KV formatter, default config — opt-in trade of tokens for model read accuracy
+    /// (field names repeat per row, but format-comprehension benchmarks favor KV over CSV).
     pub fn default_markdown_kv() -> Self {
         Self {
             config: CompactConfig::default(),
@@ -96,15 +55,12 @@ impl CompactionStage {
         }
     }
 
-    /// Formatter names accepted by [`Self::from_format_name`]. The
-    /// single source of truth for caller error messages (the PyO3
-    /// bridge renders this list) — keep in sync with the match below.
+    /// Formatter names accepted by [`Self::from_format_name`]. The single source of truth for caller
+    /// error messages (the PyO3 bridge renders this list) — keep in sync with the match below.
     pub const SUPPORTED_FORMAT_NAMES: &'static [&'static str] =
         &["csv-schema", "json", "markdown-kv"];
 
-    /// Look up a preset by its formatter name (see
-    /// [`Self::SUPPORTED_FORMAT_NAMES`]). `None` for unknown names —
-    /// callers own the fallback/error policy.
+    /// Look up a preset by its formatter name (see [`Self::SUPPORTED_FORMAT_NAMES`]). `None` for unknown names — callers own the fallback/error policy.
     pub fn from_format_name(name: &str) -> Option<Self> {
         match name {
             "csv-schema" => Some(Self::default_csv_schema()),
@@ -114,15 +70,7 @@ impl CompactionStage {
         }
     }
 
-    /// Run the stage end-to-end: compact + format. Returns the
-    /// [`Compaction`] tree (so callers can inspect kept/total row
-    /// counts) alongside the rendered bytes.
-    ///
-    /// A DECLINED compaction (`Untouched`) short-circuits with an empty
-    /// render (PERF-5): the CSV formatter used to serialize the ENTIRE
-    /// original array for a render every caller immediately discarded —
-    /// all of them gate on `was_compacted()` / `is_decoder_verifiable()`
-    /// before using the bytes.
+    /// Run the stage end-to-end: compact + format.
     pub fn run(&self, items: &[serde_json::Value]) -> (Compaction, String) {
         let c = compact(items, &self.config);
         if !c.was_compacted() {
@@ -146,11 +94,8 @@ impl std::fmt::Debug for CompactionStage {
 mod tests {
     use super::*;
 
-    /// TEST-18: `SUPPORTED_FORMAT_NAMES` and `from_format_name` are a
-    /// keep-in-sync pair (the FFI error message renders the constant;
-    /// the constructor consults the match). Every advertised name must
-    /// construct — and the constructed stage must self-report the SAME
-    /// name — while unknown names stay `None`.
+    /// TEST-18: `SUPPORTED_FORMAT_NAMES` and `from_format_name` are a keep-in-sync pair
+    /// (the FFI error message renders the constant; the constructor consults the match).
     #[test]
     fn supported_format_names_and_from_format_name_stay_in_sync() {
         for name in CompactionStage::SUPPORTED_FORMAT_NAMES {

@@ -55,27 +55,18 @@ from .error_detection import content_has_strong_error_indicators
 from .router_cache import CacheKey
 
 if TYPE_CHECKING:
-    # Annotation-only (this is a TRUE leaf module — no runtime cycle): the
-    # concrete config the gate chain reads and the frozen retrieval-feedback
-    # hints dataclass it consumes.
+    # Annotation-only (this is a TRUE leaf module — no runtime cycle): the concrete config
+    # the gate chain reads and the frozen retrieval-feedback hints dataclass it consumes.
     from ..cache.retrieval_feedback import FeedbackHints
     from .content_router import ContentRouterConfig
 
-# Engine-emitted retrieval hints always carry a real 12/24-hex hash; content
-# that merely talks about the grammar (docs, this repo's own source read back
-# as tool output) uses placeholders and never matches.
+# Engine-emitted retrieval hints always carry a real 12/24-hex hash; content that merely talks about the
+# grammar (docs, this repo's own source read back as tool output) uses placeholders and never matches.
 _RETRIEVE_HINT_PATTERN = re.compile(
     r"Retrieve (?:more|original): hash=[0-9a-fA-F]{12}(?:[0-9a-fA-F]{12})?(?![0-9a-fA-F])"
 )
 
-# Genuine analysis verbs (and analysis-question phrases) only, matched on
-# word boundaries (COR-16). The previous substring scan over a much broader
-# set — fix/error/bug/issue/problem/wrong/broken/improve/"clean up"/
-# security/vulnerability — tripped on virtually every coding-agent message
-# ("fix" matched *prefix*, "error" matched any mention), so analysis_intent
-# was ~always true and SOURCE_CODE was ~never compressed (protection 3).
-# refactor/optimize stay: precise code-work verbs with low ambient
-# frequency whose requests need full code fidelity.
+# Genuine analysis verbs (and analysis-question phrases) only, matched on word boundaries (COR-16). The previous substring scan over a much broader set.
 _ANALYSIS_INTENT_KEYWORDS: tuple[str, ...] = (
     "analyze",
     "analyse",
@@ -99,22 +90,12 @@ _ANALYSIS_INTENT_PATTERN = re.compile(
     + r")\b"
 )
 
-# Roles whose message content is a tool output. OpenAI's current API uses
-# ``tool``; the legacy function-calling API uses ``function`` (name carried on
-# ``message["name"]``, no tool_call_id). Mirrors cross_message_dedup's
-# eligibility set so the router's protection gates (excluded tools, error
-# outputs, tool bias) fire for BOTH shapes (COR-48).
+# Roles whose message content is a tool output. Mirrors cross_message_dedup's eligibility set so the
+# router's protection gates (excluded tools, error outputs, tool bias) fire for BOTH shapes (COR-48).
 _TOOL_ROLES = frozenset({"tool", "function"})
 
-# Retrieval-loop guard (P0-5): the CCR retrieval tool's outputs ARE the
-# originals the engine previously compressed. Compressing them again would
-# mint a fresh retrieval marker for content the model just asked to see —
-# a compress → retrieve → compress ping-pong. These names are excluded
-# UNCONDITIONALLY: unioned into every effective exclusion set (even a
-# caller-supplied ``exclude_tools`` override, including ``set()``) and
-# immune to the read-protection-window age decay. Covers both retrieval
-# channels: direct tool injection (``furl_retrieve``) and the MCP server
-# under any server alias (``mcp__<server>__furl_retrieve``).
+# Retrieval-loop guard (P0-5): the CCR retrieval tool's outputs ARE the originals the engine compressed. Compressing them again
+# would mint a fresh retrieval marker for content the model just asked to see — a compress → retrieve → compress ping-pong.
 ALWAYS_EXCLUDE_TOOLS: frozenset[str] = frozenset(
     {
         CCR_TOOL_NAME,
@@ -220,10 +201,8 @@ class Compressible:
     detection: DetectionResult | None = None
 
 
-# The gate chain resolves every message to exactly one of seven dispositions.
-# The five empty variants carry no data, so they are shared module singletons:
-# Pass-1 resolves one per message and must not allocate for the common lanes.
-# ``ProtectedMsg`` / ``Compressible`` hold per-message payload and stay fresh.
+# The gate chain resolves every message to exactly one of seven dispositions. The five empty variants carry no data,
+# so they are shared module singletons: Pass-1 resolves one per message and must not allocate for the common lanes.
 MessageDisposition = (
     Frozen | ProtectedMsg | Small | NonString | ContentBlocks | AlreadyCompressed | Compressible
 )
@@ -271,9 +250,8 @@ def classify_message(
     result rides out on ``Compressible.detection`` so the engine can skip
     its own detect (PERF-2c).
     """
-    # Skip frozen messages (in provider's prefix cache).
-    # Modifying these would invalidate the cache, replacing a 90%
-    # read discount with a 25% write penalty (Anthropic).
+    # Skip frozen messages (in provider's prefix cache). Modifying these would invalidate
+    # the cache, replacing a 90% read discount with a 25% write penalty (Anthropic).
     if index < frozen_message_count:
         return _FROZEN
 
@@ -286,12 +264,8 @@ def classify_message(
 
     # Handle list content (Anthropic format with content blocks)
     if isinstance(content, list):
-        # Message-level exclusion for OpenAI-style tool/function
-        # messages whose content is a parts LIST (COR-48): the block
-        # walker checks exclusion only via block-level
-        # ``tool_use_id``, which this shape doesn't carry — without
-        # this gate, excluded-tool protection vanished for it.
-        # Honors the same age-based decay as the string path.
+        # Message-level exclusion for OpenAI-style tool/function messages whose content is a parts LIST (COR-48): the block walker checks exclusion
+        # only via block-level ``tool_use_id``, which this shape doesn't carry — without this gate, excluded-tool protection vanished for it.
         if role in _TOOL_ROLES:
             tool_call_id = message.get("tool_call_id", "")
             tool_name = tool_name_map.get(tool_call_id, "") or str(message.get("name", "") or "")
@@ -311,12 +285,8 @@ def classify_message(
     if not isinstance(content, str):
         return _NON_STRING
 
-    # Skip OpenAI-style tool/function messages for excluded tools
-    # BUT: allow compression of old excluded-tool outputs beyond the
-    # adaptive protection window (age-based decay). Legacy
-    # function-role messages carry no tool_call_id — their name rides
-    # on ``message["name"]`` (COR-48), which also backstops tool-role
-    # messages whose call id was never mapped.
+    # Skip OpenAI-style tool/function messages for excluded tools BUT: allow compression of old excluded-tool outputs beyond the adaptive protection window (age-based decay). Legacy
+    # function-role messages carry no tool_call_id — their name rides on ``message["name"]`` (COR-48), which also backstops tool-role messages whose call id was never mapped.
     if role in _TOOL_ROLES:
         tool_call_id = message.get("tool_call_id", "")
         tool_name = tool_name_map.get(tool_call_id, "") or str(message.get("name", "") or "")
@@ -325,13 +295,10 @@ def classify_message(
             tool_name and is_tool_excluded(tool_name, exclude_tools)
         ):
             if messages_from_end <= read_protection_window or _is_retrieval_tool(tool_name):
-                # Recent — protect as before. Retrieval-tool outputs
-                # are protected regardless of age: recompressing them
-                # re-opens the compress→retrieve→compress loop.
+                # Recent — protect as before. Retrieval-tool outputs are protected regardless of age: recompressing them re-opens the compress→retrieve→compress loop.
                 return ProtectedMsg("router:excluded:tool", "excluded_tool")
-            # Old excluded-tool output — fall through to compression
-            # (the LLM is unlikely to need exact content from this far back,
-            # and CCR provides retrieval if it does)
+            # Old excluded-tool output — fall through to compression (the LLM is unlikely to
+            # need exact content from this far back, and CCR provides retrieval if it does)
         # Look up tool-specific compression bias for tool/function messages
         bias = get_tool_bias(tool_name) if tool_name else 1.0
 
@@ -348,12 +315,8 @@ def classify_message(
         # Skip small content
         return _SMALL
 
-    # Protection: failed tool calls / error outputs stay verbatim.
-    # The model needs exact tracebacks to recover.
-    # Strong (>=2 distinct indicators) match only — a single
-    # keyword false-positives on benign outputs that mention
-    # errors. Above the size cap, fall through — LogCompressor
-    # preserves error lines in big logs.
+    # Protection: failed tool calls / error outputs stay verbatim. The model needs exact tracebacks to recover. Strong
+    # (>=2 distinct indicators) match only — a single keyword false-positives on benign outputs that mention errors.
     if (
         config.protect_error_outputs
         and role in _TOOL_ROLES
@@ -362,24 +325,12 @@ def classify_message(
     ):
         return ProtectedMsg("router:protected:error_output", "error_protected")
 
-    # Compression pinning: if this message was already compressed
-    # (carries a real engine-emitted CCR retrieval marker), skip
-    # recompression. Recompressing would change byte content and
-    # break provider prefix caching with no meaningful further
-    # reduction. Strict grammar match — raw content that merely
-    # MENTIONS the marker text (docs, or this engine's own source
-    # read back as a tool output) is not pinned and stays
-    # compressible. Checked BEFORE detection (PERF-2a): a pinned
-    # message ships verbatim regardless of its content type, so the
-    # detect round-trip for it bought nothing.
+    # Compression pinning: if this message was already compressed (carries a real engine-emitted CCR retrieval marker), skip recompression. Strict grammar match
+    # — raw content that merely MENTIONS the marker text (docs, or this engine's own source read back as a tool output) is not pinned and stays compressible.
     if _looks_like_ccr_output(content):
         return _ALREADY_COMPRESSED
 
-    # Detect content type for protection decisions — LAZY (PERF-2b):
-    # the Rust FFI round-trip runs only when a live gate consumes the
-    # result. With the recent-code window not covering this message,
-    # analysis protection unarmed, AND the feedback lane inert, no gate
-    # reads it — the engine detects once inside compress() instead.
+    # Detect content type for protection decisions LAZY (PERF-2b): the Rust FFI round-trip runs only when a live gate consumes the result.
     detection: DetectionResult | None = None
     recent_code_live = protect_recent > 0 and messages_from_end <= protect_recent
     analysis_live = protect_analysis and analysis_intent
@@ -395,11 +346,8 @@ def classify_message(
         if analysis_live and is_code:
             return ProtectedMsg("router:protected:analysis_context", "analysis_ctx")
 
-    # Retrieval-feedback protection (Engine P2-13, opt-in): a shape
-    # the model keeps retrieving from the CCR store gets gentler
-    # routing — skip compression entirely at sustained pressure, or
-    # fold a keep-more multiplier into the bias below. Flag off
-    # (default) never consults the aggregator: byte-identical routing.
+    # Retrieval-feedback protection (Engine P2-13, opt-in): a shape the model keeps retrieving from the CCR store gets
+    # gentler routing — skip compression entirely at sustained pressure, or fold a keep-more multiplier into the bias below.
     feedback_multiplier = 1.0
     if config.enable_retrieval_feedback and role in _TOOL_ROLES:
         if detection is None:
@@ -419,9 +367,8 @@ def classify_message(
     if feedback_multiplier != 1.0:
         msg_bias *= feedback_multiplier
 
-    # The key carries the per-request bias and a length guard — see
-    # ``_result_cache_key`` (COR-18). Any detection a live gate already
-    # paid for rides along so compress() never re-detects (PERF-2c).
+    # The key carries the per-request bias and a length guard — see ``_result_cache_key`` (COR-18).
+    # Any detection a live gate already paid for rides along so compress() never re-detects (PERF-2c).
     return Compressible(
         bias=msg_bias,
         content_key=result_cache_key(content, msg_bias),
@@ -446,9 +393,8 @@ def build_tool_name_map(messages: list[dict[str, Any]]) -> dict[str, str]:
         if msg.get("role") != "assistant":
             continue
 
-        # OpenAI format: tool_calls array. `or []`: the key is
-        # present-but-None in openai-python model_dump() output —
-        # iterating None would TypeError and fail-open every request.
+        # OpenAI format: tool_calls array. `or []`: the key is present-but-None in openai-python
+        # model_dump() output — iterating None would TypeError and fail-open every request.
         for tc in msg.get("tool_calls") or []:
             if isinstance(tc, dict):
                 tc_id = tc.get("id", "")

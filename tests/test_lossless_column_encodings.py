@@ -23,19 +23,13 @@ import json
 
 from furl_ctx.transforms.content_router import ContentRouter, ContentRouterConfig
 
-# TEST-19: helpers come from the shared fixtures module — importing them
-# from a SIBLING TEST FILE (tests.test_ccr_recovery_invariant) coupled this
-# suite to that file's internals and executed its module top level on import.
+# TEST-19: helpers come from the shared fixtures module — importing them from a SIBLING TEST FILE
+# (tests.test_ccr_recovery_invariant) coupled this suite to that file's internals and executed its module top level on import.
 from tests._fixtures import canonical_repr as _repr
 from tests._fixtures import decode_csv_schema_into as _decode_csv_schema
 
-# These tests assert the LOSSLESS CSV-schema rendering directly (every
-# row encoded in the output, `isinstance(parsed, str)`). The production
-# default is route-by-min-tokens, which would ship the fewer-token render
-# — for several of these shapes that is the lossy/dropped render, flipping
-# the assertions. Force LosslessFirst so this suite exercises the lossless
-# encoder/decoder in isolation, as intended. (The recovery invariant under
-# the default policy is covered by tests/test_ccr_recovery_invariant.py.)
+# These tests assert the LOSSLESS CSV-schema rendering directly (every row encoded in the output, `isinstance(parsed, str)`). The production default is
+# route-by-min-tokens which would ship the fewer-token render Force LosslessFirst so this suite exercises the lossless encoder/decoder in isolation, as intended.
 _LOSSLESS_FIRST = ContentRouterConfig(smart_crusher_routing_policy="lossless-first")
 
 
@@ -97,11 +91,7 @@ def test_constant_fold_does_not_fire_on_varying_columns() -> None:
 
 
 def test_ditto_marks_round_trip_consecutive_repeats() -> None:
-    # Shape mirrors the real rg-search benchmark capture: `path` repeats
-    # in consecutive runs (matches grouped per file), other columns vary.
-    # Distinct, NON-affix-sharing path tokens per run (so the column pins
-    # ditto in isolation and the cross-row affix fold finds nothing to
-    # share). `lines` is per-row unique; ditto fires on the repeating path.
+    # Distinct, NON-affix-sharing path tokens per run (so the column pins ditto in isolation and the cross-row affix fold finds nothing to share).
     runs = ["zeta", "Quark9", "moon!", "Vault", "iris7", "Omega"]
     items = [
         {
@@ -151,11 +141,8 @@ def test_repeated_numeric_cells_ditto_and_round_trip() -> None:
 
 
 def test_arith_fold_monotone_counter_round_trips() -> None:
-    # Shape mirrors the real `ping` benchmark capture: the monotone
-    # icmp_seq counter is an exact arithmetic progression and folds into
-    # the declaration as `icmp_seq:int=0+1`; rows carry only the real
-    # varying latency. Reconstruction regenerates every counter value
-    # from the row index — exact, not verbatim.
+    # Shape mirrors the real `ping` benchmark capture: the monotone icmp_seq counter is an exact arithmetic progression and folds into the declaration as
+    # `icmp_seq:int=0+1`; rows carry only the real varying latency. Reconstruction regenerates every counter value from the row index — exact, not verbatim.
     items = [
         {
             "bytes": 64,
@@ -181,11 +168,8 @@ def test_arith_fold_monotone_counter_round_trips() -> None:
 
 
 def test_iso_delta_timestamps_round_trip() -> None:
-    # Shape mirrors real structured logs: a strict-shape ISO-8601
-    # timestamp column (mixed timezone spellings, non-monotone order, a
-    # duplicate) plus low-entropy content columns. The column declares
-    # `ts:string~`, ships the first timestamp verbatim and second-deltas
-    # after; reconstruction is pure integer civil-calendar math.
+    # Shape mirrors real structured logs: a strict-shape ISO-8601 timestamp column (mixed timezone spellings, non-monotone order, a duplicate) plus low-entropy content
+    # columns. The column declares `ts:string~`, ships the first timestamp verbatim and second-deltas after; reconstruction is pure integer civil-calendar math.
     tzs = ["+02:00", "+02:00", "-07:00", "Z", "+02:00", "-04:00"]
     items = [
         {
@@ -221,10 +205,7 @@ def test_iso_delta_z_and_offset_spellings_survive() -> None:
 
 
 def test_fractional_second_timestamps_stay_verbatim() -> None:
-    # Non-strict shapes (fractional seconds) must NOT delta-encode —
-    # every value stays verbatim in the output and still round-trips.
-    # Constant columns keep the array on the lossless tabular route so
-    # the timestamp column's behavior is what the test isolates.
+    # Non-strict shapes (fractional seconds) must NOT delta-encode — every value stays verbatim in the output and still round-trips.
     items = [
         {
             "ts": f"2026-06-11T21:02:{i:02d}.{i:03d}+02:00",
@@ -237,9 +218,8 @@ def test_fractional_second_timestamps_stay_verbatim() -> None:
     ]
     text = _compress_to_text(items)
     decl = text.split("\n", 1)[0]
-    # The fractional second poisons the strict ISO-delta path: the column
-    # must NOT be `ts:string~`. It MAY be cross-row affix-folded (lossless),
-    # so the invariant we assert is exact round-trip, not verbatim presence.
+    # The fractional second poisons the strict ISO-delta path: the column must NOT be `ts:string~`. It MAY be
+    # cross-row affix-folded (lossless), so the invariant we assert is exact round-trip, not verbatim presence.
     assert "ts:string~" not in decl, decl
     recovered = _reconstruct(text)
     missing = {_repr(it) for it in items} - recovered
@@ -247,10 +227,7 @@ def test_fractional_second_timestamps_stay_verbatim() -> None:
 
 
 def test_dict_encoding_low_cardinality_column_round_trips() -> None:
-    # Shape mirrors the real git-log benchmark capture: a small set of
-    # authors repeats NON-consecutively across many rows (ditto cannot
-    # catch that), each subject is distinct. The dictionary line carries
-    # each distinct author verbatim exactly once; rows carry indexes.
+    # The dictionary line carries each distinct author verbatim exactly once; rows carry indexes.
     authors = ["Alice Cooper", "Bob the Builder", "Carol Danvers", "Dan Abnett"]
     items = [
         {
@@ -284,11 +261,7 @@ def test_dict_encoding_values_with_commas_round_trip() -> None:
 
 
 def test_all_distinct_string_column_never_dict_encodes() -> None:
-    # An all-distinct column gains nothing from dictionary INDEXES — it
-    # must never be `__dict:` encoded (that would be a fake low-cardinality
-    # win). The shared path root / extension IS legitimate cross-row affix
-    # structure, which the engine may fold losslessly; the honest gate is
-    # "no dictionary encoding" + exact round-trip.
+    # An all-distinct column gains nothing from dictionary INDEXES — it must never be `__dict:` encoded (that would be a fake low-cardinality win).
     items = [
         {"path": f"src/pkg_{i}/module_{i}.py", "match": f"def handler_{i}():"} for i in range(40)
     ]
@@ -301,10 +274,8 @@ def test_all_distinct_string_column_never_dict_encodes() -> None:
 
 
 def test_decimal_scale_fold_round_trips() -> None:
-    # Shape mirrors the real `ping` benchmark capture: after const +
-    # arith folds the rows are just the latency column; the decimal
-    # scale-fold renders `0.053` as `53` (`time_ms:float%3`).
-    # Decode is pure string manipulation — exact value reconstruction.
+    # Shape mirrors the real `ping` benchmark capture: after const + arith folds the rows are just the latency column; the decimal
+    # scale-fold renders `0.053` as `53` (`time_ms:float%3`). Decode is pure string manipulation — exact value reconstruction.
     items = [
         {
             "bytes": 64,

@@ -39,16 +39,8 @@ _BASE64URL_256K = ("aB3-xY7z_Qw9-" * ((256 * 1024) // 13 + 1))[: 256 * 1024]
 # ``sk-`` rule wherever it sits, so it does not depend on a key name.
 _SECRET = "sk-" + "abcdefghijklmnopqrstuvwx"
 
-# ReDoS bound: RELATIVE, not absolute wall-clock. An absolute perf_counter bound
-# (the old ``_FAST = 1.0``) encodes the machine's speed into the test, so it flakes
-# on a shared or loaded box even though the ReDoS is already fixed. The property is
-# pinned instead as a RATIO. Slice-before-redact means every preview/log surface
-# redacts only a bounded WINDOW, so a 256 KB body must cost no more than redacting
-# that one window; the adversarial body and a lone window do ~equal work. Removing
-# the slice makes the body O((body/window)^2): measured ~68x more at 32 KB and
-# ~4000x at 256 KB, while a correct impl measured 0.93-1.12x here (idle AND under
-# 2x-core CPU load). k=10 sits ~9x above that correct ratio yet ~400x below the
-# regression, so the test fails hard on a real ReDoS but never on a slow machine.
+# ReDoS bound: RELATIVE, not absolute wall-clock. An absolute perf_counter bound (the old ``_FAST = 1.0``) encodes
+# the machine's speed into the test, so it flakes on a shared or loaded box even though the ReDoS is already fixed.
 _REDOS_RATIO_K = 10
 
 # Redaction windows, imported from production so the baseline tracks the real
@@ -97,9 +89,8 @@ def test_cross_store_preview_is_fast_on_large_base64() -> None:
 
 
 def test_store_retrieve_large_body_is_fast_end_to_end() -> None:
-    # retrieve() calls the full-body log-redact unconditionally on every hit, so a
-    # 256KB body must cost ~the same as retrieving a window-sized one (the redaction
-    # is sliced); a removed slice makes retrieve() quadratic in the body length.
+    # retrieve() calls the full-body log-redact unconditionally on every hit, so a 256KB body must cost ~the same as
+    # retrieving a window-sized one (the redaction is sliced); a removed slice makes retrieve() quadratic in the body length.
     store = CompressionStore(max_entries=10)
     h = store.store(original=_BASE64URL_256K, compressed="<<ccr:x>>")
     h_window = store.store(original=_BASE64URL_256K[:_LOG_WINDOW], compressed="<<ccr:w>>")
@@ -156,10 +147,7 @@ def test_mcp_previews_fast_and_fail_closed(make) -> None:
     # A needle deep after the secret so the match window is far from the head —
     # proves _match_preview does not redact the whole original to locate it.
     needle = "xY7z".lower()
-    # Both previews slice to a bounded window before redacting; a 256KB body must
-    # cost no more than k x one window of the same run. The match baseline window
-    # still contains the needle, so its redaction path matches the full-body call
-    # except for the linear find() over the original.
+    # Both previews slice to a bounded window before redacting; a 256KB body must cost no more than k x one window of the same run.
     match_window = 2 * (_MATCH_PREVIEW_RADIUS + _PREVIEW_REDACT_MARGIN) + len(needle)
     _assert_redact_window_bounded(
         lambda s: _match_preview(s, needle), content, match_window, "match preview"
@@ -179,17 +167,8 @@ def test_redact_primitive_itself_unchanged_on_small_input() -> None:
     assert _SECRET not in out and "[REDACTED]" in out
 
 
-# ── review F4: _match_preview window-edge straddle (partial-secret leak) ─────
-#
-# The first slice-before-redact cut of ``_match_preview`` redacted ONLY the
-# bare radius window (no margin, unlike the list/cross/log surfaces). A
-# prefix-anchored secret straddling a window edge then leaked a fragment:
-#   * FAR edge — the window truncated an ``sk-`` key below the 12-char body
-#     minimum, so the rule no-matched and the head (``sk-`` + entropy) leaked;
-#   * NEAR edge — the ``sk-`` anchor sat before the window start, so the
-#     un-anchored body tail inside the window leaked.
-# The fix redacts a MARGIN-widened window (straddling secrets are seen whole)
-# and re-finds the needle inside the REDACTED text before display-windowing.
+# review F4: _match_preview window-edge straddle (partial-secret leak) ───── The first slice-before-redact cut of ``_match_preview`` redacted ONLY
+# the bare radius window (no margin, unlike the list/cross/log surfaces). A prefix-anchored secret straddling a window edge then leaked a fragment
 
 _STRADDLE_BODY = "Zq7Rw2Xt9Kp4Mn6B"  # 16 entropy chars (>= the 12-char rule floor)
 _STRADDLE_SECRET = "sk-" + _STRADDLE_BODY
@@ -200,11 +179,7 @@ _STRADDLE_FRAGMENTS = (_STRADDLE_SECRET, _STRADDLE_BODY[:5], _STRADDLE_BODY[-6:]
 
 
 def test_match_preview_masks_secret_straddling_far_edge() -> None:
-    # Secret STARTS inside the display window; its tail crosses the far edge
-    # (only 8 of its chars fit). Pre-fix, the redactor saw just "sk-Zq7Rw" —
-    # below the rule's 12-char body floor → no match → the head LEAKED. The
-    # secret is space-delimited (real content gives the ``\b`` the sk- rule
-    # anchors on); the leak was purely the window truncation.
+    # Secret STARTS inside the display window; its tail crosses the far edge (only 8 of its chars fit).
     from furl_ctx.ccr.mcp_server import _MATCH_PREVIEW_RADIUS, _match_preview
 
     prefix = "A" * 100
@@ -225,10 +200,8 @@ def test_match_preview_masks_secret_straddling_far_edge() -> None:
 
 
 def test_match_preview_masks_secret_straddling_near_edge() -> None:
-    # Secret's ``sk-`` anchor sits BEFORE the display-window start; its body
-    # tail extends into the window. Pre-fix, the redactor saw only the
-    # un-anchored 14-char tail → no rule matched → the tail LEAKED. Space-
-    # delimited for the same ``\b`` reason as the far-edge twin.
+    # Secret's ``sk-`` anchor sits BEFORE the display-window start; its body tail extends into the window.
+    # Pre-fix, the redactor saw only the un-anchored 14-char tail → no rule matched → the tail LEAKED.
     from furl_ctx.ccr.mcp_server import _MATCH_PREVIEW_RADIUS, _match_preview
 
     head = "B" * 100 + " "

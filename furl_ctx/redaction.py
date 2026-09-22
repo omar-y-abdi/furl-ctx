@@ -147,82 +147,24 @@ FURL_REDACT_PATTERNS_ENV = "FURL_REDACT_PATTERNS"
 # Wall-clock budget for ONE redaction pass, and the env var that tunes it.
 FURL_REDACT_BUDGET_ENV = "FURL_REDACT_BUDGET_SECONDS"
 
-# Derivation (do NOT retune this blind — the numbers below are what it is for).
-#
-# LEGITIMATE COST. A full built-in redaction pass over REALISTIC content (logs,
-# code, JSON, hex, natural base64) is LINEAR, min-of-N over one tight
-# back-to-back sweep on a box at load average 17.63 — a CONTENDED box, so the
-# rate is conservative:
-#
-#     8 MiB 0.774 s | 16 MiB 1.621 s | 32 MiB 3.121 s | 64 MiB 6.157 s
-#     => ~0.096 s/MiB, exponent 1.00.
-#
-# That rate is machine- and load-dependent (re-measured at 0.116 s/MiB on the
-# same box at load 28, and 0.235 s/MiB at load 36), so the RATIO below, not the
-# absolute second count, is what makes this number portable.
-#
-# ADVERSARIAL COST, corrected. An earlier revision of this comment cited 0.101 s
-# at 64 KB and a 5 s crossing at ~0.5 MB. Those figures were measured on a
-# SPARSELY seeded corpus (one ``-eyJ`` per ~124 characters) and were about 25x
-# too low, which mattered because this comment tells the next person not to
-# retune blind and then handed them wrong data. Cost scales with SEEDING DENSITY
-# (number of boundary-anchored ``eyJ`` starts) as well as input size. Measured at
-# 64 KB, same sweep, against a benign anchor of 0.116 s/MiB taken alongside:
-#
-#     gap=120  0.100 s (0.9x)   gap=30  0.407 s (3.5x)   gap=4  1.974 s (17.1x)
-#     gap=60   0.194 s (1.7x)   gap=12  1.253 s (10.8x)  gap=1  3.188 s (27.6x)
-#
-# At the worst density the quadratic is unmistakable: 16 KB 0.165 s, 32 KB
-# 0.590 s, 64 KB 2.635 s, 128 KB 10.656 s — exponent 2.02, i.e. 4x the cost for
-# 2x the data. The 5.0 s budget is therefore crossed at roughly 70-90 KB of
-# worst-case input, NOT at 0.5 MB.
-#
-# WHY 5.0 s IS STILL RIGHT, and it is a stronger argument than before because the
-# separation is WIDER, not narrower. Legitimate content: 5.0 s covers ~52 MiB at
-# the 0.096 s/MiB rate (~21 MiB at the pessimistic 0.235 s/MiB), and the hook's
-# own ``FURL_HOOK_MAX_COMPRESS_BYTES`` reroute threshold defaults to 5 MB, whose
-# expected cost is ~0.5-1.2 s. Adversarial content trips at ~70-90 KB. So the
-# budget sits between "a 5 MB legitimate blob costs about a fifth of it" and "a
-# 90 KB attack exhausts it" — two orders of magnitude of separation, with the
-# budget nowhere near either boundary.
-#
-# UPPER BOUND, and why the ceiling below exists. The shipped hooks.json
-# PostToolUse timeout is 30 s. The redactor runs up to THREE times per hook
-# invocation, not twice: the extracted field and a Bash-shaped preserved stderr
-# (both budgeted here), plus a THIRD pass inside ``compress()`` at
-# ``compress.py:613``, which is NOT budgeted. That third pass is bounded in
-# practice only because content that would blow up there was already withheld
-# here — it re-scans the same bytes, and redaction does not remove the ``-eyJ``
-# runs that make them expensive, so it costs about the same as pass one. Worst
-# case is therefore ~3x the budget, which is why the budget is CLAMPED below:
-# 3 x 9.0 s leaves a little under 30 s, and 3 x 5.0 s leaves >=15 s of headroom
-# for compression and the emit.
+# Default redaction budget is 5 s: legitimate scans are near-linear while adversarial dense token seeds become quadratic
+# around tens of KiB. Clamp overrides because one hook invocation may perform three redaction passes inside the host timeout.
 DEFAULT_REDACT_BUDGET_SECONDS: Final = 5.0
 
-# Hard ceiling on an operator-supplied budget. Without it, the parser accepted
-# any large float while the real safe ceiling is ~9 s (see the 3x argument
-# above): an operator setting 12 or 15 s would believe they were comfortably
-# under the 30 s host timeout and would silently re-open the fail-open this
-# module exists to close. That is the same "a typo must not mean no budget"
-# class already guarded at zero and negative, left open at the other end.
+# Hard ceiling on an operator-supplied budget. That is the same "a typo must not mean
+# no budget" class already guarded at zero and negative, left open at the other end.
 MAX_REDACT_BUDGET_SECONDS: Final = 9.0
 
-# Smallest interval a restored caller timer may be re-armed with: ``setitimer(0.0)``
-# DISARMS, so a caller deadline that elapsed during our pass must be re-armed just
-# above zero to fire immediately rather than never. Mirrors
-# ``furl_ctx.ccr.regex_budget._MIN_RESTORED_TIMER`` (review B7).
+# Smallest interval a restored caller timer may be re-armed with: ``setitimer(0.0)`` DISARMS, so a caller
+# deadline that elapsed during our pass must be re-armed just above zero to fire immediately rather than never.
 _MIN_RESTORED_TIMER: Final = 1e-6
 
 # Attribute stamped on each per-call SIGALRM handler so "is this one of ours?" stays
 # answerable now that the handler is built per call rather than shared at module level.
 _WATCHDOG_MARKER: Final = "_furl_redaction_watchdog"
 
-# Bound on restore attempts. TWO is the most the signal semantics can require: the
-# itimer is one-shot and every attempt disarms it first, so at most one already-pending
-# alarm can interrupt, and it is consumed by doing so. The slack is there so that a
-# repeating fault becomes a WARNING rather than a hang -- an unbounded ``while True``
-# would spin forever on any error that does not clear, which is a worse failure than
-# giving up loudly inside a security control.
+# Bound on restore attempts. TWO is the most the signal semantics can require: the itimer is one-shot and every
+# attempt disarms it first, so at most one already-pending alarm can interrupt, and it is consumed by doing so.
 _RESTORE_ATTEMPTS: Final = 8
 
 # Opt OUT of the built-in credential patterns (audit Crit-4 / B3). They are ON by
@@ -231,58 +173,17 @@ FURL_REDACT_BUILTINS_ENV = "FURL_REDACT_BUILTINS"
 
 _MARKER_PREFIX = "[REDACTED:"
 
-# ── PEM/OpenSSH private-key blocks ──────────────────────────────────────────
-#
-# The WHOLE block goes — armor AND the base64 key material between it. Matching
-# only the ``-----BEGIN … PRIVATE KEY-----`` armor line left every byte of the
-# actual secret in the compressed content and in the CCR store while
-# ``[REDACTED:private-key]`` asserted the opposite; the armor is the ANCHOR, not
-# the credential. This mirrors ``compression_store._PEM_PRIVATE_KEY_RE``, which
-# has always taken the whole block on the (narrower) retrieval-log surface.
-#
-# ``[A-Z0-9 ]*`` before ``PRIVATE KEY`` admits every label in the wild — bare
-# PKCS#8, ``RSA``/``EC``/``DSA``/``OPENSSH``, and ``ENCRYPTED`` — and the
-# optional `` BLOCK`` suffix admits PGP, whose real armor is ``BEGIN PGP PRIVATE
-# KEY BLOCK-----`` (the old alternation listed ``PGP `` but could never match it,
-# because it expected ``PGP PRIVATE KEY-----``). Public material (``BEGIN
-# CERTIFICATE``, ``BEGIN PUBLIC KEY``) has no ``PRIVATE KEY`` and never matches.
+# PEM/OpenSSH private-key blocks ────────────────────────────────────────── The WHOLE block goes Matching only the ``-----BEGIN … PRIVATE KEY-----``
+# armor line left every byte of the actual secret in the compressed content and in the CCR store while ``[REDACTED:private-key]`` asserted the opposite;
 _PEM_ARMOR_BEGIN = r"-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
 _PEM_ARMOR_END = r"-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
 
-# Block interior. ``(?:[^-]|-(?!----))`` is "any char that does not start a
-# 5-hyphen armor run", which is both CORRECT (a base64 body and the RFC-1421
-# ``Proc-Type``/``DEK-Info`` headers of an encrypted traditional PEM contain no
-# ``-----``) and the reason this pattern is cheap on adversarial input: a scan
-# launched from a BOGUS armor cannot run past the next armor, so total work stays
-# linear in the payload instead of (armor count x bound). A plain ``[\s\S]*?``
-# interior costs 12 s on 310 KB of packed bare armors; this costs 5 ms. It spans
-# real newlines and the two-char ``\n`` escapes of a JSON-embedded key alike. The
-# 100k bound is belt-and-braces on top of that guard: ~30x a 4096-bit RSA PEM.
-# A block that somehow exceeds it falls to the truncated branch below, which
-# still takes the armor and the body's base64 runs — less than the whole block,
-# not nothing. Pinned by ``test_block_body_bound_falls_back_to_truncated_branch``.
+# PEM block interiors stop at the next five-hyphen armor run and cap at 100k characters. This
+# keeps adversarial repeated armor linear while covering real encrypted/private-key bodies.
 _PEM_BLOCK_BODY = r"(?:[^-]|-(?!----)){0,100000}"
 
-# Truncated-block fallback. Tool output is routinely cut mid-payload — that is
-# why this library exists — and a block whose ``-----END`` never arrived would
-# otherwise match NOTHING, losing even the header marker the old pattern gave.
-# So: armor plus any run of base64 lines hanging off it.
-#
-# The FIRST run's separator is optional (review F-1): a body that abuts the armor
-# with no separator at all, or with only a space or a tab, is a real shape once
-# newlines have been stripped (single-line env-var keys) and it leaked while every
-# run required a leading newline. Later runs still require one, so multi-line
-# precision is untouched. Separators are real newlines or the two-char ``\n``
-# escapes of a JSON-embedded key.
-#
-# The ``{16,}`` floor keeps it off prose — an English word beside an armor is far
-# short of 16 unbroken base64 characters — so the branch redacts key material,
-# not the paragraph that happens to follow. The one disclosed cost of the F-1
-# widening: prose abutting the armor with NO separator whose first word is 16+
-# unbroken alphanumerics is eaten, at most that one run.
-#
-# Both bounds below are deliberate and pinned. Past 2048 runs the rest of the
-# body survives; that is ~128 KB of base64, far beyond any real key.
+# For truncated PEM output, redact the armor plus bounded base64 runs even without a newline after the
+# header. The 16-character floor avoids ordinary prose; later runs still require newline separators.
 _PEM_TRUNCATED_BODY = (
     r"(?:[ \t]*[A-Za-z0-9+/=]{16,})?"
     r"(?:(?:\\n|[\r\n])+[ \t]*[A-Za-z0-9+/=]{16,}){0,2048}"
@@ -292,20 +193,8 @@ _PEM_PRIVATE_KEY_PATTERN = (
     f"{_PEM_ARMOR_BEGIN}{_PEM_BLOCK_BODY}{_PEM_ARMOR_END}|{_PEM_ARMOR_BEGIN}{_PEM_TRUNCATED_BODY}"
 )
 
-# High-precision built-in credential patterns, applied BY DEFAULT before any
-# content is compressed or stored (audit Crit-4 / B3). Tool output routinely
-# contains secrets and the store keeps originals for the TTL, so the safe default
-# is to scrub the unambiguous credential shapes preventively rather than rely on
-# the operator to configure ``FURL_REDACT_PATTERNS`` after the fact. Each pattern
-# is deliberately SPECIFIC — a fixed vendor prefix plus a length/charset tail, or
-# (for a private key) a delimited block — so it does not fire on ordinary logs,
-# code, or prose: byte-exactness for non-secret content is unchanged, and only a
-# genuine credential is masked. Each also spans the WHOLE secret, never just the
-# token that identifies it, or the marker would assert a scrub it did not do. The
-# ``(name, regex)`` pairs render as ``[REDACTED:<name>]`` (fixed length per type,
-# so the span never leaks the secret's length). Disable with
-# ``FURL_REDACT_BUILTINS=0``; add site-specific shapes with
-# ``FURL_REDACT_PATTERNS`` (both compose).
+# Built-in credential patterns run by default before compression/storage and match complete, high-confidence
+# secret shapes. Disable with `FURL_REDACT_BUILTINS=0`; site-specific patterns compose via `FURL_REDACT_PATTERNS`.
 _DEFAULT_CREDENTIAL_PATTERNS: tuple[tuple[str, str], ...] = (
     # PEM/OpenSSH private-key blocks — armor AND key material (see above).
     ("private-key", _PEM_PRIVATE_KEY_PATTERN),
@@ -516,10 +405,8 @@ def redact_budget_seconds(env: Mapping[str, str] | None = None) -> float:
         )
         return DEFAULT_REDACT_BUDGET_SECONDS
     if seconds > MAX_REDACT_BUDGET_SECONDS:
-        # Clamp, loudly. The redactor runs up to three times per hook invocation
-        # (see the derivation above), so a budget above this cannot fit inside the
-        # 30 s host timeout and would silently restore the fail-open it exists to
-        # prevent. Accepting it quietly would be the same defect as accepting 0.
+        # Clamp, loudly. The redactor runs up to three times per hook invocation (see the derivation above), so a budget
+        # above this cannot fit inside the 30 s host timeout and would silently restore the fail-open it exists to prevent.
         _warn_once(
             f"{FURL_REDACT_BUDGET_ENV}: {seconds}s exceeds the {MAX_REDACT_BUDGET_SECONDS}s "
             f"ceiling (the redactor runs up to 3x per hook invocation and the host "
@@ -749,13 +636,8 @@ def redact_within_budget(
     try:
         return _redact_under_watchdog(text, redactor, budget_seconds)
     except RedactionBudgetExceeded:
-        # OUTERMOST GUARANTEE. _restore_after_budget already prevents a late alarm
-        # from escaping, but "it cannot escape" must hold STRUCTURALLY rather than
-        # by inspection of the restore: this converts any residual escape, on any
-        # path present or future, into the fail-CLOSED verdict instead of letting
-        # it reach a caller whose generic ``except Exception`` would return the
-        # ORIGINAL text. Withholding is the correct verdict here because an escape
-        # means the pass could not be shown to have completed.
+        # OUTERMOST GUARANTEE. _restore_after_budget already prevents a late alarm from escaping, but "it cannot escape" must hold STRUCTURALLY rather than
+        # by inspection of the restore. Withholding is the correct verdict here because an escape means the pass could not be shown to have completed.
         return None
 
 
@@ -765,23 +647,13 @@ def _redact_under_watchdog(
     budget_seconds: float,
 ) -> str | None:
     """Arm the budget, run ``redactor``, restore. See :func:`redact_within_budget`."""
-    # Read the handler first, then install: the handler has to CLOSE OVER what it must
-    # put back, because it restores it itself before raising. Reading and installing as
-    # two calls is not a race — Python-level handlers only run on the main thread, which
-    # is the thread executing these two lines.
+    # Read the handler first, then install: the handler has to CLOSE OVER what it must put back, because it restores it itself before raising.
     previous_handler = signal.getsignal(signal.SIGALRM)
     signal.signal(signal.SIGALRM, _make_budget_handler(previous_handler))
     previous_remaining, previous_interval = signal.setitimer(signal.ITIMER_REAL, budget_seconds)
     started = time.monotonic()
-    # POSITIVE PROOF OF COMPLETION, not absence of exception. ``finished`` is a
-    # 1-tuple that can only be CONSTRUCTED once ``redactor(text)`` has already
-    # returned a value, so ``finished is not None`` is evidence the pass ran to
-    # completion rather than an inference from "nothing was raised". A plain
-    # ``result: str | None`` shared between the completed and interrupted paths
-    # would classify by absence of exception, and any future edit that let an
-    # interrupted pass reach the return would emit a PARTIALLY scrubbed blob as
-    # though it were fully scrubbed — worse than withholding, and indistinguishable
-    # from success at the call site.
+    # POSITIVE PROOF OF COMPLETION, not absence of exception. ``finished`` is a 1-tuple that can only be CONSTRUCTED once ``redactor(text)`` has
+    # already returned a value, so ``finished is not None`` is evidence the pass ran to completion rather than an inference from "nothing was raised".
     finished: tuple[str] | None = None
     try:
         try:
@@ -791,26 +663,8 @@ def _redact_under_watchdog(
         finally:
             _restore_after_budget(previous_handler, previous_remaining, previous_interval, started)
     except RedactionBudgetExceeded:
-        # R1. The CALL to _restore_after_budget above is itself an eval-breaker and
-        # it sits outside every inner ``try``: an alarm delivered exactly there —
-        # after the redactor returned, at the transition into the ``finally`` —
-        # raises AT THE CALL, so the restore's BODY never runs. What survives to
-        # here is therefore a pass that COMPLETED but could not be shown to have
-        # completed, and this converts it to a withhold.
-        #
-        # This is no longer what keeps our handler off the process. The handler
-        # disarms ITSELF before raising (see _make_budget_handler), so by the time
-        # this clause is reached ``previous_handler`` is already reinstalled, on
-        # this route and on every other unwinding route including ones not
-        # enumerated here. Enumerating them was tried and measured incomplete —
-        # 6 leaks in 16000 aimed trials against a tree that had this clause and the
-        # restore's retry loop but no self-disarm. The restore below therefore runs
-        # for the ITIMER: the caller's deadline still has to be handed back.
-        #
-        # Restoring here is safe from a second interruption, and that is provable
-        # rather than hopeful: our itimer is armed ONE-SHOT (``setitimer`` with a
-        # zero interval), so exactly one alarm can be delivered per call and it has
-        # already been consumed to get here.
+        # If the alarm fires at the restore call boundary, withhold the completed redaction result. The budget
+        # handler self-disarms before raising; only the caller's previous one-shot timer still needs restoration.
         _restore_after_budget(previous_handler, previous_remaining, previous_interval, started)
         return None
     return None if finished is None else finished[0]
@@ -913,22 +767,8 @@ def _restore_after_budget(
                 signal.ITIMER_REAL, max(restored, _MIN_RESTORED_TIMER), previous_interval
             )
         except (RedactionBudgetExceeded, OSError, TypeError, ValueError):
-            # THE SAME TUPLE AS THE DISARM LOOP AND THE HANDLER, deliberately, because
-            # "this function never raises" has to hold at EVERY call it makes or it does
-            # not hold at all. This one runs from a ``finally``, so an escape here would
-            # REPLACE the outcome of the guarded call with an exception the callers do
-            # not match on — the fail-open landing again, reached from the re-arm
-            # instead of the disarm.
-            #
-            # Reachability differs from the disarm's and is stated rather than implied.
-            # ``OSError`` is the live one (the discarded-signal report). ``TypeError``
-            # and ``ValueError`` need non-numeric or negative arguments, and both are
-            # excluded by the ``max()`` above and by ``previous_interval`` coming from
-            # ``setitimer``'s own return. ``RedactionBudgetExceeded`` needs the restored
-            # handler to itself be a budget handler, which happens only when a budgeted
-            # pass is NESTED inside another; the outer pass then withholds, which is
-            # fail-closed and correct. Enumerating them was the mistake once already, so
-            # the tuple is uniform and the argument lives in the comment.
+            # Timer re-arm in `finally` must never replace the guarded call's outcome. Catch the same restoration exception
+            # set as disarm/handler paths; nested budget handlers may intentionally cause the outer pass to withhold.
             _warn_once(_restore_gave_up_warning())
 
 

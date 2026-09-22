@@ -1,50 +1,30 @@
 //! Core data types for SmartCrusher.
-//!
-//! Direct port of the dataclasses in `smart_crusher.py:318-924`. These
-//! mirror the Python shapes 1:1 so the PyO3 bridge in stage 3c.1b can
-//! reconstruct Python dataclasses from the Rust output without a manual
-//! field-by-field translator.
 
 use serde_json::Value;
 
 use crate::transforms::anchor_selector::DataPattern;
 use std::collections::BTreeMap;
 
-/// One CCR-recoverable reduction produced by a crush — the typed carrier
-/// the FFI hands to Python so recovery mirroring never depends on
-/// re-parsing rendered `<<ccr:...>>` marker text (§4.2 / ARCH-2 / TYPE-2).
-///
-/// The values are exactly those the emission sites already compute when
-/// they render the markers (`persist_dropped` for row-drops,
-/// `emit_opaque_ccr_marker` / `cell_from_value` for opaque
-/// substitutions): carrying them here is pure plumbing — it never
-/// changes the rendered bytes.
+/// One CCR-recoverable reduction produced by a crush — the typed carrier the FFI hands to Python so recovery
+/// mirroring never depends on re-parsing rendered `<<ccr:...>>` marker text (§4.2 / ARCH-2 / TYPE-2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DroppedRef {
-    /// Whole rows dropped from an array. The full original array is
-    /// recoverable via `ccr_get(hash)`; row-level recovery is served from
-    /// that whole-blob parent (the MCP `furl_retrieve` surface narrows it
-    /// with `query=` / `select_field=`).
+    /// Whole rows dropped from an array.
     RowDrop {
-        /// 12-char SHA-256 hex prefix keying the stored full-original
-        /// array — the same hash the rendered
-        /// `<<ccr:HASH N_rows_offloaded>>` marker carries.
+        /// 12-char SHA-256 hex prefix keying the stored full-original array — the same hash the rendered `<<ccr:HASH N_rows_offloaded>>` marker carries.
         hash: String,
     },
-    /// An opaque payload (long base64 / HTML / long-text blob)
-    /// substituted in place by a `<<ccr:HASH,KIND,SIZE>>` marker. The
-    /// original bytes are recoverable via `ccr_get(hash)`.
+    /// An opaque payload (long base64 / HTML / long-text blob) substituted in place by a
+    /// `<<ccr:HASH,KIND,SIZE>>` marker. The original bytes are recoverable via `ccr_get(hash)`.
     Opaque {
         /// 12-char SHA-256 hex prefix of the payload bytes — the same
         /// hash the rendered marker carries.
         hash: String,
-        /// Pre-resolved wire kind token (`"base64"` / `"string"` /
-        /// `"html"` / custom) — byte-identical to the KIND field of the
-        /// rendered marker (`OpaqueKind::wire_str`).
+        /// Pre-resolved wire kind token (`"base64"` / `"string"` / `"html"` / custom) —
+        /// byte-identical to the KIND field of the rendered marker (`OpaqueKind::wire_str`).
         kind: String,
-        /// EXACT original payload length in bytes. The rendered marker
-        /// only carries the lossy humanized form (`"2.1KB"`); the typed
-        /// ref preserves the precise size.
+        /// EXACT original payload length in bytes. The rendered marker only carries the
+        /// lossy humanized form (`"2.1KB"`); the typed ref preserves the precise size.
         byte_size: usize,
     },
 }
@@ -58,12 +38,8 @@ impl DroppedRef {
     }
 }
 
-/// Compression strategies based on data patterns.
-///
-/// Mirrors `CompressionStrategy` enum at `smart_crusher.py:318-326`. The
-/// string variants must match Python's `Enum.value` exactly — they appear
-/// in strategy debug strings (e.g. `"top_n(100->10)"`) and the parity
-/// fixtures lock those bytes.
+/// Compression strategies based on data patterns. The string variants must match
+/// Python's `Enum.value` exactly — they appear in strategy debug strings (e.g.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompressionStrategy {
     /// No compression needed.
@@ -96,13 +72,6 @@ impl CompressionStrategy {
 }
 
 /// JSON type classification of a field's first non-null value (TYPE-1).
-///
-/// Internal contract between the analyzer (producer) and the
-/// field-detect / field-role / planning / orchestration consumers, which
-/// previously compared free strings in 8+ places — a producer typo
-/// silently changed routing. [`FieldType::as_str`] preserves the
-/// historical string forms byte-for-byte (they match Python's
-/// `field_type` values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
     Null,
@@ -111,9 +80,8 @@ pub enum FieldType {
     String,
     Object,
     Array,
-    /// Totality escape hatch — unreachable for parsed JSON (every
-    /// `serde_json::Value` variant maps to one of the above), kept so
-    /// the classifying `match` stays total without a panic arm.
+    /// Totality escape hatch — unreachable for parsed JSON (every `serde_json::Value` variant maps
+    /// to one of the above), kept so the classifying `match` stays total without a panic arm.
     Unknown,
 }
 
@@ -133,11 +101,8 @@ impl FieldType {
     }
 }
 
-/// Statistics for a single field across array items.
-///
-/// Mirrors the `FieldStats` dataclass at `smart_crusher.py:864-885`.
-/// Field naming and Optional<T> shape match Python exactly so the PyO3
-/// bridge can `from_dict`-reconstruct the Python dataclass.
+/// Statistics for a single field across array items. Field naming and Optional<T> shape
+/// match Python exactly so the PyO3 bridge can `from_dict`-reconstruct the Python dataclass.
 #[derive(Debug, Clone)]
 pub struct FieldStats {
     pub name: String,
@@ -164,26 +129,8 @@ pub struct FieldStats {
     pub top_values: Vec<(String, usize)>,
 }
 
-/// Crushability verdict label — WHY `analyze_crushability` decided an
-/// array is (or is not) safe to crush (TYPE-1).
-///
-/// This is a cross-module contract, not just a debug string:
-///
-/// - `route.rs`'s entropy-floor override gate matches the two
-///   `*NoSignal` variants ([`SkipReason::is_no_signal`]) to decide
-///   whether a CCR-backed store may override the analyzer's veto.
-/// - The string form is FFI-visible: when the strategy is `Skip`, the
-///   passthrough `strategy_info` ships as `format!("skip:{}",
-///   reason.as_str())`, so [`SkipReason::as_str`] must stay
-///   byte-identical to the historical literals (pinned below).
-///
-/// A producer typo can no longer silently change routing — a new label
-/// is a new variant, and the gate's match is exhaustive (fail-closed:
-/// only the two no-signal variants are override-eligible).
-///
-/// Named `SkipReason` after its load-bearing consumer (the skip gate +
-/// the `skip:<reason>` wire string); the crushable=true verdicts carry
-/// their label through the same field.
+/// Crushability verdict label This is a cross-module contract, not just a debug string: - `the Rust module`'s entropy-floor override gate matches the two
+/// `*NoSignal` variants ([`SkipReason::is_no_signal`]) to decide whether a CCR-backed store may override the analyzer's veto. - The string form is FFI-visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     /// Crushable: near-constant content distinguished only by an ID
@@ -202,9 +149,7 @@ pub enum SkipReason {
 }
 
 impl SkipReason {
-    /// Byte-identical to the historical reason strings (FFI-visible via
-    /// the `skip:<reason>` passthrough `strategy_info`; parity fixtures
-    /// pin those bytes).
+    /// Byte-identical to the historical reason strings (FFI-visible via the `skip:<reason>` passthrough `strategy_info`; parity fixtures pin those bytes).
     pub fn as_str(self) -> &'static str {
         match self {
             SkipReason::RepetitiveContentWithIds => "repetitive_content_with_ids",
@@ -216,12 +161,8 @@ impl SkipReason {
         }
     }
 
-    /// Is this a "no SIGNAL on distinct data" verdict (as opposed to a
-    /// structural one)? Only these two are eligible for the CCR-backed
-    /// entropy-floor override in `route.rs` — the match is exhaustive
-    /// over the enum, so a NEW reason variant is excluded by default
-    /// (fail-closed), exactly like the old string gate but enforced by
-    /// the compiler.
+    /// Is this a "no SIGNAL on distinct data" verdict (as opposed to a structural one)? Only
+    /// these two are eligible for the CCR-backed entropy-floor override in `the Rust module`.
     pub fn is_no_signal(self) -> bool {
         match self {
             SkipReason::UniqueEntitiesNoSignal | SkipReason::MediumUniquenessNoSignal => true,
@@ -239,26 +180,17 @@ impl std::fmt::Display for SkipReason {
     }
 }
 
-/// Analysis of whether an array is safe to crush.
-///
-/// Mirrors `CrushabilityAnalysis` at `smart_crusher.py:833-860`. The key
-/// invariant: **if we don't have a reliable signal to determine which
-/// items are important, we don't crush at all**. Signals include score
-/// fields, error keywords, numeric anomalies, and low uniqueness.
+/// Analysis of whether an array is safe to crush. The key invariant: **if we don't have
+/// a reliable signal to determine which items are important, we don't crush at all**.
 #[derive(Debug, Clone)]
 pub struct CrushabilityAnalysis {
     pub crushable: bool,
     pub confidence: f64,
     pub reason: SkipReason,
-    /// True iff at least one crushability signal fired (score field,
-    /// structural outliers, error keywords, numeric anomalies, or a
-    /// change point).
+    /// True iff at least one crushability signal fired (score field, structural outliers, error keywords, numeric anomalies, or a change point).
     pub has_any_signal: bool,
 
-    // Memoized detection indices (PERF-3). `analyze_crushability`
-    // already runs both detections over the full array to derive its
-    // counts; carrying the indices lets the over-budget prioritizer
-    // reuse them instead of re-scanning (and re-serializing) every item.
+    // Memoized detection indices (PERF-3).
     /// Indices flagged by `detect_structural_outliers` — ascending.
     pub structural_outlier_indices: Vec<usize>,
     /// Indices flagged by `detect_error_items_for_preservation` — ascending.
@@ -266,9 +198,8 @@ pub struct CrushabilityAnalysis {
 }
 
 impl CrushabilityAnalysis {
-    /// Helper to build a "not crushable" verdict — used in several early
-    /// exits in `analyze_crushability`. Mirrors the Python pattern where
-    /// `crushable=False` paths don't bother filling in detail metrics.
+    /// Helper to build a "not crushable" verdict — used in several early exits in `analyze_crushability`.
+    /// Mirrors the Python pattern where `crushable=False` paths don't bother filling in detail metrics.
     pub fn skip(reason: SkipReason, confidence: f64) -> Self {
         CrushabilityAnalysis {
             crushable: false,
@@ -281,52 +212,22 @@ impl CrushabilityAnalysis {
     }
 }
 
-/// Complete analysis of an array.
-///
-/// Mirrors `ArrayAnalysis` at `smart_crusher.py:887-897`. `field_stats`
-/// uses `BTreeMap` for sorted-by-key iteration. (Per-field constancy
-/// lives on `FieldStats.is_constant` / `constant_value`, which
-/// `estimate_reduction` reads; the compaction stage's constant-column
-/// fold computes its own. The old aggregate `constant_fields` snapshot —
-/// and the `factor_out_constants` config knob that toggled copying it
-/// into `CompressionPlan` — had zero downstream readers and were
-/// deleted as dead config.)
-///
-/// # Sort vs insertion order — known parity nuance
-///
-/// Python's `dict` preserves insertion order, and `_analyze_field` is
-/// called once per key as it appears in `items[0].keys()` (i.e., JSON
-/// parse order). With `serde_json/preserve_order` enabled at the
-/// workspace level, `serde_json::Map` is an `IndexMap` and parse order
-/// matches Python.
-///
-/// `BTreeMap` here gives sorted-key iteration — which differs from
-/// Python's parse-order `dict`. This matters only if downstream code
-/// observes the iteration order of `field_stats` (e.g., when emitting
-/// debug output, picking a "first" field, or computing strategy
-/// strings that include field names).
-///
-/// If any code path observes iteration order, the options are to either
-///   1. Switch this to `IndexMap`, OR
-///   2. Rewrite Python's order-sensitive paths to iterate sorted, then
-///      mirror that in Rust.
+/// Array analysis stores field statistics in deterministic sorted order. If downstream behavior becomes
+/// order-sensitive, align Python and Rust explicitly rather than relying on Python insertion order versus Rust sorting.
 #[derive(Debug, Clone)]
 pub struct ArrayAnalysis {
     pub item_count: usize,
     pub field_stats: BTreeMap<String, FieldStats>,
-    /// Typed data-pattern classification (TYPE-1). The historical string
-    /// forms (`"time_series"` / `"logs"` / `"search_results"` /
-    /// `"generic"`) are recoverable via [`DataPattern::as_str`].
+    /// Typed data-pattern classification (TYPE-1). The historical string forms (`"time_series"` /
+    /// `"logs"` / `"search_results"` / `"generic"`) are recoverable via [`DataPattern::as_str`].
     pub detected_pattern: DataPattern,
     pub recommended_strategy: CompressionStrategy,
     pub estimated_reduction: f64,
     pub crushability: Option<CrushabilityAnalysis>,
 }
 
-/// Plan for how to compress an array.
-///
-/// Mirrors `CompressionPlan` at `smart_crusher.py:900-910`. `keep_indices`
-/// is the list of original-array indices that survive compression.
+/// Plan for array compression; keep fields behaviorally aligned with the Python plan.
+/// `keep_indices` is the list of original-array indices that survive compression.
 #[derive(Debug, Clone)]
 pub struct CompressionPlan {
     pub strategy: CompressionStrategy,
@@ -349,35 +250,21 @@ impl Default for CompressionPlan {
     }
 }
 
-/// Result from `SmartCrusher.crush()` — used by ContentRouter when
-/// routing JSON arrays. Mirrors `CrushResult` at `smart_crusher.py:913-923`.
+/// Result from `SmartCrusher.crush()` used for JSON-array routing; keep its contract aligned with Python.
 #[derive(Debug, Clone)]
 pub struct CrushResult {
     pub compressed: String,
     pub original: String,
     pub was_modified: bool,
     pub strategy: String,
-    /// Every CCR-recoverable reduction this crush produced, TYPED.
-    /// Unlike `CrushArrayResult::ccr_hash` (a single hash for one
-    /// top-level array), `crush()` recurses via `process_value` and can
-    /// reduce MANY spots at any depth — row-drops from dict arrays via
-    /// `crush_array`, string/number/mixed arrays via
-    /// `ccr_dropped_sentinel`, and opaque-blob substitutions from the
-    /// compaction/`process_string` paths. Each contributes one
-    /// [`DroppedRef`] here, in emission order. The Python shim mirrors
-    /// each DIRECTLY into the compression_store (typed recovery) instead
-    /// of substring-scraping `<<ccr:...>>` out of `compressed`. These
-    /// are the SAME hashes the embedded markers carry — pure plumbing of
-    /// values the emission sites already computed, NOT a re-hash, so
-    /// `compressed` is byte-identical to before this field existed.
-    /// Empty when nothing was reduced.
+    /// Every CCR-recoverable reduction this crush produced, TYPED. Unlike `CrushArrayResult::ccr_hash` (a single hash for one top-level array), `crush()` recurses via `process_value` and can reduce MANY
+    /// spots at any depth — row-drops from dict arrays via `crush_array`, string/number/mixed arrays via `ccr_dropped_sentinel`, and opaque-blob substitutions from the compaction/`process_string` paths.
     pub dropped: Vec<DroppedRef>,
 }
 
 impl CrushResult {
-    /// Pass-through result: same as input, no modification, strategy
-    /// `"passthrough"`. Used when content can't be compressed (not JSON,
-    /// too small, no crushable arrays, etc.).
+    /// Pass-through result: same as input, no modification, strategy `"passthrough"`. Used
+    /// when content can't be compressed (not JSON, too small, no crushable arrays, etc.).
     pub fn passthrough(content: impl Into<String>) -> Self {
         let s = content.into();
         CrushResult {
@@ -390,11 +277,8 @@ impl CrushResult {
         }
     }
 
-    /// Row-drop CCR hashes, in emission order — derived back-compat
-    /// getter, byte-identical to the retired `ccr_hashes` FIELD (which
-    /// carried row-drop hashes ONLY; opaque refs live in [`Self::dropped`]
-    /// and are deliberately excluded here so pre-§4.2 consumers see the
-    /// exact values the field held).
+    /// Row-drop CCR hashes, in emission order — derived back-compat getter, byte-identical to the retired `ccr_hashes` FIELD (which carried row-drop
+    /// hashes ONLY; opaque refs live in [`Self::dropped`] and are deliberately excluded here so pre-§4.2 consumers see the exact values the field held).
     pub fn ccr_hashes(&self) -> Vec<String> {
         self.dropped
             .iter()
@@ -432,10 +316,7 @@ mod tests {
 
     #[test]
     fn skip_reason_strings_are_byte_identical_to_the_historical_literals() {
-        // The reason string is FFI-visible via the `skip:<reason>`
-        // passthrough strategy_info (route.rs) — parity fixtures pin the
-        // exact bytes. A drift here silently changes routing AND the
-        // wire-visible debug string.
+        // The reason string is FFI-visible via the `skip:<reason>` passthrough strategy_info (the Rust module) — parity fixtures pin the exact bytes.
         assert_eq!(
             SkipReason::RepetitiveContentWithIds.as_str(),
             "repetitive_content_with_ids"
@@ -469,8 +350,7 @@ mod tests {
 
     #[test]
     fn skip_reason_no_signal_gate_is_exactly_the_two_no_signal_variants() {
-        // The entropy-floor override eligibility (route.rs) — fail-closed:
-        // ONLY the two no-signal verdicts qualify.
+        // Entropy-floor override eligibility is fail-closed: only the two no-signal verdicts qualify.
         assert!(SkipReason::UniqueEntitiesNoSignal.is_no_signal());
         assert!(SkipReason::MediumUniquenessNoSignal.is_no_signal());
         assert!(!SkipReason::RepetitiveContentWithIds.is_no_signal());

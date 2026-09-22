@@ -1,30 +1,5 @@
-//! Tier-3 pattern-based [`super::LineImportanceDetector`] backed by
-//! `aho-corasick`.
-//!
-//! Replaces the Python `error_detection.py` regex registry. A single
-//! deterministic-finite-automaton scan finds every keyword on a line in
-//! `O(n + m)` — much faster than `len(patterns)` independent regex
-//! searches, and it's harder to misuse (one source of truth for the
-//! keyword set, no drift between sets and compiled patterns).
-//!
-//! # Bug fixes vs Python (2026-04-29)
-//!
-//! Python's `error_detection.py` had two bugs the parity fixtures
-//! lock against:
-//!
-//! 1. `ERROR_KEYWORDS` listed `{abort, timeout, denied, rejected}` but
-//!    `ERROR_PATTERN` regex omitted all four. Lines saying
-//!    "Connection timeout" therefore never flagged as errors despite
-//!    the keyword being canonical. **Fixed here**: the four keywords
-//!    are part of the error set the automaton consumes.
-//! 2. `SECURITY_KEYWORDS` included `token`, which false-positives on
-//!    every reference to LLM tokens (`input_tokens`,
-//!    `tokens_saved`, …). In an LLM-token-saturated codebase the
-//!    security signal was uselessly noisy. **Fixed here**: `token` is
-//!    dropped from the security set.
-//!
-//! Parity fixtures (in `tests/`) carry explicit `// fixed_in_3e1`
-//! markers on each diverging line so the audit trail is clear.
+//! Keyword importance detector for compression scoring. Exact and phrase matches are deterministic; callers
+//! supply content/query context and receive bounded relevance signals rather than routing decisions.
 
 use std::collections::BTreeMap;
 
@@ -34,47 +9,34 @@ use super::line_importance::{
     ImportanceCategory, ImportanceContext, ImportanceSignal, LineImportanceDetector,
 };
 
-/// Confidence used by the keyword detector. Deliberately below 1.0 so
-/// a caller composing a higher-precision detector can rank above it on
-/// borderline cases — but high enough that an unambiguous keyword match
-/// isn't second-guessed.
+/// Confidence used by the keyword detector.
 const KEYWORD_CONFIDENCE: f32 = 0.7;
 
-/// Priority returned for a confirmed match. Compressors use this as the
-/// score they sort by; tweak per category if a future caller wants
-/// errors to outrank importance markers in routing decisions.
+/// Priority returned for a confirmed match.
 const ERROR_PRIORITY: f32 = 0.95;
 const WARNING_PRIORITY: f32 = 0.75;
 const SECURITY_PRIORITY: f32 = 0.85;
 const IMPORTANCE_PRIORITY: f32 = 0.6;
 const MARKDOWN_PRIORITY: f32 = 0.45;
 
-/// Static keyword data for each importance category.
-///
-/// Exported so the Python shim can reflect on it for legacy regex
-/// re-export. A `BTreeMap` keeps iteration order deterministic without
-/// extra allocations.
+/// Static keyword data for each importance category. Exported so the Python shim can reflect on it for
+/// legacy regex re-export. A `BTreeMap` keeps iteration order deterministic without extra allocations.
 #[derive(Debug, Clone)]
 pub struct KeywordRegistry {
     pub error: Vec<&'static str>,
     pub warning: Vec<&'static str>,
     pub importance: Vec<&'static str>,
     pub security: Vec<&'static str>,
-    /// Per-context line prefixes that count as importance signals (e.g.
-    /// markdown headers `# `, blockquotes `> `). Matched as
-    /// *prefix-only*, not whole-line keywords.
+    /// Per-context line prefixes that count as importance signals (e.g. markdown headers
+    /// `# `, blockquotes `> `). Matched as *prefix-only*, not whole-line keywords.
     pub markdown_prefixes: Vec<&'static str>,
-    /// Substring indicators used by [`KeywordDetector::contains_error_indicator`]
-    /// for fast triage (no word-boundary requirement). Distinct from
-    /// `error` because the triage callsite (e.g. message-signature
-    /// classification) cares about Python tracebacks specifically.
+    /// Substring indicators used by [`KeywordDetector::contains_error_indicator`] for fast triage (no word-boundary requirement). Distinct
+    /// from `error` because the triage callsite (e.g. message-signature classification) cares about Python tracebacks specifically.
     pub error_indicators: Vec<&'static str>,
 }
 
 impl KeywordRegistry {
-    /// The default Furl keyword set — superset of Python's pre-3e.1
-    /// `error_detection.py` minus the dropped `token` security keyword
-    /// and plus the four error keywords the Python regex was missing.
+    /// Default Furl keywords keep Python parity, exclude the noisy `token` security keyword, and include the four required error keywords.
     pub fn default_set() -> Self {
         Self {
             error: vec![
@@ -131,9 +93,8 @@ impl KeywordRegistry {
     }
 }
 
-/// One automaton + the parallel category lookup table. The automaton is
-/// built case-insensitively; word-boundary checks happen as a post-filter
-/// on the byte offsets it returns.
+/// One automaton + the parallel category lookup table. The automaton is built case-insensitively;
+/// word-boundary checks happen as a post-filter on the byte offsets it returns.
 struct CategoryAutomaton {
     automaton: AhoCorasick,
     categories: Vec<ImportanceCategory>,
@@ -173,10 +134,8 @@ impl CategoryAutomaton {
     }
 }
 
-/// Pattern-based [`LineImportanceDetector`] backed by aho-corasick.
-///
-/// Construct with [`KeywordDetector::new`] for the default Furl
-/// keyword set, or [`KeywordDetector::with_registry`] for a custom one.
+/// Pattern-based [`LineImportanceDetector`] backed by aho-corasick. Construct with [`KeywordDetector::new`]
+/// for the default Furl keyword set, or [`KeywordDetector::with_registry`] for a custom one.
 pub struct KeywordDetector {
     registry: KeywordRegistry,
     /// Categories that fire across all contexts (error/importance).
@@ -186,10 +145,8 @@ pub struct KeywordDetector {
     warning: CategoryAutomaton,
     /// Security fires in Diff context only.
     security: CategoryAutomaton,
-    /// Substring-only indicators for fast triage; deliberately separate
-    /// from `universal` because (a) it matches without word boundaries
-    /// and (b) the indicator set diverges from the line-scoring set
-    /// (carries `traceback`, omits the four extras like `timeout`).
+    /// Substring-only indicators for fast triage; deliberately separate from `universal` because (a) it matches without word boundaries
+    /// and (b) the indicator set diverges from the line-scoring set (carries `traceback`, omits the four extras like `timeout`).
     indicators: AhoCorasick,
 }
 
@@ -220,15 +177,8 @@ impl KeywordDetector {
         }
     }
 
-    /// Fast keyword-presence check used by callers that only want
-    /// "does this contain anything error-shaped?" (the legacy
-    /// `content_has_error_indicators` callsite).
-    ///
-    /// Substring match — no word-boundary requirement — to preserve
-    /// the lax semantics Python had. Distinct keyword set from
-    /// [`Self::score`] (carries `traceback`, omits the four 3e1 extras
-    /// like `timeout`) because the triage callsite cares about
-    /// Python-style exception output more than connection states.
+    /// Fast keyword-presence check used by callers that only want "does this contain
+    /// anything error-shaped?" (the legacy `content_has_error_indicators` callsite).
     pub fn contains_error_indicator(&self, text: &str) -> bool {
         self.indicators.is_match(text)
     }
@@ -327,9 +277,7 @@ mod tests {
 
     #[test]
     fn timeout_now_classified_as_error_in_diff() {
-        // fixed_in_3e1: Python's ERROR_PATTERN regex omitted "timeout",
-        // so this line was misclassified as neutral despite being
-        // canonical in ERROR_KEYWORDS.
+        // fixed_in_3e1: Python's ERROR_PATTERN regex omitted "timeout", so this line was misclassified as neutral despite being canonical in ERROR_KEYWORDS.
         let s = detect(
             "FATAL: timeout connecting upstream",
             ImportanceContext::Diff,
@@ -346,9 +294,7 @@ mod tests {
 
     #[test]
     fn token_no_longer_flags_security_in_llm_proxy_context() {
-        // fixed_in_3e1: dropping "token" from the security set means an
-        // LLM-metric line stops false-positively routing as a security
-        // signal.
+        // fixed_in_3e1: dropping "token" from the security set means an LLM-metric line stops false-positively routing as a security signal.
         let s = detect(
             "input_tokens=512 output_tokens=256",
             ImportanceContext::Diff,
@@ -379,9 +325,8 @@ mod tests {
     #[test]
     fn markdown_header_fires_only_in_text() {
         let in_text = detect("# Important section", ImportanceContext::Text);
-        // "important" is itself an importance keyword, so this line
-        // fires as Importance (universal) before we reach the markdown
-        // prefix check. Drop the keyword to isolate the prefix path.
+        // "important" is itself an importance keyword, so this line fires as Importance (universal)
+        // before we reach the markdown prefix check. Drop the keyword to isolate the prefix path.
         let _ = in_text;
         let prefix_only = detect("# Section", ImportanceContext::Text);
         assert_eq!(prefix_only.category, Some(ImportanceCategory::Markdown));
@@ -391,11 +336,7 @@ mod tests {
 
     #[test]
     fn word_boundary_excludes_substring_matches() {
-        // Without word boundaries, "preferred" would match "fail" via
-        // the substring "fer" -> not a real risk, but
-        // "tokenize" must NOT be misread as the error keyword "token"
-        // (we dropped that one anyway), and "panicker" must not match
-        // "panic" inside a normal English word.
+        // Without word boundaries, "preferred" would match "fail" via the substring "fer" -> not a real risk.
         let s = detect("the panicker showed up late", ImportanceContext::Search);
         assert!(!s.is_match());
     }
@@ -409,9 +350,8 @@ mod tests {
 
     #[test]
     fn contains_error_indicator_is_lax_substring_match() {
-        // Preserves Python `content_has_error_indicators` semantics:
-        // "errored" -> matches "error". This is intentional for fast
-        // triage; the strict version is `score()`.
+        // Preserves Python `content_has_error_indicators` semantics: "errored" -> matches
+        // "error". This is intentional for fast triage; the strict version is `score()`.
         let det = KeywordDetector::new();
         assert!(det.contains_error_indicator("the request errored out"));
         assert!(det.contains_error_indicator("traceback follows"));

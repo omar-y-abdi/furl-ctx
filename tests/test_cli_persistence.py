@@ -39,16 +39,12 @@ import pytest
 
 from furl_ctx.cache.compression_store import reset_compression_store
 
-# A payload big enough to force at least one CCR offload (the retrievable hash).
-# Plain text (not JSON): 400 distinct lines offload past the token floor AND
-# round-trip byte-exact, so the cross-process assertion can be exact bytes — the
-# compressor canonicalizes JSON whitespace, but preserves plain text verbatim
-# (mirrors tests/test_cli.py's line-range round-trips).
+# Use 400 distinct plain-text lines to force CCR offload while preserving byte-exact recovery.
+# Plain text avoids JSON canonicalization differences in the cross-process assertion.
 _PAYLOAD = "\n".join(f"line {i} padding-token-{i} more-filler-{i}" for i in range(1, 401))
 
-# Every FURL_CCR_* knob that could redirect the store away from the CLI default
-# global sqlite singleton — or change its retention — cleared so the subprocess
-# exercises the pure default.
+# Every FURL_CCR_* knob that could redirect the store away from the CLI default global sqlite
+# singleton — or change its retention — cleared so the subprocess exercises the pure default.
 _CCR_ENV_KEYS = (
     "FURL_CCR_BACKEND",
     "FURL_CCR_PROJECT_DIR",
@@ -169,9 +165,8 @@ def test_retrieve_miss_names_the_namespace_store(_hermetic_cli_env, tmp_path) ->
     assert "not found" in stderr
     assert "backend=sqlite" in stderr
     assert "ccr-ns-" in stderr, "miss must name the per-namespace store file"
-    # The global file is exactly 'ccr.sqlite3'; the ns file ('ccr-ns-<hash>.sqlite3')
-    # does not contain that substring, so its absence proves the global store is
-    # NOT the one being named.
+    # The global file is exactly 'ccr.sqlite3'; the ns file ('ccr-ns-<hash>.sqlite3') does not
+    # contain that substring, so its absence proves the global store is NOT the one being named.
     assert "ccr.sqlite3" not in stderr
 
 

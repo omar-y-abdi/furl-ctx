@@ -95,12 +95,8 @@ MODEL_TO_ENCODING = {
 # Default encoding for unknown models
 DEFAULT_ENCODING = "cl100k_base"
 
-# Hard deadline for first-time encoding acquisition (P0-6). tiktoken
-# downloads BPE vocab files over the network on the first
-# `get_encoding(...)` for an encoding not yet cached on disk; a hung
-# download would otherwise hang the caller — and therefore compress() —
-# indefinitely. Module-level (not bound as a default argument) so it is
-# read at call time and tests can patch it.
+# Hard deadline for first-time encoding acquisition (P0-6). tiktoken downloads BPE vocab files over the network on the first `get_encoding(...)`
+# for an encoding not yet cached on disk; a hung download would otherwise hang the caller — and therefore compress() — indefinitely.
 ENCODING_LOAD_TIMEOUT_SECONDS = 10.0
 
 
@@ -109,10 +105,8 @@ def _get_encoding(encoding_name: str) -> _Encoding:
     """Get tiktoken encoding, cached for performance."""
     import tiktoken
 
-    # tiktoken ships no stubs mypy can see in every environment this runs in
-    # (CI's lint job installs mypy but not the project's dependencies), so
-    # `tiktoken.get_encoding` is Any there; this is the one place that
-    # boundary is asserted, everything downstream is typed via _Encoding.
+    # tiktoken ships no stubs mypy can see in every environment this runs in (CI's lint job
+    # installs mypy but not the project's dependencies), so `tiktoken.get_encoding` is Any there.
     return cast(_Encoding, tiktoken.get_encoding(encoding_name))
 
 
@@ -184,12 +178,8 @@ def get_encoding_for_model(model: str) -> str:
     if model in MODEL_TO_ENCODING:
         return MODEL_TO_ENCODING[model]
 
-    # Try prefix matching for versioned models. Ordered most-specific first
-    # so that, e.g., "gpt-4o-*" resolves before "gpt-4-*". Each prefix maps
-    # directly to its encoding: scanning MODEL_TO_ENCODING for the first key
-    # that merely starts with the prefix is order-dependent and wrong — the
-    # "gpt-4" prefix would match the "gpt-4o" dict entry first and return
-    # o200k_base instead of cl100k_base for unknown gpt-4 snapshots.
+    # Try prefix matching for versioned models. Ordered most-specific first so that, e.g., "gpt-4o-*" resolves before "gpt-4-*". Each prefix maps
+    # directly to its encoding: scanning MODEL_TO_ENCODING for the first key that merely starts with the prefix is order-dependent and wrong.
     for prefix, encoding in (
         ("gpt-4o", "o200k_base"),
         ("gpt-4-turbo", "cl100k_base"),
@@ -197,9 +187,8 @@ def get_encoding_for_model(model: str) -> str:
         ("gpt-3.5", "cl100k_base"),
         ("o1", "o200k_base"),
         ("o3", "o200k_base"),
-        # Claude models: o200k_base is the closest public encoding (Q1).
-        # Anthropic's tokenizer is not publicly available; o200k_base is far
-        # more accurate than the old 3.5-chars/token flat estimate.
+        # Claude models: o200k_base is the closest public encoding (Q1). Anthropic's tokenizer is not
+        # publicly available; o200k_base is far more accurate than the old 3.5-chars/token flat estimate.
         ("claude-", "o200k_base"),
     ):
         if model.startswith(prefix):
@@ -208,24 +197,8 @@ def get_encoding_for_model(model: str) -> str:
     return DEFAULT_ENCODING
 
 
-# Refuse to tokenize input carrying an unbroken same-class run at least this long.
-# tiktoken's split regex has UNBOUNDED quantifiers for letters (``\p{L}+``),
-# whitespace (``\s+``) and punctuation/symbols (``[^\s\p{L}\p{N}]+``); a very long
-# run of any ONE of those classes drives fancy-regex into catastrophic
-# backtracking. That failure is PLATFORM-DIVERGENT: small-stack platforms (macOS)
-# raise "Max stack size exceeded for backtracking", while larger-stack ones
-# (CI Linux) merely burn super-linear time and then hand the content back
-# un-tokenized — so the same 2 MB single-line input fails LOUD on one platform and
-# declines SILENTLY on the other. Rejecting the run here (before the encode) makes
-# the decline LOUD and DETERMINISTIC everywhere: the ValueError rides compress()'s
-# fail-open boundary into result.error, byte-exact original preserved. The limit
-# sits far above any legitimate same-class token/word/run (real ones are a handful
-# of characters) and caps the measured divergence regime: a sub-limit run costs
-# ~7.5 s worst-case at ~130k and grows super-linearly beyond (~18.7 s @ 200k,
-# ~46.5 s @ 300k; the hard stack raise only lands near ~2 M). Being >= the
-# memoization floor ``_COUNT_CACHE_MIN_LEN`` (65_536) also guarantees the
-# un-memoized fast path (shorter text) can never smuggle a longer run past this
-# gate.
+# Reject unbroken letter/whitespace/punctuation runs ≥131,072 before tiktoken. Its unbounded split regex can backtrack
+# catastrophically and fail differently by platform; this makes oversized pathological input decline loudly and deterministically.
 _MAX_SAFE_SAME_CLASS_RUN = 131_072
 
 
@@ -279,22 +252,12 @@ class TiktokenCounter(BaseTokenizer):
     MESSAGE_OVERHEAD = 3
     REPLY_OVERHEAD = 3
 
-    # count_text memoization: the router / min_ratio gate re-count the SAME
-    # multi-MB content many times per compress() (measured ~18x on a 33 MB
-    # Chrome trace — tiktoken is O(n), so that dominated latency). Cache only
-    # large strings (small ones are ~unique, not worth the memory) and bound the
-    # cache to a few entries. The memo is a pure function of the text for a fixed
-    # encoding, so a cache hit is always the exact count — accounting is unchanged.
+    # count_text memoization Cache only large strings (small ones are ~unique, not worth the memory) and bound the cache to a few entries.
     _COUNT_CACHE_MIN_LEN = 65_536
     _COUNT_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
-    # Above this length, count_text estimates by extrapolating from a bounded
-    # prefix instead of exact-encoding the whole string (see _estimate_huge).
-    # 8 MiB matches the router's default huge-content ceiling, so the boundary
-    # is: content the router OFFLOADS (>= this) gets an estimated count it
-    # discards anyway; content it COMPRESSES (< this) is still counted exactly.
-    # A representative 1 MiB sample keeps the estimate close while turning a
-    # ~13 s full pass on a 33 MB trace into well under a second.
+    # Above this length, count_text estimates by extrapolating from a bounded prefix instead of exact-encoding the
+    # whole string (see _estimate_huge). 8 MiB matches the router's default huge-content ceiling so the boundary is
     _ESTIMATE_ABOVE_LEN = 8 * 1024 * 1024
     _ESTIMATE_SAMPLE_LEN = 1 * 1024 * 1024
 
@@ -338,10 +301,7 @@ class TiktokenCounter(BaseTokenizer):
         # names like "GPT-4o" which must not fall through to the default.
         self.encoding_name = get_encoding_for_model(model.lower())
         self._encoding: _Encoding | None = _load_encoding_bounded(self.encoding_name)
-        # Bounded memo, capped by total cached BYTES (oldest evicted first). A
-        # plain clear-on-overflow thrashed at scale — the hottest string (a
-        # 33 MB doc re-counted many times) got evicted and re-encoded. Bounding
-        # by bytes keeps the working set resident, so each string is encoded once.
+        # Bounded memo, capped by total cached BYTES (oldest evicted first).
         self._count_cache: dict[str, int] = {}
         self._count_cache_bytes = 0
 
@@ -398,22 +358,12 @@ class TiktokenCounter(BaseTokenizer):
             return cached
 
         if len(text) >= self._ESTIMATE_ABOVE_LEN:
-            # Very large text is offloaded WHOLESALE by the router (its
-            # huge-content fast path swaps content past ~8 MiB for a
-            # <<ccr:HASH>> marker), so this exact o200k count is a number the
-            # caller discards moments later — yet computing it exactly means the
-            # full pure-Python ReDoS-guard scan plus a BPE encode over tens of MB
-            # (~13 s on a 33 MB trace, the dominant cost of ingesting one).
-            # Estimate from a bounded prefix instead; see ``_estimate_huge``.
+            # Very large text is offloaded WHOLESALE by the router (its huge-content fast path swaps content past ~8 MiB for a <<ccr:HASH>> marker),
+            # so this exact o200k count is a number the caller discards moments later. Estimate from a bounded prefix instead; see ``_estimate_huge``.
             n = self._estimate_huge(text)
         else:
-            # Refuse backtracking-prone input BEFORE the (super-linear /
-            # stack-blowing) encode, so the decline is loud and identical on
-            # every platform rather than a raise-here / silent-passthrough-there
-            # split (see _MAX_SAFE_SAME_CLASS_RUN). The raise rides compress()'s
-            # fail-open path into result.error with the original returned
-            # byte-exact. (Above the estimate threshold there is no full encode
-            # to guard — the pathological content simply offloads, byte-exact.)
+            # Refuse backtracking-prone input BEFORE the (super-linear / stack-blowing) encode, so the decline is loud and
+            # identical on every platform rather than a raise-here / silent-passthrough-there split (see _MAX_SAFE_SAME_CLASS_RUN).
             if _has_backtracking_prone_run(text, _MAX_SAFE_SAME_CLASS_RUN):
                 raise ValueError(
                     "tokenizer input has an unbroken same-class run of at least "
@@ -451,9 +401,8 @@ class TiktokenCounter(BaseTokenizer):
         """
         sample = text[: self._ESTIMATE_SAMPLE_LEN]
         if _has_backtracking_prone_run(sample, _MAX_SAFE_SAME_CLASS_RUN):
-            # Degenerate prefix — never hand it to the encoder; a coarse
-            # bytes/token ratio is enough for a count that is about to be thrown
-            # away, and cannot backtrack.
+            # Degenerate prefix — never hand it to the encoder; a coarse bytes/token ratio
+            # is enough for a count that is about to be thrown away, and cannot backtrack.
             return max(1, len(text) // 3)
         sample_tokens = len(self._encode_tolerant(sample))
         if sample_tokens <= 0:
@@ -502,12 +451,7 @@ class TiktokenCounter(BaseTokenizer):
                                     else:
                                         total += 170  # Base for high detail
                                 else:
-                                    # Delegate all other part types (Anthropic
-                                    # image/tool_result blocks, Strands SDK parts,
-                                    # audio, documents) to the shared handler.
-                                    # Stringifying them here would count base64
-                                    # payloads as text — a 200KB image part became
-                                    # ~100K tokens instead of the fixed image cost.
+                                    # Delegate all other part types (Anthropic image/tool_result blocks, Strands SDK parts, audio, documents) to the shared handler.
                                     total += self._count_content_parts([part])
                             elif isinstance(part, str):
                                 total += self.count_text(part)

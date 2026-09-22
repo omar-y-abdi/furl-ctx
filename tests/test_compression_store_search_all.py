@@ -22,8 +22,7 @@ from furl_ctx.cache.compression_store import (
     CrossStoreMatch,
 )
 
-# Split so no verbatim secret literal sits in source (hook-safe; mirrors the
-# trick in tests/test_compression_store_redaction.py).
+# Split so no verbatim secret literal sits in source (hook-safe; keeps the source itself hook-safe).
 _API_KEY = "sk" + "-" + "abcdefghijklmnopqrstuvwx"
 
 

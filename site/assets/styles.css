@@ -1,12 +1,6 @@
-/* ============================================================================
-   furl showcase, single-theme dark, warm near-blacks, one amber signal.
-   Display: Bricolage Grotesque. Payloads + UI data: JetBrains Mono.
-   ========================================================================== */
+/* Dark showcase theme with amber accents; Bricolage Grotesque for display and JetBrains Mono for payload/UI data. */
 
-/* Fonts (JetBrains Mono, Bricolage Grotesque) are embedded as base64 data URIs
-   in assets/fonts.css, loaded before this file. Data URIs load under file://
-   as well as http, arrive at CSS parse time (no swap, no layout shift), and add
-   no extra request. The woff2 source files live in assets/fonts/. */
+/* Fonts are self-hosted and loaded only when their weight is used. */
 
 /* ---- Tokens ------------------------------------------------------------- */
 :root {
@@ -21,7 +15,7 @@
   --ink:   #f0ece5;
   --ink-2: #aaa39a;
   --ink-3: #90897d;   /* tertiary labels, meets AA on the dark grounds */
-  --ink-4: #6f685c;   /* gutter line numbers */
+  --ink-4: #aaa39a;   /* gutter line numbers */
 
   --accent:      #ffb24d;
   --accent-2:    #ffca7d;
@@ -388,7 +382,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gut); }
 .no-js .demo-facts { display: table; }
 
 /* ---- Reveal on load / scroll ------------------------------------------- */
-.reveal { opacity: 0; transform: translateY(16px); transition: opacity .7s var(--ease), transform .7s var(--ease); }
+.reveal { opacity: 1; transform: translateY(16px); transition: transform .7s var(--ease); }
 .reveal.in { opacity: 1; transform: none; }
 .no-js .reveal { opacity: 1; transform: none; }
 
@@ -402,7 +396,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gut); }
   .note { grid-template-columns: 1fr; gap: 7px; }
 }
 @media (max-width: 560px) {
-  .nav-links a:not(:last-child) { display: none; }
+  .nav-links a[href^="#"] { display: none; }
   .proof { gap: 16px; }
   .cta { flex-basis: 100%; justify-content: center; }
   .panel-title { gap: 6px; }
@@ -415,3 +409,21 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gut); }
   .reveal { opacity: 1; transform: none; }
   .folded .frow { transform: none; filter: none; }
 }
+
+/* Document pages and shared keyboard access. */
+a:focus-visible, button:focus-visible, [tabindex="0"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.document-page { padding-top: 30px; padding-bottom: 80px; }
+.document-page h1 { font-size: clamp(2.2rem, 6vw, 4rem); margin: 34px 0; }
+.document-body { max-width: 72ch; overflow-wrap: anywhere; }
+.document-body h2 { font-size: 1.4rem; margin: 36px 0 12px; }
+.document-body p { color: var(--ink-2); margin: 14px 0; }
+.document-body a:not(.cta), .note-v a { text-decoration: underline; text-underline-offset: 3px; }
+.document-body pre { overflow-x: auto; padding: 20px; border: 1px solid var(--line-2); border-radius: var(--r-sm); }
+.document-body .cta { color: #1a1206; }
+.breadcrumb ol { display: flex; flex-wrap: wrap; list-style: none; padding: 0; color: var(--ink-2); font-size: .85rem; gap: 12px; }
+.breadcrumb li+li::before { content: "/"; margin-right: 12px; }
+.breadcrumb a { text-decoration: underline; text-underline-offset: 3px; }
+.error-number { font-family: var(--display); color: var(--accent) !important; font-size: 6rem; line-height: 1; }
+.foot-links { flex-wrap: wrap; row-gap: 14px; }
+.sr-status { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 600px) { .nav { flex-wrap: wrap; gap: 18px; } .nav-links { flex-wrap: wrap; } }

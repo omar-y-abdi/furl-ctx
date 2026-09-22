@@ -298,9 +298,8 @@ def test_hook_redacts_large_output_and_on_disk_store(tmp_path: Path) -> None:
 
 
 def test_hook_redacts_small_output_below_threshold(tmp_path: Path) -> None:
-    # Too small to compress, but redaction still fires and the scrubbed text is
-    # emitted so the secret never reaches the model (matches the library
-    # redactor, which redacts regardless of compression).
+    # Too small to compress, but redaction still fires and the scrubbed text is emitted so the secret
+    # never reaches the model (matches the library redactor, which redacts regardless of compression).
     small = f"quick result {SECRET} done"
     proc, _db = _run_hook(tmp_path, small, patterns=PATTERN, min_chars="100000")
     assert proc.returncode == 0
@@ -322,9 +321,8 @@ def test_hook_default_off_is_byte_identical_passthrough(tmp_path: Path) -> None:
 
 
 def test_multiline_caret_anchor_matches_mid_string_lines() -> None:
-    # Tool output is line-oriented: an operator writing ^ means "line start".
-    # Patterns compile with re.MULTILINE, so ^password=... hits a mid-output
-    # line — string-anchored-only was the silent-miss surprise (review F4).
+    # Tool output is line-oriented: an operator writing ^ means "line start". Patterns compile with re.MULTILINE,
+    # so ^password=... hits a mid-output line — string-anchored-only was the silent-miss surprise (review F4).
     redactor = build_env_redactor({"FURL_REDACT_PATTERNS": r"^password=\S+"})
     assert redactor is not None
     out = redactor("header line\npassword=hunter2\ntrailer line")
@@ -346,9 +344,8 @@ def test_multiline_dollar_anchor_matches_per_line() -> None:
 def test_furl_read_redacts_served_output_stored_entry_and_disk(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # furl_read stores RAW file content; with FURL_REDACT_PATTERNS set the
-    # secret must be absent from the served (numbered) output, the CCR entry,
-    # AND every store-dir file's raw bytes (review F1).
+    # furl_read stores RAW file content; with FURL_REDACT_PATTERNS set the secret must be absent from
+    # the served (numbered) output, the CCR entry, AND every store-dir file's raw bytes (review F1).
     pytest.importorskip("mcp")
     from furl_ctx.cache.compression_store import reset_compression_store
     from furl_ctx.ccr.mcp_server import FurlMCPServer
@@ -393,9 +390,8 @@ def test_furl_read_redacts_served_output_stored_entry_and_disk(
 def test_mcp_compress_filtered_runs_are_redacted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # _compress_filtered receives content AFTER _compress_content's redaction
-    # point and re-enters _compress_content per eligible run — so the filtered
-    # store path is covered by the same redaction. Pin it (review F2).
+    # _compress_filtered receives content AFTER _compress_content's redaction point and re-enters _compress_content
+    # per eligible run — so the filtered store path is covered by the same redaction. Pin it (review F2).
     pytest.importorskip("mcp")
     from furl_ctx.ccr.compress_modes import SectionPatterns
     from furl_ctx.ccr.mcp_server import FurlMCPServer
@@ -447,11 +443,7 @@ def test_builtins_on_by_default_redacts_each_credential_shape() -> None:
 
 
 def test_builtins_redacts_private_key_block() -> None:
-    # Assert the KEY MATERIAL is gone, not just the armor. Asserting only the
-    # armor is what let a header-only pattern pass this test for months while
-    # every base64 byte of the key survived into the store. Full shape coverage
-    # (labels, PGP, JSON-escaped, truncated, over-redaction boundaries) lives in
-    # tests/test_redaction_private_key_blocks.py.
+    # Assert the KEY MATERIAL is gone, not just the armor.
     redactor = build_default_redactor({})
     assert redactor is not None
     armor = "PRIVATE" + " KEY-----"

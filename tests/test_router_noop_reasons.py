@@ -163,10 +163,8 @@ class TestNoopTransformPure:
         assert noop_transform({"small": 1, "ratio_too_high": 3}) == "router:noop:no_savings"
 
     def test_shape_lane_dominance_is_over_all_noop_lanes(self) -> None:
-        # Review F1's failing scenario: 10 content-block messages shipped
-        # verbatim vs 1 small string message. The shape lane dominates, so the
-        # umbrella reason wins — NOT below_min_tokens, which described only
-        # 1 of 11 messages.
+        # Review F1's failing scenario: 10 content-block messages shipped verbatim vs 1
+        # small string message. NOT below_min_tokens, which described only 1 of 11 messages.
         assert (
             noop_transform({"content_blocks": 10, "small": 1}) == "router:noop:no_eligible_content"
         )
@@ -206,10 +204,8 @@ class TestNoBareNoopEndToEnd:
         assert res.messages[0]["content"] == content
 
     def test_block_message_batch_reasoned_no_eligible_content(self) -> None:
-        # Review F1 end-to-end: assistant text-block messages are protected by
-        # default in the block walk, so each books ONLY the content_blocks
-        # shape lane; one small tool string books small=1. The umbrella reason
-        # must win over below_min_tokens — and the no-op stays byte-neutral.
+        # Review F1 end-to-end: assistant text-block messages are protected by default in the block
+        # walk, so each books ONLY the content_blocks shape lane; one small tool string books small=1.
         block_messages = [
             {
                 "role": "assistant",
@@ -236,9 +232,7 @@ class TestNoBareNoopEndToEnd:
         assert res.tokens_after == res.tokens_before
 
     def test_changelog_head_never_bare_noop(self) -> None:
-        # The repo CHANGELOG head is prose+headers the extractor can't shrink;
-        # it must no-op WITH a reason. (If it ever becomes compressible the
-        # assertion still holds: then there is no router:noop entry at all.)
+        # The repo CHANGELOG head is prose+headers the extractor can't shrink; it must no-op WITH a reason.
         res = _compress_tool(_changelog_head())
         for entry in _noop_reasons(res.transforms_applied):
             assert entry != "router:noop"

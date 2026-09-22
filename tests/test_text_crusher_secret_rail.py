@@ -95,8 +95,7 @@ def _crusher(**overrides) -> TextCrusher:
 
 @pytest.fixture
 def _no_store_io(monkeypatch):
-    # Keep the test hermetic: skip the production CompressionStore write
-    # (the veto seam is pinned by test_ccr_persist_failure_vetoes.py).
+    # Keep the test hermetic by skipping the production store write; separate tests pin the veto seam.
     monkeypatch.setattr(TextCrusher, "_persist_to_python_ccr", lambda self, o, c, k: True)
 
 

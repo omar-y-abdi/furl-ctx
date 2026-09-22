@@ -1,15 +1,6 @@
 name: Publish to PyPI (manual fallback)
 
-# Recovery only. This workflow NEVER rebuilds release bytes. It resolves the
-# immutable vX.Y.Z tag, binds the source to the exact `.github/workflows/release.yml`
-# workflow identity and source SHA, requires that run's successful release seal,
-# verifies GitHub's SHA-256 digest for both the dist and seal artifacts, and then
-# replays the exact recovered bytes through the same local canonical publication
-# actions used by Release. Build failures stay in Release; this path can only
-# replay a previously smoke-verified artifact set. Manual input is collected by
-# the unprivileged Publish Recovery Request workflow; this privileged continuation
-# runs only from workflow_run on protected main. The PyPI job itself remains here
-# because Trusted Publishing binds authorization to this workflow filename.
+# Recovery only.
 on:
   workflow_run:
     workflows: ["Publish Recovery Request"]
@@ -358,9 +349,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Do not supply a ref here. For workflow_run, GitHub executes this workflow
-      # from the default branch and fixes GITHUB_SHA for the run. A data-derived
-      # checkout ref would turn this privileged job into an untrusted-code sink.
+      # Do not supply a ref here.
       - name: Checkout protected recovery controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -386,10 +375,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      # This OIDC-bearing job intentionally remains in publish.yml so an
-      # existing PyPI Trusted Publisher registration for the fallback workflow
-      # remains valid. The shared composite action removes policy drift without
-      # changing the workflow identity PyPI authenticates.
+      # Keep this OIDC-bearing job so the existing PyPI Trusted Publisher registration remains valid.
       - name: Checkout protected recovery controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

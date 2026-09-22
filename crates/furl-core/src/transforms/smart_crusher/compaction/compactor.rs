@@ -1,53 +1,5 @@
-//! TabularCompactor — array → [`Compaction`] IR.
-//!
-//! # Pipeline
-//!
-//! ```text
-//! &[Value]  →  detect uniformity  →  build schema  →  build rows
-//!                    │
-//!                    ├─ heterogeneous? → bucket by discriminator
-//!                    │                    (Compaction::Buckets)
-//!                    │
-//!                    └─ homogeneous → flatten nested-uniform columns
-//!                                        (Compaction::Table)
-//! ```
-//!
-//! # Decision rules
-//!
-//! - **Untouched fall-through.** Items < 2, non-object items, or a key
-//!   distribution too uneven for tabular form → return [`Compaction::Untouched`]
-//!   so the existing lossy path takes over.
-//! - **Schema = union of all keys**, sorted by descending frequency then
-//!   alphabetically. Sparse fields keep their slot — cells in rows that
-//!   lack the field render as [`CellValue::Missing`].
-//! - **Heterogeneous case.** When < 50% of keys appear in >= 80% of rows,
-//!   look for a discriminator (a string field present in every row whose
-//!   value distribution partitions cleanly). If found, emit
-//!   [`Compaction::Buckets`]; else [`Compaction::Untouched`].
-//! - **Nested-uniform flatten.** A field that's an object in every row
-//!   with the same inner key set, where flattening doesn't blow up the
-//!   column count by more than `max_flatten_inner_keys`, gets promoted
-//!   into dotted columns (`meta.region`, `meta.tier`).
-//!
-//!   HONEST CONTRACT (COR-14): the wire grammar records nothing about the
-//!   flatten, so the reference decoder reconstructs such rows with dotted
-//!   TOP-LEVEL keys (`{"meta.region": ...}`), not the original nesting.
-//!   Reconstruction is **value-exact under dotted keys** — every value is
-//!   exact, the nesting shape is not restored. `csv_schema_decoder.py`
-//!   documents the same caveat on the consumer side, and
-//!   `verify/independent_recheck.py` compares both sides un-flattened.
-//!   Shapes where even that equivalence would mis-bind a value — see
-//!   [`flatten_breaks_dotted_equivalence`] — never flatten (fail closed).
-//! - **Stringified-JSON.** Cells that classify as
-//!   [`CellClass::StringifiedJson`] become [`CellValue::Nested`] when the
-//!   parsed value is an array of objects (recursive table); otherwise
-//!   [`CellValue::Scalar`] of the parsed value (saves escaping cost).
-//! - **Opaque blob.** [`CellClass::Opaque`] cells become
-//!   [`CellValue::OpaqueRef`] keyed by a 12-char SHA-256 prefix.
-//!
-//! [`CellClass`]: super::classifier::CellClass
-//! [`CellClass::StringifiedJson`]: super::classifier::CellClass::StringifiedJson
-//! [`CellClass::Opaque`]: super::classifier::CellClass::Opaque
+//! Build tabular IR from object arrays; fall through on unsuitable shapes. Flatten uniform nested objects only
+//! when dotted-key decoding stays value-exact; stringified JSON and opaque cells use typed IR representations.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -58,11 +10,8 @@ use super::classifier::{classify_cell, CellClass, ClassifyConfig};
 use super::ir::{Bucket, CellValue, ColumnEncoding, Compaction, FieldSpec, Row, Schema};
 use crate::ccr::CcrStore;
 
-/// Config for the compactor.
-///
-/// `Clone`/`Default`/manual `Debug`. The optional `ccr_store` cannot
-/// derive `Debug` (`dyn CcrStore` isn't `Debug`), so `Debug` is
-/// hand-written below to print only the store's presence.
+/// Config for the compactor. `Clone`/`Default`/manual `Debug`. The optional `ccr_store` cannot derive `Debug`
+/// (`dyn CcrStore` isn't `Debug`), so `Debug` is hand-written below to print only the store's presence.
 #[derive(Clone)]
 pub struct CompactConfig {
     pub classify: ClassifyConfig,
@@ -71,19 +20,15 @@ pub struct CompactConfig {
     /// return [`Compaction::Untouched`]. Default: 2.
     pub min_items: usize,
 
-    /// A field is "core" if it appears in at least this fraction of
-    /// rows. Schemas with too few core fields trigger heterogeneous
-    /// (bucket) handling. Default: 0.8.
+    /// A field is "core" if it appears in at least this fraction of rows. Schemas with
+    /// too few core fields trigger heterogeneous (bucket) handling. Default: 0.8.
     pub core_field_fraction: f64,
 
-    /// Heterogeneity threshold: when fewer than this fraction of all
-    /// observed keys are core, treat the array as heterogeneous and
-    /// look for a discriminator. Default: 0.6.
+    /// Heterogeneity threshold: when fewer than this fraction of all observed keys are
+    /// core, treat the array as heterogeneous and look for a discriminator. Default: 0.6.
     pub heterogeneous_core_ratio: f64,
 
-    /// Cap on inner-key count for nested-uniform flattening. Larger
-    /// inner schemas stay nested rather than exploding column count.
-    /// Default: 6.
+    /// Cap on inner-key count for nested-uniform flattening. Larger inner schemas stay nested rather than exploding column count. Default: 6.
     pub max_flatten_inner_keys: usize,
 
     /// Minimum bucket count before considering a candidate discriminator
@@ -94,27 +39,12 @@ pub struct CompactConfig {
     /// is too granular (e.g. an ID column). Default: 8.
     pub max_buckets: usize,
 
-    /// Optional CCR store. When set, an opaque-blob cell substituted with
-    /// an `<<ccr:HASH,...>>` marker ALSO stashes the original bytes under
-    /// that hash (Defect 2): the marker becomes a recovery pointer, not a
-    /// silent loss. Without a store the marker still renders (same hash),
-    /// but the original is unretrievable — which is exactly the silent
-    /// loss the public path must avoid, so the production
-    /// `CompactionStage` always wires one in. `None` keeps the compactor
-    /// a pure function for the many tests + the parity formatters that
-    /// only inspect the IR.
+    /// Optional CCR store. When set, an opaque-blob cell substituted with an `<<ccr:HASH,...>>` marker ALSO stashes
+    /// the original bytes under that hash (Defect 2): the marker becomes a recovery pointer, not a silent loss.
     pub ccr_store: Option<Arc<dyn CcrStore>>,
 
-    /// Whether opaque-classified cells are substituted with
-    /// `<<ccr:HASH,...>>` pointers (default `true`). The substitution
-    /// pair — store write + `OpaqueRef` cell — happens EAGERLY during
-    /// `compact()`, before any caller accept/decline decision, so
-    /// callers that must never hide visible bytes cannot merely reject
-    /// the rendered output: the write would already have happened. Set
-    /// `false` (the crusher's `lossless_only` strict mode does, via
-    /// `SmartCrusherBuilder::build`) to keep opaque cells as verbatim
-    /// `Scalar`s — no pointer, no store write; the render either wins
-    /// as a pure rearrangement or fails the savings gate.
+    /// Whether opaque-classified cells are substituted with `<<ccr:HASH,...>>` pointers (default `true`). The substitution pair — store write + `OpaqueRef` cell — happens EAGERLY during
+    /// `compact()`, before any caller accept/decline decision, so callers that must never hide visible bytes cannot merely reject the rendered output: the write would already have happened.
     pub substitute_opaque: bool,
 }
 
@@ -163,12 +93,8 @@ pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
 
     let key_freqs = compute_key_freqs(items);
 
-    // COR-15 fail-closed gate: column names ship RAW in the `[N]{...}`
-    // declaration and the preamble lines (nothing quotes them), so a key
-    // like `meta:region` silently mis-keys every decoded row AND
-    // desynchronizes the `__affix:` preamble (values lose their affix,
-    // arith folds shift by a row). Decline compaction — the array keeps
-    // its verbatim JSON shape and merely skips the lossless tier.
+    // COR-15 fail-closed gate: column names ship RAW in the `[N]{...}` declaration and the preamble lines (nothing
+    // quotes them). Decline compaction — the array keeps its verbatim JSON shape and merely skips the lossless tier.
     if key_freqs.keys().any(|k| column_name_breaks_grammar(k)) {
         return Compaction::Untouched;
     }
@@ -187,9 +113,8 @@ pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
         if let Some(disc) = detect_discriminator(items, &key_freqs, cfg) {
             return bucket_by(items, &disc, cfg);
         }
-        // No clean discriminator — fall through to a sparse Table
-        // rather than refusing. A sparse table is still better than
-        // letting the lossy path drop fields wholesale.
+        // No clean discriminator — fall through to a sparse Table rather than refusing. A
+        // sparse table is still better than letting the lossy path drop fields wholesale.
     }
 
     build_homogeneous_table(items, &key_freqs, cfg)
@@ -283,39 +208,20 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
                     if sub.was_compacted() {
                         return CellValue::Nested(Box::new(sub));
                     }
-                    // Inner compaction declined (`Untouched` is
-                    // payload-free, PERF-5): carry the original value —
-                    // renders byte-identically to the old
-                    // `Nested(Untouched(...))` and stays out of the
-                    // decoder-verifiable tier.
+                    // Inner compaction declined (`Untouched` is payload-free, PERF-5): carry the original value — renders
+                    // byte-identically to the old `Nested(Untouched(...))` and stays out of the decoder-verifiable tier.
                     return CellValue::DeclinedJson(v.clone());
                 }
             }
             CellValue::Scalar(v.clone())
         }
         CellClass::StringifiedJson(_) => {
-            // T2 fidelity: a value that ORIGINATED as a string is kept as the
-            // EXACT original string bytes — never deserialized. Parsing it
-            // (the old behaviour) let `flatten_uniform_nested` promote
-            // object-strings into dotted columns so the original string field
-            // vanished, and re-serialized array-strings dropped their interior
-            // whitespace — both silent, markerless corruption on the lossless
-            // path. `classify_string` still parses to gate CCR/opaque routing,
-            // but the cell it yields here is the verbatim source string.
-            //
-            // A container-string that lands in a type-mixed (`json`-tagged)
-            // column is then declined from the lossless tier by
-            // `Compaction::is_decoder_verifiable`: a quoted container-string
-            // is indistinguishable from a real container cell to the reference
-            // decoder, so the array routes to the recoverable tier instead.
+            // T2 fidelity never deserialized. both silent, markerless corruption on the lossless path.
             CellValue::Scalar(v.clone())
         }
         CellClass::Opaque(kind) => {
-            // Strict lossless-or-passthrough callers disable substitution
-            // entirely: the cell stays a verbatim Scalar, no pointer is
-            // minted, and — critically — no store write happens (the
-            // Defect-2 write below is EAGER; a caller-side render
-            // rejection would come too late to prevent it).
+            // Strict lossless-or-passthrough callers disable substitution entirely: the cell stays a verbatim Scalar, no pointer is minted, and —
+            // critically — no store write happens (the Defect-2 write below is EAGER; a caller-side render rejection would come too late to prevent it).
             if !cfg.substitute_opaque {
                 return CellValue::Scalar(v.clone());
             }
@@ -325,14 +231,8 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
             };
             let bytes = s.as_bytes();
             let ccr_hash = hash_opaque(bytes);
-            // Defect 2: persist the original blob under the SAME hash the
-            // rendered `<<ccr:HASH,...>>` marker will carry, so a
-            // consumer holding only the output can recover it via
-            // `ccr_get(hash)`. Without this, the lossless:table path
-            // substitutes the blob with a marker but never stores the
-            // original → silent loss. The store write is unconditional
-            // when a store is configured and idempotent (same hash →
-            // same bytes); `None` keeps the compactor pure for tests.
+            // Defect 2: persist the original blob under the SAME hash the rendered `<<ccr:HASH,...>>` marker will carry, so a consumer holding only the output can
+            // recover it via `ccr_get(hash)`. Without this, the lossless:table path substitutes the blob with a marker but never stores the original → silent loss.
             if let Some(store) = &cfg.ccr_store {
                 store.put(&ccr_hash, s);
             }
@@ -345,29 +245,16 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
     }
 }
 
-/// Promote fields whose every row holds an object with the same key
-/// set into dotted columns. Bounded by `cfg.max_flatten_inner_keys` so
-/// a 50-key inner schema doesn't blow up the table width.
-///
-/// COR-14 contract note: the flatten is NOT recorded in the wire grammar,
-/// so the decoder cannot un-flatten — decoded rows carry the dotted
-/// column names as top-level keys. "Lossless" for a flattened table means
-/// value-exact under dotted keys, not shape-exact reconstruction. Shapes
-/// where even THAT equivalence would break — an empty parent name, inner
-/// keys with empty dot-segments, prefix-overlapping inner keys, or a
-/// sibling column on a strict prefix of a synthesized dotted path — skip
-/// the flatten entirely ([`flatten_breaks_dotted_equivalence`]) and stay
-/// nested-object cells, which decode byte-exact.
+/// Promote fields whose every row holds an object with the same key set into dotted columns. "Lossless"
+/// for a flattened table means value-exact under dotted keys, not shape-exact reconstruction.
 fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &CompactConfig) {
     use super::formatter::column_name_breaks_grammar;
 
     let mut i = 0;
     while i < specs.len() {
         let inner_keys = match uniform_object_keys(specs, rows, i) {
-            // COR-15: a flattened `parent.inner` column name ships RAW in
-            // the declaration too — an inner key carrying grammar chars
-            // would corrupt it the same way, so the column stays a nested
-            // object cell (CSV-quoted JSON) instead of flattening.
+            // COR-15: a flattened `parent.inner` column name ships RAW in the declaration too — an inner key carrying grammar chars
+            // would corrupt it the same way, so the column stays a nested object cell (CSV-quoted JSON) instead of flattening.
             Some(keys)
                 if !keys.is_empty()
                     && keys.len() <= cfg.max_flatten_inner_keys
@@ -383,14 +270,7 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
 
         let parent_name = specs[i].name.clone();
 
-        // T12 fail-closed: synthesized `parent.key` columns ship as RAW names
-        // in the declaration with no free-name check. If any collides with an
-        // existing column — a literal top-level `parent.key`, or a sibling
-        // already flattened to the same dotted name — flattening would emit
-        // two identically named columns and the reference decoder would
-        // silently OVERWRITE one value (last write wins). Skip the flatten for
-        // this column; it stays a nested-object cell (CSV-quoted JSON, decoded
-        // back to the object) so both distinct values survive.
+        // T12 fail-closed synthesized `parent.key` columns ship as RAW names in the declaration with no free-name check.
         let collides = inner_keys.iter().any(|k| {
             let synthesized = format!("{parent_name}.{k}");
             specs
@@ -403,12 +283,8 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
             continue;
         }
 
-        // COR-14 fail-closed: even with no name collision, a synthesized
-        // dotted name can still be AMBIGUOUS about the original nesting
-        // (`{"a": {"b.c": 1}}` and `{"a.b": {"c": 1}}` both synthesize
-        // `a.b.c`). Where that ambiguity can bind a value to the wrong
-        // path, skip the flatten; the column stays a nested-object cell
-        // and decodes byte-exact.
+        // Decline flattening when synthesized dotted names are ambiguous about original nesting,
+        // even without a direct collision. Keep the nested cell so decoding stays byte-exact.
         if flatten_breaks_dotted_equivalence(&parent_name, &inner_keys, specs) {
             i += 1;
             continue;
@@ -467,38 +343,8 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
     }
 }
 
-/// COR-14 ambiguity guard: true when flattening `parent` would break
-/// value-exactness under dotted-key canonicalization, the documented
-/// equivalence for flattened tables (`verify/independent_recheck.
-/// _unflatten_dotted`: non-dotted keys fold first, then dotted keys in
-/// sorted order, and a key stays literal when nesting would clobber
-/// existing data).
-///
-/// A dot-free, non-empty parent with dot-free inner keys is always safe:
-/// the leaf slot `out[parent][k]` cannot be reached or blocked by any
-/// other column once the synthesized-name collision check has passed, so
-/// original and decoded fold identically regardless of siblings. Four
-/// shapes break that symmetry, each reproduced as a live silent-corruption
-/// round trip before this guard existed:
-///
-/// - **empty parent name**: `{"": {"k": 1}}` synthesizes `.k`, whose
-///   leading empty segment the canonicalizer keeps LITERAL at top level,
-///   while the original folds `k` inside the `""` subtree;
-/// - **empty inner key / empty dot-segment** (`""`, `"b."`): same
-///   literal-vs-nested split (`{"p": {"": 1}}` decoded as `{"p.": 1}`);
-/// - **prefix-overlapping inner keys** (`{"b", "b.c"}`): whether the
-///   `b.c` leaf nests under sibling value `b` depends on that value's own
-///   keys row by row — data-dependent, so fail closed;
-/// - **sibling column on a strict prefix of a synthesized dotted path**
-///   (column `a.b` beside parent `a` with inner `b.c`): the original
-///   folds `b.c` inside the parent's sandboxed subtree, the decoded folds
-///   it in the global namespace where the sibling blocks the path,
-///   silently swapping which value owns `a.b.c`.
-///
-/// Siblings that EXTEND a synthesized path (`a.b.c.d`) or sit on a
-/// disjoint branch (`a.j`) fold identically on both sides and keep the
-/// flatten, so metrics-style dotted inner keys (`{"m": {"cpu.usage": 1}}`
-/// alone) still compress.
+/// Reject nested flattening when empty segments, overlapping inner keys, or sibling-prefix collisions make dotted-key
+/// reconstruction ambiguous. Safe flattening must remain value-exact under the decoder's canonical dotted-key fold.
 fn flatten_breaks_dotted_equivalence(
     parent: &str,
     inner_keys: &[String],
@@ -534,20 +380,8 @@ fn flatten_breaks_dotted_equivalence(
     })
 }
 
-/// Stamp [`FieldSpec::const_value`] on every column whose cells are the
-/// SAME scalar in every row (constant-column fold, DESIGN-style RLE for
-/// constant columns).
-///
-/// Fold conditions (all must hold):
-/// - ≥ 2 rows (a 1-row "constant" saves nothing);
-/// - every cell is `CellValue::Scalar` (no `Missing` / `Nested` /
-///   `OpaqueRef`) and all values are equal;
-/// - the value is not `Null` and not the empty string — both render as
-///   an empty CSV cell, which would make the `name:type=` declaration
-///   ambiguous with "no constant".
-///
-/// The rows keep their cells (IR stays lossless / formatter-agnostic);
-/// only formatters that understand `const_value` change their output.
+/// Stamp [`FieldSpec::const_value`] on every column whose cells are the SAME scalar in every row (constant-column fold, DESIGN-style RLE for constant columns).
+/// Fold conditions (all must hold): - ≥ 2 rows (a 1-row "constant" saves nothing). The rows keep their cells (IR stays lossless / formatter-agnostic);
 fn stamp_constant_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     if rows.len() < 2 {
         return;
@@ -582,26 +416,8 @@ fn stamp_constant_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     }
 }
 
-/// Stamp [`ColumnEncoding::ArithInt`] on every integer column that is an
-/// EXACT arithmetic progression (`value_i == base + step * i`, constant
-/// non-zero step). The CSV-schema formatter folds such a column into the
-/// declaration (`name:int=BASE+STEP`) and omits it from the rows; the
-/// decoder regenerates the exact values from the row index — pure
-/// integer math, exact reconstruction by construction (the detection IS
-/// the round-trip proof: every cell is checked against `base + step*i`).
-///
-/// Stamp conditions (all must hold):
-/// - ≥ 3 rows (a 2-row "progression" is a coincidence with negligible
-///   saving);
-/// - every cell is `Scalar` of an i64 (no `Missing`/`Null`/float — the
-///   column must be non-nullable by data, not just by schema);
-/// - the step is constant and non-zero (a zero step is a constant
-///   column — `stamp_constant_columns` already owns that fold);
-/// - no overflow anywhere in `base + step * i` (checked arithmetic);
-/// - at least one OTHER row-visible column remains (rows must not
-///   render as empty lines);
-/// - strict byte saving: the per-row cells + their commas outweigh the
-///   `=BASE+STEP` declaration suffix.
+/// Use arithmetic-column encoding only for ≥3 exact i64 progression rows with nonzero constant
+/// step, no missing/null/float cells or overflow, another visible column, and a strict byte saving.
 fn stamp_arith_int_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     if rows.len() < 3 {
         return;
@@ -634,15 +450,8 @@ fn stamp_arith_int_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     }
 }
 
-/// Stamp [`ColumnEncoding::IsoDeltaSeconds`] on every string column
-/// whose EVERY value is a strict-shape ISO-8601 timestamp and whose
-/// delta rendering is strictly smaller than the plain rendering.
-///
-/// The round-trip is PROVEN at stamp time: the column is encoded with
-/// the same streaming encoder the formatter uses, decoded back, and
-/// compared against every original string — only an exact match stamps.
-/// Byte costs are simulated WITH ditto marks (the formatter applies
-/// ditto after encoding), so the gate measures real rendered bytes.
+/// Stamp [`ColumnEncoding::IsoDeltaSeconds`] on every string column whose EVERY value is a strict-shape ISO-8601
+/// timestamp and whose delta rendering is strictly smaller than the plain rendering. only an exact match stamps.
 fn stamp_iso_delta_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     use super::encodings::{decode_iso_column, encode_iso_column};
 
@@ -683,13 +492,8 @@ fn stamp_iso_delta_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     }
 }
 
-/// Stamp [`ColumnEncoding::DecimalScaled`] on every float column whose
-/// values all render as plain decimals (`-?\d+\.\d{1,6}`, no exponent).
-/// Cells become the integer value × 10^scale via PURE STRING
-/// MANIPULATION — no float arithmetic — and the round-trip is proven at
-/// stamp time: each encoded cell is decoded back to a decimal string,
-/// parsed as f64, re-rendered, and compared to the original rendering.
-/// Strict byte gate WITH ditto plus the `%scale` declaration suffix.
+/// Stamp [`ColumnEncoding::DecimalScaled`] on every float column whose values all render as plain decimals
+/// (`-?\d+\.\d{1,6}`, no exponent). Cells become the integer value × 10^scale via PURE STRING MANIPULATION.
 fn stamp_decimal_scaled_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     use super::encodings::{decimal_frac_digits, decode_decimal_cell, encode_decimal_cell};
 
@@ -753,17 +557,8 @@ fn stamp_decimal_scaled_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     }
 }
 
-/// Stamp [`ColumnEncoding::DictString`] on every low-cardinality string
-/// column where a `__dict:name=v0,v1,...` line plus per-row index cells
-/// render strictly smaller than the plain cells. Every distinct value
-/// appears verbatim exactly once (first-appearance order) in the
-/// dictionary line; reconstruction is a total index lookup, proven at
-/// stamp time by decoding the index cells back and comparing.
-///
-/// Gates: ≥ 3 rows; every cell a scalar string; 2 ≤ distinct < rows;
-/// no value contains a newline (line-grammar integrity); strict byte
-/// saving measured WITH ditto on both sides using the exact formatter
-/// quoting (`csv_render_str`).
+/// Stamp [`ColumnEncoding::DictString`] on every low-cardinality string column where a `__dict:name=v0,v1,...` line plus per-row index cells render
+/// strictly smaller than the plain cells. Every distinct value appears verbatim exactly once (first-appearance order) in the dictionary line;
 fn stamp_dict_string_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     use super::formatter::csv_render_str;
 
@@ -831,34 +626,16 @@ fn stamp_dict_string_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     }
 }
 
-/// Stamp [`ColumnEncoding::HeadDict`] on a plain string column whose
-/// values split at a delimiter into a LOW-cardinality head and a unique
-/// tail (paths grouped under a few directories, namespaced keys under a
-/// few prefixes, dotted module names under a few packages). The distinct
-/// heads are declared once; each row carries `<head_index><delim><tail>`.
-///
-/// For each delimiter in [`HEAD_DELIMS`] priority order, the column is
-/// split at the LAST occurrence; the first delimiter that (a) splits
-/// EVERY cell, (b) yields 2..(rows) distinct heads, and (c) renders
-/// strictly smaller wins. The round-trip is proven at stamp time:
-/// every cell is split, indexed, re-encoded, decoded, and rejoined back
-/// to the original.
-///
-/// Runs BEFORE the affix stamp: when the leading segment is
-/// low-cardinality this is the larger fold; affix then catches any
-/// whole-column shared affix head-dict did not claim.
+/// Stamp [`ColumnEncoding::HeadDict`] on a plain string column whose values split at a delimiter into a LOW-cardinality head and a
+/// unique tail (paths grouped under a few directories, namespaced keys under a few prefixes, dotted module names under a few packages).
 fn stamp_head_dict_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     use super::encodings::{
         decode_head_cell, decode_head_value, encode_head_cell, split_head, HEAD_DELIMS,
     };
     use super::formatter::csv_render_str;
 
-    // Row-count floor: a head dictionary's one-time cost only reliably
-    // amortizes — in BYTES and (crucially) in tokens — when many rows
-    // reuse the few heads. On small arrays the `<idx><delim>` cells can be
-    // byte-smaller yet tokenize LARGER (the index+delimiter fragments
-    // familiar path tokens), so the per-column byte gate is not sufficient.
-    // A 16-row floor keeps head-dict in the regime where the win is robust.
+    // Row-count floor a head dictionary's one-time cost only reliably amortizes in BYTES and (crucially) in tokens On small arrays
+    // the `<idx><delim>` cells can be byte-smaller yet tokenize LARGER (the index+delimiter fragments familiar path tokens)
     const MIN_HEAD_DICT_ROWS: usize = 16;
     if rows.len() < MIN_HEAD_DICT_ROWS {
         return;
@@ -962,29 +739,8 @@ fn stamp_head_dict_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     }
 }
 
-/// Stamp [`ColumnEncoding::Affix`] on every plain string column whose
-/// every cell shares a common byte prefix and/or suffix (the structure
-/// that repeats across near-unique rows: shared path roots, URL roots,
-/// fixed key/template heads, file extensions). The affix is declared
-/// once on a `__affix:name=PREFIX,SUFFIX` preamble line and each row
-/// carries only its unique middle; reconstruction is pure byte
-/// concatenation (`prefix + middle + suffix`), proven at stamp time by
-/// stripping and rejoining every cell and comparing to the original.
-///
-/// Runs AFTER the dictionary stamp, so low-cardinality columns are
-/// already claimed by `DictString` (which is a strictly bigger win for
-/// few distinct values); affix catches the HIGH-cardinality near-unique
-/// columns the dictionary cannot fold.
-///
-/// Gates (all must hold):
-/// - ≥ 3 rows;
-/// - every cell a scalar string (no Missing/Nested/numeric);
-/// - the shared affix is non-empty (prefix or suffix);
-/// - the affix length is ≥ 2 bytes (a 1-byte affix barely pays for the
-///   `^` marker + the `__affix:` line);
-/// - the exact round-trip holds for every cell;
-/// - strict byte saving: the affix line + stripped+ditto cells render
-///   smaller than the plain+ditto cells.
+/// Use affix encoding for ≥3 string cells sharing a ≥2-byte prefix/suffix when strip-and-rejoin is exact and
+/// the preamble plus middles is smaller. Dictionary encoding gets first claim on low-cardinality columns.
 fn stamp_affix_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     use super::encodings::{common_affix, decode_affix_cell, encode_affix_cell};
     use super::formatter::csv_render_str;
@@ -1014,9 +770,8 @@ fn stamp_affix_columns(specs: &mut [FieldSpec], rows: &[Row]) {
         if prefix.len() + suffix.len() < 2 {
             continue;
         }
-        // A prefix/suffix containing a newline would break the
-        // single-line `__affix:` preamble grammar; skip (CSV-quoting
-        // can't carry a literal newline on one line).
+        // A prefix/suffix containing a newline would break the single-line `__affix:`
+        // preamble grammar; skip (CSV-quoting can't carry a literal newline on one line).
         if prefix.contains('\n')
             || prefix.contains('\r')
             || suffix.contains('\n')
@@ -1060,10 +815,7 @@ fn stamp_affix_columns(specs: &mut [FieldSpec], rows: &[Row]) {
     }
 }
 
-/// Total rendered bytes of a column's cells as the CSV formatter would
-/// ship them: a cell identical to the previous one (and longer than one
-/// char) costs 1 byte (`=` ditto), otherwise its own length. ISO and
-/// delta cells never need CSV quoting (no commas/quotes/newlines).
+/// ISO and delta cells never need CSV quoting (no commas/quotes/newlines).
 fn ditto_rendered_cost<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
     let mut prev: Option<&str> = None;
     let mut total = 0usize;
@@ -1194,18 +946,14 @@ fn type_tag_for(v: &Value) -> &'static str {
 }
 
 fn hash_opaque(bytes: &[u8]) -> String {
-    // 24-hex (96-bit) SHA-256 prefix — collision-resistant well past this
-    // store's request-window population, short enough to keep the marker
-    // compact. Algorithm consolidated in `ccr::persist` (ARCH-5); this domain
-    // alias stays so call sites and tests keep their vocabulary.
+    // 24-hex (96-bit) SHA-256 prefix — collision-resistant well past this store's request-window population, short enough to keep the marker compact.
     crate::ccr::persist::sha256_recovery_key(bytes)
 }
 
 // ─────────────────────────── heterogeneous bucketing ───────────────────────────
 
-/// Find a discriminator field — string-typed, present in every row,
-/// with a value distribution that partitions cleanly into 2..=max_buckets
-/// non-trivial buckets.
+/// Find a discriminator field — string-typed, present in every row, with a value
+/// distribution that partitions cleanly into 2..=max_buckets non-trivial buckets.
 fn detect_discriminator(
     items: &[Value],
     key_freqs: &BTreeMap<String, usize>,
@@ -1401,9 +1149,8 @@ mod tests {
 
     #[test]
     fn stringified_json_object_stays_string_scalar_not_flattened() {
-        // T2: a value that ORIGINATED as a JSON-object string is kept verbatim
-        // as a Scalar(String), never parsed + flattened into dotted columns
-        // (which dropped the original `payload` field entirely).
+        // T2: a value that ORIGINATED as a JSON-object string is kept verbatim as a Scalar(String), never
+        // parsed + flattened into dotted columns (which dropped the original `payload` field entirely).
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "payload": format!("{{\"a\": {i}}}")}))
             .collect();
@@ -1453,11 +1200,8 @@ mod tests {
 
     #[test]
     fn literal_dotted_key_collision_skips_flatten() {
-        // T12: a literal top-level `m.k` beside a nested `{"m": {"k": ..}}`
-        // must NOT synthesize a colliding `m.k` column. The nested `m` stays
-        // an object column; the literal `m.k` stays its own column, so both
-        // distinct values survive instead of one silently overwriting the
-        // other on decode.
+        // T12: a literal top-level `m.k` beside a nested `{"m": {"k": ..}}` must NOT synthesize a colliding `m.k` column. The nested `m` stays an object
+        // column; the literal `m.k` stays its own column, so both distinct values survive instead of one silently overwriting the other on decode.
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "m.k": format!("lit-{i}"), "m": {"k": 1000 + i}}))
             .collect();
@@ -1477,10 +1221,8 @@ mod tests {
 
     #[test]
     fn dotted_inner_with_prefix_sibling_object_skips_flatten() {
-        // COR-14: `a` with inner `b.c` synthesizes `a.b.c` while sibling
-        // column `a.b` sits on the strict prefix `a.b` — flattening bound
-        // 900+i to the wrong owner of `a.b.c` under the documented
-        // dotted-key equivalence. Both columns must stay nested cells.
+        // COR-14: `a` with inner `b.c` synthesizes `a.b.c` while sibling column `a.b` sits on the strict prefix `a.b` — flattening
+        // bound 900+i to the wrong owner of `a.b.c` under the documented dotted-key equivalence. Both columns must stay nested cells.
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "a.b": {"c": i}, "a": {"b.c": 900 + i}}))
             .collect();
@@ -1500,9 +1242,8 @@ mod tests {
 
     #[test]
     fn dotted_inner_with_prefix_sibling_scalar_skips_flatten() {
-        // COR-14: same prefix interference with a SCALAR sibling `a.b` —
-        // the decoded fold nests `a.b` first and keeps `a.b.c` literal,
-        // while the original folds `b.c` inside `a`'s subtree.
+        // COR-14: same prefix interference with a SCALAR sibling `a.b` — the decoded fold nests
+        // `a.b` first and keeps `a.b.c` literal, while the original folds `b.c` inside `a`'s subtree.
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "a": {"b.c": i}, "a.b": format!("s{i}")}))
             .collect();
@@ -1521,9 +1262,8 @@ mod tests {
 
     #[test]
     fn prefix_overlapping_inner_keys_skip_flatten() {
-        // COR-14: inners {`b`, `b.c`} — whether the `b.c` leaf nests under
-        // sibling value `b` depends on that value's own keys per row, so
-        // the flatten fails closed and `p` stays a nested cell.
+        // COR-14: inners {`b`, `b.c`} — whether the `b.c` leaf nests under sibling value `b` depends
+        // on that value's own keys per row, so the flatten fails closed and `p` stays a nested cell.
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "p": {"b": {"c": i}, "b.c": 900 + i}}))
             .collect();
@@ -1542,9 +1282,8 @@ mod tests {
 
     #[test]
     fn empty_segment_inner_keys_skip_flatten() {
-        // COR-14: `""` and `"b."` synthesize `p.` / `p.b.` whose empty
-        // segments the canonicalizer keeps LITERAL at top level while the
-        // original folds them inside `p` — guaranteed divergence.
+        // COR-14: `""` and `"b."` synthesize `p.` / `p.b.` whose empty segments the canonicalizer
+        // keeps LITERAL at top level while the original folds them inside `p` — guaranteed divergence.
         for inner in [json!({"": 1, "q": 2}), json!({"b.": 1, "q": 2})] {
             let items: Vec<Value> = (0..4)
                 .map(|i| json!({"id": i, "p": inner.clone()}))
@@ -1565,9 +1304,8 @@ mod tests {
 
     #[test]
     fn empty_parent_name_skips_flatten() {
-        // COR-14: parent `""` is dot-free but synthesizes `.k`, whose
-        // leading empty segment stays literal under the canonicalization
-        // while the original nests `k` under `""`.
+        // COR-14: parent `""` is dot-free but synthesizes `.k`, whose leading empty segment
+        // stays literal under the canonicalization while the original nests `k` under `""`.
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "": {"k": 900 + i}}))
             .collect();
@@ -1586,9 +1324,8 @@ mod tests {
 
     #[test]
     fn benign_dotted_inner_keys_still_flatten() {
-        // COR-14 guard must NOT over-decline: metrics-style dotted inner
-        // keys with no prefix interference fold identically on both sides
-        // of the equivalence, so the flatten (and its compression) stays.
+        // COR-14 guard must NOT over-decline: metrics-style dotted inner keys with no prefix interference
+        // fold identically on both sides of the equivalence, so the flatten (and its compression) stays.
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "m": {"cpu.usage": i, "mem.rss": 2 * i}}))
             .collect();
@@ -1605,10 +1342,8 @@ mod tests {
 
     #[test]
     fn leaf_extension_and_disjoint_siblings_keep_flatten() {
-        // COR-14 guard must NOT over-decline: a sibling EXTENDING the
-        // synthesized path (`a.b.c.d`) or on a disjoint branch (`a.j`)
-        // folds identically on both sides — only strict-prefix siblings
-        // block the flatten.
+        // COR-14 guard must NOT over-decline: a sibling EXTENDING the synthesized path (`a.b.c.d`) or on a
+        // disjoint branch (`a.j`) folds identically on both sides — only strict-prefix siblings block the flatten.
         let items: Vec<Value> = (0..4)
             .map(|i| json!({"id": i, "a": {"b.c": i}, "a.b.c.d": 900 + i, "a.j": 30 + i}))
             .collect();
@@ -1626,10 +1361,8 @@ mod tests {
 
     #[test]
     fn json_column_container_string_declines_lossless() {
-        // T1/T2: a `json`-tagged (type-mixed) column holding a container-
-        // looking STRING cannot ship losslessly — a quoted container-string
-        // is indistinguishable from a real container to the reference
-        // decoder, so the table declines (`is_decoder_verifiable` == false).
+        // T1/T2: a `json`-tagged (type-mixed) column holding a container- looking STRING cannot ship losslessly — a quoted container-string
+        // is indistinguishable from a real container to the reference decoder, so the table declines (`is_decoder_verifiable` == false).
         let items: Vec<Value> = (0..6)
             .map(|i| {
                 if i % 2 == 0 {
@@ -1655,9 +1388,8 @@ mod tests {
 
     #[test]
     fn json_column_scalar_string_stays_verifiable() {
-        // Contrast: scalar-looking strings ("200") in a json column ARE
-        // quoted by the formatter and round-trip, so the table stays
-        // decoder-verifiable — only container-strings decline.
+        // Contrast: scalar-looking strings ("200") in a json column ARE quoted by the formatter
+        // and round-trip, so the table stays decoder-verifiable — only container-strings decline.
         let items: Vec<Value> = (0..6)
             .map(|i| {
                 if i % 2 == 0 {
@@ -1683,12 +1415,8 @@ mod tests {
 
     #[test]
     fn json_column_serde_rejected_container_string_still_declines() {
-        // The decline gate keys on cell SHAPE, not a serde re-parse. Python
-        // `json.loads` accepts NaN / Infinity and deep nesting that
-        // `serde_json` rejects, and it also skips leading JSON whitespace, so a
-        // container-SHAPED string that serde would fail must still decline, else
-        // it ships quoted and the reference decoder parses it as a container
-        // (silent loss). Includes a leading-whitespace variant for the trim.
+        // The decline gate keys on cell SHAPE, not a serde re-parse. Python `json.loads` accepts NaN /
+        // Infinity and deep nesting that `serde_json` rejects, and it also skips leading JSON whitespace.
         let deep = "[".repeat(128) + &"]".repeat(128);
         for bad in [
             "[NaN]",
@@ -1717,11 +1445,8 @@ mod tests {
 
     #[test]
     fn grammar_breaking_key_declines_compaction() {
-        // COR-15: column names ship RAW in the `[N]{...}` declaration and
-        // the `__dict:`/`__affix:`/`__head:` preamble lines — nothing
-        // quotes them. A key carrying a grammar char (or the reserved
-        // `__` marker prefix) must DECLINE compaction (Untouched, array
-        // verbatim), never ship a silently mis-keying table.
+        // COR-15: column names ship RAW in the `[N]{...}` declaration and the `__dict:`/`__affix:`/`__head:` preamble lines — nothing quotes them. A key carrying
+        // a grammar char (or the reserved `__` marker prefix) must DECLINE compaction (Untouched, array verbatim), never ship a silently mis-keying table.
         for key in [
             "meta:region",
             "a,b",
@@ -1747,10 +1472,8 @@ mod tests {
 
     #[test]
     fn grammar_breaking_inner_key_does_not_flatten() {
-        // COR-15 flatten guard: a nested-uniform object whose INNER key
-        // would flatten into a grammar-breaking dotted column name
-        // (`cfg.k:v`) must stay a nested object cell (CSV-quoted JSON)
-        // instead of flattening into a corrupting declaration.
+        // COR-15 flatten guard: a nested-uniform object whose INNER key would flatten into a grammar-breaking dotted column name
+        // (`cfg.k:v`) must stay a nested object cell (CSV-quoted JSON) instead of flattening into a corrupting declaration.
         let items: Vec<Value> = (0..5)
             .map(|i| json!({"id": i, "cfg": {"k:v": format!("val-{i}"), "plain": "p"}}))
             .collect();
@@ -1769,12 +1492,7 @@ mod tests {
 
     #[test]
     fn stringified_json_array_stays_verbatim_string() {
-        // T2: a value that ORIGINATED as a stringified-JSON array is kept as
-        // the EXACT original string, never parsed into a recursive sub-table.
-        // The old recurse-into-Nested behaviour dropped the string's interior
-        // bytes and hid the original behind an un-decodable Nested cell on the
-        // lossless path. Genuine (non-string) arrays still recurse — see
-        // `formatter::tests::csv_formatter_nested_cell_inline_json`.
+        // T2: a value that ORIGINATED as a stringified-JSON array is kept as the EXACT original string, never parsed into a recursive sub-table.
         let items = vec![
             json!({"event": "batch", "payload": r#"[{"x":1},{"x":2},{"x":3}]"#}),
             json!({"event": "batch", "payload": r#"[{"x":4},{"x":5}]"#}),
@@ -1836,12 +1554,8 @@ mod tests {
 
     #[test]
     fn opaque_blob_original_is_persisted_under_marker_hash() {
-        // Defect 2: when a CCR store is wired into the compact config,
-        // an opaque-blob substitution MUST persist the original bytes
-        // under the SAME hash the `OpaqueRef` / rendered marker carries,
-        // so a consumer holding only the output can recover it. Without
-        // a store wired in (the pure-function default) nothing is
-        // persisted — that path is for tests/parity formatters only.
+        // Defect 2: when a CCR store is wired into the compact config, an opaque-blob substitution MUST persist the original bytes
+        // under the SAME hash the `OpaqueRef` / rendered marker carries, so a consumer holding only the output can recover it.
         use crate::ccr::InMemoryCcrStore;
 
         let big = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".repeat(8);
@@ -1888,10 +1602,8 @@ mod tests {
 
     #[test]
     fn compaction_stage_with_store_persists_opaque_originals_end_to_end() {
-        // End-to-end through the real production seam: a CSV-schema
-        // CompactionStage with a CCR store wired in renders `<<ccr:...>>`
-        // markers AND persists the originals. This is the seam the
-        // public `compress()` path uses (Defect 2 fix point).
+        // End-to-end through the real production seam: a CSV-schema CompactionStage with
+        // a CCR store wired in renders `<<ccr:...>>` markers AND persists the originals.
         use super::super::CompactionStage;
         use crate::ccr::InMemoryCcrStore;
 

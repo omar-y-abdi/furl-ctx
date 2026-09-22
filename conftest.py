@@ -34,9 +34,7 @@ def pytest_configure(config: pytest.Config) -> None:
     try:
         spec = importlib.util.find_spec("furl_ctx._core")
     except ModuleNotFoundError as exc:
-        # ``find_spec`` imports the parent package to read its ``__path__``. If a
-        # future refactor makes ``import furl_ctx`` hard-import the extension,
-        # treat that as the same unbuilt case; surface anything else unchanged.
+        # ``find_spec`` imports the parent package to read its ``__path__``.
         if exc.name != "furl_ctx._core":
             raise
         spec = None

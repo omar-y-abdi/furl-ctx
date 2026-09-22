@@ -1,26 +1,4 @@
-//! CCR (Compress-Cache-Retrieve) storage layer.
-//!
-//! When a transform compresses data with row-drop or opaque-string
-//! substitution, the *original payload* is stashed here keyed by the
-//! hash that ends up in the prompt. The runtime later honors retrieval
-//! tool calls by looking up the hash in this store and serving back the
-//! original. This is the cornerstone of CCR: lossy on the wire, lossless
-//! end-to-end.
-//!
-//! Mirrors the semantics of Python's [`CompressionStore`] (`furl_ctx/
-//! cache/compression_store.py`) but stripped down to the contract that
-//! actually matters for retrieval — no BM25 search, no retrieval-event
-//! feedback, no per-tool metadata. Those live in the runtime layer; this
-//! crate only needs put/get.
-//!
-//! # Backend
-//!
-//! - [`InMemoryCcrStore`] — process-local, sharded `DashMap`.
-//!   Constructed once at startup, shared across worker threads behind an
-//!   `Arc`; entries are lost on restart. CCR recovery is scoped to the
-//!   process / request window (see `CCR-RETENTION.md`).
-//!
-//! [`CompressionStore`]: ../../../../furl_ctx/cache/compression_store.py
+//! CCR stores originals removed by row-drop or opaque substitution under the exact hash emitted in prompt markers, scoped to the configured store lifetime.
 
 pub mod in_memory;
 mod markers;
@@ -38,45 +16,21 @@ pub(crate) use markers::{
 // `len` is a telemetry counter, not a container length — no `is_empty`.
 #[allow(clippy::len_without_is_empty)]
 pub trait CcrStore: Send + Sync {
-    /// Stash `payload` under `hash`. The store is content-addressed, so
-    /// `hash` should uniquely determine `payload`:
-    ///
-    /// * hash absent → the payload is stored;
-    /// * hash present with the SAME payload → idempotent refresh (re-storing
-    ///   the same content is normal dedup);
-    /// * hash present with a DIFFERENT payload → a true hash collision. The
-    ///   binding is DROPPED (the entry is removed and the new payload refused)
-    ///   and the collision is logged, so every marker on the key resolves to a
-    ///   LOUD miss instead of FOREIGN content — a recoverable recompute rather
-    ///   than silent corruption (T3). Mirrors the Python `CompressionStore`
-    ///   collision guard (audit #9).
+    /// Stash `payload` under `hash`. The store is content-addressed so `hash` should uniquely determine `payload` * hash absent → the payload is stored. The
+    /// binding is DROPPED (the entry is removed and the new payload refused) and the collision is logged a recoverable recompute rather than silent corruption (T3).
     fn put(&self, hash: &str, payload: &str);
 
     /// Look up `hash`. Returns `None` if missing or expired.
     fn get(&self, hash: &str) -> Option<String>;
 
-    /// Number of live entries — stored AND not past TTL. Backends with
-    /// lazy expiry must not count expired-but-unreaped entries (a `get`
-    /// would refuse them). Informational; used by tests + telemetry.
-    /// A backend that cannot answer this efficiently (e.g. a remote
-    /// store) may return 0 — see backend-specific docs. (The in-memory
-    /// store is the ONLY Rust backend today; no remote one ships.)
+    /// Number of live entries — stored AND not past TTL. Backends with lazy expiry must not count expired-but-unreaped entries (a `get` would refuse them).
     fn len(&self) -> usize;
 }
 
 /// Default capacity — matches Python's `CompressionStore` default.
 pub const DEFAULT_CAPACITY: usize = 1000;
 
-/// Default TTL — 30 minutes, matching Python's `DEFAULT_CCR_TTL_SECONDS`
-/// (`furl_ctx/cache/compression_store.py`). Session-scale (Engine P0-3):
-/// agentic sessions routinely outlive 5 minutes, and an entry that expires
-/// mid-session silently converts "lossless + retrieval" into lossy.
+/// Default TTL is 30 minutes, matching Python. Agent sessions can exceed five minutes; expiry mid-session would break lossless retrieval.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(1800);
 
-// CCR marker construction lives in `markers.rs` — the single
-// construction point every Rust producer routes through. CCR *key
-// algorithms* live in `persist.rs` — one `md5_hex_24` (diff/log/search/
-// text cache keys) and one `sha256_recovery_key` (crusher row hashes,
-// opaque prefixes; 24 hex / 96 bits), consolidated from the per-producer
-// copies (ARCH-5) so a hash change can only happen in one place. Grammar
-// and hashing remain deliberately separate concerns (separate modules).
+// Centralize Rust CCR marker construction here so every producer uses the same recovery-key helpers.

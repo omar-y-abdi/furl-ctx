@@ -211,12 +211,8 @@ def _run_hook(
     )
 
 
-# Every command shape reviewer-guard raised, plus the classes the old per-verb
-# matcher got wrong. Under the total invariant, a SINGLE unrelated deny rule
-# makes ALL of them pass through — including the ones that match no rule
-# (``zzz …``, ``/usr/bin/printf``) and the wrappers CC sees through that were
-# NOT in the old 18-verb denylist (``flock``/``strace``/``ltrace``). The
-# non-matching + un-listed-wrapper shapes REWROTE pre-redesign → RED proof.
+# Every command shape reviewer-guard raised, plus the classes the old per-verb matcher got
+# wrong. Under the total invariant, a SINGLE unrelated deny rule makes ALL of them pass through
 _EVERY_COMMAND_SHAPE = (
     "printf x",  # simple
     "printf x | tee y",  # compound
@@ -320,12 +316,7 @@ def _no_config_env(monkeypatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
-# --- G2: enterprise managed-settings scope ----------------------------------------
-# Paths verified at code.claude.com/docs/en/settings. The real system path is not
-# writable in CI, so default behavior is proven by (1) the platform-correct path,
-# (2) inclusion in _settings_paths, (3) an in-process flow test with a
-# monkeypatched managed path, and (4) drop-in-dir doubt. The env-relocation cases
-# (G6) are proven end-to-end via the real hook subprocess below.
+# G2: enterprise managed-settings scope ---------------------------------------- Paths verified at code.claude.com/docs/en/settings.
 
 
 def test_managed_settings_path_is_platform_correct(monkeypatch) -> None:
@@ -453,9 +444,7 @@ def test_managed_settings_path_env_override_unresolvable_passes_through(tmp_path
     assert proc.stdout == "", "set-but-unresolvable managed override must force passthrough"
 
 
-# --- F3: _scan_bash_rules (the shared banner+gate detection) ----------------------
-# The banner reports count + scopes; the gate needs existence + doubt. Both call the
-# SAME _scan_bash_rules, so what the banner claims is exactly what the pipe enforces.
+# F3: _scan_bash_rules (the shared banner+gate detection) ---------------------- The banner reports count + scopes; the gate needs existence + doubt.
 
 
 def test_scan_reports_count_scope_and_no_doubt(tmp_path, monkeypatch) -> None:

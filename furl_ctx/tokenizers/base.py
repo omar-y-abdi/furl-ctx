@@ -151,12 +151,8 @@ class BaseTokenizer(ABC):
                 if part_type == "text":
                     total += self.count_text(part.get("text", ""))
                 elif part_type in ("image_url", "image", "input_image"):
-                    # Images are NOT tokenized as text — they have a pixel-based cost.
-                    # Anthropic: tokens = (width * height) / 750, max ~1600 after resize.
-                    # OpenAI: similar tile-based calculation, ~765 tokens for high-detail.
-                    # We use 1600 as a conservative estimate (max after auto-resize).
-                    # This prevents the base64 blob from being json.dumps'd and counted
-                    # as text tokens (1MB image = ~330K fake tokens without this).
+                    # Images are NOT tokenized as text — they have a pixel-based cost. Anthropic: tokens = (width * height) / 750, max ~1600 after resize.
+                    # This prevents the base64 blob from being json.dumps'd and counted as text tokens (1MB image = ~330K fake tokens without this).
                     total += 1600
                 elif part_type in ("input_audio", "audio"):
                     # Audio has fixed token cost, not tokenized as text
@@ -199,11 +195,7 @@ class BaseTokenizer(ABC):
                     elif isinstance(reasoning_text, str):
                         total += self.count_text(reasoning_text)
                 elif not part_type and "document" in part:
-                    # Strands SDK document: {"document": {"source": {"bytes": ...}}}
-                    # Provider internally extracts text from PDF/DOCX then tokenizes.
-                    # Accurate counting would require a PDF parser — instead we use
-                    # the Anthropic documented estimate of ~1500 tokens per page,
-                    # with ~3KB of PDF per page as a rough heuristic.
+                    # Strands SDK document: {"document": {"source": {"bytes": ...}}} Provider internally extracts text from PDF/DOCX then tokenizes.
                     doc = part["document"]
                     source = doc.get("source", {})
                     doc_bytes = source.get("bytes", b"")
@@ -213,15 +205,11 @@ class BaseTokenizer(ABC):
                     else:
                         total += self.count_text(str(doc_bytes))
                 elif not part_type and "image" in part:
-                    # Strands SDK image: {"image": {"source": {"bytes": ...}}}
-                    # Anthropic formula: tokens = (width * height) / 750.
-                    # Decode with Pillow for exact count; fall back to estimate.
+                    # Strands SDK image: {"image": {"source": {"bytes": ...}}} Anthropic formula: tokens
+                    # = (width * height) / 750. Decode with Pillow for exact count; fall back to estimate.
                     total += self._estimate_image_tokens(part["image"])
                 elif not part_type and "video" in part:
-                    # Strands SDK video: provider samples ~1 fps, each frame costs
-                    # image tokens. We can't decode frames without heavy deps, so
-                    # estimate from byte size assuming ~30KB per frame, ~1000 tokens
-                    # per frame (average image).
+                    # Strands SDK video: provider samples ~1 fps, each frame costs image tokens.
                     vid = part["video"]
                     source = vid.get("source", {})
                     vid_bytes = source.get("bytes", b"")
@@ -255,12 +243,7 @@ class BaseTokenizer(ABC):
                 from PIL import Image
 
                 img = Image.open(io.BytesIO(img_bytes))
-                # PIL ships no type stubs here (ignore_missing_imports), so
-                # img.size is inferred as Any; declare w/h ahead of the
-                # unpack (mypy does not narrow an already-Any name via a
-                # same-name `int(w)` reassignment for its no-any-return
-                # check) and coerce at runtime in case a real decoder
-                # ever returns non-int dimensions.
+                # PIL ships no type stubs here (ignore_missing_imports), so img.size is inferred as Any.
                 w: int
                 h: int
                 w, h = img.size

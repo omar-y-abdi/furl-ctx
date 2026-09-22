@@ -1,19 +1,5 @@
-//! CCR store throughput benchmark — single-threaded and multi-threaded.
-//!
-//! Pins the win from PR9: replacing the single-`Mutex<HashMap>` design
-//! with a `DashMap`-backed sharded store. The single-threaded numbers
-//! should be roughly comparable (DashMap has a small per-op shard-hash
-//! overhead vs a raw Mutex), but the multi-threaded numbers should
-//! diverge sharply — distinct keys hit distinct shards and never
-//! contend.
-//!
-//! Run with:
-//!     cargo bench -p furl-core --bench ccr_store
-//!
-//! The critical numbers to watch are the `mt/N=8` rows: with the
-//! Mutex design, all 8 threads serialize on one lock, so throughput
-//! is ~1× the single-threaded figure. With DashMap, throughput should
-//! scale near-linearly with cores.
+//! CCR store throughput benchmark — single-threaded and multi-threaded. The single-threaded numbers should be roughly comparable (DashMap has a small
+//! per-op shard-hash overhead vs a raw Mutex), but the multi-threaded numbers should diverge sharply — distinct keys hit distinct shards and never contend.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -23,11 +9,8 @@ use std::time::{Duration, Instant};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use furl_core::ccr::{CcrStore, InMemoryCcrStore};
 
-// ─── Baseline: the old single-Mutex<HashMap> design ────────────────
-//
-// Inlined here so the bench is self-contained and shows the
-// before/after gap directly. Same trait, same semantics; the only
-// difference is "all ops serialize on one Mutex" vs "DashMap-sharded".
+// ─── Baseline: the old single-Mutex<HashMap> design ──────────────── Inlined
+// here so the bench is self-contained and shows the before/after gap directly.
 
 struct LegacyMutexStore {
     inner: Mutex<LegacyInner>,
@@ -185,10 +168,8 @@ fn run_mt_workload(store: Arc<dyn CcrStore>, threads: usize, n: u64) -> Duration
     start.elapsed()
 }
 
-/// Multi-threaded mixed put/get — direct A/B between the legacy
-/// `Mutex<HashMap>` design and the new DashMap-backed store. The
-/// legacy version serializes every op on one lock; the new version
-/// shards across keys so distinct hashes never contend.
+/// Multi-threaded mixed put/get — direct A/B between the legacy `Mutex<HashMap>` design and the new DashMap-backed store.
+/// The legacy version serializes every op on one lock; the new version shards across keys so distinct hashes never contend.
 fn bench_mixed_multi_threaded(c: &mut Criterion) {
     let mut group = c.benchmark_group("ccr_store/mt_mixed");
     group.throughput(Throughput::Elements(1));

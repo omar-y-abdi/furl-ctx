@@ -108,79 +108,31 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# DOTALL: a folded string constant may legally carry a newline inside its
-# CSV-quoted declaration value (the formatter's ``const_decl_value``), so
-# ``(.+)`` must span newlines within the header LOGICAL line.
-# Header: `[kept]{cols}` (lossless tier, every row shown) OR `[kept/total]{cols}`
-# (survivor render, F4) where `total` is the ORIGINAL row count before drops.
-# Group 1 = kept (body-row count); group 2 = optional original total; group 3 =
-# column declarations. Old `[N]{cols}` output has no `/total` (group 2 = None).
+# Use DOTALL because folded string constants may contain newlines. Parse `[kept]{cols}` for lossless output or
+# `[kept/total]{cols}` for survivor output, where `total` is the original row count; legacy headers omit `/total`.
 _HEADER_RE = re.compile(r"^\[(\d+)(?:/(\d+))?\]\{(.+)\}$", re.DOTALL)
 _ARITH_RE = re.compile(r"^(-?\d+)\+(-?\d+)$")
 _ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$")
 _DELTA_RE = re.compile(r"^([+-]\d+)(?:/(Z|[+-]\d{2}:\d{2}))?$")
 _CCR_SENTINEL_KEY = "_ccr_dropped"
 
-# ─── CSV-schema preamble grammar markers ──────────────────────────────────
-#
-# Line prefixes for the three preamble lines (dictionary values / shared
-# affix / head dictionary) emitted directly after the ``[N]{...}``
-# declaration. A plain data cell starting with one of these is CSV-quoted by
-# the formatter, so the preamble lines stay unambiguous.
-#
-# CONTRACT: these byte strings are the wire format produced by the Rust
-# encoder ``crates/furl-core/src/transforms/smart_crusher/compaction/
-# formatter.rs`` (the ``DICT_PREFIX`` / ``AFFIX_PREFIX`` / ``HEAD_PREFIX``
-# constants there must be byte-for-byte identical). The round-trip is guarded
-# by the 200-case fuzz test ``tests/test_csv_schema_decoder_roundtrip_fuzz.py``
-# (real Rust formatter → this decoder), so any drift between the two sides
-# fails loudly.
+# CSV-schema preamble grammar markers ────────────────────────────────── Line prefixes for the three preamble
+# lines (dictionary values / shared affix / head dictionary) emitted directly after the ``[N]{...}`` declaration.
 _DICT_PREFIX = "__dict:"
 _AFFIX_PREFIX = "__affix:"
 _HEAD_PREFIX = "__head:"
 
-# Exact-match reserved cell sentinels (NOT prefixes — matched exactly, like
-# the ditto ``=``). An unquoted cell equal to ``_NULL_SENTINEL`` decodes to
-# ``None`` (JSON null); one equal to ``_MISSING_SENTINEL`` OMITS the key from
-# the reconstructed row (the original object had no such key). This keeps
-# ``null`` / a missing key / the empty string ``""`` distinct on the lossless
-# path. A CSV-quoted cell that unquotes to the literal ``__null__`` /
-# ``__missing__`` is a genuine string value (the Rust ``csv_render_str`` quotes
-# any string equal to a sentinel), so it falls through to ``_decode_cell`` and
-# stays a string. These byte strings + the escape rule must match the Rust
-# encoder ``formatter.rs`` (``NULL_SENTINEL`` / ``MISSING_SENTINEL``) exactly.
+# Exact-match reserved cell sentinels (NOT prefixes — matched exactly, like the ditto ``=``). This keeps ``null`` / a missing key / the empty string ``""`` distinct
+# on the lossless path. These byte strings + the escape rule must match the Rust encoder ``the Rust module`` (``NULL_SENTINEL`` / ``MISSING_SENTINEL``) exactly.
 _NULL_SENTINEL = "__null__"
 _MISSING_SENTINEL = "__missing__"
 
-# JSON-container cell envelope (F5). A ``json``-tagged column's Object/Array
-# cell whose compact JSON contains a ``"`` ships as
-# ``\x1f<codepoint_len><raw_compact_json>`` instead of CSV-quoted compact JSON,
-# so a nested-object column is never inflated by quote-doubling. A quote-free
-# container (e.g. a numeric array) stays CSV-quoted — the ``\x1f``+length frame
-# would only ADD bytes there (R2), and the decoder accepts both spellings.
-# ``\x1f`` (ASCII Unit Separator) never appears unescaped in ``serde_json``
-# output. An envelope is recognised ONLY at a cell boundary and only when the
-# length digits are followed by a container-opening ``{`` / ``[`` whose declared
-# span carries no raw newline AND ends at a cell boundary (the next unquoted char
-# is a comma, a newline, or end of input) (see ``_envelope_span``); a ``\x1f``
-# anywhere else is treated as a literal byte. That guard is what keeps OLD tables
-# decoding byte-for-byte even though the old encoder never CSV-quoted a raw
-# ``\x1f`` in a plain cell (R1): a legacy ``\x1f`` mid-cell no longer over-reads,
-# a lying or truncated length can no longer swallow the following row, and a
-# legacy value that merely looks framed but ends mid-cell stays literal.
-# ``split_unquoted``
-# / ``_split_logical_lines`` skip a recognised envelope by its code-point length
-# so the raw JSON's inner commas / quotes never perturb the CSV row grammar.
-# Must stay byte-identical to the Rust ``JSON_ENVELOPE_MARK`` (formatter.rs).
-# Old CSV-quoted-JSON container cells still decode (backward compatible), so
-# previously stored tables are unaffected.
+# Decode JSON container envelopes as `US + codepoint_length + raw_json` only at valid cell boundaries with a complete
+# container span. This avoids quote inflation while preventing malformed/legacy text from swallowing following cells or rows.
 _ENVELOPE = "\x1f"
 
-# Row-drop numeric summary line (F4): ``__stats:col=min/max/sum/count,...``
-# appended by the router to the survivor render over ALL original rows. It is
-# METADATA, not a data row — the decoder skips it when reconstructing rows and
-# ``decode_stats_line`` parses it on demand. Must match the Rust ``STATS_PREFIX``
-# (formatter.rs) / the router's emit (route.rs).
+# It is METADATA, not a data row — the decoder skips it when reconstructing rows and ``decode_stats_line``
+# parses it on demand. Must match Rust `STATS_PREFIX` and the router emission format.
 _STATS_PREFIX = "__stats:"
 
 
@@ -314,15 +266,10 @@ class ColumnSpec:
     # Fractional-digit count of a decimal scale-fold (``name:float%k``);
     # None when not scale-encoded.
     dec_scale: int | None = None
-    # ``(prefix, suffix)`` of a cross-row affix fold (``name:string^``);
-    # None when not affix-encoded. The shared affix lives on the
-    # ``__affix:name=PREFIX,SUFFIX`` preamble line; row cells carry only
-    # the unique middle, reconstructed as ``prefix + middle + suffix``.
+    # ``(prefix, suffix)`` of a cross-row affix fold (``name:string^``); None when not affix-encoded. The shared affix lives on the
+    # ``__affix:name=PREFIX,SUFFIX`` preamble line; row cells carry only the unique middle, reconstructed as ``prefix + middle + suffix``.
     affix: tuple[str, str] | None = None
-    # True when the column is head-dict encoded (``name:string@``). The
-    # delimiter + distinct heads live on the ``__head:name=...`` preamble
-    # line; row cells are ``<head_index><delim><tail>``, reconstructed as
-    # ``head[index] + tail``.
+    # True when the column is head-dict encoded (``name:string@``).
     head_dict: bool = False
 
 
@@ -356,10 +303,7 @@ def _split_logical_lines(text: str) -> list[str]:
     lines: list[str] = []
     buf: list[str] = []
     in_quotes = False
-    # A JSON-container envelope opens ONLY at a cell boundary (start of the
-    # text, or right after an unquoted ``,`` / line break). Mid-cell a ``\x1f``
-    # is a literal legacy byte, so it must not be interpreted as a length frame
-    # (R1) — otherwise an old cell like ``a\x1f9hello`` would over-read.
+    # A JSON-container envelope opens ONLY at a cell boundary (start of the text, or right after an unquoted ``,`` / line break).
     at_cell_start = True
     i = 0
     n = len(text)
@@ -371,12 +315,7 @@ def _split_logical_lines(text: str) -> list[str]:
             i += 1
             at_cell_start = False
         elif ch == _ENVELOPE and not in_quotes and at_cell_start:
-            # F5: a JSON-container envelope. Copy its whole `\x1f<len><json>`
-            # span verbatim by length so the raw JSON's `"` never toggle
-            # `in_quotes` (which would mis-split a LATER quoted cell's embedded
-            # newline). A lying / truncated length whose span would cross this
-            # newline is rejected by `_envelope_span`, so it falls back to a
-            # literal byte and the real line break below still splits (R1).
+            # F5: a JSON-container envelope.
             span = _envelope_span(text, i)
             if span is None:
                 buf.append(ch)
@@ -420,10 +359,7 @@ def split_unquoted(s: str) -> list[str]:
             buf.append(ch)
             i += 1
         elif ch == _ENVELOPE and not in_quotes and not buf:
-            # `not buf` == at a cell boundary (start of cell). An envelope only
-            # opens here; a mid-cell `\x1f` (buf already holds bytes) is a
-            # literal legacy byte and falls through to the else branch, so an old
-            # cell such as `a\x1f9hello` keeps splitting on its real comma (R1).
+            # `not buf` == at a cell boundary (start of cell).
             span = _envelope_span(s, i)
             if span is None:
                 buf.append(ch)
@@ -468,17 +404,11 @@ def _decode_cell(raw: str, type_tag: str) -> Any:
     raw-string fallback.
     """
     base_tag = type_tag.rstrip("?")
-    # F5: a length-prefixed JSON-container envelope (`\x1f<len><raw_json>`),
-    # emitted for Object/Array cells of a json-tagged column instead of
-    # CSV-quoted compact JSON. The payload is verbatim JSON — parse it back
-    # directly. Old CSV-quoted container cells still take the quoted branch
-    # below (backward compatible).
+    # F5: a length-prefixed JSON-container envelope (`\x1f<len><raw_json>`), emitted for Object/Array cells of a json-tagged column
+    # instead of CSV-quoted compact JSON. Old CSV-quoted container cells still take the quoted branch below (backward compatible).
     if base_tag == "json" and raw.startswith(_ENVELOPE):
         span = _envelope_span(raw, 0)
         # Only a cell that IS exactly one conformant envelope decodes as JSON.
-        # A legacy cell that merely starts with a raw `\x1f` fails the guard
-        # (`span is None`, or the span does not cover the whole cell) and is
-        # returned byte-for-byte — never reinterpreted as data (R1).
         if span is not None and span[1] == len(raw):
             try:
                 return json.loads(raw[span[0] : span[1]])
@@ -642,12 +572,8 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     header = _HEADER_RE.match(lines[0])
     if not header:
         return None
-    # Group 1 = KEPT (body-row) count; group 2 = optional ORIGINAL total (F4,
-    # survivor render) — carried for callers/telemetry, not needed to
-    # reconstruct rows (rows come from the body lines). `declared_count` stays
-    # the kept count: it bounds the single-var empty-line path and drives the
-    # degenerate fully-folded synthesis, which only occurs on the lossless tier
-    # where kept == total.
+    # `declared_count` stays the kept count: it bounds the single-var empty-line path and drives the
+    # degenerate fully-folded synthesis, which only occurs on the lossless tier where kept == total.
     declared_count = int(header.group(1))
     specs: list[ColumnSpec] = []
     for seg in split_unquoted(header.group(3)):
@@ -656,13 +582,8 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
             return None
         specs.append(spec)
 
-    # T12 fail-loud: duplicate column names make row reconstruction ambiguous
-    # — the row dict would silently OVERWRITE one value with the other (last
-    # write wins), losing data with no marker. A conformant producer never
-    # emits duplicate names (the Rust ``flatten_uniform_nested`` skips a
-    # flatten whose synthesized ``parent.key`` collides with an existing
-    # column), so this only fires on corrupt/adversarial input: decline the
-    # whole table rather than invent a reconstruction the output cannot prove.
+    # T12 fail-loud: duplicate column names make row reconstruction ambiguous — the row dict would
+    # silently OVERWRITE one value with the other (last write wins), losing data with no marker.
     names = [s.name for s in specs]
     if len(names) != len(set(names)):
         return None
@@ -672,21 +593,8 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
     var_cols = [s for s in specs if not s.has_const and s.arith is None]
 
     if not var_cols and (const_cols or arith_cols):
-        # Degenerate fully-folded table: every column is a constant or an
-        # arithmetic fold, so there are no per-row body cells — the rows are
-        # carried entirely by the declaration and [N] gives the count. Const
-        # columns repeat their value; arith columns step by row ordinal.
-        #
-        # An earlier guard of `const_cols and not arith_cols`
-        # returned [] (total silent loss) for a const+arith zero-var table
-        # like `[N]{x:int=5,seq:int=0+1}`. The all-const case is just the
-        # special case where `arith_cols` is empty.
-        #
-        # Defensive/forward-looking: the reference Rust formatter always
-        # reserves one variable "anchor" column unless EVERY column is const
-        # (the all-const case above), so it does not currently emit the
-        # const+arith zero-var shape. This makes the recovery decoder correct
-        # for any conformant producer of that shape regardless.
+        # Degenerate fully-folded table: every column is a constant or an arithmetic fold, so there are no per-row body cells — the rows are carried
+        # entirely by the declaration and [N] gives the count. This makes the recovery decoder correct for any conformant producer of that shape regardless.
         result: list[dict[str, Any]] = []
         for ordinal in range(declared_count):
             row = {s.name: s.const_value for s in const_cols}
@@ -696,9 +604,8 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
             result.append(row)
         return result
 
-    # Dictionary preamble: `__dict:name=v0,v1,...` lines directly after
-    # the declaration. Only declared column names are accepted — any
-    # other line ends the preamble and is processed as a row.
+    # Dictionary preamble: `__dict:name=v0,v1,...` lines directly after the declaration. Only declared
+    # column names are accepted — any other line ends the preamble and is processed as a row.
     var_names = {s.name for s in var_cols}
     affix_names = {s.name for s in var_cols if s.affix is not None}
     head_names = {s.name for s in var_cols if s.head_dict}
@@ -756,19 +663,8 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
         if line.startswith(_STATS_PREFIX):
             continue
         if not line:
-            # An empty physical line is a REAL empty-string value ONLY when
-            # there is exactly one variable column (multi-col empty rows still
-            # carry their `,` separators, so they are never blank).
-            # A bare `if not line: continue` would drop that row AND fail to
-            # advance `ordinal`, so every later arith-fold value would shift.
-            # Bound emission by the declared row count using the CONSUMED
-            # `ordinal` (every row-line counts, including malformed/bad-cell
-            # rows that were skipped), NOT `len(rows)`: a skipped-but-counted
-            # row makes `len(rows)` lag the ordinal, which would let a trailing
-            # newline artifact (an extra `""` beyond row N) slip through as a
-            # phantom row with a fabricated arith value. On clean formatter
-            # output `ordinal == len(rows)`, so this is a no-op there; it only
-            # hardens against malformed/adversarial input.
+            # An empty physical line is a REAL empty-string value ONLY when there is exactly one variable column (multi-col empty rows
+            # still carry their `,` separators so they are never blank). continue` would drop that row AND fail to advance `ordinal`
             if len(var_cols) == 1 and ordinal < declared_count:
                 # Fall through to the normal parse path: split_unquoted("")
                 # yields [""], which parses as the empty-string cell.
@@ -790,13 +686,7 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
             else:
                 resolved = raw
                 carry_raw[j] = raw
-            # Exact-match reserved sentinels (see ``_NULL_SENTINEL`` /
-            # ``_MISSING_SENTINEL`` above). Checked on the ditto-resolved raw
-            # cell, BEFORE any encoding dispatch, so a sentinel in any column
-            # kind (dict/affix/head/plain) decodes uniformly. A quoted
-            # ``"__null__"`` keeps its quotes in ``resolved`` and so does NOT
-            # match here — it falls through and ``_decode_cell`` unquotes it to
-            # the literal string, exactly like a quoted ``"="``.
+            # Exact-match reserved sentinels (see ``_NULL_SENTINEL`` / ``_MISSING_SENTINEL`` above).
             if resolved == _NULL_SENTINEL:
                 row[spec.name] = None
                 continue
@@ -805,11 +695,7 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
                 continue
             if spec.head_dict:
                 hd = head_dicts.get(spec.name)
-                # ``resolved`` is the raw CSV cell — still wrapped in quotes
-                # if the tail contained a comma/quote/newline. Unquote BEFORE
-                # the head-index digit scan (a leading ``"`` fails it and the
-                # row is silently skipped), exactly like the affix branch
-                # below; ``_unq`` is the identity for unquoted cells.
+                # ``resolved`` is the raw CSV cell — still wrapped in quotes if the tail contained a comma/quote/newline.
                 value = _decode_head_cell(_unq(resolved), hd)
                 if value is None:
                     ok = False  # never invent data on a bad head cell
@@ -817,12 +703,8 @@ def decode_csv_schema_rows(text: str) -> list[dict[str, Any]] | None:
                 row[spec.name] = value
             elif spec.affix is not None:
                 pre, suf = affixes.get(spec.name, ("", ""))
-                # ``resolved`` is the raw CSV cell — still wrapped in quotes if
-                # the affix middle contained a newline/comma/quote (e.g. a
-                # multi-line log message under a shared prefix/suffix). Unquote
-                # it BEFORE re-applying the affix, exactly like every other
-                # branch does, otherwise the quote characters leak into the
-                # reconstructed value (silent corruption on the lossless path).
+                # Unquote an affix-encoded CSV middle before reattaching prefix and suffix. Otherwise quoted
+                # commas, newlines, or quotes become literal characters and break lossless reconstruction.
                 row[spec.name] = pre + _unq(resolved) + suf
             elif spec.iso_delta:
                 value = _decode_iso_delta_cell(resolved, iso_state, j)

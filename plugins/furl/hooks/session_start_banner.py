@@ -50,7 +50,7 @@ _STATUS_LINE_ENV = "FURL_STATUS_LINE"
 _MIN_VERSION = (2, 1, 163)
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
-# Keep in sync with furl_ctx/host_version.py's release-please-managed pins.
+# Keep in sync with the module's release-please-managed pins.
 _PLUGIN_VERSION = "1.4.0"
 _ENGINE_VERSION = "1.4.0"
 

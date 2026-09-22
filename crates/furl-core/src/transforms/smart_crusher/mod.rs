@@ -1,35 +1,5 @@
-//! Smart statistical tool output compression — Rust port of
-//! `furl_ctx/transforms/smart_crusher.py`.
-//!
-//! # Like-for-like parity port
-//!
-//! This module is a literal Rust port of the Python `SmartCrusher`
-//! implementation. The goal is **byte-equal output parity** for
-//! every fixture in `tests/parity/fixtures/smart_crusher/`. Architectural
-//! improvements (lossless-first, unified saliency score, structured CCR
-//! markers, token budget) build on top of this parity port.
-//!
-//! # Bugs fixed in BOTH Python and Rust during the port
-//!
-//! Four defects in the Python source (`furl_ctx/transforms/smart_crusher.py`)
-//! were caught during port review. They're fixed in both languages
-//! simultaneously so the parity fixtures continue to byte-match:
-//!
-//! - **k-split overshoot** (line 2722): `_compute_k_split` keeps 2 items when
-//!   `k_total = 1` because `max(1, round(k_total * fraction))` floors both
-//!   first and last to 1. Violates `max_items_after_crush`.
-//! - **sequential-pattern false positive** (line 444): `_detect_sequential_pattern`
-//!   does `int("001")` and silently loses zero padding. Padded string IDs
-//!   misclassified as sequential numeric IDs.
-//! - **rare-status detection short-circuit** (line 674): `_detect_rare_status_values`
-//!   exits early at >10 distinct values. Datasets with 50+ error codes lose
-//!   rare-error preservation.
-//! - **percentile off-by-one** (line 2844): For `len < 8`, integer-division
-//!   percentile indices are off by one. Cosmetic — only affects strategy
-//!   debug strings.
-//!
-//! Each fix has a fixture entry in the parity harness and a corresponding
-//! test in `tests/test_transforms/test_smart_crusher_bugs.py`.
+//! SmartCrusher Rust implementation preserves Python output parity while adding lossless-first routing
+//! and CCR recovery. Selection-critical parity fixes must land consistently across both implementations.
 
 mod analyzer;
 mod anchors;
@@ -52,9 +22,8 @@ mod stats_math;
 mod types;
 mod walk;
 
-/// The relevance-scoring seam — the one remaining `SmartCrusher`
-/// extension point. Re-exported here so callers can reach it alongside
-/// the rest of the smart-crusher surface.
+/// The relevance-scoring seam — the one remaining `SmartCrusher` extension point.
+/// Re-exported here so callers can reach it alongside the rest of the smart-crusher surface.
 pub use crate::relevance::RelevanceScorer as Scorer;
 pub use analyzer::SmartAnalyzer;
 pub use anchors::{extract_query_anchors, item_matches_anchors};

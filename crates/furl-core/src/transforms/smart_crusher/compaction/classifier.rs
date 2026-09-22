@@ -1,21 +1,5 @@
-//! Per-cell classification for the compaction pipeline.
-//!
-//! Given a JSON value, decide what kind of compaction treatment it needs.
-//! The classifier is intentionally conservative — when in doubt, return
-//! [`CellClass::Scalar`] so the cell is rendered verbatim.
-//!
-//! # Detection priorities
-//!
-//! 1. **Object / array** — pass through to caller, who decides whether to
-//!    flatten (uniform-nested) or recurse ([`CellClass::JsonObject`],
-//!    [`CellClass::JsonArray`]).
-//! 2. **Stringified-JSON** — strings that parse to a JSON object/array.
-//!    Common in tool-output payloads where one field is a serialized
-//!    sub-structure ([`CellClass::StringifiedJson`]).
-//! 3. **Opaque blob** — strings above a length threshold the classifier
-//!    couldn't otherwise place. Sub-classified into base64 / HTML /
-//!    plain long-string for telemetry ([`CellClass::Opaque`]).
-//! 4. **Scalar** — everything else, rendered verbatim.
+//! Per-cell classification for the compaction pipeline. The classifier is intentionally
+//! conservative — when in doubt, return [`CellClass::Scalar`] so the cell is rendered verbatim. .
 
 use serde_json::Value;
 
@@ -40,19 +24,13 @@ pub enum CellClass {
 }
 
 /// Config controlling classification thresholds.
-///
-/// Defaults are tuned for typical tool-output payloads. Override via
-/// builder if a workload has different characteristics (e.g. an API
-/// that always emits 500-char status descriptions shouldn't have those
-/// CCR-substituted).
 #[derive(Debug, Clone)]
 pub struct ClassifyConfig {
     /// Strings strictly longer than this become candidates for opaque
     /// classification. Default: 256 bytes.
     pub opaque_min_bytes: usize,
-    /// Base64-alphabet ratio threshold. Strings whose chars are at
-    /// least this fraction in `[A-Za-z0-9+/=_-]` and at least 64 bytes
-    /// long are tagged base64. Default: 0.95.
+    /// Base64-alphabet ratio threshold. Strings whose chars are at least this fraction in
+    /// `[A-Za-z0-9+/=_-]` and at least 64 bytes long are tagged base64. Default: 0.95.
     pub base64_alphabet_ratio: f64,
     /// `<` count above which a long string is considered HTML-ish.
     /// Default: 3.
@@ -80,19 +58,9 @@ pub fn classify_cell(value: &Value, cfg: &ClassifyConfig) -> CellClass {
 }
 
 /// Classify a string cell WITHOUT wrapping it in a `Value` first.
-///
-/// Public so string-handling call sites (`walker::walk_string`,
-/// `SmartCrusher::process_string`) can classify a borrowed `&str`
-/// directly — the old private-fn shape forced them to clone every
-/// string into a throwaway `Value::String` just to classify it (PERF-5).
-/// `classify_cell(&Value::String(s), cfg)` delegates here, so the two
-/// entry points cannot drift.
 pub fn classify_string(s: &str, cfg: &ClassifyConfig) -> CellClass {
-    // Stringified-JSON check first. Cheap fast-path: must start with
-    // `{` or `[` (after optional whitespace) — skip strings that
-    // can't possibly be JSON containers. Parsing `"123"` would
-    // technically succeed as JSON-the-number, but that's a scalar,
-    // not a recursion target.
+    // Stringified-JSON check first. Cheap fast-path: must start with `{` or `[` (after
+    // optional whitespace) — skip strings that can't possibly be JSON containers.
     let trimmed = s.trim_start();
     if matches!(trimmed.chars().next(), Some('{') | Some('[')) {
         if let Ok(parsed) = serde_json::from_str::<Value>(s) {
@@ -139,10 +107,7 @@ fn looks_like_base64(s: &str, ratio_threshold: f64) -> bool {
         return false;
     }
 
-    // Diversity filter: real base64-encoded random bytes use most of
-    // their 64-character alphabet. Strings with < 16 unique characters
-    // are almost certainly not base64 (typical false-positive: brace-
-    // wrapped repeated characters like `{xxxx...}`).
+    // Diversity filter: real base64-encoded random bytes use most of their 64-character alphabet.
     let mut unique = std::collections::HashSet::new();
     for c in s.chars() {
         unique.insert(c);

@@ -36,9 +36,7 @@ def test_strategy_chain_has_no_duplicates() -> None:
 
 
 def test_compression_output_unchanged_by_dedup() -> None:
-    # Neutrality proof: the dedup must not change WHAT gets produced — same
-    # bytes, same winning strategy. (A tiny array like [1,2,3] is below the
-    # savings threshold, so it passes through as SMART_CRUSHER.)
+    # Neutrality proof: the dedup must not change WHAT gets produced — same bytes, same winning strategy.
     res = _router().compress("[1,2,3]")
     assert res.compressed == "[1,2,3]"
     assert res.strategy_used is CompressionStrategy.SMART_CRUSHER

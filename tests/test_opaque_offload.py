@@ -91,10 +91,7 @@ def test_opaque_code_offload_is_surfaced_in_typed_field():
 def test_opaque_offload_reports_net_negative_round_trip():
     result = compress(_code_snapshot_messages(), model=BENCH_MODEL)
     offload = result.opaque_offloads[0]
-    # net_tokens_if_retrieved is the real economics: what the offload saved
-    # (offloaded - preview) minus what retrieval pays back (offloaded + overhead).
-    # Pinned to the derivation so a regression to the old preview_tokens > 0
-    # tautology, which never priced retrieval, is caught.
+    # net_tokens_if_retrieved is the real economics: what the offload saved (offloaded - preview) minus what retrieval pays back (offloaded + overhead).
     saved = offload.offloaded_tokens - offload.preview_tokens
     retrieval_cost = offload.offloaded_tokens + _CCR_RETRIEVE_OVERHEAD_TOKENS
     assert offload.net_tokens_if_retrieved == saved - retrieval_cost
@@ -105,11 +102,7 @@ def test_opaque_offload_reports_net_negative_round_trip():
 
 
 def test_zero_preview_offload_is_still_net_negative():
-    # A whole-blob offload whose preview is 0 tokens is STILL net-negative on
-    # retrieval: you pay the whole blob plus a call to get anything back. The old
-    # tautology offloaded_tokens > offloaded_tokens - preview_tokens reduces to
-    # preview_tokens > 0 and mislabels this exact case as net-positive (False);
-    # the real economics flags it net-negative (True).
+    # A whole-blob offload whose preview is 0 tokens is STILL net-negative on retrieval: you pay the whole blob plus a call to get anything back.
     store = get_compression_store()
     ccr_hash = "abc123abc123abc123abc123"
     store.store(

@@ -322,17 +322,10 @@ def build_search_dataset(*, limit: int = 90, refresh: bool = False) -> Dataset:
     )
 
 
-# ---------------------------------------------------------------------------
-# Dataset 4 — REPEATED_LOGS: real `ping` replies (recurring content +
-# monotone identity counter). The canonical field-aware dedup case (Imp2).
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Dataset 4 — REPEATED_LOGS: real `ping` replies (recurring content +
+# monotone identity counter). The canonical field-aware dedup case (Imp2). ---------------------------------------------------------------------------
 
 # A fixed, reproducible local capture: 100 ICMP echo replies to loopback.
-# Each reply's *content* is byte-identical ({bytes, from, ttl}); only the
-# monotone ``icmp_seq`` counter and the measured ``time`` vary per reply.
-# ``icmp_seq`` is exactly the "VaryingIdentity" column the whole-item hash
-# mistakes for content (every row hashes unique) and that the field-aware
-# stable-projection hash excludes (rows collapse on their shared content).
 _PING_CMD: tuple[str, ...] = ("ping", "-c", "100", "-i", "0.01", "127.0.0.1")
 _PING_RE = re.compile(
     r"^(?P<bytes>\d+) bytes from (?P<from>\S+): "
@@ -400,11 +393,7 @@ def build_repeated_logs_dataset(*, limit: int = 90, refresh: bool = False) -> Da
     )
 
 
-# ---------------------------------------------------------------------------
-# Dataset 5 — DISK: real `df -k` rows (small array, ≤ adaptive_k).
-# The canonical "small tool output" case: most real tool results are a
-# handful of rows, which the engine used to pass through untouched.
-# ---------------------------------------------------------------------------
+# Dataset 5
 
 _DF_CMD: tuple[str, ...] = ("df", "-k")
 
@@ -473,25 +462,11 @@ def build_disk_dataset(*, refresh: bool = False) -> Dataset:
     )
 
 
-# ---------------------------------------------------------------------------
-# Dataset 6 — MULTITURN: the SAME real tool I/O captured across successive
-# turns of one conversation. The cross-message redundancy case: per-message
-# compression pays full price for every repetition; only conversation-level
-# dedup can remove it.
-# ---------------------------------------------------------------------------
+# Dataset 6 The cross-message redundancy case: per-message compression pays
+# full price for every repetition; only conversation-level dedup can remove it.
 
-# Each command is genuinely invoked TWICE (two separate real runs, both raw
-# captures snapshotted). `rg --sort path` is the deterministic form agents
-# get from sorted search tools: across two runs of an unchanged tree the
-# parsed match rows are byte-identical (verified at capture time — the raw
-# `--json` streams differ only in elapsed-time stats events, which the
-# parser never reads). `df -k` runs seconds apart genuinely DRIFT (free
-# blocks / inode counts move), giving the honest near-identical pair.
-# The third pair is `git log -n 30` viewed one REAL commit apart
-# (HEAD~1 then HEAD — the canonical "agent commits, re-checks history"
-# turn pair): 29 of 30 rows are byte-identical, one row is new and one
-# falls off the window. Both views come from this repo's real history, so
-# a --refresh stays deterministic at any given HEAD.
+# Each command is genuinely invoked TWICE (two separate real runs, both raw captures snapshotted). `rg --sort path` is the deterministic form
+# agents get from sorted search tools: across two runs of an unchanged tree the parsed match rows are byte-identical (verified at capture time.
 _MULTITURN_RG_CMD: tuple[str, ...] = ("rg", "--json", "--sort", "path", "def ", "furl_ctx/")
 _MULTITURN_DF_CMD: tuple[str, ...] = ("df", "-k")
 _MULTITURN_RG_LIMIT = 90
@@ -512,9 +487,8 @@ def _multiturn_git_log_cmd(ref: str) -> list[str]:
     ]
 
 
-# Successive agent turns are seconds apart, not microseconds — space the two
-# df captures accordingly so the snapshot reflects real inter-turn drift
-# (free-space / inode counters move on a live machine).
+# Successive agent turns are seconds apart, not microseconds — space the two df captures accordingly
+# so the snapshot reflects real inter-turn drift (free-space / inode counters move on a live machine).
 _MULTITURN_TURN_SPACING_S = 3.0
 
 
@@ -632,21 +606,13 @@ def build_multiturn_dataset(*, refresh: bool = False) -> Dataset:
     )
 
 
-# ---------------------------------------------------------------------------
-# Datasets 7-10 — RAW TEXT (EFF-6): the four non-JSON compressor routes.
-# Items are the distinct non-blank lines of the raw text; retention and
-# recovery are scored per line (visible verbatim OR CCR-recoverable from the
-# compressor's `Retrieve …: hash=…` marker, which backs the FULL original).
-# ---------------------------------------------------------------------------
+# Datasets 7-10 Items are the distinct non-blank lines of the raw text; retention and recovery are scored per line
+# (visible verbatim OR CCR-recoverable from the compressor's `Retrieve …: hash=…` marker, which backs the FULL original).
 
 _GREP_CMD: tuple[str, ...] = ("grep", "-rn", "--include=*.py", "def ", "furl_ctx/transforms/")
 
-# Two real refs from this repo's history: the dependency-bump window
-# (thiserror 2.0.18 → merge #11), restricted to the manifests so the diff is
-# multi-file with heavy Cargo.lock churn (19+ hunks in one file exercises the
-# max_hunks_per_file cap) and stays PURE diff for the detector (code/docs
-# churn carries prose + brace-led context lines, which trips the
-# mixed-content gate).
+# Use a real dependency-bump diff restricted to manifests: multi-file, lockfile-heavy,
+# and pure diff syntax. This exercises max-hunk capping without mixed-content detection.
 _DIFF_CMD: tuple[str, ...] = (
     "git",
     "diff",

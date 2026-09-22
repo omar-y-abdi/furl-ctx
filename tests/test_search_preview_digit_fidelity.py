@@ -81,10 +81,7 @@ def test_zero_padded_ids_and_amounts_survive_in_preview() -> None:
 
 
 def test_bracketed_timestamp_lines_are_asserted_and_byte_exact() -> None:
-    # Lines starting with "[" used to be skipped wholesale by the helper's
-    # any-"["-prefix sentinel, so a corrupted bracketed timestamp passed
-    # silently. The helper now matches the structural sentinels precisely,
-    # and these lines are pinned end-to-end.
+    # Lines starting with "[" used to be skipped wholesale by the helper's any-"["-prefix sentinel, so a corrupted bracketed timestamp passed silently.
     content = "\n".join(
         f"[2026-07-11T13:{i % 10:02d}:00] payment id={i:04d} status=ok" for i in range(60)
     )

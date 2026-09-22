@@ -49,20 +49,14 @@ _HOOK_SCRIPT = _PLUGIN_HOOKS_DIR / "compress_tool_output.py"
 _SESSION_START_SCRIPT = _PLUGIN_HOOKS_DIR / "session_start_banner.py"
 _PYPROJECT = _ROOT / "pyproject.toml"
 
-# T7: the two undocumented, native-installer-only env vars session_start_banner.py
-# and furl_ctx/host_version.py both read. Every SessionStart test below scrubs
-# them and sets an explicit value instead, so results are deterministic
-# regardless of what Claude Code version, if any, is actually running the suite.
+# T7: the two undocumented, native-installer-only env vars the module and the module both read. Every SessionStart test below scrubs them and
+# sets an explicit value instead, so results are deterministic regardless of what Claude Code version, if any, is actually running the suite.
 _VERSION_ENV_VARS = ("CLAUDE_CODE_EXECPATH", "AI_AGENT")
 _ABOVE_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-212_agent"}
 _BELOW_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-100_agent"}
 
-# Hermetic scope for the SessionStart banner subprocess. The banner now reports the
-# PreToolUse pipe's LIVE status by reading Bash permission rules from the same scopes
-# the pipe gates on (HOME/.claude, CLAUDE_PROJECT_DIR, the cwd, managed settings), so
-# these must be rule-free fresh dirs with the config-path env vars unset — otherwise
-# a developer's real ~/.claude Bash rules would flip the banner to its "pipe off"
-# wording and make the default-wording pins below machine-dependent.
+# Hermetic scope for the SessionStart banner subprocess. The banner now reports the PreToolUse pipe's LIVE status by reading Bash permission rules from the same
+# scopes the pipe gates on (HOME/.claude, CLAUDE_PROJECT_DIR, the cwd, managed settings), so these must be rule-free fresh dirs with the config-path env vars unset.
 _BANNER_EMPTY_HOME = tempfile.mkdtemp(prefix="furl-manifest-banner-home-")
 _BANNER_EMPTY_CWD = tempfile.mkdtemp(prefix="furl-manifest-banner-cwd-")
 _BANNER_CONFIG_ENV_VARS = (
@@ -71,9 +65,8 @@ _BANNER_CONFIG_ENV_VARS = (
     "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
 )
 
-# The library version the PostToolUse `uv run --with` command pins to. Derived from
-# pyproject so the expected command below never rots, and so a pin that drifts from the
-# shipped library version fails here as well as in test_plugin_version_pins.py.
+# The library version the PostToolUse `uv run --with` command pins to. Derived from pyproject so the expected command below
+# never rots, and so a pin that drifts from the shipped library version fails here as well as in test_plugin_version_pins.py.
 _LIB_VERSION = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]["version"]
 
 # The events Furl ships. The loader rejects unknown event keys ("Invalid key in
@@ -85,12 +78,8 @@ _EVENTS = {"PostToolUse", "PreToolUse", "SessionStart"}
 # without a login shell; appending never overrides an existing PATH entry.
 _PATH_AUG = 'PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"'
 
-# The exact PostToolUse command the plugin ships (F-A1). It runs via ``sh -c`` so
-# NO login profile is sourced (a profile that prints to stdout would corrupt the
-# JSON envelope); it appends common uv dirs to PATH so uv resolves without a
-# login shell; and it captures the hook's stdout and strips any non-JSON prefix
-# so a stray line never breaks the envelope. The ``==<version>`` pin stops ``uv``
-# from serving a stale cached resolution. Any other edit here must be deliberate.
+# The exact PostToolUse command the plugin ships (F-A1). It runs via ``sh -c`` so NO login profile is sourced (a profile that
+# prints to stdout would corrupt the JSON envelope). The ``==<version>`` pin stops ``uv`` from serving a stale cached resolution.
 _EXPECTED_COMMAND = (
     "sh -c 'o=$(" + _PATH_AUG + " uv run --no-project --with "
     f'"furl-ctx[mcp]=={_LIB_VERSION}" '
@@ -99,13 +88,8 @@ _EXPECTED_COMMAND = (
     '*) printf %s "$o" ;; esac; true\''
 )
 
-# The PreToolUse pipe hook, ON BY DEFAULT (S1 smart default, user-approved).
-# The shell gate is an OPT-OUT: an explicitly falsy FURL_PRETOOL_PIPE
-# (0/false/off/no/disabled, normalized via ``tr`` lowercase + strip, review F3)
-# skips the body cheaply (no ``uv`` resolve); unset, empty, and ANY other value,
-# including unknown junk like "garbage", launch the rewrite ("on unless
-# explicitly disabled"). Runs via ``sh -c`` (F-A1) with the same PATH-resolved uv
-# and non-JSON-prefix strip. Bash-only. Any other edit here must be deliberate.
+# The PreToolUse pipe hook, ON BY DEFAULT (S1 smart default, user-approved). The shell gate is an OPT-OUT: an explicitly falsy
+# FURL_PRETOOL_PIPE (0/false/off/no/disabled, normalized via ``tr`` lowercase + strip, review F3) skips the body cheaply (no ``uv`` resolve).
 _EXPECTED_PRETOOL_COMMAND = (
     'sh -c \'case "$(printf %s "$FURL_PRETOOL_PIPE" | '
     'tr "[:upper:]" "[:lower:]" | tr -d "[:space:]")" in 0|false|off|no|disabled) ;; '
@@ -116,9 +100,8 @@ _EXPECTED_PRETOOL_COMMAND = (
     '*) printf %s "$o" ;; esac ;; esac; true\''
 )
 
-# Fields the schema does not honor where the old manifest wrongly placed them:
-# the host silently ignores ``description``/``id`` at the matcher level and ``env``
-# per command hook. They must not reappear.
+# Fields the schema does not honor where the old manifest wrongly placed them: the host silently ignores
+# ``description``/``id`` at the matcher level and ``env`` per command hook. They must not reappear.
 _FORBIDDEN_MATCHER_KEYS = {"description", "id"}
 _FORBIDDEN_HOOK_KEYS = {"env"}
 
@@ -128,9 +111,8 @@ def _load() -> dict[str, Any]:
 
 
 def _run(command: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    # Execute the hook command exactly as Claude Code does — as a shell command line —
-    # but via an explicit argv (no shell=True); the command string is the repo's own,
-    # not external input.
+    # Execute the hook command exactly as Claude Code does — as a shell command line — but via an
+    # explicit argv (no shell=True); the command string is the repo's own, not external input.
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
@@ -255,16 +237,13 @@ def test_pretool_command_is_env_gated_and_pinned() -> None:
     assert 'tr "[:upper:]" "[:lower:]"' in command
     # Invokes the bundled rewrite script via the plugin-root placeholder.
     assert "${CLAUDE_PLUGIN_ROOT}/hooks/pretool_pipe.py" in command
-    # No inline env pins on the hooks.json command itself (the rewrite bakes the
-    # CCR env at runtime; the manifest command must not clobber user env).
+    # Do not pin CCR environment values in the manifest command; runtime rewriting adds them without clobbering user environment.
     assert "FURL_CCR" not in command
 
 
 def test_pretool_explicit_disable_is_cheap_no_uv_no_output() -> None:
-    # With an explicitly falsy flag the shell gate skips the body entirely: no
-    # output, exit 0, and crucially NO `uv` process is spawned — disabling the
-    # pipe costs nothing. (The DEFAULT path now launches the rewrite hook; that
-    # side is exercised via the uv-free gate probe in the parity test below.)
+    # With an explicitly falsy flag the shell gate skips the body entirely: no output,
+    # exit 0, and crucially NO `uv` process is spawned — disabling the pipe costs nothing.
     command = _load()["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     for value in ("0", "false", "off", "no", "disabled", "OFF"):
         proc = _run(command, {"FURL_PRETOOL_PIPE": value})
@@ -272,9 +251,7 @@ def test_pretool_explicit_disable_is_cheap_no_uv_no_output() -> None:
         assert proc.stdout == "", f"flag {value!r} must skip the pipe cheaply"
 
 
-# The uv-launch body inside the shipped PreToolUse command. Swapped for a marker
-# echo by the gate-probe tests below, so the GATE itself (the part before the
-# body) is exercised from the shipped string without a real `uv` resolve.
+# The uv-launch body inside the shipped PreToolUse command.
 _PRETOOL_UV_BODY_RE = re.compile(
     r'uv run --no-project --with "furl-ctx\[mcp\]==[^"]*" '
     r'python3 "\$\{CLAUDE_PLUGIN_ROOT\}/hooks/pretool_pipe\.py"'
@@ -288,14 +265,7 @@ def _pretool_gate_probe() -> str:
     return probe
 
 
-# The gate-parity contract (S1 + review-84 F1): the hooks.json SHELL gate and
-# the python ``_pipe_disabled`` gate must agree on EVERY value. ON unless
-# explicitly disabled: unset, empty, truthy spellings, and unknown junk all
-# leave the pipe ON; only the normalized falsy set turns it off. Both gates
-# remove ALL whitespace (the shell's ``tr -d "[:space:]"``, python's ASCII
-# whitespace-removal table) before comparing — INTERNAL whitespace included —
-# so "semantically identical" holds for every value, not just whitespace-free
-# ones.
+# The shell gate and Python `_pipe_disabled` gate must agree on every value. ON unless explicitly disabled
 _GATE_PARITY_CASES: tuple[tuple[str | None, bool], ...] = (
     (None, True),  # unset → ON (the S1 smart default; pre-flip this was OFF)
     ("", True),  # empty → ON
@@ -307,9 +277,7 @@ _GATE_PARITY_CASES: tuple[tuple[str | None, bool], ...] = (
     ("1", True),
     ("TRUE", True),
     ("garbage", True),  # unknown non-falsy → ON ("on unless explicitly disabled")
-    # The typo named by pretool_pipe.py's ``_pipe_disabled`` docstring as the
-    # motivating case for "on unless explicitly disabled": a misspelled "false"
-    # must NEVER silently disable savings.
+    # A misspelled falsy value must not disable the pipe; only recognized explicit values may opt out.
     ("fasle", True),
     ("2", True),  # non-1 numeric: not in _DISABLE_VALUES → ON
     ("On", True),  # mixed-case truthy
@@ -326,10 +294,8 @@ _GATE_PARITY_CASES: tuple[tuple[str | None, bool], ...] = (
 
 _PRETOOL_SCRIPT = _PLUGIN_HOOKS_DIR / "pretool_pipe.py"
 
-# Hermetic HOME + cwd for the python-gate subprocess: the deny/ask guard
-# (reviewer-84 F3) reads permission rules from the payload cwd and HOME, and
-# this parity test targets the FLAG gate only — a developer's real ~/.claude
-# deny rules must not turn its rewrites into passthroughs.
+# Hermetic HOME + cwd for the python-gate subprocess: the deny/ask guard (reviewer-84 F3) reads
+# permission rules from the payload cwd and HOME, and this parity test targets the FLAG gate only.
 _EMPTY_SETTINGS_DIR = tempfile.mkdtemp(prefix="furl-manifest-tests-home-")
 
 
@@ -402,10 +368,8 @@ def test_session_start_group_shape() -> None:
 
 def test_session_start_is_cheap_user_visible_and_fail_open() -> None:
     command = _load()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    # Cheap: no `uv` resolve on the session-start path — bare python3, no
-    # dependency resolution (T7 made the banner version-aware but it stayed
-    # dependency-free for exactly this reason; see session_start_banner.py's
-    # module docstring).
+    # Cheap: no `uv` resolve on the session-start path — bare python3, no dependency resolution (T7 made the banner
+    # version-aware but it stayed dependency-free for exactly this reason; see the module's module docstring).
     assert "uv run" not in command
     assert "python3" in command
     assert "session_start_banner.py" in command
@@ -428,9 +392,7 @@ def test_session_start_emits_valid_system_message_json() -> None:
     assert set(payload.keys()) == {"systemMessage"}
     message = payload["systemMessage"]
     assert message.startswith("furl ")
-    # Names the pinned engine alongside the plugin (see test_plugin_version_pins.py
-    # for the full plugin-version / engine-version cross-check); _LIB_VERSION is the
-    # same pyproject-derived constant the PostToolUse pin check above uses.
+    # Name the pinned engine alongside the plugin; `_LIB_VERSION` is the same project-version constant used by the hook pin checks.
     assert f"engine furl-ctx {_LIB_VERSION}" in message
     assert "furl_stats" in message
     assert "PostToolUse compression armed" in message
@@ -466,13 +428,8 @@ def test_session_start_unknown_version_preserves_armed_claim() -> None:
     assert "PostToolUse compression armed" in message
 
 
-# --- F3: the banner reports the pipe's LIVE, rule-aware status --------------------
-# The old banner printed an unconditional "PreToolUse pipe active" that LIED whenever
-# a Bash permission rule existed (the pipe gates itself off then). These pins run the
-# real banner hermetically against settings on disk, so the clause is deterministic,
-# and prove it now tells the truth: OFF with rules / doubt, ON with none, and the
-# conscious FURL_PIPE_WITH_RULES override reported as such. It shares the pipe's own
-# detection (imported from pretool_pipe), so what it says is what the pipe enforces.
+# F3: the banner reports the pipe's LIVE, rule-aware status -------------------- The old banner printed an unconditional
+# "PreToolUse pipe active" that LIED whenever a Bash permission rule existed (the pipe gates itself off then).
 
 
 def _no_ai_tells(text: str) -> bool:

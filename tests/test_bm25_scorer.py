@@ -51,22 +51,13 @@ def test_tokenize_splits_on_non_alphanumeric_delimiters() -> None:
     assert BM25Scorer()._tokenize("ID-1234 code99 X") == ["id", "1234", "code99", "x"]
 
 
-# --------------------------------------------------------------------------- #
-# Tokenization boundaries pinned through the PUBLIC API (score_batch +
-# matched_terms), so they survive a behavior-preserving rename or inline of the
-# private _tokenize helper. The UUID and digit-in-word cases replace the former
-# direct _tokenize assertions for exactly those two boundaries.
-# --------------------------------------------------------------------------- #
+# . PUBLIC API (score_batch + matched_terms), so they survive a behavior-preserving rename or inline of the private _tokenize helper. The UUID and digit-in-word
+# cases replace the former direct _tokenize assertions for exactly those two boundaries. --------------------------------------------------------------------------- #
 
 
 def test_uuid_is_preserved_as_one_token_through_score_batch() -> None:
-    # A UUID matches only when the whole 36-char token is present: a document
-    # holding the identical UUID matches it, one whose UUID differs by a single
-    # hex character does not. That proves the UUID is one token, not split into
-    # hex runs that would match piecewise. The matching document's UUID is
-    # uppercase while the query's is lowercase, so this also pins that
-    # tokenization folds case before matching, not just that the UUID
-    # survives as one token.
+    # A UUID matches only when the whole 36-char token is present: a document holding the identical UUID matches it, one whose UUID
+    # differs by a single hex character does not. That proves the UUID is one token, not split into hex runs that would match piecewise.
     uuid = "550e8400-e29b-41d4-a716-446655440000"
     altered = "550e8400-e29b-41d4-a716-44665544ffff"
     results = BM25Scorer().score_batch(
@@ -78,10 +69,7 @@ def test_uuid_is_preserved_as_one_token_through_score_batch() -> None:
 
 
 def test_digits_embedded_in_word_stay_one_token_through_score_batch() -> None:
-    # "abc1234def" is one token: it matches a document containing it verbatim
-    # and not one where the same characters are split by spaces. The 4+ digit
-    # numeric-ID boundary is covered across the corpus, including the non-ASCII
-    # Unicode-digit case, by tests/test_bm25_dead_branch_parity.py.
+    # "abc1234def" is one token: it matches a document containing it verbatim and not one where the same characters are split by spaces.
     results = BM25Scorer().score_batch(["abc1234def zeta", "abc 1234 def zeta"], "abc1234def")
     assert results[0].matched_terms == ["abc1234def"]
     assert results[1].matched_terms == []
@@ -125,24 +113,8 @@ def test_score_batch_no_matching_terms_scores_zero_with_no_matches_reason() -> N
     assert result.matched_terms == []
 
 
-# --------------------------------------------------------------------------- #
-# score_batch: exact-value pins for the core formula
-# --------------------------------------------------------------------------- #
-#
-# Corpus: items = ["alpha alpha beta", "gamma"], context = "alpha gamma".
-# doc_freq_across = {"alpha": 1, "beta": 1, "gamma": 1} (2 docs total), so
-# idf("alpha") == idf("gamma") == log(2) -- the difference between the two
-# items' scores below comes entirely from the length-normalization term.
-#
-# Hand-worked with k1=1.5, b=0.75, avgdl=(3+1)/2=2.0:
-#   item 0, term "alpha": doc_len=3, f=2
-#     num = 2 * 2.5 = 5
-#     den = 2 + 1.5 * (0.25 + 0.75 * 3/2) = 2 + 1.5 * 1.375 = 4.0625
-#     score = log(2) * 5 / 4.0625
-#   item 1, term "gamma": doc_len=1, f=1
-#     num = 1 * 2.5 = 2.5
-#     den = 1 + 1.5 * (0.25 + 0.75 * 1/2) = 1 + 1.5 * 0.625 = 1.9375
-#     score = log(2) * 2.5 / 1.9375
+# # score_batch: exact-value pins for the core formula --------------------------------------------------------------------------- # Corpus:
+# items = ["alpha alpha beta", "gamma"], context = "alpha gamma". doc_freq_across = {"alpha": 1, "beta": 1, "gamma": 1} (2 docs total).
 
 
 def test_score_batch_matches_hand_derived_values_for_worked_corpus() -> None:
@@ -159,41 +131,28 @@ def test_score_batch_matches_hand_derived_values_for_worked_corpus() -> None:
 
 
 def test_duplicate_query_terms_scale_score_linearly_with_query_frequency() -> None:
-    # "alpha" appears in 2 of 3 docs and "beta"/"gamma"/"delta"/"epsilon"
-    # never repeat, so a repeated query term is the only source of the
-    # doubling: query frequency (qf) is a pure linear multiplier per the
-    # module's own formula (`score += term_score * qf`).
+    # "alpha" appears in 2 of 3 docs and "beta"/"gamma"/"delta"/"epsilon" never repeat, so a repeated query term is the only source
+    # of the doubling: query frequency (qf) is a pure linear multiplier per the module's own formula (`score += term_score * qf`).
     items = ["alpha beta", "alpha gamma", "delta epsilon"]
     scorer = BM25Scorer(normalize_score=False)
 
     single = scorer.score_batch(items, "alpha")[0].score
     double = scorer.score_batch(items, "alpha alpha")[0].score
 
-    # Derived symbolically like the worked-corpus test above, not pasted
-    # machine output. "alpha" is in 2 of 3 docs, so
-    #   idf("alpha") = log((3 - 2 + 0.5) / (2 + 0.5) + 1) = log(1.6).
-    # For item 0: doc_len=2, avgdl=(2+2+2)/3=2.0, f=1:
-    #   num = 1 * (k1 + 1) = 2.5
-    #   den = 1 + 1.5 * (0.25 + 0.75 * 2/2) = 2.5
-    # so single = log(1.6) * 2.5 / 2.5. The operation order matters: that
-    # product-then-quotient is 1 ULP off from log(1.6) itself, which is why
-    # pinning the bare log(1.6) would fail.
+    # Derived symbolically like the worked-corpus test above, not pasted machine output.
     expected_single = math.log(1.6) * 2.5 / 2.5
     assert single == expected_single
     assert double == expected_single * 2
     assert double == single * 2
 
 
-# --------------------------------------------------------------------------- #
-# Long-match bonus: the guarded, previously-unpinned behavior (see module
-# docstring above for the mutation that survived the full suite without it).
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Long-match bonus: the guarded, previously-unpinned behavior (see module
+# docstring above for the mutation that survived the full suite without it). --------------------------------------------------------------------------- #
 
 
 def test_long_match_bonus_applies_at_exactly_eight_chars_not_seven() -> None:
-    # Two isolated single-term corpora differing only in the matched term's
-    # length (7 vs 8 chars): the 8-char term earns the same base BM25 term
-    # score PLUS the 0.3 long-match bonus; the 7-char term earns none.
+    # Two isolated single-term corpora differing only in the matched term's length (7 vs 8 chars): the 8-char
+    # term earns the same base BM25 term score PLUS the 0.3 long-match bonus; the 7-char term earns none.
     items = ["shortid other stuff here", "longerid other stuff here"]
     results = BM25Scorer().score_batch(items, "shortid longerid")
 
@@ -207,10 +166,8 @@ def test_long_match_bonus_applies_at_exactly_eight_chars_not_seven() -> None:
 
 
 def test_normalization_divides_by_max_score_before_the_bonus_is_added() -> None:
-    # The bonus is added AFTER raw_score/max_score, not before: with the
-    # default max_score=10.0, a term scoring log(4/3) pre-bonus normalizes
-    # to log(4/3)/10 and the 0.3 bonus is added on top of that, not on top
-    # of the un-normalized raw term score.
+    # The bonus is added AFTER raw_score/max_score, not before: with the default max_score=10.0, a term scoring log(4/3) pre-bonus
+    # normalizes to log(4/3)/10 and the 0.3 bonus is added on top of that, not on top of the un-normalized raw term score.
     items = ["longerid other stuff here"]  # single-item corpus: avgdl == doc_len
     raw = BM25Scorer(normalize_score=False).score_batch(items, "longerid")[0].score
     normalized = (

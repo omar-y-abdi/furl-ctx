@@ -3,23 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>furl &middot; context compression for AI agents</title>
-<meta name="description" content="furl folds repeated tool output into a hash-addressed marker, keeps the line that matters, and returns any original byte-exact. Six real captures, real numbers.">
+<title>Furl &middot; context compression for AI agents</title>
+<meta name="description" content="Explore Furl context compression with six prerecorded captures. Inspect smaller outputs, retrieve stored details, and understand the limits.">
 <meta name="color-scheme" content="dark">
-<meta property="og:title" content="furl &middot; context compression for AI agents">
-<meta property="og:description" content="Fold the noise, keep the signal, retrieve any original byte-exact. Six real captures, real furl output.">
+<meta property="og:title" content="Furl &middot; context compression for AI agents">
+<meta property="og:description" content="Smaller context. Details on demand. Explore six prerecorded Furl captures and the limits of retrievable compression.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://furl-ctx.vercel.app/">
 <meta property="og:image" content="https://furl-ctx.vercel.app/assets/og.png">
 <meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="935">
-<meta property="og:image:alt" content="The furl showcase site showing 91.5 percent fewer tokens across six real captures.">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Furl. Smaller context. Details on demand. Amber Furl mark on a dark background.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://furl-ctx.vercel.app/assets/og.png">
 <link rel="canonical" href="https://furl-ctx.vercel.app/">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0908'/%3E%3Cpath d='M9 8h14M9 14h9M9 20h5' stroke='%23ffb24d' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="assets/fonts.css">
-<link rel="stylesheet" href="assets/styles.css">
+<link rel="icon" href="/assets/icons/favicon-32.png" type="image/png">
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/fonts.css">
+<link rel="stylesheet" href="/assets/styles.css">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -27,10 +28,10 @@
   "name": "furl",
   "alternateName": "furl-ctx",
   "url": "https://furl-ctx.vercel.app/",
-  "description": "furl is context compression for AI agents. It folds repeated tool output into a hash-addressed marker, keeps the lines that matter to cut token costs, and returns any original byte-exact the moment an agent asks. furl ships as plugins for Claude Code and Codex plus an MCP server, and nothing is ever thrown away.",
+  "description": "Furl compresses AI-agent context and retrieves stored originals through CCR. It provides a Rust core, Python API, CLI, and local MCP integration. Retrieval is subject to retention and storage availability.",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Linux, Windows",
-  "softwareVersion": "1.2.0",
+  "softwareVersion": "1.4.0",
   "license": "https://www.apache.org/licenses/LICENSE-2.0",
   "offers": {
     "@type": "Offer",
@@ -64,32 +65,31 @@
 
 <header class="nav" role="banner">
   <a class="brand" href="#top" aria-label="furl, home">
-    <span class="brand-mark" aria-hidden="true">
-      <span></span><span></span><span></span>
-    </span>
+    <img src="/assets/icons/composer-48.png" alt="" width="36" height="36">
     <span class="brand-word">furl</span>
   </a>
   <nav class="nav-links" aria-label="Primary">
     <a href="#how">How it works</a>
     <a href="#read">The honest read</a>
+    <a href="/connect">Connect</a>
     <a href="https://github.com/omar-y-abdi/furl-ctx" rel="noopener">GitHub</a>
   </nav>
 </header>
 
-<main id="top">
+<main id="top" tabindex="-1">
 
   <section class="hero" aria-labelledby="hero-title">
     <p class="eyebrow reveal">Context compression for AI agents</p>
-    <h1 id="hero-title" class="reveal">Most of your agent's context is noise it has already seen.</h1>
-    <p class="lead reveal">furl folds repeated tool output into a hash-addressed marker, keeps the line that matters, and returns any original byte-exact the moment the agent asks for it. No summary. No guessing. Nothing thrown away.</p>
+    <h1 id="hero-title" class="reveal">Less repeated output.<br>More room to work.</h1>
+    <p class="lead reveal">Furl produces a compact view of large tool outputs and keeps stored originals retrievable through CCR. Ask for the details when you need them, while the entry is retained. The compact view is not the full original.</p>
 
     <div class="proof reveal" aria-label="Aggregate result across the captures below">
       <div class="proof-figure">
         <span class="proof-num" data-agg="overall_percent_saved" data-suffix="%">91.5%</span>
       </div>
       <div class="proof-copy">
-        <p class="proof-head">fewer tokens across six real captures</p>
-        <p class="proof-sub"><span data-agg="total_tokens_before">22,630</span> tokens in, <span data-agg="total_tokens_after">1,922</span> out. The per-capture range is <span data-agg="min_percent_saved" data-suffix="%">87.2%</span> to <span data-agg="max_percent_saved" data-suffix="%">95.8%</span>, and nothing was cherry-picked. These six are repetitive machine captures, furl-ctx's best case; on high-entropy prose the honest range is roughly 0 to 54 percent.</p>
+        <p class="proof-head">fewer tokens across six synthetic examples</p>
+        <p class="proof-sub"><span data-agg="total_tokens_before">22,630</span> tokens in, <span data-agg="total_tokens_after">1,922</span> out. The per-capture range is <span data-agg="min_percent_saved" data-suffix="%">87.2%</span> to <span data-agg="max_percent_saved" data-suffix="%">95.8%</span>. These six are generated, repetitive examples, furl-ctx's best case; on high-entropy prose the honest range is roughly 0 to 54 percent.</p>
       </div>
       <a class="cta" href="#demo">See it fold<span class="cta-arrow" aria-hidden="true">↓</span></a>
     </div>
@@ -98,13 +98,12 @@
   <section id="demo" class="demo" aria-labelledby="demo-title" tabindex="-1">
     <div class="section-head">
       <p class="eyebrow">The demo</p>
-      <h2 id="demo-title">Six captures a coding agent would actually paste in. Fold each one.</h2>
-      <p class="section-note">Every line, number, marker, and retrieved byte below is real output from furl <span data-meta="furl_version">1.2.0</span>, generated by <code>site/data/generate.py</code>. Pick a capture, press compress, then pull an original back out of the marker.</p>
+      <h2 id="demo-title">Six prerecorded captures. Fold each one.</h2>
+      <p class="section-note">This is a browser replay of real Furl output on synthetic inputs. Results were captured with Furl <span data-meta="furl_version">1.2.0</span>, generated by <code>site/data/generate.py</code> on 2026-07-13. It does not run a live compression server or upload your files. Pick a capture to inspect its saved result.</p>
     </div>
 
     <div class="demo-mount" id="demo-mount">
-      <!-- Skeleton, replaced by app.js once fonts are ready. Sized to match the
-           real panel so there is no layout shift. -->
+      <!-- Skeleton matches the final panel size to avoid layout shift while fonts load. -->
       <div class="skeleton" aria-hidden="true">
         <div class="sk-tabs"><span></span><span></span><span></span><span></span><span></span><span></span></div>
         <div class="sk-head"></div>
@@ -112,7 +111,7 @@
         <div class="sk-bar"></div>
       </div>
       <table class="demo-facts">
-        <caption>Six real captures, summarized. The interactive demo needs JavaScript to fold and retrieve each one.</caption>
+        <caption>Six synthetic examples, summarized. The interactive demo needs JavaScript to fold and retrieve each one.</caption>
         <thead>
           <tr>
             <th scope="col">Capture</th>
@@ -142,8 +141,8 @@
     <ol class="steps">
       <li class="step reveal">
         <span class="step-n">1</span>
-        <h3>Score, do not summarize</h3>
-        <p>furl ranks lines by relevance and keeps the errors, the anomalies, and the ones that do not repeat. A summary would invent text. furl only ever removes.</p>
+        <h3>Keep a useful view</h3>
+        <p>Furl selects a transformation for the content. Depending on the input, it can retain relevant lines, compact rows, or offload a large payload with a structured overview. Check the original before relying on omitted details.</p>
       </li>
       <li class="step reveal">
         <span class="step-n">2</span>
@@ -153,7 +152,7 @@
       <li class="step reveal">
         <span class="step-n">3</span>
         <h3>Retrieve on demand</h3>
-        <p>Every dropped original stays in a local hash-addressed store. The agent pulls back exactly what it needs by pattern, by row, or by line, and it comes back byte-exact.</p>
+        <p>Stored text can be recovered byte-exact; structured JSON can be re-serialized while preserving its values rather than its original spacing. Retention, eviction, redaction settings and storage availability affect what can be retrieved.</p>
       </li>
     </ol>
   </section>
@@ -166,15 +165,15 @@
     <div class="read-notes">
       <div class="note reveal">
         <span class="note-k">Today</span>
-        <p class="note-v">The furl API and the MCP tools give real, verified compression on large tool outputs, and every original returns byte-exact through retrieve. That is the path this page demonstrates.</p>
+        <p class="note-v">The Python API, CLI and MCP tools compress content and retrieve stored details. This page replays historical captures from version 1.2.0; the current package is version 1.4.0. These results are not a promise for every input.</p>
       </div>
       <div class="note reveal">
         <span class="note-k">Automatic</span>
-        <p class="note-v">Hands-off automatic compression works on Claude Code 2.1.163 and newer. The PostToolUse hook mirrors each replacement to the tool's output shape, so the harness honors it. It was built for upstream issue 68951, and the manual API and MCP tools work on every version and lose nothing.</p>
+        <p class="note-v">Automatic hooks are client-specific. ChatGPT uses explicit MCP tool calls; it does not run Claude Code hooks or automatically intercept other plugins. See the <a href="/connect">connection guide</a> and the <a href="https://github.com/omar-y-abdi/furl-ctx#proof">repository limits</a>.</p>
       </div>
       <div class="note reveal">
         <span class="note-k">Bounds</span>
-        <p class="note-v">These captures are repetitive machine output, the case furl is built for. On high-entropy prose the honest range is lower, roughly zero to 54 percent. furl folds only what repeats.</p>
+        <p class="note-v">These captures are repetitive machine output, the case furl is built for. On high-entropy prose the honest range is lower, roughly zero to 54 percent. Some inputs are left unchanged; omitted details require retrieval.</p>
       </div>
     </div>
   </section>
@@ -189,11 +188,15 @@
   <div class="foot-links">
     <a href="https://github.com/omar-y-abdi/furl-ctx" rel="noopener">Source</a>
     <a href="https://github.com/omar-y-abdi/furl-ctx/blob/main/LICENSE" rel="noopener">Apache 2.0</a>
+    <a href="/support">Support</a>
+    <a href="/privacy">Privacy</a>
+    <a href="/cookies">Cookies</a>
+    <a href="/terms">Terms</a>
   </div>
-  <p class="foot-note">furl is context compression for AI agents. It cuts token costs by folding repeated tool output into a compact hash-addressed marker, and every original stays available for byte-exact retrieval on demand. Use it as a Claude Code plugin, Codex plugin, or standalone MCP server.</p>
+  <p class="foot-note">furl is context compression for AI agents. It can reduce active token usage by producing compact views with retrievable stored details. Savings depend on the input and model; retrieval depends on retention and storage availability. Use it as a Claude Code plugin, Codex plugin, or standalone MCP server.</p>
 </footer>
 
-<script src="data/furl-data.js"></script>
-<script src="assets/app.js"></script>
+<script src="/data/furl-data.js"></script>
+<script src="/assets/app.js"></script>
 </body>
 </html>

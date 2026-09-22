@@ -54,22 +54,13 @@ def _scrape_row_drop_hashes(rendered: str) -> set[str]:
     return {h for h in sink if not h.endswith("#rows")}
 
 
-# ── Row-drop fixtures: ≥20 distinct cases (dicts, strings, numbers, mixed) ──
-#
-# Each must take the lossy row-drop path under the default config so a
-# `<<ccr:HASH N_rows_offloaded>>` marker is emitted and a typed ccr_hash is
-# surfaced. Built large + low uniqueness (or numeric/string) so the analyzer
-# crushes rather than keeps.
+# ── Row-drop fixtures: ≥20 distinct cases (dicts, strings, numbers, mixed) ── Each must take the lossy row-drop path
+# under the default config so a `<<ccr:HASH N_rows_offloaded>>` marker is emitted and a typed ccr_hash is surfaced.
 
 
 def _dict_case(seed: int) -> list[dict]:
-    # HIGH-ENTROPY dict rows → the lossy ``smart_sample`` row-drop path (a
-    # repetitive array would compact losslessly to a CSV table with NO drop,
-    # which is correct but not a row-drop case to characterize). Near-unique
-    # id/commit/msg per row from a seeded SHA stream forces row-drop; the
-    # survivors are still rendered as a compacted table
-    # (``smart_sample+compact:table``), exercising the survivor-compacted
-    # DICT drop arm specifically.
+    # HIGH-ENTROPY dict rows → the lossy ``smart_sample`` row-drop path (a repetitive array would compact
+    # losslessly to a CSV table with NO drop, which is correct but not a row-drop case to characterize).
     rows: list[dict] = []
     for i in range(60):
         h = hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()
@@ -151,9 +142,8 @@ def test_crush_typed_hash_equals_scrape_and_retrieves(
     )
     # (2) Typed set == scraped row-drop set (byte-for-byte parity).
     assert typed == scraped, f"{shape}-{seed}: typed {sorted(typed)} != scraped {sorted(scraped)}"
-    # (3) TEST-11 payload equality against GROUND TRUTH: each fixture is
-    # ONE top-level array, so the whole-blob entry under the (single)
-    # typed==scraped hash must decode to exactly the original items.
+    # TEST-11 payload equality against GROUND TRUTH: each fixture is ONE top-level array, so the
+    # whole-blob entry under the (single) typed==scraped hash must decode to exactly the original items.
     for h in typed | scraped:
         payload = crusher._rust.ccr_get(h)
         assert payload is not None, f"hash {h} unresolvable in store"

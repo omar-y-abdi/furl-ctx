@@ -53,15 +53,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
-# Deterministic tiktoken counts drift only marginally across tokenizer or OS
-# builds, so a fresh run is allowed to land up to this fraction ABOVE the
-# baseline token count before it counts as inflation. Retention and recall get
-# no such slack: they are structural ratios and must never drop.
+# Deterministic tiktoken counts drift only marginally across tokenizer or OS builds, so a fresh run is
+# allowed to land up to this fraction ABOVE the baseline token count before it counts as inflation.
 TOKEN_SLACK: Final = 0.02
 
-# Float-noise guard for ratio metrics (retention, recall). A drop smaller than
-# this is treated as unchanged, so identical inputs never flag a phantom
-# regression; a genuine drop is always far larger.
+# Float-noise guard for ratio metrics (retention, recall).
 _EPS: Final = 1e-9
 
 

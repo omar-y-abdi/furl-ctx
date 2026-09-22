@@ -146,22 +146,12 @@ class StrategyDispatcher:
         compressor_name = strategy.value
         decision_reason = "strategy_not_enabled_or_unavailable"
         strategy_chain: list[str] = [strategy.value]
-        # Set by the tabular-CSV sub-branch when it already resolved a
-        # fail-open passthrough: the generic SMART_CRUSHER → LOG fallback
-        # must NOT re-route a detected table through a lossy line-dropper.
+        # Set by the tabular-CSV sub-branch when it already resolved a fail-open passthrough: the generic
+        # SMART_CRUSHER → LOG fallback must NOT re-route a detected table through a lossy line-dropper.
         suppress_no_savings_fallback = False
 
-        # Compressor exceptions propagate: a bug in a compressor must stay
-        # loud, not degrade into a silent passthrough (#4-upstream). Any
-        # strategy without a branch here falls through to the generic
-        # passthrough fallback at the bottom, so the dispatch stays total.
-        #
-        # `lossless_only` (strict lossless-or-passthrough): the search /
-        # log / diff compressors all DROP lines, so their arms are gated
-        # off below and those strategies resolve to the passthrough
-        # fallback — same shape as `enable_*_compressor=False`. The
-        # SMART_CRUSHER arm stays live: the Rust crusher routes
-        # lossless-or-passthrough internally in that mode.
+        # Compressor exceptions propagate: a bug in a compressor must stay loud, not degrade into a silent passthrough (#4-upstream). Any
+        # strategy without a branch here falls through to the generic passthrough fallback at the bottom, so the dispatch stays total.
         if strategy == CompressionStrategy.SMART_CRUSHER:
             # The no-savings Log fallback is handled ONCE by the generic
             # post-dispatch fallback below.
@@ -169,15 +159,8 @@ class StrategyDispatcher:
                 crusher = get_smart_crusher()
                 if crusher:
                     compressor_name = type(crusher).__name__
-                    # Tabular ingestion: raw CSV → records → SmartCrusher.
-                    # Attempted only for content that cannot be JSON (the
-                    # arm's normal input) and never under ``lossless_only``
-                    # — the conversion is a visible, CCR-recoverable
-                    # substitution of the raw bytes, exactly what strict
-                    # mode forbids. ``sniff_csv`` is the SAME predicate the
-                    # detector used, so the two can never disagree; a
-                    # ``None`` here keeps the historical crush path
-                    # byte-identical.
+                    # Tabular ingestion: raw CSV → records → SmartCrusher. Attempted only for content that cannot be JSON (the arm's normal input) and never
+                    # under ``lossless_only`` — the conversion is a visible, CCR-recoverable substitution of the raw bytes, exactly what strict mode forbids.
                     view = None if self.config.lossless_only else sniff_envelope(content)
                     table = None
                     if not self.config.lossless_only and not content.lstrip().startswith(
@@ -218,13 +201,7 @@ class StrategyDispatcher:
                             compressed, compressed_tokens = shipped, count(shipped)
                             decision_reason = "smart_crusher_tabular_csv"
                         else:
-                            # Fail-open: no savings, or the raw-recovery
-                            # store write vetoed — the raw CSV ships
-                            # byte-exact. The LOG fallback is suppressed:
-                            # lossy line-dropping is never an acceptable
-                            # fallback for a detected table (the engine's
-                            # reversible CCR offload still applies
-                            # downstream).
+                            # Fail-open: no savings, or the raw-recovery store write vetoed — the raw CSV ships byte-exact.
                             compressed, compressed_tokens = content, original_tokens
                             actual_strategy = CompressionStrategy.PASSTHROUGH
                             compressor_name = "Passthrough"
@@ -252,16 +229,8 @@ class StrategyDispatcher:
                     decision_reason = "search_compressor"
 
         elif strategy == CompressionStrategy.LOG:
-            # LogTemplate (NR2-3b): lossless template mining, tried BEFORE the
-            # lossy line-dropping LogCompressor. `encode_verified` self-checks
-            # its round-trip and returns None on no structure / no win / verify
-            # failure, so this arm is lossless-or-None — architecturally the
-            # SMART_CRUSHER shape, NOT the lossy-log shape. It is therefore
-            # gated by `enable_log_template` ALONE and stays live under
-            # `lossless_only` (strict mode = lossless-or-passthrough, and the
-            # wire is self-describing so no CCR store is written). The size
-            # gate is re-checked in tokenizer units via the injected `count`:
-            # a wire smaller in code points can still cost more tokens.
+            # LogTemplate (NR2-3b): lossless template mining, tried BEFORE the lossy line-dropping LogCompressor. `encode_verified` self-checks its round-trip and
+            # returns None on no structure / no win / verify failure, so this arm is lossless-or-None — architecturally the SMART_CRUSHER shape, NOT the lossy-log shape.
             log_template_won = False
             if self.config.enable_log_template:
                 enc = encode_verified(content)
@@ -291,10 +260,8 @@ class StrategyDispatcher:
                 if log_compressor_arm:
                     compressor_name = type(log_compressor_arm).__name__
                     log_arm_result = log_compressor_arm.compress(content, bias=bias)
-                    # Use the same count metric the rest of the
-                    # router uses; `compressed_line_count` is in
-                    # lines, not tokens — recording it here made
-                    # ratios meaningless against `original_tokens`.
+                    # Use the same count metric the rest of the router uses; `compressed_line_count` is in
+                    # lines, not tokens — recording it here made ratios meaningless against `original_tokens`.
                     compressed, compressed_tokens = (
                         log_arm_result.compressed,
                         count(log_arm_result.compressed),
@@ -313,20 +280,8 @@ class StrategyDispatcher:
                 decision_reason = "diff_compressor"
 
         elif strategy == CompressionStrategy.TEXT:
-            # Deterministic extractive prose compression (Engine P2-11).
-            # Gated like the other line-dropping compressors: never under
-            # `lossless_only` (the crusher drops segments). Below its size
-            # floors (600 chars / 15 segments) the crusher returns the
-            # original bytes, which the no-savings fallback below turns
-            # into an honest passthrough chain entry. When the arm is
-            # gated off, `compressed` stays None and the generic
-            # passthrough fallback at the bottom fires (same shape as
-            # `enable_search_compressor=False`) — large uncompressible
-            # text still gets the router's reversible CCR offload
-            # downstream.
-            # HTML main-content extraction first: WebFetch/HTML ships as extracted
-            # article text + a marker recovering the full raw HTML. Lossy-but-
-            # reversible, so gated off under lossless_only like the prose crusher.
+            # Deterministic extractive prose compression (Engine P2-11). Gated like the other line-dropping compressors never under `lossless_only` (the crusher drops segments).
+            # When the arm is gated off, `compressed` stays None and the generic passthrough fallback at the bottom fires (same shape as `enable_search_compressor=False`)
             html_shipped = (
                 None if self.config.lossless_only else compress_html(content, token_counter=count)
             )
@@ -346,14 +301,7 @@ class StrategyDispatcher:
                     decision_reason = "text_crusher"
 
         elif strategy == CompressionStrategy.CODE_AWARE:
-            # Opt-in AST code compression (Engine P2-12, default OFF — the
-            # policy maps SOURCE_CODE here only when `enable_code_aware`).
-            # Gated off under `lossless_only` like the other line-dropping
-            # compressors (body truncation is a visible, CCR-recoverable
-            # reduction). The compressor itself fails open to a passthrough
-            # result (missing tree-sitter, unknown language, invalid render,
-            # store-write failure), which the generic no-savings handling
-            # below reports honestly.
+            # Opt-in AST code compression (Engine P2-12, default OFF — the policy maps SOURCE_CODE here only when `enable_code_aware`).
             if self.config.enable_code_aware and not self.config.lossless_only:
                 code_compressor = get_code_aware_compressor()
                 if code_compressor:
@@ -391,13 +339,7 @@ class StrategyDispatcher:
                     compressor_name = "Passthrough"
                     decision_reason = f"{decision_reason}_no_savings_passthrough"
                 elif self.config.enable_log_compressor and not self.config.lossless_only:
-                    # Last-ditch: line-structured compressors (log dumps
-                    # land here — repetitive JSONL that SmartCrusher
-                    # can't shrink but the log compressor can). Only
-                    # attempted when the strategy was SMART_CRUSHER so
-                    # we don't reroute genuine code/diff content — and
-                    # never under `lossless_only` (the log compressor
-                    # drops lines).
+                    # Last-ditch: line-structured compressors (log dumps land here — repetitive JSONL that SmartCrusher can't shrink but the log compressor can).
                     log_compressor = get_log_compressor()
                     if log_compressor is not None:
                         strategy_chain.append(CompressionStrategy.LOG.value)

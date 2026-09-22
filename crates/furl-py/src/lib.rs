@@ -1,17 +1,4 @@
-//! PyO3 bindings for furl-core. Exposed to Python as `furl_ctx._core`.
-//!
-//! # Stage 3b — diff_compressor bridge
-//!
-//! The `DiffCompressor` family is exported here so the Python
-//! `ContentRouter` can route to the Rust implementation in-process via
-//! PyO3 instead of running the Python port. Backend selection happens in
-//! `furl_ctx.transforms._rust_diff_compressor.RustBackedDiffCompressor`,
-//! which mirrors the Python `DiffCompressor` API one-for-one (so callers
-//! don't notice the swap).
-//!
-//! Why in-process: ContentRouter compresses on the engine's hot path. Any
-//! IPC / subprocess / RPC bridge would dominate the cost we're trying to
-//! save. PyO3 calls cost ~microseconds; staying in-process is ~free.
+//! PyO3 bindings for furl-core.
 
 use std::any::Any;
 
@@ -46,27 +33,14 @@ fn hello() -> &'static str {
     furl_core::hello()
 }
 
-/// Build the `ValueError` raised for invalid caller input at the FFI
-/// boundary. Centralized so every binding reports bad input the same way
-/// (and none of them panic — see `crush_array_json`).
+/// Build the `ValueError` raised for invalid caller input at the FFI boundary. Centralized so
+/// every binding reports bad input the same way (and none of them panic — see `crush_array_json`).
 fn invalid_input(msg: String) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(msg)
 }
 
-/// Convert a caught `catch_unwind` panic payload into a `PyRuntimeError`.
-///
-/// A bare Rust panic crossing the PyO3 boundary surfaces as
-/// `pyo3_runtime.PanicException`, a `BaseException` that escapes the caller's
-/// `except Exception` (and Python `compress()`'s fail-open). Wrapping the hot
-/// bridge methods in `std::panic::catch_unwind` and routing the payload through
-/// here turns an engine-bug panic into an ordinary `Exception`, so the
-/// fail-open path reverts to the original messages instead of crashing the host
-/// request. The workspace keeps `panic = "unwind"` (see Cargo.toml) precisely so
-/// this `catch_unwind` is not a no-op.
-///
-/// The payload is `Box<dyn Any + Send>`; the message string set by
-/// `panic!(...)` is either a `&str` (literal) or a `String` (formatted), so we
-/// try both before falling back.
+/// Convert a caught `catch_unwind` panic payload into a `PyRuntimeError`. A bare Rust panic crossing the PyO3 boundary surfaces as
+/// `pyo3_runtime.PanicException`, a `BaseException` that escapes the caller's `except Exception` (and Python `compress()`'s fail-open).
 fn panic_to_pyerr(payload: Box<dyn Any + Send>) -> PyErr {
     let msg = payload
         .downcast_ref::<&str>()
@@ -87,17 +61,7 @@ fn type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Build the dict returned by `SmartCrusher.crush_array_json`. Kept
-/// outside `#[pymethods]` so we can `unwrap()` `set_item` (it cannot
-/// fail when keys are static str literals and values are owned String /
-/// Option<String> / Option<&'static str>) without tripping the
-/// `clippy::useless_conversion` false positive that fired inside the
-/// pyo3 method-attribute macro (first seen under pyo3 0.22; kept
-/// defensively under the pinned 0.29 — re-check on pyo3 bumps).
-///
-/// `dropped_refs` (typed recovery refs, §4.2 R3/R4) is converted to a
-/// `list[DroppedRef]`. `set_item` on the pyclass list allocates Python
-/// objects and can in principle fail — propagated as PyErr.
+/// Build the dict returned by `SmartCrusher.crush_array_json`.
 #[allow(clippy::too_many_arguments)]
 fn build_crush_array_dict<'py>(
     py: Python<'py>,
@@ -122,10 +86,8 @@ fn build_crush_array_dict<'py>(
 
 // ─── DiffCompressorConfig ──────────────────────────────────────────────────
 
-/// Mirror of `furl_ctx.transforms.diff_compressor.DiffCompressorConfig`.
-/// Defaults match Python; constructor accepts every field as a kwarg with
-/// the same name and type as the Python dataclass for drop-in
-/// compatibility.
+/// Mirror of `furl_ctx.transforms.diff_compressor.DiffCompressorConfig`. Defaults match Python; constructor
+/// accepts every field as a kwarg with the same name and type as the Python dataclass for drop-in compatibility.
 #[pyclass(
     name = "DiffCompressorConfig",
     module = "furl_ctx._core",
@@ -219,12 +181,8 @@ impl PyDiffCompressorConfig {
 
 // ─── DiffCompressionResult ─────────────────────────────────────────────────
 
-/// Mirror of `furl_ctx.transforms.diff_compressor.DiffCompressionResult`.
-/// Read-only on the Python side: ContentRouter consumes fields, doesn't
-/// mutate. `compression_ratio` and `tokens_saved_estimate` are exposed as
-/// methods (not `@property`) — Python callers reach them via `.method()`.
-/// The Python adapter wraps and re-exposes them as properties for full
-/// dataclass compatibility.
+/// Mirror of `furl_ctx.transforms.diff_compressor.DiffCompressionResult`. Read-only on the Python side: ContentRouter
+/// consumes fields, doesn't mutate. `compression_ratio` and `tokens_saved_estimate` are exposed as methods (not `@property`)
 #[pyclass(name = "DiffCompressionResult", module = "furl_ctx._core")]
 struct PyDiffCompressionResult {
     inner: DiffCompressionResult,
@@ -269,9 +227,7 @@ impl PyDiffCompressionResult {
         self.inner.cache_key.clone()
     }
 
-    /// Mirror of Python `@property compression_ratio`. Returns
-    /// `compressed_line_count / original_line_count` (1.0 if input was
-    /// empty).
+    /// Mirror of Python `@property compression_ratio`. Returns `compressed_line_count / original_line_count` (1.0 if input was empty).
     fn compression_ratio(&self) -> f64 {
         if self.inner.original_line_count == 0 {
             1.0
@@ -310,9 +266,8 @@ impl PyDiffCompressionResult {
 
 // ─── DiffCompressor ────────────────────────────────────────────────────────
 
-/// Mirror of `furl_ctx.transforms.diff_compressor.DiffCompressor`. The
-/// Python adapter wraps this in `RustBackedDiffCompressor` so
-/// `ContentRouter` can swap backends transparently.
+/// Mirror of `furl_ctx.transforms.diff_compressor.DiffCompressor`. The Python adapter wraps
+/// this in `RustBackedDiffCompressor` so `ContentRouter` can swap backends transparently.
 #[pyclass(name = "DiffCompressor", module = "furl_ctx._core")]
 struct PyDiffCompressor {
     inner: DiffCompressor,
@@ -331,14 +286,8 @@ impl PyDiffCompressor {
         }
     }
 
-    /// `compress(content: str, context: str = "") -> DiffCompressionResult`.
-    /// Argument order and keyword names match the Python implementation.
-    ///
-    /// Releases the GIL across the Rust compress call so concurrent
-    /// Python threads (uvicorn workers, asyncio tasks) can keep
-    /// running while we hash + parse + filter the diff. The
-    /// `&str` inputs are copied to owned `String`s first because
-    /// PyO3 ties their lifetime to the GIL hold.
+    /// `compress(content: str, context: str = "") -> DiffCompressionResult`. Argument order and keyword names match the Python implementation. Releases the GIL
+    /// across the Rust compress call so concurrent Python threads (uvicorn workers, asyncio tasks) can keep running while we hash + parse + filter the diff.
     #[pyo3(signature = (content, context = ""))]
     fn compress(
         &self,
@@ -348,10 +297,8 @@ impl PyDiffCompressor {
     ) -> PyResult<PyDiffCompressionResult> {
         let content = content.to_string();
         let context = context.to_string();
-        // catch_unwind inside detach: keep the GIL released during the
-        // Rust compute, catch any panic there, convert after re-acquiring so an
-        // engine bug becomes a catchable PyRuntimeError instead of a
-        // BaseException that crashes the host (COR-7).
+        // catch_unwind inside detach: keep the GIL released during the Rust compute, catch any panic there, convert after
+        // re-acquiring so an engine bug becomes a catchable PyRuntimeError instead of a BaseException that crashes the host (COR-7).
         let inner = py
             .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -365,21 +312,8 @@ impl PyDiffCompressor {
 
 // ─── SmartCrusherConfig ────────────────────────────────────────────────────
 
-/// Mirror of `furl_ctx.transforms.smart_crusher.SmartCrusherConfig`.
-/// Defaults match Python's dataclass byte-for-byte. The constructor
-/// accepts every dataclass field as a kwarg with the same name and type,
-/// so the Python shim passes `SmartCrusherConfig(**asdict(py_cfg), ...)` —
-/// plus two non-dataclass kwargs it injects explicitly:
-/// `relevance_threshold` (the reconciled 0.3 scoring threshold — the
-/// retired `RelevanceScorerConfig`'s 0.25 was never forwarded) and
-/// `advertise_retrieval_tool` (derived from the CCR config). The old
-/// name `enable_ccr_marker` is accepted as a deprecation alias for one
-/// release: passing it emits `DeprecationWarning` and maps to the new
-/// kwarg; passing both raises `ValueError`.
-///
-/// An unknown kwarg (including the four knobs deleted by SIMP-7:
-/// `enabled`, `uniqueness_threshold`, `similarity_threshold`,
-/// `include_summaries`) raises `TypeError` — fail-loud wire contract.
+/// Mirror of `furl_ctx.transforms.smart_crusher.SmartCrusherConfig`. The constructor accepts every dataclass field
+/// as a kwarg with the same name and type, so the Python shim passes `SmartCrusherConfig(**asdict(py_cfg), ...)`.
 #[pyclass(name = "SmartCrusherConfig", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
 struct PySmartCrusherConfig {
@@ -423,11 +357,7 @@ impl PySmartCrusherConfig {
         lossless_only: bool,
         enable_ccr_marker: Option<bool>,
     ) -> PyResult<Self> {
-        // `advertise_retrieval_tool` (renamed from `enable_ccr_marker`)
-        // gates ONLY the retrieval-tool advertisement — never the
-        // recovery pointer or store write. The old kwarg is a deprecation
-        // alias for one release: warn on use, ValueError if both are set,
-        // default `true` when neither is passed.
+        // `advertise_retrieval_tool` (renamed from `enable_ccr_marker`) gates ONLY the retrieval-tool advertisement — never the recovery pointer or store write.
         let advertise_retrieval_tool = match (advertise_retrieval_tool, enable_ccr_marker) {
             (Some(_), Some(_)) => {
                 return Err(invalid_input(
@@ -544,19 +474,8 @@ impl PySmartCrusherConfig {
 
 // ─── DroppedRef ────────────────────────────────────────────────────────────
 
-/// Typed CCR recovery ref carried across the FFI (§4.2) — one per
-/// reduction the engine shipped (row-drop or opaque substitution).
-///
-/// A small pyclass instead of a flat tuple so the row-drop variant never
-/// needs a documented `byte_size=0` filler: fields that don't apply to a
-/// variant are `None`.
-///
-/// * `kind_tag` — `"row_drop"` | `"opaque"` (the variant discriminator).
-/// * `hash` — the CCR store key (also embedded in the rendered marker).
-/// * `opaque_kind` — wire kind token (`"base64"` / `"string"` / `"html"`
-///   / custom); opaque only.
-/// * `byte_size` — EXACT original payload length in bytes (the rendered
-///   marker only carries the humanized form); opaque only.
+/// Each shipped reduction crosses FFI as a typed ref: `kind` (`row_drop`/`opaque`), CCR `hash`, optional opaque wire kind, and
+/// original `byte_size`. The hash is the rendered recovery key; opaque kind identifies base64/string/html/custom substitutions.
 #[pyclass(name = "DroppedRef", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
 struct PyDroppedRef {
@@ -637,9 +556,8 @@ impl PyDroppedRef {
 
 // ─── CrushResult ───────────────────────────────────────────────────────────
 
-/// Mirror of `furl_ctx.transforms.smart_crusher.CrushResult`. Read-only;
-/// the Python shim builds its own dataclass instance from these
-/// attributes so callers that destructure with `asdict()` keep working.
+/// Mirror of `furl_ctx.transforms.smart_crusher.CrushResult`. Read-only; the Python shim builds its own
+/// dataclass instance from these attributes so callers that destructure with `asdict()` keep working.
 #[pyclass(name = "CrushResult", module = "furl_ctx._core")]
 struct PyCrushResult {
     inner: RustCrushResult,
@@ -664,23 +582,15 @@ impl PyCrushResult {
         &self.inner.strategy
     }
 
-    /// Row-drop CCR hashes produced anywhere in this crush. The Python
-    /// shim mirrors EACH directly into the compression_store (typed
-    /// recovery) instead of scraping `<<ccr:HASH>>` out of `compressed`.
-    /// Plural because `crush()` recurses and can drop rows from many
-    /// sub-arrays — see `RustCrushResult::ccr_hashes()`. Empty when
-    /// nothing was dropped. Returned as a fresh `list[str]` per call.
-    /// Back-compat derivation over the typed `dropped` carrier —
-    /// byte-identical to the retired field.
+    /// Row-drop CCR hashes produced anywhere in this crush. The Python shim mirrors EACH directly into
+    /// the compression_store (typed recovery) instead of scraping `<<ccr:HASH>>` out of `compressed`.
     #[getter]
     fn ccr_hashes(&self) -> Vec<String> {
         self.inner.ccr_hashes()
     }
 
-    /// Every CCR-recoverable reduction this crush shipped, typed
-    /// (§4.2): row-drops AND opaque substitutions, in emission order.
-    /// The Python shim mirrors each directly — no marker re-parsing.
-    /// Returned as a fresh `list[DroppedRef]` per call.
+    /// Every CCR-recoverable reduction this crush shipped, typed (§4.2): row-drops AND opaque
+    /// substitutions, in emission order. The Python shim mirrors each directly — no marker re-parsing.
     #[getter]
     fn dropped_refs(&self) -> Vec<PyDroppedRef> {
         py_dropped_refs(&self.inner.dropped)
@@ -700,12 +610,8 @@ impl PyCrushResult {
 
 // ─── SmartCrusher ──────────────────────────────────────────────────────────
 
-/// Mirror of `furl_ctx.transforms.smart_crusher.SmartCrusher`.
-///
-/// Constructor accepts only `config` — Python's `relevance_config`,
-/// `scorer`, and `ccr_config` parameters are handled in the Python
-/// shim (the optional subsystems are disabled in Rust;
-/// the shim drops those args to preserve call-site compatibility).
+/// Mirror of `furl_ctx.transforms.smart_crusher.SmartCrusher`. Constructor accepts only `config` Python's `relevance_config`, `scorer`, and `ccr_config`
+/// parameters are handled in the Python shim (the optional subsystems are disabled in Rust; the shim drops those args to preserve call-site compatibility).
 #[pyclass(name = "SmartCrusher", module = "furl_ctx._core")]
 struct PySmartCrusher {
     inner: RustSmartCrusher,
@@ -722,11 +628,7 @@ impl PySmartCrusher {
         }
     }
 
-    /// Construct WITHOUT the lossless-first compaction stage. The
-    /// public `crush()` API runs the lossy path directly (still with
-    /// CCR-Dropped retrieval markers populated when rows are dropped).
-    /// Used by the parity fixture harness — those fixtures
-    /// were recorded against the lossy-only behavior.
+    /// Construct WITHOUT the lossless-first compaction stage.
     #[staticmethod]
     #[pyo3(signature = (config = None))]
     fn without_compaction(config: Option<&PySmartCrusherConfig>) -> Self {
@@ -736,10 +638,7 @@ impl PySmartCrusher {
         }
     }
 
-    /// Construct with the lossless-first compaction stage's formatter
-    /// chosen by name: `"csv-schema"` (the `new()` default), `"json"`,
-    /// or `"markdown-kv"`. Raises `ValueError` on unknown names so a
-    /// misconfigured knob is visible instead of silently falling back.
+    /// Construct with the lossless-first compaction stage's formatter chosen by name: `"csv-schema"` (the `new()` default), `"json"`, or `"markdown-kv"`.
     #[staticmethod]
     #[pyo3(signature = (config = None, format_name = "csv-schema"))]
     fn with_compaction_format(
@@ -756,14 +655,8 @@ impl PySmartCrusher {
         }
     }
 
-    /// `crush(content, query="", bias=1.0) -> CrushResult`. Argument
-    /// order and keyword names mirror the Python implementation.
-    ///
-    /// Releases the GIL across the Rust crush call. Concurrent Python
-    /// threads in the engine keep running during the JSON parse +
-    /// recursive process_value + per-array compression work. `&str`
-    /// inputs are copied to owned `String`s up-front since PyO3 ties
-    /// their lifetime to the GIL hold.
+    /// `crush(content, query="", bias=1.0) -> CrushResult`. Argument order and keyword names mirror the Python implementation. Concurrent
+    /// Python threads in the engine keep running during the JSON parse + recursive process_value + per-array compression work.
     #[pyo3(signature = (content, query = "", bias = 1.0))]
     fn crush(
         &self,
@@ -786,13 +679,7 @@ impl PySmartCrusher {
         Ok(PyCrushResult { inner })
     }
 
-    /// `smart_crush_content_typed(content, query="", bias=1.0) ->
-    /// (str, bool, str, list[DroppedRef])` — the typed sibling of
-    /// `smart_crush_content` (§4.2 R3/R4): identical first three
-    /// elements (byte-identical rendering), plus every typed recovery
-    /// ref the walk shipped (row-drops AND opaque substitutions, in
-    /// emission order) so the Python mirror consumes refs directly
-    /// instead of re-parsing rendered markers.
+    /// `smart_crush_content_typed(content, query="", bias=1.0) -> (str, bool, str, list[DroppedRef])`.
     #[pyo3(signature = (content, query = "", bias = 1.0))]
     fn smart_crush_content_typed(
         &self,
@@ -814,31 +701,8 @@ impl PySmartCrusher {
         Ok((crushed, was_modified, info, py_dropped_refs(&dropped)))
     }
 
-    /// Crush a JSON array directly and return the structured result.
-    ///
-    /// Input is a JSON string holding an array (`[item, item, ...]`).
-    /// Returns a dict with:
-    /// - `items`: JSON array string of the kept rows after compression
-    /// - `ccr_hash`: 12-char hash if rows were dropped, else `None`
-    /// - `dropped_summary`: `<<ccr:HASH N_rows_offloaded>>` marker
-    ///   text, empty if nothing dropped
-    /// - `strategy_info`: debug string describing what ran (e.g.
-    ///   `"smart_sample"`, `"lossless:table"`, `"none:adaptive_at_limit"`)
-    /// - `compacted`: rendered bytes when the lossless path won, else `None`
-    /// - `compaction_kind`: `"table" | "buckets" | "ccr" | None`
-    /// - `dropped_refs`: `list[DroppedRef]` — every typed recovery ref
-    ///   the shipped render carries (the row-drop plus any opaque
-    ///   substitutions baked into `compacted`), §4.2 R3/R4
-    ///
-    /// This surfaces `CrushArrayResult` to Python so tests and the
-    /// runtime can reach the CCR hash directly (rather than parsing it
-    /// out of the prompt marker).
-    /// Raises `ValueError` when `items_json` is not valid JSON or not a
-    /// JSON array — explicit boundary validation with a specific, clean error.
-    /// A panic anywhere in the compute is caught by `catch_unwind` and
-    /// converted to `PyRuntimeError` (see `panic_to_pyerr`) so it does not
-    /// surface as `pyo3_runtime.PanicException` — a `BaseException` that would
-    /// escape the caller's `except Exception` handlers.
+    /// Expose structured array compression to Python: kept items, recovery hash/marker, strategy, optional compacted render,
+    /// kind, and typed dropped refs. Invalid/non-array JSON raises `ValueError`; Rust panics become catchable `PyRuntimeError`.
     #[pyo3(signature = (items_json, query = "", bias = 1.0))]
     fn crush_array_json<'py>(
         &self,
@@ -847,16 +711,11 @@ impl PySmartCrusher {
         query: &str,
         bias: f64,
     ) -> PyResult<Bound<'py, PyDict>> {
-        // GIL-release pattern: own the inputs, do all heavy compute
-        // (JSON parse, crush, re-serialize) without the GIL, then
-        // re-acquire to build the PyDict from the owned outputs.
+        // GIL-release pattern: own the inputs, do all heavy compute (JSON parse, crush,
+        // re-serialize) without the GIL, then re-acquire to build the PyDict from the owned outputs.
         let items_json = items_json.to_string();
         let query = query.to_string();
-        // catch_unwind wraps the whole GIL-free compute so a panic in the JSON
-        // parse / crush / re-serialize becomes a catchable PyRuntimeError
-        // (COR-7). Two Result layers to flatten: the outer is the panic
-        // (`map_err(panic_to_pyerr)?`), the inner is the existing input-validation
-        // `PyErr` (`?`).
+        // catch_unwind wraps the whole GIL-free compute so a panic in the JSON parse / crush / re-serialize becomes a catchable PyRuntimeError (COR-7).
         let (
             kept_json,
             ccr_hash,
@@ -868,11 +727,7 @@ impl PySmartCrusher {
         ) = py
             .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // COR-44: decline magic-key payloads before from_str so
-                    // serde_json's arbitrary_precision / raw_value promotions
-                    // never fire.  Raises ValueError — same class as the
-                    // invalid-JSON path — so callers get a clean, catchable
-                    // signal rather than silently mutated output.
+                    // COR-44: decline magic-key payloads before from_str so serde_json's arbitrary_precision / raw_value promotions never fire.
                     if has_serde_private_marker(&items_json) {
                         return Err(invalid_input(
                             "items_json contains a serde_json internal key \
@@ -921,25 +776,8 @@ impl PySmartCrusher {
         )
     }
 
-    /// `compact_document_json_typed(doc_json) -> (str, list[DroppedRef])`
-    /// — the document-level walker on `doc_json` (JSON string): returns
-    /// the compacted document as JSON, plus every typed opaque ref the
-    /// walker shipped (both the live string substitutions and the opaque
-    /// cells baked into rendered sub-tables) so the Python mirror
-    /// consumes refs directly instead of re-parsing rendered markers.
-    ///
-    /// The walker recursively descends through objects, arrays, and
-    /// strings; tabular sub-arrays become rendered CSV+schema strings,
-    /// long opaque blobs become `<<ccr:HASH,KIND,SIZE>>` markers (with
-    /// originals stashed in this crusher's CCR store, so `ccr_get`
-    /// resolves them).
-    ///
-    /// Distinct from `crush_array_json`: this is the lossless walker
-    /// pass without per-array lossy crushing — useful when the caller
-    /// wants document-shape compaction (forms, configs, mixed records)
-    /// rather than statistical row drop.
-    /// Raises `ValueError` when `doc_json` is not valid JSON — boundary
-    /// validation, not a panic (same rationale as `crush_array_json`).
+    /// `compact_document_json_typed(doc_json) -> (str, list[DroppedRef])` the document-level walker on `doc_json` (JSON string). tabular sub-arrays become rendered CSV+schema
+    /// strings, long opaque blobs become `<<ccr:HASH,KIND,SIZE>>` markers (with originals stashed in this crusher's CCR store Raises `ValueError` when `doc_json` is not valid JSON
     fn compact_document_json_typed(
         &self,
         py: Python<'_>,
@@ -948,16 +786,13 @@ impl PySmartCrusher {
         // Heavy: JSON parse + recursive walker + tabular compaction +
         // re-serialize. None of it touches Python; release the GIL.
         let doc_json = doc_json.to_string();
-        // catch_unwind wraps the GIL-free walker compute (COR-7). Flatten the
-        // panic Result (`map_err(panic_to_pyerr)?`) over the existing
-        // input-validation `PyErr` (`?`).
+        // catch_unwind wraps the GIL-free walker compute (COR-7). Flatten the panic Result
+        // (`map_err(panic_to_pyerr)?`) over the existing input-validation `PyErr` (`?`).
         let (compacted, dropped) = py
             .detach(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // COR-44: decline magic-key payloads before from_str so
-                    // serde_json's arbitrary_precision / raw_value promotions
-                    // never fire.  Raises ValueError — same class as the
-                    // invalid-JSON path.
+                    // COR-44: decline magic-key payloads before from_str so serde_json's arbitrary_precision /
+                    // raw_value promotions never fire. Raises ValueError — same class as the invalid-JSON path.
                     if has_serde_private_marker(&doc_json) {
                         return Err(invalid_input(
                             "doc_json contains a serde_json internal key \
@@ -984,24 +819,14 @@ impl PySmartCrusher {
         Ok((compacted, py_dropped_refs(&dropped)))
     }
 
-    /// Look up an original payload by CCR hash.
-    ///
-    /// When the lossy path drops rows, it stashes the **full original**
-    /// array into the in-memory CCR store keyed by the 12-char hash
-    /// embedded in the prompt's `<<ccr:HASH ...>>` marker. The
-    /// MCP retrieval tool calls this to serve the
-    /// dropped rows back to the LLM on demand.
-    ///
-    /// Returns the canonical-JSON serialization of the original
-    /// `[item, item, ...]` array, or `None` if the hash is unknown,
-    /// expired, or the crusher was constructed without a CCR store.
+    /// Look up an original payload by CCR hash. When the lossy path drops rows, it stashes the **full original** array
+    /// into the in-memory CCR store keyed by the 12-char hash embedded in the prompt's `<<ccr:HASH ...>>` marker.
     fn ccr_get(&self, hash: &str) -> Option<String> {
         self.inner.ccr_store().and_then(|s| s.get(hash))
     }
 
-    /// Number of entries currently held by the CCR store. `0` if no
-    /// store is configured. Informational; use it from tests and
-    /// telemetry, not from the retrieval hot path.
+    /// Number of entries currently held by the CCR store. `0` if no store is configured.
+    /// Informational; use it from tests and telemetry, not from the retrieval hot path.
     fn ccr_len(&self) -> usize {
         self.inner.ccr_store().map(|s| s.len()).unwrap_or(0)
     }
@@ -1009,16 +834,8 @@ impl PySmartCrusher {
 
 // ─── ContentDetector ───────────────────────────────────────────────────────
 
-/// Mirror of `furl_ctx.transforms.content_detector.DetectionResult`.
-///
-/// Field names + types match the Python dataclass exactly so the existing
-/// Python `ContentRouter` (which `import`s `DetectionResult` directly) can
-/// continue to read `.content_type`, `.confidence`, and `.metadata` without
-/// modification.
-///
-/// `content_type` is exposed as the lowercase string tag (e.g.
-/// `"json_array"`). The Python wrapper translates it back into the
-/// `ContentType` enum so the call-site looks identical.
+/// Mirror of `furl_ctx.transforms.content_detector.DetectionResult`. Field names + types match the Python dataclass exactly so the existing Python
+/// `ContentRouter` (which `import`s `DetectionResult` directly) can continue to read `.content_type`, `.confidence`, and `.metadata` without modification.
 #[pyclass(name = "DetectionResult", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
 struct PyDetectionResult {
@@ -1037,17 +854,8 @@ impl PyDetectionResult {
         self.inner.confidence
     }
 
-    /// Metadata bag — always an EMPTY fresh `dict` (ARCH-11).
-    ///
-    /// The only constructor of this class (`detect_content_type`)
-    /// synthesizes the legacy `DetectionResult` shape with an empty
-    /// metadata map; the detection chain carries no per-type metadata.
-    /// The getter survives purely for field-surface parity with the
-    /// Python `DetectionResult` dataclass (callers read
-    /// `.content_type` / `.confidence`; none read metadata values).
-    /// The former number-coercion ladder here (u64→i64→f64→None,
-    /// arrays→JSON strings) was dead code describing values that could
-    /// never occur.
+    /// Metadata bag — always an EMPTY fresh `dict` (ARCH-11). The only constructor of this class (`detect_content_type`)
+    /// synthesizes the legacy `DetectionResult` shape with an empty metadata map; the detection chain carries no per-type metadata.
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         debug_assert!(
@@ -1069,28 +877,8 @@ impl PyDetectionResult {
     }
 }
 
-/// Detect the type of `content`. Returns a `DetectionResult` with the
-/// same field surface as Python's dataclass.
-///
-/// This runs through the unidiff→PlainText detection chain (the Rust
-/// byte-parity port of the regex `content_detector` was removed — it
-/// was never on the Rust production path). The chain returns a
-/// `ContentType` only; we synthesize the legacy `DetectionResult`
-/// shape here with `confidence = 1.0` (the chain doesn't surface a
-/// probabilistic score) and an empty metadata bag (no production
-/// caller reads metadata from this binding today — see audit notes in
-/// `furl_ctx/transforms/content_router.py`).
-///
-/// Releases the GIL while detecting — unidiff parsing can be
-/// substantial on large bodies, and freeing the GIL
-/// lets other Python threads make progress in the meantime.
-///
-/// This is the router's hottest bridge — `_detect_content` calls it on
-/// EVERY message — so it carries the COR-7 catch_unwind containment: an
-/// engine-bug panic anywhere in the detection chain becomes a catchable
-/// `PyRuntimeError` instead of a `pyo3_runtime.PanicException`
-/// (`BaseException`) that would sail past every `except Exception` on
-/// the way up and crash the host request (P0-1).
+/// Detect content through the unified-diff→plain-text chain and return the legacy result shape with
+/// confidence 1.0. Release the GIL during detection and convert Rust panics to `PyRuntimeError`.
 #[pyfunction]
 fn detect_content_type(py: Python<'_>, content: &str) -> PyResult<PyDetectionResult> {
     let owned = content.to_string();
@@ -1109,13 +897,8 @@ fn detect_content_type(py: Python<'_>, content: &str) -> PyResult<PyDetectionRes
     })
 }
 
-// ─── signals: line-importance detector bridge ────────────────────────────
-//
-// One process-wide [`KeywordDetector`] is shared via `OnceLock` because
-// the underlying aho-corasick automaton is stateless and cheap to clone
-// nothing on call. The Python shim re-exports the keyword tables and a
-// pair of thin functions; that's enough surface for the legacy
-// `error_detection` callers without dragging the trait into Python.
+// ─── signals: line-importance detector bridge ──────────────────────────── One process-wide [`KeywordDetector`] is
+// shared via `OnceLock` because the underlying aho-corasick automaton is stateless and cheap to clone nothing on call.
 
 use std::sync::OnceLock;
 
@@ -1124,11 +907,8 @@ fn shared_keyword_detector() -> &'static KeywordDetector {
     DETECTOR.get_or_init(KeywordDetector::new)
 }
 
-/// Returns `Some(ctx)` for known names and `None` otherwise — caller
-/// converts to PyValueError. Avoids the pyo3 + clippy
-/// `useless_conversion` false positive that fires when `?` propagates a
-/// `PyResult<_>` through another `PyResult<_>` (first seen under pyo3
-/// 0.22; shape kept under the pinned 0.29).
+/// Returns `Some(ctx)` for known names and `None` otherwise — caller converts to PyValueError. Avoids the pyo3 + clippy `useless_conversion` false
+/// positive that fires when `?` propagates a `PyResult<_>` through another `PyResult<_>` (first seen under pyo3 0.22; shape kept under the pinned 0.29).
 fn ctx_from_str(name: &str) -> Option<ImportanceContext> {
     match name {
         "text" => Some(ImportanceContext::Text),
@@ -1150,18 +930,6 @@ fn category_to_str(cat: ImportanceCategory) -> &'static str {
 }
 
 /// Score a line against the default Furl keyword detector.
-///
-/// Returns `Some((category | None, priority, confidence))` for known
-/// contexts (`text|search|diff|log`) and `None` for an unknown context
-/// — the Python shim translates `None` into `ValueError` for the
-/// caller. (Historical note: this used to return a bare `Option` to
-/// dodge a pyo3-0.22-era clippy `useless_conversion` false positive; the
-/// P0-1 panic-containment audit wrapped it in `PyResult` for the COR-7
-/// catch_unwind, and the lint no longer fires on this shape.)
-///
-/// No `detach` here: this is called per line in tight Python
-/// loops and the compute is a single aho-corasick scan — releasing and
-/// reacquiring the GIL per call would cost more than the scan itself.
 #[pyfunction]
 #[pyo3(signature = (line, context = "text"))]
 fn score_line(line: &str, context: &str) -> PyResult<Option<(Option<&'static str>, f32, f32)>> {
@@ -1178,9 +946,8 @@ fn score_line(line: &str, context: &str) -> PyResult<Option<(Option<&'static str
     .map_err(panic_to_pyerr)
 }
 
-/// Lax substring check: does `text` contain any error indicator? Mirrors
-/// Python `error_detection.content_has_error_indicators`. Same
-/// no-`detach` rationale as `score_line`.
+/// Lax substring check: does `text` contain any error indicator? Mirrors Python
+/// `error_detection.content_has_error_indicators`. Same no-`detach` rationale as `score_line`.
 #[pyfunction]
 fn content_has_error_indicators(text: &str) -> PyResult<bool> {
     // catch_unwind → PyRuntimeError (see `panic_to_pyerr`): COR-7 (P0-1 audit).
@@ -1190,13 +957,8 @@ fn content_has_error_indicators(text: &str) -> PyResult<bool> {
     .map_err(panic_to_pyerr)
 }
 
-/// Snapshot of the default keyword sets, exposed as a dict so the Python
-/// shim can recompile the legacy `re.Pattern` objects without
-/// re-declaring keyword data on the Python side. Uses `.unwrap()` on
-/// `set_item` because keys are static str literals and values are
-/// `Vec<&'static str>`, which can't fail — and avoids the pyo3
-/// `useless_conversion` clippy false positive (first seen under 0.22;
-/// kept defensively under the pinned 0.29).
+/// Expose Rust’s default keyword registry so Python can rebuild legacy regex objects without
+/// duplicating keyword data. Static string keys and values make `set_item` infallible here.
 #[pyfunction]
 fn keyword_registry_snapshot(py: Python<'_>) -> Py<PyDict> {
     let registry = KeywordRegistry::default_set();
@@ -1207,20 +969,7 @@ fn keyword_registry_snapshot(py: Python<'_>) -> Py<PyDict> {
     dict.unbind()
 }
 
-// ─── search_compressor bridge (Phase 3e.2) ────────────────────────────
 //
-// Mirrors `furl_ctx.transforms.search_compressor.SearchCompressor` so the
-// Python shim can swap in via PyO3. The Rust implementation consumes the
-// `signals::LineImportanceDetector` trait for priority scoring (instead of
-// the regex registry the Python original used) and fixes the Windows-path
-// + dashes-in-filename parser bugs.
-//
-// CCR persistence is exposed via a callback hook because the Python
-// `CompressionStore` already lives Python-side. The Rust crate holds no
-// long-lived store reference; instead the caller passes the dict back
-// through the result and the Python shim writes it to the existing
-// store. This avoids dragging a second CCR backend into Rust before the
-// Phase 3g pipeline formalization owns CCR end-to-end.
 
 #[pyclass(
     name = "SearchCompressorConfig",
@@ -1359,19 +1108,8 @@ impl PySearchCompressor {
         }
     }
 
-    /// Compress `content`. CCR persistence is the caller's responsibility
-    /// — the Rust side never writes to the store. If the result needs a
-    /// CCR marker, `cache_key` will be populated and the Python shim
-    /// writes the original to the existing `CompressionStore`. This
-    /// matches Python's existing CCR plumbing and avoids dragging a
-    /// second backend into the Rust crate.
-    ///
-    /// PERF-8: `compress_key_only` computes the key + marker with NO
-    /// store write — the old shape synthesized a throwaway 1000-cap
-    /// `InMemoryCcrStore` per call and had the core write the FULL
-    /// original into it, dropped on return. `cache_key` is byte-equal
-    /// (pinned in furl-core); the Python shim's re-persist is (and
-    /// always was) the real backing.
+    /// Compress `content`. CCR persistence is the caller's responsibility — the Rust side never writes to the store. If the result
+    /// needs a CCR marker, `cache_key` will be populated and the Python shim writes the original to the existing `CompressionStore`.
     #[pyo3(signature = (content, context = "", bias = 1.0))]
     fn compress(
         &self,
@@ -1398,11 +1136,8 @@ impl PySearchCompressor {
     }
 }
 
-// ─── log_compressor bridge (Phase 3e.5) ───────────────────────────────
-//
-// Mirrors `furl_ctx.transforms.log_compressor.LogCompressor`. Same CCR
-// pattern as search_compressor: Rust emits a `cache_key`, Python shim
-// writes the original to the production `CompressionStore`.
+// ─── log_compressor bridge (Phase 3e.5) ─────────────────────────────── Mirrors `furl_ctx.transforms.log_compressor.LogCompressor`.
+// Same CCR pattern as search_compressor: Rust emits a `cache_key`, Python shim writes the original to the production `CompressionStore`.
 
 #[pyclass(
     name = "LogCompressorConfig",
@@ -1561,13 +1296,7 @@ impl PyLogCompressor {
         }
     }
 
-    /// Compress `content`. Same CCR pattern as search_compressor: Rust
-    /// emits the `cache_key`; the Python shim is responsible for
-    /// writing the original to the production `CompressionStore`.
-    ///
-    /// PERF-8: key-only mode — no throwaway store, no dead write of the
-    /// full original. `cache_key` bytes are unchanged (pinned in
-    /// furl-core).
+    /// Compress `content`.
     #[pyo3(signature = (content, bias = 1.0))]
     fn compress(
         &self,
@@ -1592,14 +1321,8 @@ impl PyLogCompressor {
     }
 }
 
-// ─── text_crusher bridge (Engine P2-11) ───────────────────────────────
-//
-// Mirrors `furl_ctx.transforms.text_crusher.TextCrusher`. Same CCR
-// pattern as the log/search bridges: Rust emits a `cache_key` after
-// backing the crush in a per-call in-memory store; the Python shim
-// re-persists the original into the production `CompressionStore` and
-// VETOES the compression (serves the original) if that write fails —
-// the marker never ships dangling.
+// ─── text_crusher bridge (Engine P2-11) ─────────────────────────────── Mirrors `furl_ctx.transforms.text_crusher.TextCrusher`.
+// Same CCR pattern as the log/search bridges: Rust emits a `cache_key` after backing the crush in a per-call in-memory store.
 
 #[pyclass(name = "TextCrusherConfig", module = "furl_ctx._core", from_py_object)]
 #[derive(Clone)]
@@ -1749,11 +1472,8 @@ impl PyTextCrusher {
         }
     }
 
-    /// Compress `content`. Same CCR pattern as the log/search bridges:
-    /// the Rust side backs the crush in a per-call in-memory store and
-    /// emits `cache_key`; the Python shim persists the original to the
-    /// production `CompressionStore` and vetoes (serves the original)
-    /// on write failure.
+    /// Compress `content`. Same CCR pattern as the log/search bridges: the Rust side backs the crush in a per-call in-memory store and emits
+    /// `cache_key`; the Python shim persists the original to the production `CompressionStore` and vetoes (serves the original) on write failure.
     #[pyo3(signature = (content, context = "", bias = 1.0))]
     fn compress(
         &self,

@@ -15,48 +15,24 @@ tiktoken-rs = "0.12"
 # `md5` for the CCR cache_key. Python's compression_store hashes the original
 # diff with MD5 truncated to 24 hex chars; we must match byte-for-byte.
 md-5 = "0.11"
-# `sha2` for `hash_field_name` (SHA256 truncated to 8 hex chars) and the
-# crusher's row hashes (sha256[:6]). Python uses `hashlib.sha256` so we
-# need byte-exact parity.
+# `sha2` for `hash_field_name` (SHA256 truncated to 8 hex chars) and the crusher's
+# row hashes (sha256[:6]). Python uses `hashlib.sha256` so we need byte-exact parity.
 sha2 = "0.11"
-# `dashmap` for the CCR storage backend. Concurrent HashMap with sharded
-# locking — distinct keys hashed to different shards never contend, so
-# concurrent multi-threaded load doesn't queue on a single Mutex. Lock-free
-# reads inside each shard via RwLock semantics.
+# `dashmap` for the CCR storage backend.
 dashmap = "6"
 # `regex` powers the hunk-header parser and priority-pattern matcher.
 regex = "1"
-# `flate2` for `_validate_with_zlib` in `adaptive_sizer`. Python's adaptive
-# sizing pipeline uses `zlib.compress(..., level=1)` to validate the chosen
-# K against compression-ratio diversity. We use the default `miniz_oxide`
-# backend (pure Rust) which produces DEFLATE output of similar length to
-# CPython's libz at level=1 for typical inputs. The check only triggers on
-# >15% ratio divergence so small per-byte differences don't change the
-# outcome — but if a parity fixture flakes here, swap to
-# `features = ["zlib"]` to link against system libz for byte-equal output.
+# `flate2` for `_validate_with_zlib` in `adaptive_sizer`. Python's adaptive sizing pipeline uses
+# `zlib.compress(..., level=1)` to validate the chosen K against compression-ratio diversity.
 flate2 = "1"
-# `unidiff` is the Stage-3d Tier-2 diff detector. We use the parser
-# itself as the "is this a diff?" oracle — anything that successfully
-# parses to ≥1 PatchedFile is a diff. The deterministic parser
-# catches diffs Magika may miss (naked hunks without `diff --git`
-# headers, prose-prefixed diffs, truncated outputs). Default features
-# bring `encoding_rs` for non-UTF8 sniffing — we keep them on for
-# compatibility with arbitrary tool outputs.
+# `unidiff` is the Stage-3d Tier-2 diff detector. The deterministic parser catches diffs Magika
+# may miss (naked hunks without `diff --git` headers, prose-prefixed diffs, truncated outputs).
 unidiff = "0.4"
-# `rustc-hash` (FxHash) powers the adaptive sizer's SimHash grams and
-# bigram-coverage sets (PERF-6). The old implementation ran one full MD5
-# digest per 4-char window — Python-parity ballast (the Python original
-# is retired; no cross-language pin remains). FxHash is a tiny,
-# deterministic, non-cryptographic 64-bit hash: exactly what a
-# similarity fingerprint needs. Already in the workspace tree
-# transitively; this makes it a direct dependency.
+# `rustc-hash` (FxHash) powers the adaptive sizer's SimHash grams and bigram-coverage sets (PERF-6). FxHash
+# is a tiny, deterministic, non-cryptographic 64-bit hash: exactly what a similarity fingerprint needs.
 rustc-hash = "2"
-# `aho-corasick` powers the Tier-3 KeywordDetector in `signals/`.
-# A single deterministic-finite-automaton scan finds every keyword
-# in a line in O(n + m) — orders of magnitude faster than running N
-# regex .search() calls and harder to misuse. Word-boundary checks
-# happen as a post-filter on the byte offsets the automaton returns.
-# Default features (std, perf-literal) keep the build small.
+# `aho-corasick` powers the Tier-3 KeywordDetector in `signals/`. A single deterministic-finite-automaton scan finds every keyword in a line in O(n + m) — orders of
+# magnitude faster than running N regex .search() calls and harder to misuse. Word-boundary checks happen as a post-filter on the byte offsets the automaton returns.
 aho-corasick = "1"
 
 [features]

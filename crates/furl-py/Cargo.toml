@@ -5,23 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "PyO3 bindings exposing furl-core to Python as furl_ctx._core."
-# Issue #355: build.rs compiles a glibc-2.38-compat shim
-# (glibc_compat.c) on Linux/glibc only. Without `build = "build.rs"`
-# Cargo skips it. See the script's header comment for rationale.
+# Linux/glibc builds require a compatibility shim compiled by the Cargo build script; keep the build-script hook enabled or Cargo skips the shim.
 build = "build.rs"
 
 [build-dependencies]
 # Compile the C shim into a static library that links into _core.so.
-# `cc` is already transitively in our build graph (used by aws-lc-rs,
-# zstd-sys, ring, etc) so this is not a new cold dep.
 cc = "1"
 
 [lib]
 name = "_core"
 crate-type = ["cdylib"]
-# Disable the default test harness — Rust `cargo test` can't run a cdylib that
-# links against libpython without LD/DYLD setup. Tests for this crate happen
-# on the Python side (via `maturin develop` + pytest/smoke).
+# Disable the default test harness
 test = false
 doctest = false
 bench = false

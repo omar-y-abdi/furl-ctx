@@ -383,9 +383,8 @@ class TestStoreConfiguredBackedMarkerUnchanged:
 
         result = manager.apply(messages)
 
-        # If no substitution occurred (correct behavior), ccr_hashes is empty
-        # If substitution occurred with phantom hash, ccr_hashes would be non-empty
-        # Either way, any hashes in ccr_hashes should be backed:
+        # If no substitution occurred (correct behavior), ccr_hashes is empty If substitution occurred with
+        # phantom hash, ccr_hashes would be non-empty Either way, any hashes in ccr_hashes should be backed:
         if result.ccr_hashes:
             # With store=None there's nowhere to back a hash — so none should exist
             raise AssertionError(
@@ -450,10 +449,8 @@ class TestDurableWriteVetoServesVerbatim:
         assert not result.ccr_hashes
 
     def test_healthy_durable_store_still_replaces(self, tmp_path) -> None:
-        # Control: with a HEALTHY sqlite-backed store the SAME fixture still
-        # substitutes and the marker's hash resolves to the original — proving
-        # the veto tests assert a change on failure, not that replacement is
-        # globally off for durable backends.
+        # Control: with a HEALTHY sqlite-backed store the SAME fixture still substitutes and the marker's hash resolves to the
+        # original — proving the veto tests assert a change on failure, not that replacement is globally off for durable backends.
         from furl_ctx.cache.backends.sqlite import SqliteBackend
 
         store = CompressionStore(backend=SqliteBackend(db_path=tmp_path / "ok.sqlite3"))

@@ -1,11 +1,7 @@
 name: Retry Failed Workflows
 
-# Conservative recovery for GitHub-hosted runner/action-delivery failures only.
-# A normal test/lint/audit/build failure is NEVER rerun automatically: rerunning
-# deterministic failures can turn a flaky defect green and destroy the value of
-# a required check. Startup failures are safe to rerun because no job executed;
-# ordinary failures are retried only when every failed job carries a narrowly
-# allowlisted GitHub Actions infrastructure signature.
+# Auto-rerun only GitHub-hosted runner or action-delivery failures. Never rerun normal test,
+# lint, or build failures unless every failed job matches the narrow infrastructure allowlist.
 on:
   workflow_run:
     workflows:
@@ -81,9 +77,8 @@ jobs:
             exit 0
           fi
 
-          # Deliberately narrow. Package registry/network failures are handled by
-          # retries inside the workflows themselves. These patterns identify the
-          # Actions runner/action-delivery layer, not application/test output.
+          # Deliberately narrow. Package registry/network failures are handled by retries inside the workflows
+          # themselves. These patterns identify the Actions runner/action-delivery layer, not application/test output.
           infra_re='(The hosted runner encountered an error|The runner has received a shutdown signal|Lost communication with the server|The self-hosted runner lost communication with the server|Failed to download action|Unable to resolve action|GitHub Actions service is currently unavailable|The job was abandoned because the runner was lost)'
 
           classified=0
@@ -92,9 +87,8 @@ jobs:
             IFS=$'\t' read -r job_id job_name job_conclusion failed_steps <<<"$row"
             log_file="${RUNNER_TEMP}/job-${job_id}.log"
 
-            # A real failed step means application/action logic executed and
-            # reported failure. Never retry it automatically, even if its output
-            # happens to contain an infrastructure-looking phrase.
+            # A real failed step means application/action logic executed and reported failure. Never retry
+            # it automatically, even if its output happens to contain an infrastructure-looking phrase.
             if (( failed_steps > 0 )); then
               echo "${job_name}: ${failed_steps} step(s) concluded failure; automatic rerun forbidden."
               unclassified=$((unclassified + 1))

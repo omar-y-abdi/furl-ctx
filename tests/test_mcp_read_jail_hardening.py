@@ -64,9 +64,8 @@ def _envelope(result: list[mt.TextContent]) -> dict:
 
 
 async def test_hardlinked_file_rejected_with_honest_error(server, tmp_path: Path) -> None:
-    # An IN-JAIL hardlink to an IN-JAIL file: the old message claimed "path
-    # outside workspace", which was simply false — the rejection is about the
-    # inode's link count, and the error must say so.
+    # An IN-JAIL hardlink to an IN-JAIL file: the old message claimed "path outside workspace", which
+    # was simply false — the rejection is about the inode's link count, and the error must say so.
     target = tmp_path / "orig.txt"
     target.write_text("linked twice")
     link = tmp_path / "link.txt"
@@ -89,10 +88,8 @@ async def test_singly_linked_file_still_reads(server, tmp_path: Path) -> None:
 
 
 def test_open_jailed_rejects_symlinked_dir_component(tmp_path: Path) -> None:
-    # Simulated TOCTOU: the path looks in-jail lexically, but an intermediate
-    # directory component is a symlink pointing OUTSIDE the jail (the state a
-    # racer creates after resolve() ran on the honest tree). The walk must
-    # refuse to follow it — the secret is never opened.
+    # Simulated TOCTOU: the path looks in-jail lexically, but an intermediate directory component is a
+    # symlink pointing OUTSIDE the jail (the state a racer creates after resolve() ran on the honest tree).
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("out-of-jail secret")
@@ -147,9 +144,8 @@ def test_open_jailed_missing_file_raises_file_not_found(tmp_path: Path) -> None:
 
 
 def test_open_jailed_root_itself_returns_directory_fd(tmp_path: Path) -> None:
-    # path == root (empty relative parts): the walk hands back the root fd and
-    # the caller's S_ISREG gate reports "Not a file" — pinned end to end in
-    # test_mcp_server_handlers.py::test_read_directory_reports_not_a_file.
+    # path == root (empty relative parts): the walk hands back the root fd and the caller's S_ISREG gate
+    # reports `Not a file`; the end-to-end handler test pins this behavior.
     fd = _open_jailed(tmp_path, tmp_path)
     try:
         assert stat.S_ISDIR(os.fstat(fd).st_mode)
@@ -158,9 +154,7 @@ def test_open_jailed_root_itself_returns_directory_fd(tmp_path: Path) -> None:
 
 
 def test_open_jailed_fallback_path_still_reads(tmp_path: Path, monkeypatch) -> None:
-    # Platforms without dir_fd support (Windows) fall back to the single
-    # direct open of the resolve()d path — the documented-residual route.
-    # Force the fallback and verify the happy path still works.
+    # Platforms without dir_fd support (Windows) fall back to the single direct open of the resolve()d path — the documented-residual route.
     monkeypatch.setattr(mcp_server, "_DIR_FD_WALK_SUPPORTED", False)
     f = tmp_path / "plain.txt"
     f.write_bytes(b"fallback read")

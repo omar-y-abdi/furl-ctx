@@ -35,8 +35,7 @@ _HOOK = (
 
 _COMPRESSIBLE = json.dumps([{"id": i, "status": "ok", "kind": "row"} for i in range(400)])
 
-# Real, empirically-observed shapes (see tests/test_host_version.py) — an old
-# host below the 2.1.163 floor, and a current one above it.
+# Use observed host-version shapes on both sides of the 2.1.163 compatibility floor.
 _BELOW_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-100_agent"}
 _ABOVE_FLOOR_ENV = {"AI_AGENT": "claude-code_2-1-212_agent"}
 _VERSION_ENV_VARS = ("CLAUDE_CODE_EXECPATH", "AI_AGENT")

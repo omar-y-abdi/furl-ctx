@@ -57,9 +57,7 @@ _CONSISTENCY_FLOOR = 0.90
 MIN_DATA_ROWS = 5
 MIN_BYTES = 200
 
-# Cap on the naive consistency scan — cost parity with the sibling
-# detectors' line windows (search 100 / log 200 lines). The REAL csv
-# parse below still processes everything once a candidate passes.
+# Cap on the naive consistency scan — cost parity with the sibling detectors' line windows (search 100 / log 200 lines).
 _SNIFF_SCAN_LINES = 200
 
 
@@ -105,9 +103,8 @@ def sniff_csv(content: str) -> CsvTable | None:
     keys = [cell.strip() for cell in header]
     if len(keys) < 2:
         return None
-    # Header discipline: keys must be non-empty, unique, and not ALL
-    # numeric-looking (an all-numeric first row is a headerless table —
-    # refuse to invent keys from data).
+    # Header discipline: keys must be non-empty, unique, and not ALL numeric-looking (an
+    # all-numeric first row is a headerless table — refuse to invent keys from data).
     if any(not k for k in keys) or len(set(keys)) != len(keys):
         return None
     if all(_coerce_cell(k) != k for k in keys):

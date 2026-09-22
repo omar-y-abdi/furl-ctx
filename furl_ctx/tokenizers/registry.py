@@ -19,27 +19,8 @@ from .estimator import EstimatingTokenCounter
 logger = logging.getLogger(__name__)
 
 
-# Model pattern matching for tokenizer selection
-# Order matters - more specific patterns first
-# Models that match no pattern here fall back to the "estimation" backend
-# (EstimatingTokenCounter). This includes Llama/Mistral/Qwen and other open
-# models.
-#
-# Rust mirror + known divergences (ARCH-6): the Rust registry
-# (crates/furl-core/src/tokenizer/registry.rs) mirrors this pattern →
-# backend mapping, and the agreeing families are pinned cross-language by
-# TEST-8 (tests/test_tokenizer_rust_parity.py ↔ Rust
-# tests/tokenizer_python_parity.rs): OpenAI/tiktoken counts are
-# byte-identical; Anthropic claude-* now also uses tiktoken o200k_base
-# (byte-identical across FFI, Q1); google/cohere (4.0 cpt) FIXED-ratio
-# estimations match exactly. Two divergences remain — the same model name
-# can count differently across the FFI:
-#   1. Unknown-model estimation: _create_estimation returns the AUTO
-#      EstimatingTokenCounter (density auto-detection 4.0/3.5/3.2 +
-#      URL/UUID overhead); Rust uses a FIXED 4.0.
-#   2. Legacy OpenAI encoding corners: names absent from
-#      MODEL_TO_ENCODING (e.g. "davinci-002") fall to cl100k_base here
-#      but match the r50k prefixes in Rust.
+# Tokenizer patterns are ordered from specific to general. Python and Rust agree for supported tiktoken/fixed-estimation
+# families; known divergences are unknown-model density heuristics and some legacy OpenAI fallback encodings.
 MODEL_PATTERNS: list[tuple[str, str]] = [
     # OpenAI models -> tiktoken
     (r"^gpt-4o", "tiktoken"),
@@ -64,43 +45,8 @@ MODEL_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
-# ── Documented tokenizer-accuracy caveats (T10) ─────────────────────────────
-#
-# Two backends below stand in for a vendor tokenizer this project has no
-# access to. Neither error band is fabricated:
-#
-# - ANTHROPIC_O200K_PROXY_NOTE cites Anthropic's own published developer
-#   guidance on tiktoken vs. Claude token counts, not a live measurement —
-#   the `anthropic` package is not a project dependency, and even installed,
-#   real calibration needs a live `POST /v1/messages/count_tokens` API call
-#   (network + an API key) this project does not make from a tokenizer
-#   constructor. See tests/test_tokenizers.py for the calibration-limit note.
-# - FIXED_RATIO_ESTIMATOR_NOTE's "~2x" was reproduced directly against this
-#   project's own o200k_base tokenizer (see tests/test_tokenizers.py), not
-#   measured against a real Gemini/Cohere tokenizer, which this project has
-#   no access to either.
-#
-# If a real tokenizer for either vendor is ever wired in, `_create_anthropic`
-# / `_create_fixed_estimation` must stop tagging their result `proxy_for=...`
-# — the pinning tests in tests/test_tokenizers.py force that to be a
-# conscious change, not a silently stale label.
-#
-# Neither factory logs at construction time. `get_tokenizer` is a plain
-# library call, cached per process at module scope (`_cache`) — but Furl's
-# own plugin hooks (plugins/furl/hooks/pipe_compress.py,
-# compress_tool_output.py) invoke it from a FRESH subprocess per tool call,
-# so that cache starts empty on every single invocation. A construction-time
-# `logger.warning` here fired on every tool call, not once per session — an
-# earlier revision of this fix did exactly that, and an adversarial review
-# caught it: with no logging handler configured, Python's `lastResort`
-# handler prints straight to stderr, roughly 100 writes over a 50-call
-# default-config session. See tests/test_tokenizers.py's
-# `test_claude_proxy_construction_note_never_leaks_across_real_subprocesses`
-# for the reproduction. Surfacing this note at a sane cadence is a
-# caller-side concern: a caller that wants it shown reads `proxy_for` off
-# the returned counter and formats the NOTE constant itself, at whatever
-# cadence its own layer can dedupe correctly across process boundaries —
-# this module has no visibility into "session" once a process exits.
+# Anthropic and fixed-ratio vendor backends are documented proxies, not live vendor-tokenizer measurements.
+# Factories stay silent; callers may surface `proxy_for` notes at a cadence they can deduplicate across subprocesses.
 
 ANTHROPIC_O200K_PROXY_NOTE: str = (
     "claude-* token counts are computed with tiktoken's o200k_base encoding "
@@ -189,10 +135,8 @@ def _create_estimation(model: str) -> TokenCounter:
 # Explicitly registered tokenizers (model -> tokenizer instance).
 _tokenizers: dict[str, TokenCounter] = {}
 
-# Registered factories (backend -> factory function). ``register_tokenizer``
-# with ``factory=`` also lands here keyed by the model name — such a factory
-# is reachable via ``get_tokenizer(model, backend=<model>)`` (historical
-# behavior, preserved).
+# Registered factories (backend -> factory function). ``register_tokenizer`` with ``factory=`` also lands here keyed by the
+# model name — such a factory is reachable via ``get_tokenizer(model, backend=<model>)`` (historical behavior, preserved).
 _factories: dict[str, Callable[[str], TokenCounter]] = {
     "tiktoken": _create_tiktoken,
     "anthropic": _create_anthropic,
@@ -282,9 +226,8 @@ def get_tokenizer(
             logger.warning(
                 f"Failed to create tokenizer for {model}: {e}. Falling back to estimation."
             )
-            # Deliberately NOT cached: caching the fallback would pin this
-            # model to estimation for the process lifetime even after a
-            # transient failure resolves. The next get() retries creation.
+            # Deliberately NOT cached: caching the fallback would pin this model to estimation for the
+            # process lifetime even after a transient failure resolves. The next get() retries creation.
             return EstimatingTokenCounter()
         raise ValueError(f"No tokenizer available for {model}: {e}") from e
 

@@ -64,9 +64,8 @@ def test_collision_logged_at_error(caplog) -> None:
 
 
 def test_duplicate_same_content_still_updates(caplog) -> None:
-    # Same key + SAME content is the normal duplicate-store path, NOT a
-    # collision: no error, entry refreshed (created_at bumps, TTL restarts),
-    # and it still resolves.
+    # Same key + SAME content is the normal duplicate-store path, NOT a collision: no
+    # error, entry refreshed (created_at bumps, TTL restarts), and it still resolves.
     store = CompressionStore(max_entries=10)
     store.store(original="same content", compressed=f"<<ccr:{H}>>", explicit_hash=H)
     first_created = store._backend.get(H).created_at
@@ -81,11 +80,8 @@ def test_duplicate_same_content_still_updates(caplog) -> None:
 
 
 def test_collision_with_require_durable_vetoes_bug6() -> None:
-    # Bug-6: the collision-drop path used to `return hash_key` BEFORE the
-    # require_durable check, so a durable caller was handed a hash for content
-    # that was actually dropped (a marker that loud-misses, contract broken).
-    # Now the drop honors the veto: require_durable raises DurableWriteError so
-    # the caller reverts to the original uncompressed content.
+    # Bug-6: the collision-drop path used to `return hash_key` BEFORE the require_durable check, so a durable
+    # caller was handed a hash for content that was actually dropped (a marker that loud-misses, contract broken).
     store = CompressionStore(max_entries=10)
     store.store(original="first content", compressed=f"<<ccr:{H}>>", explicit_hash=H)
     with pytest.raises(DurableWriteError, match="collision"):
@@ -100,9 +96,8 @@ def test_collision_with_require_durable_vetoes_bug6() -> None:
 
 
 def test_expired_first_binding_does_not_wedge_the_key() -> None:
-    # An expired same-key entry is reaped by _evict_if_needed() BEFORE the
-    # collision check, so it is not a collision at all: different content binds
-    # cleanly after expiry and resolves normally (the key is not wedged).
+    # An expired same-key entry is reaped by _evict_if_needed() BEFORE the collision check, so it is not a
+    # collision at all: different content binds cleanly after expiry and resolves normally (the key is not wedged).
     store = CompressionStore(max_entries=10)
     store.store(original="first content", compressed=f"<<ccr:{H}>>", explicit_hash=H, ttl=60)
     store._backend.get(H).created_at -= 120.0  # age the entry past its ttl

@@ -174,9 +174,8 @@ class TestDedupSingleFullCount:
         result = CrossMessageDeduper().apply(messages, tokenizer)
 
         assert result.transforms_applied == ["cross_message_dedup:exact:1"]
-        # ONE full-conversation count (entry); the second full recount is
-        # replaced by exactly 2 single-message counts (the one replaced
-        # message, before + after).
+        # ONE full-conversation count (entry); the second full recount is replaced by
+        # exactly 2 single-message counts (the one replaced message, before + after).
         assert counter.count_messages_calls == 1
         assert counter.count_message_calls == 2
         # The delta-derived after-count is EXACT: identical to what a full

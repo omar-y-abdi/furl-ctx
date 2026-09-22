@@ -51,42 +51,28 @@ import json
 
 from furl_ctx.transforms.smart_crusher import SmartCrusher
 
-# Canonical form = serde_json::to_string(items): compact (no spaces), keys as
-# emitted. For these vectors (empty / scalars / single-key dicts / non-ASCII /
-# control chars — all Python-normal-form) Python's compact dump is
-# byte-identical to serde_json's, so the reference below reproduces the Rust
-# canonical. Wire-form numbers do NOT belong in this list — see _WIRE_VECTORS.
+# Canonical form = serde_json::to_string(items): compact (no spaces), keys as emitted.
 _VECTORS: list[tuple[list[object], str]] = [
     ([], "4f53cda18c2baa0c0354bb5f"),
     (["alpha", "beta", "gamma"], "a3e185260009ab5be7bb16f3"),
     ([1, 2, 3, 4, 5], "f5baf0e4336fd53b4c82b453"),
     ([{"id": 1}, {"id": 2}, {"id": 3}], "d99179347cb13877fc9057e0"),
-    # Non-ASCII: both serializers emit raw UTF-8 (Python via
-    # ensure_ascii=False; serde_json always) — the agreeing subset
-    # extends beyond ASCII scalars.
+    # Non-ASCII: both serializers emit raw UTF-8 (Python via ensure_ascii=False; serde_json always) — the agreeing subset extends beyond ASCII scalars.
     (["café", "日本語", "naïve"], "3a6991f2cdbff9637f9d8ec2"),
     # Control characters: both serializers emit the short escapes \n / \t
     # and \\u00XX escapes for other unprintables — byte-identical text.
     (["line1\nline2", "tab\there", "bell\x07"], "333b058285a5aa142b93c6bd"),
 ]
 
-# Wire-form vectors (TEST-33): the pinned hash is SHA-256[:24] over the serde
-# CANONICAL text — decimal literals preserved verbatim, exponent spelling
-# normalized to ``e{sign}`` — NOT over parsed values. Each string here IS the
-# canonical (byte-for-byte what the Rust producer hashes); the Rust half pins
-# the identical (canonical, hash) pairs AND that parsing the wire input
-# re-serializes to exactly these bytes. The Python reference CANNOT reproduce
-# the numeric ones (it would float-normalize them) — that is the scoping this
-# file's docstring documents.
+# Wire-form vectors (TEST-33) the pinned hash is SHA-256[:24] over the serde CANONICAL text decimal literals preserved verbatim,
+# exponent spelling normalized to ``e{sign}`` Each string here IS the canonical (byte-for-byte what the Rust producer hashes);
 _WIRE_VECTORS: list[tuple[str, str]] = [
     ('[{"price":1.50}]', "86cf954ca9f301c4cf6f9832"),  # trailing zero preserved verbatim
     ("[1e+5]", "5c20cc153829a59a47596031"),  # canonical of wire `[1E5]` (serde respells)
     ("[1e+400]", "7e9854d86909950904d96294"),  # canonical of wire `[1e400]`; Python → inf
     ("[2.5000000000000000000000000001]", "44a8948fa037883453d1adec"),  # beyond f64 precision
-    # Non-ASCII and control-char wire forms — these AGREE with the Python
-    # reference (pinned identically in _VECTORS above); listed here too so
-    # the canonical-text contract covers the full grammar, not just the
-    # divergent numeric corner.
+    # Non-ASCII and control-char wire forms — these AGREE with the Python reference (pinned identically in _VECTORS above);
+    # listed here too so the canonical-text contract covers the full grammar, not just the divergent numeric corner.
     ('["café","日本語","naïve"]', "3a6991f2cdbff9637f9d8ec2"),
     ('["line1\\nline2","tab\\there","bell\\u0007"]', "333b058285a5aa142b93c6bd"),
 ]
@@ -152,9 +138,8 @@ def test_python_reference_is_scoped_to_python_normal_form() -> None:
         "Python reference unexpectedly reproduced the wire-form key — the "
         "canonicals have converged; update the parity-scope docs"
     )
-    # Same divergence class for exponent forms and float overflow: the
-    # reference collapses `1E5` to `100000.0` and `1e400` to `Infinity`,
-    # never serde's respelled canonicals `1e+5` / `1e+400`.
+    # Same divergence class for exponent forms and float overflow: the reference collapses `1E5` to
+    # `100000.0` and `1e400` to `Infinity`, never serde's respelled canonicals `1e+5` / `1e+400`.
     assert _canonical(json.loads("[1E5]")) == "[100000.0]"
     assert _hash_canonical(json.loads("[1E5]")) != _hash_raw("[1e+5]")
     assert _canonical(json.loads("[1e400]")) == "[Infinity]"
@@ -178,9 +163,8 @@ def test_rust_crush_emits_the_python_reference_hash() -> None:
     (Input is Python-normal-form — ASCII strings — so the reference is in
     scope; the wire-form sibling below locks the divergent-number case.)
     """
-    # 600 distinct lines → a guaranteed row-drop on the live crush() path
-    # (the 1a parity suite uses the same shape). Fixed seed → deterministic
-    # canonical → a stable expected hash.
+    # 600 distinct lines → a guaranteed row-drop on the live crush() path (the 1a parity suite
+    # uses the same shape). Fixed seed → deterministic canonical → a stable expected hash.
     items: list[object] = [f"ccr-parity-line-{i}" for i in range(600)]
     expected = _hash_canonical(items)  # SHA-256[:24] over the full-array canonical
 
@@ -205,10 +189,7 @@ def test_rust_crush_emits_the_raw_text_hash_for_wire_form_numbers() -> None:
     arbitrary inputs must hash the raw wire text (``_hash_raw``), never
     ``json.loads`` → ``json.dumps`` output.
     """
-    # 600 distinct wire-form decimals, every literal carrying a trailing
-    # zero the float round-trip would strip (0.10 → 0.1). Compact from the
-    # start, so serde's canonical re-serialization is byte-identical to
-    # this exact text (preserve_order + arbitrary_precision).
+    # 600 distinct wire-form decimals, every literal carrying a trailing zero the float round-trip would strip (0.10 → 0.1).
     raw = "[" + ",".join(f"{i}.10" for i in range(600)) + "]"
     expected_raw = _hash_raw(raw)
     normalized = _hash_canonical(json.loads(raw))  # what the reference would say
