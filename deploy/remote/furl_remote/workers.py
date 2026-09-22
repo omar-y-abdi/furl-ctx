@@ -15,9 +15,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, TextIO
 
+import mcp
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
+
+import furl_ctx
 
 from .auth import Principal
 from .config import Settings
@@ -92,7 +95,18 @@ class TenantWorkers:
         env.update(
             {
                 "HOME": str(workspace),
-                "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+                # Vercel's _vendor is injected into the parent sys.path, not the
+                # interpreter's site-packages. Use trusted package locations;
+                # never forward an arbitrary caller-supplied PYTHONPATH.
+                "PYTHONPATH": os.pathsep.join(
+                    dict.fromkeys(
+                        (
+                            str(Path(__file__).resolve().parents[1]),
+                            str(Path(mcp.__file__).resolve().parents[1]),
+                            str(Path(furl_ctx.__file__).resolve().parents[1]),
+                        )
+                    )
+                ),
                 "PYTHONUNBUFFERED": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "FURL_WORKSPACE_DIR": str(workspace),
@@ -141,37 +155,41 @@ class TenantWorkers:
                     size = sum(p.stat().st_size for p in workspace.rglob("*") if p.is_file())
                     if size >= self.settings.tenant_max_bytes:
                         raise WorkerRejected("Storage budget reached; purge your entries first")
-                server = StdioServerParameters(
-                    command=sys.executable,
-                    args=["-m", "furl_remote.worker"],
-                    cwd=str(workspace),
-                    env=self.environment(workspace),
-                )
-                # Keep AnyIO cancel scopes and stdio cleanup in one task on timeout/disconnect.
-                import anyio
-
-                with anyio.fail_after(self.settings.call_timeout):
-                    with open(os.devnull, "w") as errors:
-                        async with stdio_client(server, errlog=errors) as (read, write):
-                            async with ClientSession(read, write) as session:
-                                await session.initialize()
-                                result = await session.call_tool(name, arguments)
-                if name == "furl_compress":
-                    for item in result.content:
-                        if isinstance(item, TextContent):
-                            try:
-                                envelope = json.loads(item.text)
-                            except ValueError:
-                                continue
-                            if (
-                                isinstance(envelope, dict)
-                                and envelope.get("durably_stored") is False
-                            ):
-                                raise WorkerRejected(
-                                    "Storage did not persist the result. Keep the original; no durable retrieval result is confirmed. Inspect your entries before retrying."
-                                )
-                if len(result.model_dump_json().encode()) > 1024 * 1024:
-                    raise WorkerRejected("Result exceeds 1 MiB; retrieve a narrower slice")
-                return result
+                return await self._run(workspace, name, arguments)
         finally:
             self.slots.release()
+
+    async def health(self) -> None:
+        if self.volume_lock is None:
+            raise WorkerRejected("Service storage is not initialized")
+
+    async def _run(self, workspace: Path, name: str, arguments: dict[str, Any]) -> CallToolResult:
+        server = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "furl_remote.worker"],
+            cwd=str(workspace),
+            env=self.environment(workspace),
+        )
+        # Keep AnyIO cancel scopes and stdio cleanup in one task on timeout/disconnect.
+        import anyio
+
+        with anyio.fail_after(self.settings.call_timeout):
+            with open(os.devnull, "w") as errors:
+                async with stdio_client(server, errlog=errors) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        result = await session.call_tool(name, arguments)
+        if name == "furl_compress":
+            for item in result.content:
+                if isinstance(item, TextContent):
+                    try:
+                        envelope = json.loads(item.text)
+                    except ValueError:
+                        continue
+                    if isinstance(envelope, dict) and envelope.get("durably_stored") is False:
+                        raise WorkerRejected(
+                            "Storage did not persist the result. Keep the original; no durable retrieval result is confirmed. Inspect your entries before retrying."
+                        )
+        if len(result.model_dump_json().encode()) > 1024 * 1024:
+            raise WorkerRejected("Result exceeds 1 MiB; retrieve a narrower slice")
+        return result

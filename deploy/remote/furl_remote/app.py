@@ -43,7 +43,13 @@ class RemoteApp:
             )
         else:
             self.verifier = verifier
-        self.workers = TenantWorkers(settings)
+        self.workers: TenantWorkers
+        if settings.database_url:
+            from .postgres import PostgresWorkers
+
+            self.workers = PostgresWorkers(settings)
+        else:
+            self.workers = TenantWorkers(settings)
         self.tools: list[Tool] = []
 
     async def _tools(self) -> list[Tool]:
@@ -182,11 +188,10 @@ class RemoteApp:
             return
         if path in ("/healthz", "/readyz") and request.method == "GET":
             try:
-                if self.workers.volume_lock is None:
-                    raise IssuerUnavailable("Storage not initialized")
+                await self.workers.health()
                 if path == "/readyz":
                     await self.verifier.ready()
-            except IssuerUnavailable:
+            except (IssuerUnavailable, WorkerRejected):
                 await self._reply(scope, receive, send, 503, {"ready": False})
             else:
                 await self._reply(scope, receive, send, 200, {"ready": True})

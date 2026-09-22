@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .auth import https_url
 
@@ -26,6 +26,7 @@ class Settings:
     call_timeout: float = 120.0
     attachment_hosts: str = "*.oaiusercontent.com"
     challenge_token: str | None = None
+    database_url: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for value in (self.origin, self.issuer, self.jwks_url):
@@ -58,11 +59,32 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        database_url = os.environ.get("FURL_REMOTE_DATABASE_URL") or None
+        if os.environ.get("VERCEL") == "1" and not database_url:
+            raise ValueError("Vercel requires FURL_REMOTE_DATABASE_URL; /tmp is not durable")
+        if database_url:
+            parsed = urlsplit(database_url)
+            ssl = parse_qs(parsed.query).get("sslmode", [])
+            if (
+                parsed.scheme not in ("postgres", "postgresql")
+                or not parsed.hostname
+                or not parsed.path.strip("/")
+                or parsed.fragment
+                or ssl not in (["require"], ["verify-ca"], ["verify-full"])
+            ):
+                raise ValueError("FURL_REMOTE_DATABASE_URL requires a PostgreSQL URL with TLS")
         return cls(
             origin=os.environ["FURL_REMOTE_ORIGIN"],
             issuer=os.environ["FURL_REMOTE_ISSUER"],
             jwks_url=os.environ["FURL_REMOTE_JWKS_URL"],
-            data_dir=Path(os.environ["FURL_REMOTE_DATA_DIR"]),
+            data_dir=Path(
+                os.environ.get("FURL_REMOTE_DATA_DIR", "/tmp/furl-remote")
+                if database_url
+                else os.environ["FURL_REMOTE_DATA_DIR"]
+            ),
+            database_url=database_url,
+            max_workers=1 if database_url else 2,
+            tenant_max_bytes=(64 if database_url else 256) * 1024 * 1024,
             attachment_hosts=os.environ.get("FURL_REMOTE_ATTACHMENT_HOSTS", "*.oaiusercontent.com"),
             challenge_token=os.environ.get("OPENAI_APPS_CHALLENGE_TOKEN") or None,
         )
