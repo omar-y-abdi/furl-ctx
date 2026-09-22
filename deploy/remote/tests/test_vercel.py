@@ -72,6 +72,8 @@ def test_vercel_database_configuration_is_private_and_bounded(monkeypatch):
 
 def test_vercel_runtime_configuration_targets_only_the_mcp_app():
     config = json.loads((ROOT / "vercel.json").read_text())
+    # An empty buildCommand makes fs-detectors skip the Python framework builder.
+    assert config.get("buildCommand") != ""
     assert config["functions"]["app.py"]["maxDuration"] >= 150
     assert (ROOT / ".python-version").read_text().strip() == "3.12"
 
