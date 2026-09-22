@@ -1,0 +1,39 @@
+services:
+  furl:
+    build:
+      context: ../..
+      dockerfile: deploy/remote/Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      FURL_REMOTE_ORIGIN: ${FURL_REMOTE_ORIGIN:?Set the public HTTPS origin}
+      FURL_REMOTE_ISSUER: ${FURL_REMOTE_ISSUER:?Set the real OAuth issuer}
+      FURL_REMOTE_JWKS_URL: ${FURL_REMOTE_JWKS_URL:?Set the issuer signing-key URL}
+      FURL_REMOTE_DATA_DIR: /var/lib/furl
+      FURL_REMOTE_ATTACHMENT_HOSTS: ${FURL_REMOTE_ATTACHMENT_HOSTS:-*.oaiusercontent.com}
+      OPENAI_APPS_CHALLENGE_TOKEN: ${OPENAI_APPS_CHALLENGE_TOKEN:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - furl-data:/var/lib/furl
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 6g
+    cpus: 2
+    pids_limit: 128
+    stop_grace_period: 140s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; from urllib.parse import urlsplit; r=urllib.request.Request('http://127.0.0.1:8000/readyz',headers={'Host':urlsplit(os.environ['FURL_REMOTE_ORIGIN']).netloc}); urllib.request.urlopen(r,timeout=15).close()"
+      interval: 30s
+      timeout: 20s
+      start_period: 20s
+      retries: 3
+volumes:
+  furl-data:

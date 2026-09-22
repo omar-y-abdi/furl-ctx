@@ -1,81 +1,90 @@
-# furl showcase site
+# Furl showcase website
 
-A self-contained static site that lets a visitor watch furl fold real tool
-output and pull originals back byte-exact. Every number, marker, and retrieved
-byte is real furl output captured by `data/generate.py`. Nothing is hand-typed.
+A static, dark/amber demonstration deployed at `https://furl-ctx.vercel.app/`.
+The six examples replay real Furl **1.2.0** outputs produced on synthetic inputs
+by `data/generate.py` on 13 July 2026. They are historical fixtures, not current
+production captures or a live upload/compression API. The package's current
+version is reported separately. Never relabel archived numbers as a new benchmark.
 
-## What is here
+## Files and preview
 
-```
-site/
-  index.html            page shell (nav, hero, demo mount, how it works, honest read)
-  assets/
-    styles.css          full design system + fold and retrieve mechanics
-    app.js              vanilla classic script: tabs, fold animation, retrieve reveal
-    fonts/              self-hosted woff2 (JetBrains Mono, Bricolage Grotesque) + FONTS.md
-  data/
-    generate.py         the generator: calls furl, writes the JSON below
-    <id>.json           one honest record per capture (logs, crash, json, pytest, ci, csv)
-    manifest.json       metadata + aggregate
-    furl-data.js        window.__FURL_DATA__, consumed by the page (no runtime fetch)
-  vercel.json           static headers
-```
+`index.html` contains real page content and a no-JavaScript results table.
+`assets/app.js` supplies the six accessible demo tabs, folding and retrieval.
+`data/furl-data.js` is the prerecorded payload; no visitor content is uploaded.
+Fonts and images are self-hosted. `assets/fonts.css` uses the existing WOFF2 files
+rather than embedding duplicate base64 font data in the stylesheet.
 
-The page reads `data/furl-data.js` through a plain `<script>` tag, so it works
-opened straight from disk as `file://` as well as served over http. There are
-no external CDN, font, or script requests at runtime.
+`privacy.html`, `terms.html`, `cookies.html`, `support.html` and `connect.html`
+provide distinct content pages. `404.html` is the custom error document, not a
+catch-all rewrite returning 200. Shared legal pages do not load the demo JS.
+There are no analytics integrations, tracking cookies or third-party embeds.
+Do not add a consent banner for tracking the site does not perform.
 
-## Preview locally
+Serve the website over HTTP (root-relative links deliberately require a server):
 
-Open the file directly:
-
-```
-open site/index.html
+```sh
+python3 -m http.server 8000 --directory site
 ```
 
-Or serve it, which is closer to production:
+Visit `/index.html` or the individual `.html` files with that simple server.
+The browser-test server emulates Vercel's clean URLs, security headers and deep
+404 behavior more closely. Do not open the page with `file://`.
 
-```
-cd site
-python3 -m http.server 8000
-# then open http://localhost:8000
-```
+## Tests
 
-## Regenerate the data
+From the repository root:
 
-The numbers come from the real `furl_ctx` engine. From the repository root,
-in a Python environment where furl is importable:
-
-```
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e .            # or: maturin develop --release
-python site/data/generate.py
-```
-
-This rewrites `data/*.json` and `data/furl-data.js`. The script prints a
-self-check table with the real per-capture savings and whether each full
-retrieve came back byte-exact. Sizes are chosen so each capture crosses furl's
-offload threshold and renders in full, the way a real agent's tool output does.
-
-## Deploy to Vercel
-
-The site is static, no build step. Point Vercel at this `site/` directory as
-the project root and deploy. From the CLI:
-
-```
-cd site
-vercel deploy --prod
+```sh
+python3 -m unittest discover -s tests/site -p 'test_*.py'
+python3 -m pip install playwright==1.57.0
+python3 -m playwright install chromium
+npm pack axe-core@4.10.3 --pack-destination /tmp
+mkdir -p /tmp/furl-axe
+tar -xzf /tmp/axe-core-4.10.3.tgz -C /tmp/furl-axe
+python3 tests/site/browser.py --axe /tmp/furl-axe/package/axe.min.js
 ```
 
-Or set the project Root Directory to `site` in the Vercel dashboard. There is
-no framework and no build command.
+The browser suite covers desktop/mobile pages, axe WCAG rules, keyboard tabs,
+all six fold/retrieve/reset interactions, the reset-animation race, reduced
+motion, no-JavaScript content, empty browser storage, request failures and
+third-party requests. Reports and screenshots go to `artifacts/site/`.
+Use `--origin` for an already running deployment. Automated checks supplement,
+not replace, manual accessibility review.
 
-## Honest notes
+Static tests enforce unique metadata, one H1 per content page, real links,
+sitemap coverage, source-map exclusion, icon sizes and CSP hashes for JSON-LD.
+Verification responses such as Google's ownership file are not content pages.
+Update CSP hashes in `vercel.json` when changing inline structured data; never
+work around a mismatch by enabling `unsafe-inline` scripts. No LocalBusiness
+schema is used because Furl is software, not a physical local business.
 
-- These captures are repetitive machine output, the case furl is built for. On
-  high-entropy prose the honest range is lower, roughly zero to 54 percent.
-- Automatic hands-off compression works on Claude Code 2.1.163 and newer; the PostToolUse
-  hook mirrors each replacement to the tool's output shape, so the harness honors it. It was
-  built for issue 68951. The furl API and the MCP tools also deliver verified compression on
-  every version, and every original returns byte-exact through retrieve. That is what this
-  page shows.
+## Deployment and assets
+
+Keep Vercel's Root Directory set to **`site`**, with no framework or build command.
+`vercel.json` enables clean URLs and security/cache headers. `.vercelignore`
+excludes Python generators, README and source maps from the public deployment.
+The project's existing ignored-build command skips commits with no changes in
+`site/`; a cancelled no-change build is expected, not an application failure.
+A feature PR previews site changes; merging main publishes through the existing
+Git integration. Do not change an unrelated Vercel project.
+
+Directory icons are under `assets/icons/directory-512.png` and
+`directory-256.png`; ChatGPT composer icons are `composer-128.png` and
+`composer-48.png`. All are square PNGs below 10 KiB. The social card is
+`assets/og.png`, 1200 x 630 pixels. Reuse the same mark consistently. Fonts are
+not part of the downloadable icon bundle.
+
+## MCP is a separate runtime
+
+This static site is not an MCP server and `/mcp` is not a working public service
+merely because a URL has been written into documentation. See
+[`deploy/remote`](../deploy/remote/README.md) for the implemented Streamable HTTP
+resource server with OAuth token verification and isolated durable CCR workers.
+It still requires an approved host, real identity provider, persistent volume,
+TLS, domain-verification token and end-to-end testing before public launch.
+The local stdio server can continue to use a private Secure MCP Tunnel.
+
+The site's legal pages describe actual static-site/local behavior. Publish a
+service-specific notice with confirmed providers and retention before accepting
+public user data. Do not invent OAuth endpoints, business details, token-savings
+guarantees or verification tokens.

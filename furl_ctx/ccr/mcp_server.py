@@ -26,15 +26,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import stat
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin, urlsplit
 
 from furl_ctx import paths as _paths
 from furl_ctx._version import get_version
@@ -77,7 +80,7 @@ except ImportError:
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import TextContent, Tool
+    from mcp.types import TextContent, Tool, ToolAnnotations
 
     MCP_AVAILABLE = True
 except ImportError:
@@ -144,6 +147,144 @@ def _max_compress_file_bytes() -> int:
         if parsed > 0:
             return parsed
     return _MAX_COMPRESS_FILE_BYTES_DEFAULT
+
+
+class _ProvidedFileError(ValueError):
+    """Caller-visible validation/download failure for an OpenAI provided file."""
+
+
+def _provided_file_fields(provided: Any) -> tuple[str, str]:
+    """Validate an ``openai/fileParams`` payload without leaking its signed URL."""
+    if not isinstance(provided, dict):
+        raise _ProvidedFileError(
+            f"file parameter must be a provided-file object, got {type(provided).__name__}"
+        )
+
+    download_url = provided.get("download_url")
+    file_id = provided.get("file_id")
+    if not isinstance(download_url, str) or not download_url.strip():
+        raise _ProvidedFileError("file.download_url must be a non-empty string")
+    if not isinstance(file_id, str) or not file_id.strip():
+        raise _ProvidedFileError("file.file_id must be a non-empty string")
+    return download_url, file_id
+
+
+async def _validate_provided_file_url(url: str) -> None:
+    """Require a public HTTPS destination before fetching a provided file."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise _ProvidedFileError("file.download_url is not a valid URL") from exc
+
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise _ProvidedFileError("file.download_url must use public HTTPS")
+    if parsed.username is not None or parsed.password is not None:
+        raise _ProvidedFileError("file.download_url must not contain URL credentials")
+
+    host = parsed.hostname
+    allowed_hosts = os.environ.get("FURL_MCP_ALLOWED_FILE_HOSTS")
+    if allowed_hosts is not None:
+        patterns = [part.strip().lower() for part in allowed_hosts.split(",") if part.strip()]
+        canonical_host = host.lower().rstrip(".")
+        allowed = any(
+            canonical_host == pattern
+            or (
+                pattern.startswith("*.")
+                and canonical_host.endswith(pattern[1:])
+                and canonical_host != pattern[2:]
+            )
+            for pattern in patterns
+        )
+        if port != 443 or not allowed:
+            raise _ProvidedFileError("provided file destination is not allowed by this server")
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            infos = await asyncio.to_thread(
+                socket.getaddrinfo,
+                host,
+                port,
+                socket.AF_UNSPEC,
+                socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            raise _ProvidedFileError("provided file download host could not be resolved") from exc
+        addresses = {ipaddress.ip_address(info[4][0]) for info in infos}
+    else:
+        addresses = {literal}
+
+    if not addresses or any(not address.is_global for address in addresses):
+        raise _ProvidedFileError("file.download_url must resolve only to public addresses")
+
+
+async def _download_provided_file(provided: Any, max_bytes: int) -> str:
+    """Download one ChatGPT/OpenAI provided file with redirect and size bounds."""
+    download_url, _file_id = _provided_file_fields(provided)
+
+    # MCP already depends on httpx; keep this lazy so non-MCP imports stay light.
+    import httpx
+
+    timeout = httpx.Timeout(60.0, connect=10.0, read=30.0, write=30.0, pool=10.0)
+    current_url = download_url
+    max_redirects = 3
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=timeout, trust_env=False
+        ) as client:
+            for redirect_index in range(max_redirects + 1):
+                await _validate_provided_file_url(current_url)
+                async with client.stream("GET", current_url) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise _ProvidedFileError(
+                                "provided file download redirect is missing Location"
+                            )
+                        if redirect_index >= max_redirects:
+                            raise _ProvidedFileError(
+                                "provided file download exceeded redirect limit"
+                            )
+                        current_url = urljoin(current_url, location)
+                        continue
+
+                    if response.status_code < 200 or response.status_code >= 300:
+                        raise _ProvidedFileError(
+                            f"provided file download failed with HTTP {response.status_code}"
+                        )
+
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            advertised_size = int(content_length)
+                        except ValueError:
+                            advertised_size = None
+                        if advertised_size is not None and advertised_size > max_bytes:
+                            raise _ProvidedFileError(
+                                f"File too large to compress: {advertised_size} bytes "
+                                f"(limit {max_bytes} bytes) — raise "
+                                f"{_MAX_COMPRESS_FILE_BYTES_ENV} to ingest a larger file"
+                            )
+
+                    raw = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        raw.extend(chunk)
+                        if len(raw) > max_bytes:
+                            raise _ProvidedFileError(
+                                f"File too large to compress: >{max_bytes} bytes "
+                                f"(limit {max_bytes} bytes) — raise "
+                                f"{_MAX_COMPRESS_FILE_BYTES_ENV} to ingest a larger file"
+                            )
+                    return _safe_decode_for_logging(bytes(raw))
+    except _ProvidedFileError:
+        raise
+    except httpx.HTTPError as exc:
+        logger.warning("event=mcp_provided_file_download_failed error_type=%s", type(exc).__name__)
+        raise _ProvidedFileError("provided file download failed") from exc
+
+    raise _ProvidedFileError("provided file download failed")
 
 
 def _describe_arguments_for_log(arguments: dict[str, Any]) -> str:
@@ -1584,9 +1725,10 @@ class FurlMCPServer:
                         "Compress content to save context window space. "
                         "Use this on large tool outputs, file contents, search results, "
                         "or any content you want to shrink before reasoning over it. "
-                        "Pass 'content' with inline text, OR 'file_path' to have the server "
-                        "read and compress a file from disk (ideal for a large trace/log that "
-                        "would overflow context if pasted inline) — exactly one of the two. "
+                        "Pass 'content' with inline text, 'file_path' for a local workspace "
+                        "file, OR 'file' for a host-provided attachment such as a ChatGPT "
+                        "upload — exactly one input source. Large attachments are transferred "
+                        "out-of-band and do not need to be pasted into model context. "
                         "When it compresses, the original is stored and can be retrieved "
                         f"later via mcp__furl__{CCR_TOOL_NAME}: returns compressed text + a "
                         "hash for retrieval. When Furl decides NOT to compress (a no-op: "
@@ -1604,8 +1746,8 @@ class FurlMCPServer:
                                 "type": "string",
                                 "description": (
                                     "The inline content to compress. Any text: tool output, "
-                                    "JSON, search results, logs, code, etc. Provide EITHER "
-                                    "content OR file_path, not both."
+                                    "JSON, search results, logs, code, etc. Provide exactly one "
+                                    "of content, file_path, or file."
                                 ),
                             },
                             "file_path": {
@@ -1614,10 +1756,27 @@ class FurlMCPServer:
                                     "Absolute path to a file the server reads from disk and "
                                     "compresses, so a large artifact (e.g. a multi-MB trace or "
                                     "log) never has to be pasted inline and pay the full context "
-                                    "cost first. Confined to the workspace. Provide EITHER "
-                                    "file_path OR content, not both. Larger byte ceiling than "
-                                    "inline content (override with FURL_MCP_MAX_FILE_BYTES)."
+                                    "cost first. Confined to the workspace. For ChatGPT attachments "
+                                    "use the host-provided file parameter instead. Larger byte ceiling "
+                                    "than inline content (override with FURL_MCP_MAX_FILE_BYTES)."
                                 ),
+                            },
+                            "file": {
+                                "type": "object",
+                                "description": (
+                                    "Host-provided attachment. ChatGPT/OpenAI supplies this object "
+                                    "out-of-band for an uploaded file; callers should select/upload "
+                                    "the file rather than constructing download_url/file_id manually. "
+                                    "Provide exactly one of file, file_path, or content."
+                                ),
+                                "properties": {
+                                    "download_url": {"type": "string", "format": "uri"},
+                                    "file_id": {"type": "string"},
+                                    "mime_type": {"type": "string"},
+                                    "file_name": {"type": "string"},
+                                },
+                                "required": ["download_url", "file_id"],
+                                "additionalProperties": False,
                             },
                             "mode": {
                                 "type": "string",
@@ -1663,10 +1822,11 @@ class FurlMCPServer:
                                 ),
                             },
                         },
-                        # Neither is schema-required: exactly one of content / file_path is enforced in the
-                        # handler (JSON Schema cannot express "exactly one of" portably across MCP clients).
+                        # No source is schema-required: exactly one of content / file_path / file is enforced
+                        # in the handler (JSON Schema cannot express "exactly one of" portably across MCP clients).
                         "required": [],
                     },
+                    _meta={"openai/fileParams": ["file"]},
                 ),
                 Tool(
                     name=CCR_TOOL_NAME,
@@ -1977,7 +2137,17 @@ class FurlMCPServer:
                     )
                 )
 
+            for tool in tools:
+                mutating = tool.name in {COMPRESS_TOOL_NAME, PURGE_TOOL_NAME, READ_TOOL_NAME}
+                tool.annotations = ToolAnnotations(
+                    readOnlyHint=not mutating,
+                    # Compression/cached reads can evict older entries at store capacity.
+                    destructiveHint=mutating,
+                    openWorldHint=tool.name == COMPRESS_TOOL_NAME,
+                )
             return tools
+
+        self.route_list_tools = list_tools
 
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
@@ -2027,10 +2197,15 @@ class FurlMCPServer:
     async def _handle_compress(self, arguments: dict[str, Any]) -> list[TextContent]:
         content = arguments.get("content")
         file_path = arguments.get("file_path")
+        provided_file = arguments.get("file")
 
-        # Exactly one input source. ``content`` is inline text the caller already holds.
-        if file_path is not None and content is not None:
+        # Preserve the historical two-source error byte-for-byte for existing clients while
+        # extending the contract to a third host-provided source.
+        if provided_file is None and file_path is not None and content is not None:
             return _err("provide either 'content' or 'file_path', not both")
+        source_count = sum(value is not None for value in (content, file_path, provided_file))
+        if source_count > 1:
+            return _err("provide exactly one of 'content', 'file_path', or 'file'")
 
         if file_path is not None:
             # Non-string / empty path is a parameter error, mirroring the content
@@ -2051,6 +2226,11 @@ class FurlMCPServer:
             if isinstance(jailed, list):
                 return jailed
             _resolved_path, content = jailed
+        elif provided_file is not None:
+            try:
+                content = await _download_provided_file(provided_file, _max_compress_file_bytes())
+            except _ProvidedFileError as exc:
+                return _err(str(exc))
         else:
             # Inline content path (unchanged). "" is falsy → the same
             # required-parameter error as an absent key.
