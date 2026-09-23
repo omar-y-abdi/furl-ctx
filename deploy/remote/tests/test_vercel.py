@@ -70,6 +70,23 @@ def test_vercel_database_configuration_is_private_and_bounded(monkeypatch):
         Settings.from_env()
 
 
+def test_vercel_default_attachment_hosts_cover_chatgpt_file_handoff(monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("FURL_REMOTE_ORIGIN", "https://remote.example.test")
+    monkeypatch.setenv("FURL_REMOTE_ISSUER", "https://issuer.example.test")
+    monkeypatch.setenv("FURL_REMOTE_JWKS_URL", "https://issuer.example.test/jwks")
+    monkeypatch.setenv(
+        "FURL_REMOTE_DATABASE_URL",
+        "postgresql://furl:secret@database.example.test/furl?sslmode=require",
+    )
+    monkeypatch.delenv("FURL_REMOTE_ATTACHMENT_HOSTS", raising=False)
+
+    hosts = {item.strip() for item in Settings.from_env().attachment_hosts.split(",")}
+
+    assert "chatgpt.com" in hosts
+    assert "*.oaiusercontent.com" in hosts
+
+
 def test_vercel_runtime_configuration_targets_only_the_mcp_app():
     config = json.loads((ROOT / "vercel.json").read_text())
     # An empty buildCommand makes fs-detectors skip the Python framework builder.
