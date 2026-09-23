@@ -31,7 +31,7 @@ async def test_explicit_tool_hints():
     ],
 )
 async def test_remote_allowlist_rejects_destination_before_dns(monkeypatch, url):
-    monkeypatch.setenv("FURL_MCP_ALLOWED_FILE_HOSTS", "*.oaiusercontent.com")
+    monkeypatch.setenv("FURL_MCP_ALLOWED_FILE_HOSTS", "chatgpt.com,*.oaiusercontent.com")
 
     def forbidden_dns(*args):
         raise AssertionError("Disallowed destinations must not reach DNS")
@@ -39,3 +39,29 @@ async def test_remote_allowlist_rejects_destination_before_dns(monkeypatch, url)
     monkeypatch.setattr("socket.getaddrinfo", forbidden_dns)
     with pytest.raises(_ProvidedFileError, match="allowed"):
         await _validate_provided_file_url(url)
+
+
+
+@pytest.mark.asyncio
+async def test_remote_allowlist_accepts_current_chatgpt_file_host(monkeypatch):
+    monkeypatch.setenv(
+        "FURL_MCP_ALLOWED_FILE_HOSTS", "chatgpt.com,*.oaiusercontent.com"
+    )
+
+    def public_dns(*args):
+        import socket
+
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("104.18.0.1", 443),
+            )
+        ]
+
+    monkeypatch.setattr("socket.getaddrinfo", public_dns)
+    await _validate_provided_file_url(
+        "https://chatgpt.com/backend-api/estuary/content?id=file_123&sig=test"
+    )
