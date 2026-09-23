@@ -67,7 +67,7 @@ or provider secrets:
 | `FURL_REMOTE_JWKS_URL` | Exact provider HTTPS signing-key URL |
 | `FURL_REMOTE_DATA_DIR` | Docker: required private persistent-volume directory. PostgreSQL mode: optional private scratch directory, default `/tmp/furl-remote` |
 | `FURL_REMOTE_DATABASE_URL` | Required on Vercel: dedicated PostgreSQL service connection URL with TLS; never a public/anonymous key |
-| `FURL_REMOTE_ATTACHMENT_HOSTS` | Optional comma-separated exact hosts or `*.domain` suffixes; default `*.oaiusercontent.com` |
+| `FURL_REMOTE_ATTACHMENT_HOSTS` | Optional comma-separated exact hosts or `*.domain` suffixes; default `chatgpt.com,*.oaiusercontent.com` |
 | `OPENAI_APPS_CHALLENGE_TOKEN` | Optional exact token issued by the OpenAI submission portal |
 
 An absent required variable stops the Docker gateway. The Vercel entrypoint
