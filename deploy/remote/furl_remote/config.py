@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from .auth import https_url
 
+_DEFAULT_ATTACHMENT_HOSTS = "chatgpt.com,*.oaiusercontent.com"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -24,7 +26,7 @@ class Settings:
     tenant_max_bytes: int = 256 * 1024 * 1024
     ttl_seconds: int = 86400
     call_timeout: float = 120.0
-    attachment_hosts: str = "*.oaiusercontent.com"
+    attachment_hosts: str = _DEFAULT_ATTACHMENT_HOSTS
     challenge_token: str | None = None
     database_url: str | None = field(default=None, repr=False)
 
@@ -85,6 +87,8 @@ class Settings:
             database_url=database_url,
             max_workers=1 if database_url else 2,
             tenant_max_bytes=(64 if database_url else 256) * 1024 * 1024,
-            attachment_hosts=os.environ.get("FURL_REMOTE_ATTACHMENT_HOSTS", "*.oaiusercontent.com"),
+            attachment_hosts=os.environ.get(
+                "FURL_REMOTE_ATTACHMENT_HOSTS", _DEFAULT_ATTACHMENT_HOSTS
+            ),
             challenge_token=os.environ.get("OPENAI_APPS_CHALLENGE_TOKEN") or None,
         )
