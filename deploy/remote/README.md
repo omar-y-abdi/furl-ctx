@@ -2,9 +2,10 @@
 
 This deployment exposes the actual Furl engine at `/mcp` using the official MCP
 SDK's stateless Streamable HTTP transport. It is an **OAuth resource server**,
-not an authorization server. It requires an existing OAuth 2.1 provider and a
-private persistent Linux filesystem. Adding these files to GitHub does not
-provision either service or turn the static Vercel website into an MCP server.
+not an authorization server. It requires an existing OAuth 2.1 provider and
+either PostgreSQL (Vercel) or a private persistent Linux filesystem (Docker).
+Adding these files to GitHub does not provision an OAuth provider or database.
+The static website in `site/` and this MCP service are separate Vercel projects.
 The local CLI, stdio MCP server and private Secure MCP Tunnel remain unchanged.
 
 ## Architecture and boundaries
@@ -23,12 +24,17 @@ absent from the public API. Host attachments use `file` and `openai/fileParams`,
 not a path on ChatGPT's filesystem or inline base64. Compression is conservatively
 marked destructive because storing content can evict older entries at capacity.
 
-Run **one gateway process and one replica per persistent volume**. An exclusive
-volume lock rejects accidental double starts. This is a bounded single-host
-service, not a horizontally scaled database design. Do not put its SQLite files
-on a shared network filesystem or Vercel's ephemeral `/tmp`. Keep the Vercel
-showcase deployed from `site/`; deploy this service to a separately approved
-container host with a persistent volume and HTTPS reverse proxy.
+For **Docker**, run one gateway process and one replica per persistent volume.
+An exclusive volume lock rejects accidental double starts. Do not put these
+live SQLite files on a shared network filesystem or use ephemeral storage.
+
+For **Vercel**, PostgreSQL is the source of truth. A row lock serializes each
+user's restore/run/save transaction across instances. The existing native worker
+uses a private temporary SQLite copy; the gateway snapshots it using SQLite's
+backup API (including committed WAL pages) and commits to PostgreSQL **before**
+returning the tool result. Failed calls roll back. Temporary copies are removed
+when the call exits. Database credentials are never passed to the child. This
+avoids treating `/tmp` or a warm function instance as durable storage.
 
 ## Configure the real authorization provider
 
@@ -59,17 +65,85 @@ or provider secrets:
 | `FURL_REMOTE_ORIGIN` | Public HTTPS origin, no path or trailing slash; port 443 |
 | `FURL_REMOTE_ISSUER` | Exact issuer identifier, preserving any trailing slash |
 | `FURL_REMOTE_JWKS_URL` | Exact provider HTTPS signing-key URL |
-| `FURL_REMOTE_DATA_DIR` | Absolute private persistent-volume directory |
+| `FURL_REMOTE_DATA_DIR` | Docker: required private persistent-volume directory. PostgreSQL mode: optional private scratch directory, default `/tmp/furl-remote` |
+| `FURL_REMOTE_DATABASE_URL` | Required on Vercel: dedicated PostgreSQL service connection URL with TLS; never a public/anonymous key |
 | `FURL_REMOTE_ATTACHMENT_HOSTS` | Optional comma-separated exact hosts or `*.domain` suffixes; default `*.oaiusercontent.com` |
 | `OPENAI_APPS_CHALLENGE_TOKEN` | Optional exact token issued by the OpenAI submission portal |
 
-An absent required variable stops startup. There is no anonymous fallback.
+An absent required variable stops the Docker gateway. The Vercel entrypoint
+returns a non-cacheable 503 and logs the required variable **names**, not their
+values. There is no anonymous or ephemeral-store fallback.
 The attachment allowlist is enforced again after each redirect and is in addition
 to the existing public-address checks. A wildcard does not include the domain
 apex. Do not broaden this to arbitrary domains just to suppress a failed upload;
 inspect the host's actual handoff contract and allow only trusted file hosts.
 
-## Build and run
+## Deploy on Vercel
+
+Use the existing **remote** project with Root Directory **`deploy/remote`**, not
+`site/` and not the repository root. Enable **Include source files outside of the
+Root Directory**: the native crate and Python package live at the repository root.
+The checked-in `vercel.json` selects Python, discovers `app.py`, runs
+`install-vercel.sh` and allows 180 seconds per invocation. Python is pinned to
+3.12. The install script builds the **current checkout** with the Rust toolchain
+from `rust-toolchain.toml` and `maturin build --release --locked`, installs that
+wheel with the pinned runtime dependencies, and primes tokenizer assets. It does
+not replace current repository code with a PyPI release. Do not override the
+install command with Docker or a website build.
+
+Provision a dedicated PostgreSQL database/role through your chosen provider, then
+apply the private schema once using that role:
+
+```sh
+psql "$FURL_REMOTE_DATABASE_URL" -v ON_ERROR_STOP=1 -f deploy/remote/migrations/001_postgres.sql
+```
+
+The gateway needs SELECT/INSERT/UPDATE/DELETE on `furl_remote.tenants` and USAGE on
+its schema. Do not expose this schema through a browser-accessible database API.
+Use a direct connection or a transaction-mode pooler, not statement pooling.
+The driver uses transaction-scoped row locks, closes connections per call and
+disables prepared statements. The service does not create tables during requests.
+
+Set `FURL_REMOTE_ORIGIN`, `FURL_REMOTE_ISSUER`, `FURL_REMOTE_JWKS_URL` and
+`FURL_REMOTE_DATABASE_URL` in the Vercel project's environment settings, then
+redeploy. The database URL must explicitly enable TLS (`sslmode=require`,
+`verify-ca` or `verify-full`); prefer provider-supported certificate verification.
+The canonical origin must match the endpoint's actual Host header. Preview
+hostname aliases are deliberately not implicitly trusted. Configure a preview's
+own origin/database when testing it independently. A successful Vercel build
+without these values is **not** a ready MCP service: it returns 503.
+
+The canonical MCP domain must be accessible without a Vercel login/interstitial;
+application access remains protected by OAuth. Confirm `/healthz` is 200,
+`/readyz` is 200, and unauthenticated `/mcp` is 401 with resource metadata. Then
+exercise compression followed by retrieval using a real issuer token. Vercel
+READY alone does not prove database configuration, OAuth login or file handoff.
+
+This adapter intentionally retains the existing engine instead of introducing
+a second compression implementation. Its tradeoff is that the complete tenant
+snapshot is transferred in both directions for each tool call, including reads
+which update native store counters. Budget database transfer and function time
+accordingly; this is bounded serverless hosting, not a high-throughput shared
+storage engine. The snapshot cap is **64 MiB per tenant**, with **one worker per
+function process**. The cap is enforced after execution as well as when restoring;
+an over-budget write is rolled back and no retrieval receipt is returned. The
+other request, attachment and worker limits below still apply. Connection and
+commit overhead have a separate bounded allowance within the function deadline.
+
+Expired snapshots are never restored. Idle rows are removed opportunistically
+when allocating a tenant. For scheduled physical cleanup independent of traffic,
+run this statement through the database provider's scheduler:
+
+```sql
+DELETE FROM furl_remote.tenants WHERE expires_at <= now();
+```
+
+Database backups/WAL have their own retention; neither TTL nor purge promises
+secure erasure of those copies. PostgreSQL mode does not keep the Docker
+workspace's per-process `session_stats.jsonl`; native persisted `store` counters
+remain in the snapshot.
+
+## Build and run with Docker
 
 From the repository root on the chosen Linux Docker host:
 
@@ -106,7 +180,8 @@ python -m pip install --no-deps dist/furl_ctx-*.whl
 PYTHONPATH=deploy/remote python -m furl_remote
 ```
 
-`GET /healthz` reports gateway/storage initialization. `GET /readyz` additionally
+`GET /healthz` reports gateway/storage initialization (and database schema/access
+readiness in PostgreSQL mode). `GET /readyz` additionally
 checks signing-key availability. Both require the configured Host header.
 Neither claims an end-to-end successful user login or a writable CCR transaction.
 Unauthenticated `/mcp` returns 401 with `WWW-Authenticate` linking to
@@ -123,7 +198,7 @@ unrelated and are not overwritten.
 
 ## Limits, retention and failure semantics
 
-Default gateway limits are two active tool workers, 32 HTTP connections, 256
+Docker gateway limits are two active tool workers, 32 HTTP connections, 256
 retained tenant workspaces, a 1 MiB JSON request/response ceiling and a 40 MiB
 attachment ceiling. A worker has a 120-second call budget, 2 GiB address-space
 limit and a 128 MiB per-file write limit. Busy requests fail rather than building
@@ -131,7 +206,7 @@ an unbounded process queue. Per-tenant calls are serialized; waiting for the
 same user is limited to five seconds. Configure edge abuse protection as well;
 these limits are not a distributed rate limiter.
 
-The tenant's **256 MiB preflight budget** blocks new compression when its current
+The Docker tenant's **256 MiB preflight budget** blocks new compression when its current
 workspace reaches that size; it is not a strict post-write quota. A call can
 cross the budget. Inspect actual disk usage and enforce a host volume quota.
 Read and purge operations remain possible after the preflight budget is reached.
@@ -140,7 +215,7 @@ Underlying CCR entry limits and eviction still apply. All workers use the stable
 volume can move to another mount path without changing database names.
 
 The default CCR TTL is **24 hours**. Stale entries are not retrievable. Idle tenant
-workspaces are removed after 24 hours of inactivity, checked at startup and every
+Docker workspaces are removed after 24 hours of inactivity, checked at startup and every
 five minutes while the gateway runs. Active workspaces can retain expired pages
 inside SQLite until normal cleanup or maintenance; this is not a guarantee of
 physical secure erasure. Purge removes the requested CCR entries, not filesystem
@@ -160,7 +235,7 @@ top-level process counters describe only the short-lived worker.
 
 ```sh
 PYTHONPATH=deploy/remote pytest deploy/remote/tests tests/test_mcp_remote_metadata.py
-mypy deploy/remote/furl_remote --ignore-missing-imports
+mypy deploy/remote/furl_remote deploy/remote/app.py --ignore-missing-imports
 ```
 
 Tests use a test-only issuer with real RSA signatures and a mocked JWKS transport;
@@ -169,6 +244,15 @@ scopes, bounded requests/JWKS, metadata, same-hash cross-user isolation, concurr
 users, all six tools, purge, gateway restart and real SQLite-open failures. They
 do not prove that an external OAuth provider or ChatGPT attachment handoff is live.
 CI also builds the container and checks startup, metadata and fail-closed auth.
+For the PostgreSQL tests, install `requirements-vercel.txt` and set
+`FURL_TEST_DATABASE_URL` to a **disposable** local PostgreSQL database. These tests
+create/truncate the test schema. CI supplies PostgreSQL 16 and runs cold-instance
+retrieval, cross-tenant isolation, all six tools, concurrent writes, quota races,
+expiry, corrupt storage, worker cancellation, over-budget rollback and deferred
+COMMIT rejection. A 33 MiB staged-file test covers native compression and cold
+retrieval, without claiming the external attachment URL handoff was exercised. A separate
+bare-interpreter test reproduces Vercel's vendored dependency layout so the child
+must find its native engine without relying on global site-packages.
 
 Before any Directory submission, verify the actual HTTPS endpoint using two real
 accounts, token refresh, account disconnect/reconnect, expiry, each of the six

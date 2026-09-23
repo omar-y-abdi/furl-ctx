@@ -1,0 +1,43 @@
+name: Website
+on:
+  pull_request:
+    branches: [main]
+    paths: ['site/**', 'tests/site/**', '.github/workflows/site.yml']
+  push:
+    branches: [main]
+    paths: ['site/**', 'tests/site/**', '.github/workflows/site.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: website-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Static page, metadata, link and asset contracts
+        run: python -m unittest discover -s tests/site -p 'test_*.py'
+      - name: Install pinned browser auditors
+        run: |
+          python -m pip install playwright==1.57.0
+          python -m playwright install --with-deps chromium
+          npm pack axe-core@4.10.3 --pack-destination /tmp
+          mkdir -p /tmp/furl-axe
+          tar -xzf /tmp/axe-core-4.10.3.tgz -C /tmp/furl-axe
+      - name: Desktop, mobile and keyboard accessibility
+        run: python tests/site/browser.py --axe /tmp/furl-axe/package/axe.min.js
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: site-verification
+          path: artifacts/site
+          if-no-files-found: warn
+          retention-days: 7

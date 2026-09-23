@@ -59,6 +59,7 @@ jobs:
           filters: |
             code:
               - 'furl_ctx/**'
+              - 'deploy/remote/**'
               - 'crates/**'
               - '**/*.rs'
               - 'pyproject.toml'
@@ -508,3 +509,92 @@ jobs:
           print(f"installed release wheel import OK: {module_path}; hello={hello()}")
           PY
           "$venv/bin/furl" --help >/dev/null
+
+  remote-mcp:
+    needs: [changes, build-wheel]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: furl_remote_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: furl-wheel
+          path: dist
+      - name: Install deployment runtime and current wheel
+        run: |
+          python -m pip install -r deploy/remote/requirements-vercel.txt pytest==9.1.1 pytest-asyncio==1.4.0 mypy==1.14.1
+          python -m pip install --no-deps dist/*.whl
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          cp "${SITE}/furl_ctx/"_core*.so furl_ctx/
+      - name: Real HTTP authentication and durable-worker isolation
+        env:
+          PYTHONPATH: deploy/remote
+          FURL_TEST_DATABASE_URL: postgresql://postgres:ci-only-password@127.0.0.1:5432/furl_remote_test
+        run: |
+          pytest deploy/remote/tests tests/test_mcp_remote_metadata.py -q
+          bash -n deploy/remote/install-vercel.sh
+          mypy deploy/remote/furl_remote deploy/remote/app.py --ignore-missing-imports
+      - name: Build the non-root deployment image from this checkout
+        run: docker build -f deploy/remote/Dockerfile -t furl-remote-ci .
+      - name: Prove offline image operation with a read-only root filesystem
+        run: |
+          docker volume create furl-remote-ci-data
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m \
+            -v furl-remote-ci-data:/var/lib/furl \
+            -v "$PWD/deploy/remote/tests/container_smoke.py:/check.py:ro" \
+            furl-remote-ci python /check.py
+      - name: HTTP startup, resource metadata and fail-closed authentication
+        run: |
+          docker run -d --name furl-remote-ci --read-only --tmpfs /tmp:rw,size=64m \
+            -p 127.0.0.1:18000:8000 -v furl-remote-ci-data:/var/lib/furl \
+            -e FURL_REMOTE_ORIGIN=https://furl.example.test \
+            -e FURL_REMOTE_ISSUER=https://issuer.example.test/ \
+            -e FURL_REMOTE_JWKS_URL=https://issuer.example.test/jwks \
+            -e OPENAI_APPS_CHALLENGE_TOKEN=container-test-token \
+            furl-remote-ci
+          python - <<'PY'
+          import json, time, urllib.request, urllib.error
+          def request(path, method='GET'):
+              req = urllib.request.Request('http://127.0.0.1:18000'+path, headers={'Host':'furl.example.test'}, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=2) as r:
+                      return r.status, r.read(), r.headers
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read(), e.headers
+          for _ in range(40):
+              try:
+                  if request('/healthz')[0] == 200:
+                      break
+              except OSError:
+                  pass
+              time.sleep(.25)
+          else:
+              raise SystemExit('Gateway startup failed')
+          status, body, headers = request('/mcp', 'POST')
+          assert status == 401 and 'resource_metadata=' in headers['WWW-Authenticate']
+          assert json.loads(request('/.well-known/oauth-protected-resource/mcp')[1])['resource'] == 'https://furl.example.test/mcp'
+          assert request('/.well-known/openai-apps-challenge')[1] == b'container-test-token'
+          print('Container HTTP smoke passed; no real issuer/login is claimed')
+          PY
+      - name: Clean test containers and volume
+        if: always()
+        run: |
+          docker rm -f furl-remote-ci 2>/dev/null || true
+          docker volume rm furl-remote-ci-data 2>/dev/null || true
