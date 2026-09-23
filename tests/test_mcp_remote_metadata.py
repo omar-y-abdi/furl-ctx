@@ -41,12 +41,9 @@ async def test_remote_allowlist_rejects_destination_before_dns(monkeypatch, url)
         await _validate_provided_file_url(url)
 
 
-
 @pytest.mark.asyncio
 async def test_remote_allowlist_accepts_current_chatgpt_file_host(monkeypatch):
-    monkeypatch.setenv(
-        "FURL_MCP_ALLOWED_FILE_HOSTS", "chatgpt.com,*.oaiusercontent.com"
-    )
+    monkeypatch.setenv("FURL_MCP_ALLOWED_FILE_HOSTS", "chatgpt.com,*.oaiusercontent.com")
 
     def public_dns(*args):
         import socket
