@@ -197,7 +197,7 @@ async def _validate_provided_file_url(url: str) -> None:
             for pattern in patterns
         )
         if port != 443 or not allowed:
-            raise _ProvidedFileError("provided file destination is not allowed by this server")
+            raise _ProvidedFileError(\n                f"provided file destination host {canonical_host!r} is not allowed by this server"\n            )
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
