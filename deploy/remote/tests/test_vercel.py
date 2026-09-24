@@ -83,8 +83,7 @@ def test_vercel_default_attachment_hosts_cover_chatgpt_file_handoff(monkeypatch)
 
     hosts = {item.strip() for item in Settings.from_env().attachment_hosts.split(",")}
 
-    assert "chatgpt.com" in hosts
-    assert "*.oaiusercontent.com" in hosts
+    assert hosts == {"chatgpt.com", "*.oaiusercontent.com"}
 
 
 def test_vercel_runtime_configuration_targets_only_the_mcp_app():
