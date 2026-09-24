@@ -62,3 +62,18 @@ async def test_remote_allowlist_accepts_current_chatgpt_file_host(monkeypatch):
     await _validate_provided_file_url(
         "https://chatgpt.com/backend-api/estuary/content?id=file_123&sig=test"
     )
+
+
+@pytest.mark.asyncio
+async def test_remote_allowlist_rejection_reports_only_hostname(monkeypatch):
+    monkeypatch.setenv("FURL_MCP_ALLOWED_FILE_HOSTS", "chatgpt.com,*.oaiusercontent.com")
+
+    with pytest.raises(_ProvidedFileError) as exc:
+        await _validate_provided_file_url(
+            "https://library-files.example.test/private/path?secret=signed-value"
+        )
+
+    message = str(exc.value)
+    assert "library-files.example.test" in message
+    assert "private/path" not in message
+    assert "signed-value" not in message
