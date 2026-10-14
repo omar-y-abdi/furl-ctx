@@ -122,7 +122,7 @@ jobs:
 
       - name: Upload repair patch
         if: always() && steps.dirty.outputs.dirty == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: autofix-patch-pr-${{ github.event.pull_request.number }}
           path: autofix.patch
@@ -202,7 +202,7 @@ jobs:
           steps.dirty.outputs.dirty == 'true' &&
           steps.verify.outcome == 'success' &&
           steps.scope.outputs.same_repo == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: autofix-candidate-pr-${{ github.event.pull_request.number }}
           path: autofix-candidate/
