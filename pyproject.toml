@@ -79,7 +79,8 @@ re2 = [
 ]
 # MCP server for Claude Code integration (furl_ctx.ccr.mcp_server).
 mcp = [
-    "mcp>=1.28.1,<2",
+    "mcp>=1.30.0,<2",
+    "PyJWT>=2.15.0,<3",  # MCP upstream allows vulnerable JWT releases
     "furl-ctx[re2]",
 ]
 # Opt-in AST-verified code compression (transforms.code_aware_compressor, Engine P2-12; enable via ContentRouterConfig.enable_code_aware=True). Missing extra → the compressor

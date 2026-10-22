@@ -523,6 +523,7 @@ dependencies = [
 all = [
     { name = "google-re2" },
     { name = "mcp" },
+    { name = "pyjwt" },
     { name = "tree-sitter" },
     { name = "tree-sitter-language-pack" },
 ]
@@ -535,6 +536,7 @@ dev = [
     { name = "mcp" },
     { name = "mypy" },
     { name = "pre-commit" },
+    { name = "pyjwt" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -546,6 +548,7 @@ dev = [
 mcp = [
     { name = "google-re2" },
     { name = "mcp" },
+    { name = "pyjwt" },
 ]
 re2 = [
     { name = "google-re2" },
@@ -560,9 +563,10 @@ requires-dist = [
     { name = "furl-ctx", extras = ["re2"], marker = "extra == 'dev'" },
     { name = "furl-ctx", extras = ["re2"], marker = "extra == 'mcp'" },
     { name = "google-re2", marker = "extra == 're2'", specifier = ">=1.1" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.28.1,<2" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.30.0,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.1" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0.0" },
+    { name = "pyjwt", marker = "extra == 'mcp'", specifier = ">=2.15.0,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
