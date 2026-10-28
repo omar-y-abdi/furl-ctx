@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
 thiserror = "2"
 tracing = "0.1"
-pyo3 = { version = "0.29", features = ["abi3-py310"] }
+pyo3 = { version = "0.30", features = ["abi3-py310"] }
 # NOTE: the proxy-era workspace deps (clap, tokio, axum, tower, reqwest, anyhow, bytes, aws-sigv4/-config/-credential-types/-smithy-runtime-api,
 # gcp_auth) were removed with the proxy/parity crates in the amputation (D7) — no remaining workspace member references them.
 
