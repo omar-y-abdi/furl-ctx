@@ -79,7 +79,7 @@ re2 = [
 ]
 # MCP server for Claude Code integration (furl_ctx.ccr.mcp_server).
 mcp = [
-    "mcp>=1.30.0,<2",
+    "mcp>=1.30.0,<3",
     "PyJWT>=2.15.0,<3",  # MCP upstream allows vulnerable JWT releases
     "furl-ctx[re2]",
 ]
